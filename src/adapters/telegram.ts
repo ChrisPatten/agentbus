@@ -22,6 +22,8 @@ const MAX_MESSAGE_LENGTH = 4096;
 const OUTBOUND_POLL_MS = 2000;
 const BACKOFF_INITIAL_MS = 1000;
 const BACKOFF_MAX_MS = 30_000;
+const ACK_MAX_RETRIES = 3;
+const LOOP_RESTART_DELAY_MS = 5000;
 
 // ── Minimal Telegram Bot API types ────────────────────────────────────────────
 
@@ -84,11 +86,35 @@ const telegramRecipients: string[] = [];
 
 for (const contact of Object.values(config.contacts)) {
   if (contact.platforms.telegram) {
-    allowedSenderIds.add(String(contact.platforms.telegram.userId));
-    contactChatIdMap.set(contact.id, contact.platforms.telegram.userId);
+    const userId = contact.platforms.telegram.userId;
+    if (!Number.isInteger(userId) || userId <= 0) {
+      console.error(
+        `[telegram] Invalid Telegram userId ${userId} for contact "${contact.id}" — must be a positive integer`,
+      );
+      process.exit(1);
+    }
+    allowedSenderIds.add(String(userId));
+    contactChatIdMap.set(contact.id, userId);
     telegramRecipients.push(`contact:${contact.id}`);
   }
 }
+
+// ── Shutdown signal ───────────────────────────────────────────────────────────
+
+let stopping = false;
+const stopController = new AbortController();
+
+process.on('SIGTERM', () => {
+  console.log('[telegram] SIGTERM received — shutting down');
+  stopping = true;
+  stopController.abort();
+});
+
+process.on('SIGINT', () => {
+  console.log('[telegram] SIGINT received — shutting down');
+  stopping = true;
+  stopController.abort();
+});
 
 // ── HTTP helpers ──────────────────────────────────────────────────────────────
 
@@ -138,20 +164,70 @@ export function splitMessage(text: string, maxLen: number = MAX_MESSAGE_LENGTH):
     const chunk = remaining.slice(0, maxLen);
     const lastNewline = chunk.lastIndexOf('\n');
     const splitAt = lastNewline > 0 ? lastNewline + 1 : maxLen;
-    parts.push(remaining.slice(0, splitAt).trimEnd());
-    remaining = remaining.slice(splitAt);
+    const part = remaining.slice(0, splitAt).trimEnd();
+    // Only push non-empty parts; hard-split if trimming emptied the chunk
+    if (part.length > 0) {
+      parts.push(part);
+      remaining = remaining.slice(splitAt).trimStart();
+    } else {
+      parts.push(remaining.slice(0, maxLen));
+      remaining = remaining.slice(maxLen);
+    }
   }
 
   if (remaining.length > 0) parts.push(remaining);
   return parts;
 }
 
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+// ── Sleep with shutdown interruption ─────────────────────────────────────────
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    stopController.signal.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      { once: true },
+    );
+  });
+}
+
+// ── Ack with retry ────────────────────────────────────────────────────────────
+
+async function ackMessage(
+  id: string,
+  status: 'delivered' | 'failed',
+  error?: string,
+): Promise<void> {
+  for (let attempt = 0; attempt < ACK_MAX_RETRIES; attempt++) {
+    if (attempt > 0) await sleep(500 * attempt);
+    try {
+      const res = await busFetch(`/api/v1/messages/${id}/ack`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status, ...(error !== undefined && { error }) }),
+      });
+      if (res.ok) return;
+      console.error(
+        `[telegram] Ack attempt ${attempt + 1}/${ACK_MAX_RETRIES} failed for ${id}: HTTP ${res.status}`,
+      );
+    } catch (err) {
+      console.error(
+        `[telegram] Ack attempt ${attempt + 1}/${ACK_MAX_RETRIES} threw for ${id}: ${String(err)}`,
+      );
+    }
+  }
+  console.error(
+    `[telegram] All ${ACK_MAX_RETRIES} ack attempts failed for ${id} (status=${status}) — message may be reprocessed`,
+  );
+}
 
 // ── Inbound long-poll loop ────────────────────────────────────────────────────
 
 let offset = 0;
-let stopping = false;
 let inboundBackoffMs = BACKOFF_INITIAL_MS;
 
 async function processUpdate(update: TelegramUpdate): Promise<boolean> {
@@ -188,10 +264,14 @@ async function processUpdate(update: TelegramUpdate): Promise<boolean> {
 
     if (!res.ok) {
       const text = await res.text();
-      console.error(`[telegram] Bus rejected inbound message ${update.update_id}: HTTP ${res.status} — ${text}`);
+      console.error(
+        `[telegram] Bus rejected inbound message ${update.update_id}: HTTP ${res.status} — ${text}`,
+      );
       return false; // don't advance offset — let Telegram redeliver
     }
 
+    // Drain response body to release the connection
+    await res.body?.cancel();
     return true;
   } catch (err) {
     console.error(`[telegram] Failed to POST inbound message ${update.update_id}: ${String(err)}`);
@@ -238,7 +318,10 @@ async function deliverMessage(envelope: MessageEnvelope): Promise<void> {
 
   const chatId = contactChatIdMap.get(contactId);
   if (!chatId) {
-    throw new Error(`No Telegram chat_id for contact "${contactId}"`);
+    throw new Error(
+      `No Telegram chat_id for contact "${contactId}" (recipient="${envelope.recipient}"). ` +
+        `Known contacts: [${[...contactChatIdMap.keys()].join(', ')}]`,
+    );
   }
 
   if (envelope.payload.type !== 'text') {
@@ -247,9 +330,12 @@ async function deliverMessage(envelope: MessageEnvelope): Promise<void> {
 
   const parts = splitMessage(envelope.payload.body);
 
-  // Typing indicator — fire-and-forget
-  callTelegram('sendChatAction', { chat_id: chatId, action: 'typing' }).catch(() => {});
+  // Typing indicator — fire-and-forget, but log failures for observability
+  callTelegram('sendChatAction', { chat_id: chatId, action: 'typing' }).catch((err) =>
+    console.warn(`[telegram] Typing indicator failed for chat ${chatId}: ${String(err)}`),
+  );
 
+  let sentParts = 0;
   for (let i = 0; i < parts.length; i++) {
     if (i > 0) await sleep(200);
 
@@ -259,14 +345,24 @@ async function deliverMessage(envelope: MessageEnvelope): Promise<void> {
         text: parts[i],
         parse_mode: 'Markdown',
       });
+      sentParts++;
     } catch (err: unknown) {
       // Retry without parse_mode if Telegram rejects due to malformed markdown (HTTP 400)
       const status = (err as { status?: number }).status;
       if (status === 400) {
-        console.error(`[telegram] Markdown parse error for part ${i + 1}/${parts.length}, retrying plain text`);
+        console.error(
+          `[telegram] Markdown parse error for part ${i + 1}/${parts.length}, retrying plain text`,
+        );
         await callTelegram('sendMessage', { chat_id: chatId, text: parts[i] });
+        sentParts++;
       } else {
-        throw err;
+        // Enrich error with partial delivery context if some parts already sent
+        const prefix =
+          sentParts > 0 ? `Partial delivery (${sentParts}/${parts.length} parts sent): ` : '';
+        throw Object.assign(new Error(`${prefix}${String(err)}`), {
+          sentParts,
+          totalParts: parts.length,
+        });
       }
     }
   }
@@ -301,23 +397,10 @@ async function outboundLoop(): Promise<void> {
         for (const envelope of data.messages) {
           try {
             await deliverMessage(envelope);
-
-            const ackRes = await busFetch(`/api/v1/messages/${envelope.id}/ack`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ status: 'delivered' }),
-            });
-
-            if (!ackRes.ok) {
-              console.error(`[telegram] Ack failed for ${envelope.id}: HTTP ${ackRes.status}`);
-            }
+            await ackMessage(envelope.id, 'delivered');
           } catch (err) {
             console.error(`[telegram] Delivery failed for ${envelope.id}: ${String(err)}`);
-            await busFetch(`/api/v1/messages/${envelope.id}/ack`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ status: 'failed', error: String(err) }),
-            }).catch(() => {});
+            await ackMessage(envelope.id, 'failed', String(err));
           }
         }
       } catch (err) {
@@ -327,6 +410,27 @@ async function outboundLoop(): Promise<void> {
 
     if (!stopping) await sleep(OUTBOUND_POLL_MS);
   }
+}
+
+// ── Loop supervision ──────────────────────────────────────────────────────────
+
+/**
+ * Runs `fn` in a supervised loop: if the function throws (rather than catching internally),
+ * logs the crash and restarts after a delay, until `stopping` is true.
+ */
+async function supervise(name: string, fn: () => Promise<void>): Promise<void> {
+  while (!stopping) {
+    try {
+      await fn();
+    } catch (err) {
+      console.error(`[telegram] ${name} crashed unexpectedly: ${String(err)}`);
+      if (!stopping) {
+        console.error(`[telegram] Restarting ${name} in ${LOOP_RESTART_DELAY_MS}ms`);
+        await sleep(LOOP_RESTART_DELAY_MS);
+      }
+    }
+  }
+  console.log(`[telegram] ${name} stopped`);
 }
 
 // ── Startup: register slash commands ─────────────────────────────────────────
@@ -345,18 +449,6 @@ async function registerCommands(): Promise<void> {
   }
 }
 
-// ── Shutdown ──────────────────────────────────────────────────────────────────
-
-process.on('SIGTERM', () => {
-  console.log('[telegram] SIGTERM received — shutting down');
-  stopping = true;
-});
-
-process.on('SIGINT', () => {
-  console.log('[telegram] SIGINT received — shutting down');
-  stopping = true;
-});
-
 // ── Start ─────────────────────────────────────────────────────────────────────
 
 console.log(
@@ -366,5 +458,5 @@ console.log(
 
 await registerCommands();
 
-void inboundLoop();
-void outboundLoop();
+void supervise('inboundLoop', inboundLoop);
+void supervise('outboundLoop', outboundLoop);

@@ -54,6 +54,8 @@ contacts:
 
 There is no separate `allowed_sender_ids` config — the contacts map is the source of truth.
 
+**Validation:** At startup, each contact's `platforms.telegram.userId` is validated to be a positive integer. An invalid value causes the adapter to exit immediately with an error.
+
 ---
 
 ## Inbound Flow
@@ -73,6 +75,8 @@ There is no separate `allowed_sender_ids` config — the contacts map is the sou
 
 **Backoff:** On Telegram API errors, the inbound loop backs off exponentially: 1s → 2s → 4s → 8s → 16s → 30s (max), resetting to 1s on success.
 
+**Loop supervision:** Both loops run under a `supervise()` wrapper. If a loop throws unexpectedly, the crash is logged and the loop is restarted after 5 seconds. Shutdown signals (`SIGTERM`/`SIGINT`) interrupt sleeping loops immediately via `AbortController`.
+
 ---
 
 ## Outbound Flow
@@ -80,12 +84,13 @@ There is no separate `allowed_sender_ids` config — the contacts map is the sou
 1. At startup, the adapter derives the list of Telegram-reachable recipients from `config.contacts`
 2. Every 2 seconds, for each recipient (e.g. `contact:chris`), it polls `GET /api/v1/messages/pending?recipient=contact:{id}&limit=10`
 3. For each pending message:
-   - Sends a typing indicator (`sendChatAction`) as fire-and-forget
+   - Sends a typing indicator (`sendChatAction`) as fire-and-forget (failures are logged as warnings, not silently swallowed)
    - Splits the body into chunks ≤4096 chars (Telegram's hard limit), splitting on newlines where possible
    - Sends each chunk via `sendMessage` with `parse_mode: "Markdown"`
-   - If Telegram returns HTTP 400 (malformed markdown), retries without `parse_mode`
-   - ACKs the message via `POST /api/v1/messages/:id/ack { status: "delivered" }`
-   - On unrecoverable delivery failure, dead-letters via `{ status: "failed", error: ... }`
+   - If Telegram returns HTTP 400 (malformed markdown), retries without `parse_mode` (text is delivered as plain text)
+   - If delivery fails mid-way through a multi-part message, the error is enriched with partial delivery context (`Partial delivery (N/M parts sent): ...`) before dead-lettering
+   - ACKs the message via `POST /api/v1/messages/:id/ack { status: "delivered" }` with up to 3 retries on transient failures
+   - On unrecoverable delivery failure, dead-letters via `{ status: "failed", error: ... }` (also retried up to 3 times)
 
 The chat ID for outbound messages is resolved from `contact.platforms.telegram.userId` in the config (correct for DM conversations; Telegram DM `chat.id === user.id`).
 
