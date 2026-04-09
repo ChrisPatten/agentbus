@@ -1,6 +1,8 @@
 node_modules/
 dist/
 .env
+.envrc
+.claude/
 *.db
 *.db-wal
 *.db-shm

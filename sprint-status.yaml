@@ -5,7 +5,7 @@ bmad_status:
   planning: complete
   architecture: complete
   implementation: in-progress
-current_epic: E1
+current_epic: E3
 epics:
   E1:
     status: complete
@@ -16,4 +16,12 @@ epics:
       S1.3: complete  # Schema + Migrations
       S1.4: complete  # MessageQueue
       S1.5: complete  # AdapterRegistry
-last_updated: 2026-04-07
+  E2:
+    status: complete
+    completed: 2026-04-08
+    stories:
+      S2.1: complete  # MCP Scaffold + HTTP API (src/mcp/server.ts, src/http/api.ts)
+      S2.2: complete  # Polling Loop (src/adapters/cc.ts)
+      S2.3: complete  # reply tool (src/mcp/tools.ts)
+      S2.4: complete  # get_adapter_status tool (src/mcp/tools.ts)
+last_updated: 2026-04-08
