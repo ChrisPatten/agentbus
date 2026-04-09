@@ -5,6 +5,7 @@ import { runMigrations } from '../db/schema.js';
 import { MessageQueue } from '../core/queue.js';
 import { AdapterRegistry } from '../core/registry.js';
 import { createHttpServer } from './api.js';
+import { PipelineEngine } from '../pipeline/engine.js';
 import type { AppConfig } from '../config/schema.js';
 
 function makeDb(): Database.Database {
@@ -14,8 +15,6 @@ function makeDb(): Database.Database {
   return db;
 }
 
-// Minimal config stub — createHttpServer no longer reads any config fields
-// after the dead-code removal, but the signature still requires AppConfig.
 const stubConfig = {
   bus: { http_port: 0, db_path: ':memory:', log_level: 'info' },
   adapters: {},
@@ -27,14 +26,15 @@ const stubConfig = {
     context_window_hours: 48,
     claude_api_model: 'claude-opus-4-6',
   },
-  pipeline: {},
+  pipeline: { dedup_window_ms: 30000, drop_unrouted: false, topic_rules: [], priority_weights: { base_score: 0, topic_bonus: 40, vip_sender_bonus: 20, urgency_keyword_bonus: 15 }, urgency_keywords: [], vip_contacts: [], routes: [] },
 } as unknown as AppConfig;
 
 async function makeServer(): Promise<{ server: FastifyInstance; queue: MessageQueue }> {
   const db = makeDb();
   const queue = new MessageQueue(db);
   const registry = new AdapterRegistry();
-  const server = await createHttpServer(queue, registry, stubConfig);
+  const pipeline = new PipelineEngine(); // no-op pipeline for existing tests
+  const server = await createHttpServer({ queue, registry, config: stubConfig, pipeline, db });
   return { server, queue };
 }
 
@@ -44,6 +44,48 @@ const validMessage = {
   recipient: 'agent:peggy',
   payload: { type: 'text', body: 'hello' },
 };
+
+async function makeSecureServer(): Promise<{ server: FastifyInstance; queue: MessageQueue }> {
+  const db = makeDb();
+  const queue = new MessageQueue(db);
+  const registry = new AdapterRegistry();
+  const pipeline = new PipelineEngine();
+  const config = { ...stubConfig, bus: { ...stubConfig.bus, auth_token: 'secret-token' } } as unknown as AppConfig;
+  const server = await createHttpServer({ queue, registry, config, pipeline, db });
+  return { server, queue };
+}
+
+describe('HTTP API — auth middleware', () => {
+  let server: FastifyInstance;
+
+  beforeEach(async () => {
+    ({ server } = await makeSecureServer());
+  });
+
+  afterEach(async () => {
+    await server.close();
+  });
+
+  it('returns 401 when X-Bus-Token header is absent', async () => {
+    const res = await server.inject({ method: 'GET', url: '/api/v1/messages/pending?agent=peggy' });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it('returns 401 when X-Bus-Token header is wrong', async () => {
+    const res = await server.inject({ method: 'GET', url: '/api/v1/messages/pending?agent=peggy', headers: { 'x-bus-token': 'wrong' } });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it('allows access with correct X-Bus-Token header', async () => {
+    const res = await server.inject({ method: 'GET', url: '/api/v1/messages/pending?agent=peggy', headers: { 'x-bus-token': 'secret-token' } });
+    expect(res.statusCode).toBe(200);
+  });
+
+  it('health endpoint is always accessible without token', async () => {
+    const res = await server.inject({ method: 'GET', url: '/api/v1/health' });
+    expect(res.statusCode).toBe(200);
+  });
+});
 
 describe('HTTP API', () => {
   let server: FastifyInstance;
