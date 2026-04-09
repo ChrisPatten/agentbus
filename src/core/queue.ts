@@ -110,14 +110,14 @@ export class MessageQueue {
   /**
    * Dequeue up to `limit` pending messages for `recipientId`.
    * Atomically marks selected rows as `processing` within a transaction.
-   * Optional `channel` filter restricts to a specific channel.
+   * Optional `topic` filter restricts to a specific topic.
    */
-  dequeue(recipientId: string, channel?: string, limit = 10): QueuedMessage[] {
+  dequeue(recipientId: string, topic?: string, limit = 10): QueuedMessage[] {
     const dequeueTransaction = this.db.transaction(
-      (recipientId: string, channel: string | undefined, limit: number) => {
-        const channelClause = channel ? 'AND channel = ?' : '';
-        const params: unknown[] = channel
-          ? [recipientId, channel, limit]
+      (recipientId: string, topic: string | undefined, limit: number) => {
+        const topicClause = topic ? 'AND topic = ?' : '';
+        const params: unknown[] = topic
+          ? [recipientId, topic, limit]
           : [recipientId, limit];
 
         const rows = this.db
@@ -125,7 +125,7 @@ export class MessageQueue {
             `SELECT ${MESSAGE_COLS} FROM message_queue
              WHERE status = 'pending'
                AND recipient = ?
-               ${channelClause}
+               ${topicClause}
              ORDER BY
                CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 ELSE 2 END,
                created_at ASC
@@ -151,7 +151,7 @@ export class MessageQueue {
       }
     );
 
-    return dequeueTransaction(recipientId, channel, limit);
+    return dequeueTransaction(recipientId, topic, limit);
   }
 
   /**
@@ -227,7 +227,7 @@ export class MessageQueue {
 
   /**
    * Sweep messages past their `expires_at` into the dead-letter table.
-   * Runs atomically in a single transaction. Returns the count of messages swept.
+   * Runs as a single atomic transaction without nesting. Returns the count swept.
    */
   sweepExpired(): number {
     const sweep = this.db.transaction(() => {
@@ -235,21 +235,98 @@ export class MessageQueue {
 
       const expired = this.db
         .prepare(
-          `SELECT id FROM message_queue
+          `SELECT ${MESSAGE_COLS} FROM message_queue
            WHERE status = 'pending'
              AND expires_at IS NOT NULL
              AND expires_at < ?`
         )
-        .all(now) as Array<{ id: string }>;
+        .all(now) as MessageRow[];
 
-      let count = 0;
-      for (const { id } of expired) {
-        if (this.deadLetter(id, 'expired')) count++;
+      if (expired.length === 0) return 0;
+
+      for (const row of expired) {
+        const envelope: MessageEnvelope = {
+          id: row.id,
+          timestamp: row.created_at,
+          channel: row.channel,
+          topic: row.topic,
+          sender: row.sender,
+          recipient: row.recipient,
+          reply_to: row.reply_to,
+          priority: row.priority as 'normal' | 'high' | 'urgent',
+          payload: JSON.parse(row.payload) as MessageEnvelope['payload'],
+          metadata: JSON.parse(row.metadata) as Record<string, unknown>,
+        };
+        this.db
+          .prepare(
+            `INSERT INTO dead_letter
+               (id, original_message_id, created_at, reason, retry_count, expires_at, payload)
+             VALUES (?, ?, ?, 'expired', ?, ?, ?)`
+          )
+          .run(randomUUID(), row.id, now, row.retry_count, row.expires_at ?? null, JSON.stringify(envelope));
       }
-      return count;
+
+      const placeholders = expired.map(() => '?').join(', ');
+      this.db
+        .prepare(`DELETE FROM message_queue WHERE id IN (${placeholders})`)
+        .run(...expired.map((r) => r.id));
+
+      return expired.length;
     });
 
     return sweep();
+  }
+
+  /**
+   * Reset messages stuck in `processing` for longer than `maxAgeMs` back to `pending`.
+   * This recovers messages whose adapter crashed before acknowledging.
+   * Returns the count of messages recovered.
+   */
+  recoverStuck(maxAgeMs: number): number {
+    const cutoff = new Date(Date.now() - maxAgeMs).toISOString();
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare(
+        `UPDATE message_queue
+         SET status = 'pending', updated_at = ?
+         WHERE status = 'processing' AND updated_at <= ?`
+      )
+      .run(now, cutoff);
+    return result.changes;
+  }
+
+  /**
+   * Fetch a single message by ID regardless of status.
+   * Falls back to the dead_letter table if not found in message_queue.
+   * Returns `null` if no message with that ID exists anywhere.
+   * Used by the reply tool to look up the original message.
+   */
+  getById(messageId: string): QueuedMessage | null {
+    const row = this.db
+      .prepare(`SELECT ${MESSAGE_COLS} FROM message_queue WHERE id = ?`)
+      .get(messageId) as MessageRow | undefined;
+    if (row) return rowToQueuedMessage(row);
+
+    // Fallback: check dead_letter (messages that were delivered or expired)
+    const dlRow = this.db
+      .prepare(
+        `SELECT original_message_id, created_at, retry_count, expires_at, payload
+         FROM dead_letter WHERE original_message_id = ?`
+      )
+      .get(messageId) as
+      | { original_message_id: string; created_at: string; retry_count: number; expires_at: string | null; payload: string }
+      | undefined;
+    if (!dlRow) return null;
+
+    const envelope = JSON.parse(dlRow.payload) as MessageEnvelope;
+    return {
+      messageId: dlRow.original_message_id,
+      envelope,
+      priority: envelope.priority,
+      retryCount: dlRow.retry_count,
+      createdAt: dlRow.created_at,
+      expiresAt: dlRow.expires_at,
+    };
   }
 
   /**
