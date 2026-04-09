@@ -63,17 +63,20 @@ Submit a `MessageEnvelope` to the inbound pipeline. bus-core runs all 8 pipeline
 
 ---
 
-### `GET /api/v1/messages/pending` _(pending — E12)_
+### `GET /api/v1/messages/pending`
 
-Poll for pending messages destined for a specific agent. Used by the Claude Code adapter, which polls approximately every second.
+Poll for pending messages destined for a specific recipient. Used by the Claude Code adapter (every ~1s) and the Telegram adapter (every ~2s).
 
 **Query params:**
 
 | Param | Required | Default | Description |
 |---|---|---|---|
-| `agent` | yes | — | Recipient agent ID, e.g. `peggy` |
+| `agent` | one of | — | Shorthand: prepends `agent:` prefix. E.g. `agent=peggy` → `agent:peggy` |
+| `recipient` | one of | — | Raw recipient ID, e.g. `contact:chris`, `agent:peggy`. Takes precedence over `agent=` if both are provided |
 | `limit` | no | 10 | Max messages to return (max 100) |
 | `topic` | no | — | Filter by topic |
+
+At least one of `agent` or `recipient` is required; omitting both returns HTTP 400.
 
 **Response (200):**
 ```json

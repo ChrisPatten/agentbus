@@ -31,6 +31,10 @@ npx tsx src/index.ts          # Run bus core
 npx tsx src/adapters/cc.ts    # Run Claude Code adapter
 ```
 
+## Documentation
+
+**All implementation work MUST include creation or updates of documentation in the `docs/` directory.** When adding or modifying functionality, create or update the relevant doc file(s) in `docs/` as part of the same change. Do not complete an implementation task without a corresponding documentation update.
+
 ## BMAD Status
 
 See sprint-status.yaml for current phase and epic progress.

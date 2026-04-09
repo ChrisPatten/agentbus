@@ -151,13 +151,15 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
 
   // GET /api/v1/messages/pending
   server.get<{
-    Querystring: { agent?: string; limit?: string; topic?: string };
+    Querystring: { agent?: string; recipient?: string; limit?: string; topic?: string };
   }>('/api/v1/messages/pending', (req, reply) => {
-    const { agent, limit, topic } = req.query;
-    if (!agent) {
-      return reply.status(400).send({ ok: false, error: '?agent= is required' });
+    const { agent, recipient, limit, topic } = req.query;
+    if (!agent && !recipient) {
+      return reply.status(400).send({ ok: false, error: '?agent= or ?recipient= is required' });
     }
-    const recipientId = `agent:${agent}`;
+    // ?recipient= takes a raw recipientId (e.g. "contact:chris", "agent:peggy").
+    // ?agent= is a shorthand that prepends the "agent:" prefix (legacy CC adapter usage).
+    const recipientId = recipient ?? `agent:${agent}`;
     const parsedLimit = limit ? Math.max(1, Math.min(parseInt(limit, 10) || 10, 100)) : 10;
     const messages = queue.dequeue(recipientId, topic, parsedLimit);
     return {

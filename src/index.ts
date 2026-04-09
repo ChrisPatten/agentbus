@@ -22,6 +22,15 @@ import { runMigrations, rebuildFts } from './db/schema.js';
 import { MessageQueue } from './core/queue.js';
 import { AdapterRegistry } from './core/registry.js';
 import { createHttpServer } from './http/api.js';
+import { PipelineEngine } from './pipeline/engine.js';
+import { normalize } from './pipeline/stages/normalize.js';
+import { createContactResolve } from './pipeline/stages/contact-resolve.js';
+import { createDedup } from './pipeline/stages/dedup.js';
+import { slashCommandDetect } from './pipeline/stages/slash-command.js';
+import { createTopicClassify } from './pipeline/stages/topic-classify.js';
+import { createPriorityScore } from './pipeline/stages/priority-score.js';
+import { createRouteResolve } from './pipeline/stages/route-resolve.js';
+import { createTranscriptLog } from './pipeline/stages/transcript-log.js';
 
 const configPath = process.env['AGENTBUS_CONFIG'] ?? resolve(process.cwd(), 'config.yaml');
 
@@ -37,7 +46,17 @@ if (process.argv.includes('--rebuild-fts')) {
 const queue = new MessageQueue(db);
 const registry = new AdapterRegistry();
 
-const httpServer = await createHttpServer(queue, registry, config);
+const pipeline = new PipelineEngine();
+pipeline.use({ slot: 10, name: 'normalize',        stage: normalize });
+pipeline.use({ slot: 20, name: 'contact-resolve',  stage: createContactResolve(config) });
+pipeline.use({ slot: 30, name: 'dedup',            stage: createDedup(db, config.pipeline.dedup_window_ms) });
+pipeline.use({ slot: 40, name: 'slash-command',    stage: slashCommandDetect });
+pipeline.use({ slot: 50, name: 'topic-classify',   stage: createTopicClassify(config) });
+pipeline.use({ slot: 60, name: 'priority-score',   stage: createPriorityScore(config) });
+pipeline.use({ slot: 70, name: 'route-resolve',    stage: createRouteResolve(config, db) });
+pipeline.use({ slot: 80, name: 'transcript-log',   stage: createTranscriptLog(db, config), critical: false });
+
+const httpServer = await createHttpServer({ queue, registry, config, pipeline, db });
 
 // Periodic maintenance: sweep expired messages and recover stuck-processing ones.
 // Stuck threshold: messages in `processing` for > 5 minutes are reset to `pending`.

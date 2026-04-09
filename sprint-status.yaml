@@ -5,7 +5,7 @@ bmad_status:
   planning: complete
   architecture: complete
   implementation: in-progress
-current_epic: E3
+current_epic: E4
 epics:
   E1:
     status: complete
@@ -24,4 +24,20 @@ epics:
       S2.2: complete  # Polling Loop (src/adapters/cc.ts)
       S2.3: complete  # reply tool (src/mcp/tools.ts)
       S2.4: complete  # get_adapter_status tool (src/mcp/tools.ts)
-last_updated: 2026-04-08
+  E3:
+    status: complete
+    completed: 2026-04-09
+    stories:
+      S3.1: complete  # Scaffold + long-poll loop (src/adapters/telegram.ts)
+      S3.2: complete  # Inbound message processing (processUpdate, POST /api/v1/inbound)
+      S3.3: complete  # Outbound delivery loop (poll bus, sendMessage, ack)
+      S3.4: complete  # Capabilities (typing indicator, setMyCommands)
+  E5:
+    status: complete
+    completed: 2026-04-09
+    stories:
+      S5.1: complete  # PipelineEngine + types (src/pipeline/engine.ts, src/pipeline/types.ts)
+      S5.2: complete  # Stages 1–4: normalize, contact-resolve, dedup, slash-command
+      S5.3: complete  # Stages 5–8: topic-classify, priority-score, route-resolve, transcript-log + config expansion
+      S5.4: complete  # Fan-out + wiring (POST /api/v1/inbound, createHttpServer deps refactor, index.ts pipeline wiring)
+last_updated: 2026-04-09

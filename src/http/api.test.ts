@@ -145,6 +145,63 @@ describe('HTTP API', () => {
     });
   });
 
+  describe('GET /api/v1/messages/pending — ?recipient= parameter', () => {
+    beforeEach(async () => {
+      // Enqueue one message for a contact recipient (as the Telegram adapter would see)
+      await server.inject({
+        method: 'POST',
+        url: '/api/v1/messages',
+        payload: {
+          channel: 'telegram',
+          sender: 'agent:peggy',
+          recipient: 'contact:chris',
+          payload: { type: 'text', body: 'hi from peggy' },
+        },
+      });
+    });
+
+    it('returns messages for a raw contact: recipient via ?recipient=', async () => {
+      const res = await server.inject({
+        method: 'GET',
+        url: '/api/v1/messages/pending?recipient=contact:chris',
+      });
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body) as { count: number };
+      expect(body.count).toBe(1);
+    });
+
+    it('returns 400 when neither ?agent= nor ?recipient= is provided', async () => {
+      const res = await server.inject({ method: 'GET', url: '/api/v1/messages/pending' });
+      expect(res.statusCode).toBe(400);
+    });
+
+    it('?recipient= takes precedence when both ?agent= and ?recipient= are provided', async () => {
+      const res = await server.inject({
+        method: 'GET',
+        url: '/api/v1/messages/pending?agent=peggy&recipient=contact:chris',
+      });
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body) as { count: number };
+      expect(body.count).toBe(1); // message is for contact:chris, not agent:peggy
+    });
+
+    it('?agent= still works as before (returns messages for agent:peggy)', async () => {
+      // Enqueue a message for agent:peggy
+      await server.inject({
+        method: 'POST',
+        url: '/api/v1/messages',
+        payload: { ...validMessage, payload: { type: 'text', body: 'hi peggy' } },
+      });
+      const res = await server.inject({
+        method: 'GET',
+        url: '/api/v1/messages/pending?agent=peggy',
+      });
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body) as { count: number };
+      expect(body.count).toBe(1); // only the agent:peggy message
+    });
+  });
+
   // Fix #11: expires_at was not validated as a future timestamp, so messages
   // could be submitted already expired. The schema now rejects past values.
   describe('POST /api/v1/messages — expires_at validation', () => {
