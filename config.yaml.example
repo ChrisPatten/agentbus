@@ -1,38 +1,39 @@
 bus:
-  db_path: ~/.agentbus/bus.db
   http_port: 3000
+  db_path: ./data/agentbus.db
   log_level: info
 
 adapters:
   telegram:
-    enabled: true
     token: ${TELEGRAM_BOT_TOKEN}
-    poll_interval_ms: 1000
-    allowed_sender_ids: []
-
+    poll_timeout: 30
   bluebubbles:
-    enabled: true
     server_url: http://localhost:1234
-    password: ${BLUEBUBBLES_PASSWORD}
-    webhook_port: 3001
+    webhook_port: 3002
+  claude-code:
+    poll_interval_ms: 1000
 
-  claude_code:
-    enabled: true
+contacts:
+  chris:
+    id: chris
+    displayName: Chris
+    platforms:
+      telegram:
+        userId: 123456789
+        username: chrispatten
+      bluebubbles:
+        handle: "+15551234567"
+
+topics:
+  - general
+  - reminders
+  - code
+  - personal
 
 memory:
-  summarizer:
-    inactivity_timeout_ms: 900000
-    context_window_hours: 48
-    context_token_budget: 2500
-    model: claude-opus-4-5
-    api_key: ${ANTHROPIC_API_KEY}
+  summarizer_interval_ms: 60000
+  session_idle_threshold_ms: 1800000
+  context_window_hours: 48
+  claude_api_model: claude-opus-4-6
 
-contacts: []
-agents:
-  - id: peggy
-    name: Peggy
-    identifiers:
-      claude_code: "agent:peggy"
-    subscriptions:
-      - channel: "*"
-        topic: general
+pipeline: {}

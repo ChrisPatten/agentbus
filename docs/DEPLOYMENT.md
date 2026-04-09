@@ -1,0 +1,266 @@
+# AgentBus Deployment Guide
+
+Deploying AgentBus to the Mac mini. The system runs as four pm2-managed processes. Most operational tasks can be done without SSH using pm2's monitoring tools.
+
+---
+
+## Prerequisites
+
+- Node.js 20+ and npm installed
+- pm2 installed globally: `npm install -g pm2`
+- A Telegram bot token (from @BotFather)
+- BlueBubbles server running and accessible on the local network
+- `config.yaml` and `.env` populated (see below)
+
+---
+
+## First-Time Setup
+
+### 1. Install dependencies
+
+```bash
+cd /path/to/agentbus
+npm install
+```
+
+### 2. Configure secrets
+
+Copy the example files and fill in your credentials:
+
+```bash
+cp .env.example .env
+cp config.yaml.example config.yaml
+```
+
+**`.env`** — secrets only, never committed:
+```
+TELEGRAM_BOT_TOKEN=your-telegram-bot-token
+BLUEBUBBLES_PASSWORD=your-bluebubbles-server-password
+CLAUDE_API_KEY=your-anthropic-api-key
+```
+
+**`config.yaml`** — references secrets via `${VAR_NAME}` substitution:
+```yaml
+bus:
+  http_port: 3000
+  db_path: /Users/you/.agentbus/agentbus.db
+  log_level: info
+
+adapters:
+  telegram:
+    token: ${TELEGRAM_BOT_TOKEN}
+    poll_timeout: 30
+  bluebubbles:
+    server_url: http://192.168.1.x:1234
+    webhook_port: 3002
+  claude-code:
+    poll_interval_ms: 1000
+
+contacts:
+  chris:
+    id: chris
+    displayName: Chris
+    platforms:
+      telegram:
+        userId: 123456789
+      bluebubbles:
+        handle: "+15551234567"
+
+memory:
+  summarizer_interval_ms: 60000
+  session_idle_threshold_ms: 1800000   # 30 minutes
+  context_window_hours: 48
+  claude_api_model: claude-opus-4-6
+```
+
+### 3. Create log and data directories
+
+```bash
+mkdir -p ~/.agentbus/logs
+mkdir -p ~/.agentbus/data   # or wherever db_path points
+```
+
+### 4. Initialize the database
+
+Run bus-core once to create the SQLite file and run migrations:
+
+```bash
+npx tsx src/index.ts
+# Ctrl+C once you see "bus-core ready"
+```
+
+### 5. Start with pm2
+
+```bash
+pm2 start ecosystem.config.js
+pm2 save       # persist process list across reboots
+pm2 startup    # generates and prints a command — run that command as root
+```
+
+After `pm2 startup`, run the printed command (e.g., `sudo env PATH=... pm2 startup`) to register pm2 with launchd so processes restart after a reboot.
+
+---
+
+## Daily Operations
+
+### Check process status
+
+```bash
+pm2 status          # overview of all processes
+pm2 show bus-core   # detailed info for one process
+```
+
+### View logs
+
+```bash
+pm2 logs            # tail all processes
+pm2 logs bus-core   # tail one process
+pm2 logs --lines 200 bus-core   # last 200 lines
+```
+
+Log files: `~/.agentbus/logs/{name}-out.log` and `~/.agentbus/logs/{name}-error.log`
+
+### Restart a process
+
+```bash
+pm2 restart bus-core
+pm2 restart telegram-adapter
+pm2 restart all
+```
+
+### Stop and start
+
+```bash
+pm2 stop bus-core
+pm2 start bus-core
+```
+
+---
+
+## Startup Order
+
+pm2 starts all processes in parallel, but adapters depend on bus-core being ready. If an adapter starts before bus-core's HTTP API is up, it will fail its registration and pm2 will restart it after `restart_delay` (default 3s). After 1–2 restarts, all adapters should be connected.
+
+If adapters keep crashing, check `pm2 logs telegram-adapter` — the most common cause is bus-core not ready yet or a credential error.
+
+---
+
+## Configuration Changes
+
+After editing `config.yaml` or `.env`:
+
+```bash
+pm2 restart all
+```
+
+Changes take effect on the next restart. No reload mechanism exists yet.
+
+---
+
+## FTS Index Recovery
+
+If the FTS search index becomes out of sync (e.g., after restoring from backup):
+
+```bash
+pm2 stop bus-core
+AGENTBUS_CONFIG=/path/to/config.yaml npx tsx src/index.ts --rebuild-fts
+pm2 start bus-core
+```
+
+The `--rebuild-fts` flag rebuilds all FTS5 indices from source tables and then exits. The process should not stay running — let pm2 start it normally afterward.
+
+---
+
+## Rotating Secrets
+
+### Telegram bot token
+
+1. Get new token from @BotFather
+2. Update `.env`: `TELEGRAM_BOT_TOKEN=new-token`
+3. `pm2 restart telegram-adapter`
+
+The adapter reads the token at startup; no db changes needed.
+
+### Claude API key
+
+1. Rotate at console.anthropic.com
+2. Update `.env`: `CLAUDE_API_KEY=new-key`
+3. `pm2 restart bus-core` (the summarizer uses it)
+
+---
+
+## Dead Letter Management
+
+Dead-lettered messages are messages that could not be delivered after all retries. They accumulate in the `dead_letter` table and expire automatically after 24 hours.
+
+**Via slash command** (from Telegram or iMessage):
+```
+/dead-letter          # list recent dead-lettered messages
+/dead-letter retry <message_id>   # re-enqueue a specific message
+```
+
+**Via REST API** (see `docs/HTTP_API.md`):
+```bash
+curl http://localhost:3000/api/v1/dead-letter
+curl -X POST http://localhost:3000/api/v1/dead-letter/<id>/retry
+```
+
+---
+
+## Mac Mini Reboot Recovery
+
+After a hard reboot (power loss, OS update):
+
+1. pm2 auto-restarts all processes if `pm2 startup` was run during setup
+2. Verify with `pm2 status` — all processes should be `online` within ~30s
+3. If any process is `errored`, check `pm2 logs <name>` for the cause
+
+If pm2 startup was never set up, processes won't auto-start. Fix:
+```bash
+pm2 start ecosystem.config.js
+pm2 save
+pm2 startup   # run the printed command as root
+```
+
+---
+
+## Incident Runbook
+
+### Dead letter spike
+
+**Symptom:** `/status` reports many dead-lettered messages, or delivery is silently failing.
+
+1. `pm2 logs` — look for repeated errors in the relevant adapter
+2. Check adapter health: `curl http://localhost:3000/api/v1/health`
+3. If Telegram is rate-limiting, wait and retry: `pm2 restart telegram-adapter`
+4. Inspect dead letters: `/dead-letter` from any channel
+5. Retry recoverable messages: `/dead-letter retry <id>`
+6. Messages that fail 3 retries require manual investigation
+
+### Summarizer not running
+
+**Symptom:** `memory.last_summarizer_run` is stale in the health response, or context injection at session start returns no summaries.
+
+1. `pm2 logs bus-core` — look for errors in the summarizer loop
+2. Most common cause: invalid or expired Claude API key
+3. Verify: `curl https://api.anthropic.com/v1/models -H "x-api-key: $CLAUDE_API_KEY"`
+4. Rotate the key if needed (see above), then `pm2 restart bus-core`
+
+### Bus-core won't start
+
+**Symptom:** `pm2 status` shows bus-core `errored` and it keeps restarting.
+
+1. `pm2 logs bus-core --lines 50` — most likely a config validation error
+2. Common causes:
+   - `config.yaml` references an env var not set in `.env`
+   - `db_path` directory doesn't exist
+   - Port 3000 already in use (`lsof -i :3000`)
+3. Run manually for full error output: `AGENTBUS_CONFIG=./config.yaml npx tsx src/index.ts`
+
+### Claude Code adapter not connecting
+
+The claude-code-adapter is **not managed by pm2** — it's spawned by Claude Code via MCP. If tools aren't working in a Claude Code session:
+
+1. Check Claude Code's MCP server config (`~/.claude/mcp.json` or equivalent)
+2. Verify bus-core is running: `curl http://localhost:3000/api/v1/health`
+3. Start a new Claude Code session (the adapter process is per-session)

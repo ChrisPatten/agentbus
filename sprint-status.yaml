@@ -1,9 +1,19 @@
 project: agentbus
-phase: 4-implementation-planning
+phase: 5-implementation
 bmad_status:
   analysis: complete
   planning: complete
   architecture: complete
-  implementation: not-started
-current_epic: null
+  implementation: in-progress
+current_epic: E1
+epics:
+  E1:
+    status: complete
+    completed: 2026-04-07
+    stories:
+      S1.1: complete  # Config Loader
+      S1.2: complete  # SQLite Client
+      S1.3: complete  # Schema + Migrations
+      S1.4: complete  # MessageQueue
+      S1.5: complete  # AdapterRegistry
 last_updated: 2026-04-07
