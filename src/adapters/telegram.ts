@@ -435,6 +435,15 @@ async function supervise(name: string, fn: () => Promise<void>): Promise<void> {
 
 // ── Startup: register slash commands ─────────────────────────────────────────
 
+async function clearWebhook(): Promise<void> {
+  try {
+    await callTelegram('deleteWebhook', { drop_pending_updates: false });
+    console.log('[telegram] Webhook cleared (polling mode active)');
+  } catch (err) {
+    console.error(`[telegram] Failed to clear webhook: ${String(err)}`);
+  }
+}
+
 async function registerCommands(): Promise<void> {
   const commands = [
     { command: 'status', description: 'Check AgentBus status' },
@@ -456,6 +465,7 @@ console.log(
     `allowed senders: [${[...allowedSenderIds].join(', ')}]`,
 );
 
+await clearWebhook();
 await registerCommands();
 
 void supervise('inboundLoop', inboundLoop);

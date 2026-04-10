@@ -12,8 +12,10 @@
  */
 import { resolve } from 'node:path';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import type { ClientCapabilities } from '@modelcontextprotocol/sdk/types.js';
 import { loadConfig } from '../config/loader.js';
 import { createMcpServer } from '../mcp/server.js';
+import { createSamplingQueue } from '../mcp/sampling-queue.js';
 import { registerTools, type HealthState } from '../mcp/tools.js';
 import type { MessageEnvelope } from '../types/envelope.js';
 
@@ -27,6 +29,7 @@ const BACKOFF_INTERVAL_MS = 5000;
 const configPath = process.env['AGENTBUS_CONFIG'] ?? resolve(process.cwd(), 'config.yaml');
 const config = loadConfig(configPath);
 const pollIntervalMs = config.adapters['claude-code']?.poll_interval_ms ?? 1000;
+const samplingMaxTokens = config.adapters['claude-code']?.sampling_max_tokens ?? 8192;
 const busBaseUrl = `http://127.0.0.1:${config.bus.http_port}`;
 
 // ── Shared mutable state ──────────────────────────────────────────────────────
@@ -45,10 +48,61 @@ const messageBuffer: MessageEnvelope[] = [];
 const mcpServer = createMcpServer();
 registerTools(mcpServer, busBaseUrl, healthState, messageBuffer);
 
+// ── Sampling helpers ──────────────────────────────────────────────────────────
+
+/**
+ * Returns true if the connected client declared the `sampling` capability.
+ * Pass the result of `mcpServer.server.getClientCapabilities()` directly.
+ */
+export function detectSamplingCapability(caps: ClientCapabilities | undefined): boolean {
+  return !!caps?.sampling;
+}
+
+/**
+ * Process a batch of successfully-acked messages: push them into the shared
+ * buffer and either enqueue a `createMessage` call (when sampling is available)
+ * or emit a logging notification so the agent can poll manually.
+ */
+export function processAckedMessages(
+  acked: MessageEnvelope[],
+  messageBuffer: MessageEnvelope[],
+  samplingAvailable: boolean,
+  samplingQueue: { enqueue(text: string): void } | null,
+  sendLogging: (msg: string) => void,
+): void {
+  messageBuffer.push(...acked);
+  if (samplingAvailable && samplingQueue !== null) {
+    samplingQueue.enqueue(formatMessagesForSampling(acked));
+  } else {
+    sendLogging(`[agentbus] ${acked.length} new message(s) — call get_pending_messages`);
+  }
+}
+
+// ── Message formatting ────────────────────────────────────────────────────────
+
+/**
+ * Format a batch of message envelopes into a single user-turn string for
+ * `sampling/createMessage`. Each message becomes one paragraph; multiple
+ * messages in a batch are separated by a blank line.
+ */
+export function formatMessagesForSampling(envelopes: MessageEnvelope[]): string {
+  return envelopes
+    .map((env) => {
+      const body = env.payload.type === 'text' ? env.payload.body : `[${env.payload.type}]`;
+      return `New message from ${env.sender} via ${env.channel} [id:${env.id}]:\n${body}`;
+    })
+    .join('\n\n');
+}
+
 // ── Polling loop ──────────────────────────────────────────────────────────────
 
 let pollTimer: ReturnType<typeof setTimeout> | null = null;
 let shuttingDown = false;
+let samplingAvailable = false;
+
+// Sampling queue is initialised after connect() reveals client capabilities.
+// If sampling is unavailable, this stays null and sendLoggingMessage is used instead.
+let samplingQueue: ReturnType<typeof createSamplingQueue> | null = null;
 
 async function poll(): Promise<void> {
   if (shuttingDown) return;
@@ -91,14 +145,9 @@ async function poll(): Promise<void> {
 
     // Buffer messages and notify Claude Code
     if (acked.length > 0) {
-      messageBuffer.push(...acked);
-
-      mcpServer
-        .sendLoggingMessage({
-          level: 'info',
-          data: `[agentbus] ${acked.length} new message(s) — call get_pending_messages`,
-        })
-        .catch(() => {});
+      processAckedMessages(acked, messageBuffer, samplingAvailable, samplingQueue, (msg) => {
+        mcpServer.sendLoggingMessage({ level: 'info', data: msg }).catch(() => {});
+      });
     }
 
     // Reset health on success
@@ -155,6 +204,25 @@ process.on('SIGINT', () => {
 
 const transport = new StdioServerTransport();
 await mcpServer.connect(transport);
+
+// Check client capabilities after handshake
+samplingAvailable = detectSamplingCapability(mcpServer.server.getClientCapabilities());
+
+if (samplingAvailable) {
+  console.error('[agentbus] sampling capability detected — proactive delivery enabled');
+  samplingQueue = createSamplingQueue(async (text: string) => {
+    await mcpServer.server.createMessage({
+      messages: [{ role: 'user', content: { type: 'text', text } }],
+      maxTokens: samplingMaxTokens,
+    });
+  });
+} else {
+  console.error(
+    '[agentbus] sampling capability not declared by client — ' +
+      'falling back to sendLoggingMessage; use get_pending_messages to retrieve messages manually'
+  );
+}
+
 console.error(
   `[agentbus] claude-code adapter ready — polling ${busBaseUrl} for agent:${AGENT_ID} every ${pollIntervalMs}ms`
 );

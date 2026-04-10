@@ -1,5 +1,6 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdirSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
+import { homedir } from 'node:os';
 import { load as parseYaml } from 'js-yaml';
 import dotenv from 'dotenv';
 import { AppConfigSchema, type AppConfig } from './schema.js';
@@ -10,9 +11,16 @@ import { AppConfigSchema, type AppConfig } from './schema.js';
  *
  * Throws a descriptive error if a referenced variable is undefined.
  */
+/** Expand a leading `~` to the user's home directory. */
+function expandTilde(s: string): string {
+  if (s === '~') return homedir();
+  if (s.startsWith('~/') || s.startsWith('~\\')) return `${homedir()}${s.slice(1)}`;
+  return s;
+}
+
 function substituteEnvVars(obj: unknown): unknown {
   if (typeof obj === 'string') {
-    return obj.replace(/\$\{([^}]+)\}/g, (_, varName: string) => {
+    return expandTilde(obj).replace(/\$\{([^}]+)\}/g, (_, varName: string) => {
       const val = process.env[varName];
       if (val === undefined) {
         throw new Error(`Config references undefined env var: ${varName}`);
@@ -65,6 +73,10 @@ export function loadConfig(path: string, envPath?: string): AppConfig {
       .join('\n');
     throw new Error(`Config validation failed:\n${formatted}`);
   }
+
+  // Ensure the db directory exists so better-sqlite3 can create the file
+  const dbDir = dirname(result.data.bus.db_path);
+  mkdirSync(dbDir, { recursive: true });
 
   return result.data;
 }

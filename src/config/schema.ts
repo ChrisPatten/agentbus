@@ -67,6 +67,7 @@ const BlueBubblesAdapterSchema = z.object({
 
 const ClaudeCodeAdapterSchema = z.object({
   poll_interval_ms: z.number().int().positive().default(1000),
+  sampling_max_tokens: z.number().int().positive().default(8192),
   plugin: z.string().optional(),
 });
 
