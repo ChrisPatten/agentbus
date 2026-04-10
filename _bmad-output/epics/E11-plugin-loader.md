@@ -12,7 +12,9 @@
 
 ## Epic Summary
 
-E11 locks down the `AdapterInstance` TypeScript interface and adds dynamic plugin loading support to the `AdapterRegistry`. This epic serves two purposes: ensuring all built-in adapters (Telegram, BlueBubbles, Claude Code) implement a stable, consistent contract, and laying the foundation for community or custom adapters to be loaded from npm packages via dynamic import. After E11, the adapter surface is a defined, documented extension point.
+E11 locks down the `AdapterInstance` TypeScript interface and adds config-driven adapter plugin support to the `AdapterRegistry`. This epic serves two purposes: ensuring all built-in adapters (Telegram, BlueBubbles, Claude Code) implement a stable, consistent contract, and laying the foundation for community or custom adapters to be declared in config and loaded at startup from npm packages.
+
+Plugin loading is static and config-driven — plugins are declared in `config.yaml` and resolved at boot time using Node's ESM `import()`. Agents cannot load or register plugins at runtime; the bus surface is fixed once startup completes. After E11, the adapter surface is a defined, documented extension point.
 
 ---
 
@@ -60,9 +62,9 @@ E11 locks down the `AdapterInstance` TypeScript interface and adds dynamic plugi
 
 ---
 
-### S11.2 — Plugin Loader Stub
+### S11.2 — Config-Driven Adapter Plugin Loading
 
-**User story:** As a system operator, I want `AdapterRegistry.loadFromConfig()` to support loading adapters from npm packages so that custom or community adapters can be added without modifying bus-core source code.
+**User story:** As a system operator, I want to declare a custom adapter in `config.yaml` and have it load at startup so that community or custom adapters can be added without modifying bus-core source code.
 
 **Acceptance criteria:**
 - `AdapterRegistry.loadFromConfig(config: AppConfig): Promise<void>` iterates `config.adapters[]` and for each entry:
