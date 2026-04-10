@@ -7,6 +7,16 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 export function createMcpServer(): McpServer {
   return new McpServer(
     { name: 'agentbus-claude-code', version: '0.1.0' },
-    { capabilities: { logging: {} } }
+    {
+      capabilities: {
+        logging: {},
+        experimental: {
+          // Declares support for push-style channel notifications so Claude Code
+          // registers a listener and wakes up when a notification/claude/channel
+          // event arrives.
+          'claude/channel': {},
+        },
+      },
+    }
   );
 }

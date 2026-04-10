@@ -9,23 +9,32 @@ The `cc` adapter (`src/adapters/cc.ts`) is an MCP server that runs as a subproce
 3. When messages arrive, the adapter wakes Claude Code using `sampling/createMessage`, delivering the message content as a new user turn.
 4. Claude Code processes the message and calls the `reply` MCP tool to send a response back through the bus.
 
-## Sampling / Proactive Delivery
+## Proactive Delivery
 
-The adapter uses `sampling/createMessage` (E13) to initiate new Claude Code turns autonomously — no human prompt required.
+The adapter uses the `claude/channel` MCP extension to initiate new Claude Code turns autonomously — no human prompt required.
 
-### Capability Negotiation
+### Mechanism
 
-After `mcpServer.connect(transport)` completes the MCP handshake, the adapter reads the client's declared capabilities:
+The server declares `experimental: { 'claude/channel': {} }` in its capabilities. When inbound messages arrive, the adapter emits a `notifications/claude/channel` notification with the formatted message as `content`. Claude Code automatically wraps it in a `<channel>` tag (source set from the server name) and injects it as a new turn:
 
-```typescript
-const caps = mcpServer.server.getClientCapabilities();
-const samplingAvailable = !!caps?.sampling;
+```
+<channel source="agentbus-claude-code" ts="2026-04-10T12:00:00.000Z">
+New message from contact:chris via telegram [id:msg-abc123]:
+Hey Peggy!
+</channel>
 ```
 
-- **Sampling available**: Adapter logs `sampling capability detected`, creates a serialized queue, and fires `createMessage` for each inbound message batch.
-- **Sampling unavailable**: Adapter logs a warning and falls back to `sendLoggingMessage`. Messages still accumulate in `messageBuffer` and are retrievable via `get_pending_messages`.
+No capability negotiation is needed — the notification fires unconditionally on every inbound message batch.
 
-The capability check happens once at connection time and is not re-evaluated per message.
+### Required flag
+
+During the research preview, custom channels must be declared via `--dangerously-load-development-channels`. Start Claude Code with:
+
+```bash
+claude --permission-mode auto --dangerously-load-development-channels server:agentbus
+```
+
+where `server:agentbus` matches the key name in `.mcp.json`.
 
 ### Message Format
 
@@ -54,14 +63,16 @@ This section describes what the agent (e.g., Claude Code running as Peggy) needs
 
 ### How Messages Arrive
 
-When a message is delivered to the agent, the adapter calls `sampling/createMessage`, which initiates a **new Claude Code turn** with no human input required. The user turn delivered to the agent looks like this:
+When a message is delivered to the agent, the adapter emits a `notifications/claude/channel` event, which Claude Code injects as a new turn — no human input required. The turn delivered to the agent looks like this:
 
 ```
+<channel source="agentbus" ts="2026-04-10T12:00:00.000Z">
 New message from contact:chris via telegram [id:msg-abc123]:
 Hey Peggy, what's the weather like?
+</channel>
 ```
 
-For a batch of messages arriving in the same poll cycle, each message is separated by a blank line in a single user turn:
+For a batch of messages arriving in the same poll cycle, each message is separated by a blank line inside the `<channel>` wrapper:
 
 ```
 New message from contact:chris via telegram [id:msg-001]:

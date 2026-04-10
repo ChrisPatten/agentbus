@@ -1,8 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
-  detectSamplingCapability,
   formatMessagesForSampling,
   processAckedMessages,
+  sendChannelNotification,
 } from './cc.js';
 import type { MessageEnvelope } from '../types/envelope.js';
 
@@ -22,71 +22,58 @@ function makeEnvelope(overrides: Partial<MessageEnvelope> = {}): MessageEnvelope
   };
 }
 
-// ── S13.1 — Capability negotiation ───────────────────────────────────────────
-
-describe('detectSamplingCapability', () => {
-  it('returns true when sampling is present in caps', () => {
-    expect(detectSamplingCapability({ sampling: {} })).toBe(true);
-  });
-
-  it('returns false when sampling is absent from caps', () => {
-    expect(detectSamplingCapability({})).toBe(false);
-  });
-
-  it('returns false when caps is undefined', () => {
-    expect(detectSamplingCapability(undefined)).toBe(false);
-  });
-});
-
-// ── S13.2 — processAckedMessages (poll → enqueue path) ───────────────────────
+// ── S13.2 — processAckedMessages (poll → notify path) ────────────────────────
 
 describe('processAckedMessages', () => {
-  it('enqueues formatted text when sampling is available', () => {
+  it('pushes to buffer and calls notify with formatted text', () => {
     const buffer: MessageEnvelope[] = [];
-    const queue = { enqueue: vi.fn() };
-    const sendLogging = vi.fn();
+    const notify = vi.fn();
     const acked = [makeEnvelope()];
 
-    processAckedMessages(acked, buffer, true, queue, sendLogging);
+    processAckedMessages(acked, buffer, notify);
 
     expect(buffer).toHaveLength(1);
-    expect(queue.enqueue).toHaveBeenCalledOnce();
-    expect(queue.enqueue).toHaveBeenCalledWith(
+    expect(notify).toHaveBeenCalledOnce();
+    expect(notify).toHaveBeenCalledWith(
       'New message from contact:chris via telegram [id:msg-001]:\nHello Peggy!'
     );
-    expect(sendLogging).not.toHaveBeenCalled();
   });
 
-  it('calls sendLogging instead of enqueue when sampling is unavailable', () => {
+  it('batches multiple acked messages into a single notify call', () => {
     const buffer: MessageEnvelope[] = [];
-    const sendLogging = vi.fn();
-    const acked = [makeEnvelope()];
-
-    processAckedMessages(acked, buffer, false, null, sendLogging);
-
-    expect(buffer).toHaveLength(1);
-    expect(sendLogging).toHaveBeenCalledOnce();
-    expect(sendLogging).toHaveBeenCalledWith(
-      '[agentbus] 1 new message(s) — call get_pending_messages'
-    );
-  });
-
-  it('enqueues a single batch for multiple acked messages', () => {
-    const buffer: MessageEnvelope[] = [];
-    const queue = { enqueue: vi.fn() };
+    const notify = vi.fn();
     const acked = [
       makeEnvelope({ id: 'msg-001', payload: { type: 'text', body: 'First' } }),
       makeEnvelope({ id: 'msg-002', payload: { type: 'text', body: 'Second' } }),
     ];
 
-    processAckedMessages(acked, buffer, true, queue, vi.fn());
+    processAckedMessages(acked, buffer, notify);
 
     expect(buffer).toHaveLength(2);
-    // One enqueue call containing both messages
-    expect(queue.enqueue).toHaveBeenCalledOnce();
-    const text = queue.enqueue.mock.calls[0]![0] as string;
+    expect(notify).toHaveBeenCalledOnce();
+    const text = notify.mock.calls[0]![0] as string;
     expect(text).toContain('msg-001');
     expect(text).toContain('msg-002');
+  });
+});
+
+// ── S13.1 — sendChannelNotification ──────────────────────────────────────────
+
+describe('sendChannelNotification', () => {
+  it('emits notifications/claude/channel with wrapped content', () => {
+    const server = { notification: vi.fn() };
+
+    sendChannelNotification(server, 'hello world');
+
+    expect(server.notification).toHaveBeenCalledOnce();
+    const call = server.notification.mock.calls[0]![0] as {
+      method: string;
+      params: { content: string; meta: { source: string } };
+    };
+    expect(call.method).toBe('notifications/claude/channel');
+    // content is the raw body — Claude Code wraps it in <channel> automatically
+    expect(call.params.content).toBe('hello world');
+    expect(call.params.meta).toHaveProperty('ts');
   });
 });
 
