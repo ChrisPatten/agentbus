@@ -32,8 +32,8 @@ Submit a `MessageEnvelope` to the inbound pipeline. bus-core runs all 8 pipeline
 {
   "channel": "telegram",
   "topic": "general",
-  "sender": "contact:chris",
-  "recipient": "agent:peggy",
+  "sender": "contact:alice",
+  "recipient": "agent:claude",
   "reply_to": null,
   "priority": "normal",
   "payload": { "type": "text", "body": "Hey, remind me to call Alice tomorrow" },
@@ -71,8 +71,8 @@ Poll for pending messages destined for a specific recipient. Used by the Claude 
 
 | Param | Required | Default | Description |
 |---|---|---|---|
-| `agent` | one of | — | Shorthand: prepends `agent:` prefix. E.g. `agent=peggy` → `agent:peggy` |
-| `recipient` | one of | — | Raw recipient ID, e.g. `contact:chris`, `agent:peggy`. Takes precedence over `agent=` if both are provided |
+| `agent` | one of | — | Shorthand: prepends `agent:` prefix. E.g. `agent=claude` → `agent:claude` |
+| `recipient` | one of | — | Raw recipient ID, e.g. `contact:alice`, `agent:claude`. Takes precedence over `agent=` if both are provided |
 | `limit` | no | 10 | Max messages to return (max 100) |
 | `topic` | no | — | Filter by topic |
 
@@ -87,8 +87,8 @@ At least one of `agent` or `recipient` is required; omitting both returns HTTP 4
       "id": "550e8400-...",
       "channel": "telegram",
       "topic": "general",
-      "sender": "contact:chris",
-      "recipient": "agent:peggy",
+      "sender": "contact:alice",
+      "recipient": "agent:claude",
       "reply_to": null,
       "priority": "normal",
       "payload": { "type": "text", "body": "Hey, remind me to call Alice tomorrow" },
@@ -259,10 +259,10 @@ Query session summaries. Called by the Claude Code adapter at session start to i
     {
       "session_id": "uuid",
       "channel": "telegram",
-      "contact_id": "chris",
+      "contact_id": "alice",
       "started_at": "2025-09-15T08:00:00.000Z",
       "ended_at": "2025-09-15T09:30:00.000Z",
-      "summary": "Discussed grocery list. Chris asked for a reminder about the dentist on Thursday."
+      "summary": "Discussed grocery list. Alice asked for a reminder about an appointment on Thursday."
     }
   ]
 }

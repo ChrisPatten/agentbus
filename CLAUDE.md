@@ -1,6 +1,6 @@
 # AgentBus
 
-TypeScript MCP message bus for AI agents (primarily Peggy). Runs persistently on a Mac mini.
+TypeScript MCP message bus for AI agents.
 
 ## Project Structure
 

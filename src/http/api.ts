@@ -157,7 +157,7 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     if (!agent && !recipient) {
       return reply.status(400).send({ ok: false, error: '?agent= or ?recipient= is required' });
     }
-    // ?recipient= takes a raw recipientId (e.g. "contact:chris", "agent:peggy").
+    // ?recipient= takes a raw recipientId (e.g. "contact:alice", "agent:claude").
     // ?agent= is a shorthand that prepends the "agent:" prefix (legacy CC adapter usage).
     const recipientId = recipient ?? `agent:${agent}`;
     const parsedLimit = limit ? Math.max(1, Math.min(parseInt(limit, 10) || 10, 100)) : 10;

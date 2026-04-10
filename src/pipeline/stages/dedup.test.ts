@@ -29,8 +29,8 @@ function makeCtx(envelope: Partial<MessageEnvelope> = {}, db?: Database.Database
       timestamp: new Date().toISOString(),
       channel: 'telegram',
       topic: 'general',
-      sender: 'contact:chris',
-      recipient: 'agent:peggy',
+      sender: 'contact:alice',
+      recipient: 'agent:claude',
       reply_to: null,
       priority: 'normal',
       payload: { type: 'text', body: 'hello' },
@@ -82,12 +82,12 @@ describe('dedup stage', () => {
     const db = makeDb();
     const stage = createDedup(db);
     // First call: records the key in the in-memory Map
-    const ctx1 = makeCtx({ sender: 'contact:chris', payload: { type: 'text', body: 'duplicate' } }, db);
+    const ctx1 = makeCtx({ sender: 'contact:alice', payload: { type: 'text', body: 'duplicate' } }, db);
     const result1 = await stage(ctx1);
     expect(result1).not.toBeNull();
 
     // Second call with same stage instance: Map already holds the key → abort
-    const ctx2 = makeCtx({ sender: 'contact:chris', payload: { type: 'text', body: 'duplicate' } }, db);
+    const ctx2 = makeCtx({ sender: 'contact:alice', payload: { type: 'text', body: 'duplicate' } }, db);
     const result2 = await stage(ctx2);
     expect(result2).toBeNull();
   });
@@ -96,7 +96,7 @@ describe('dedup stage', () => {
     const db = makeDb();
     // First stage instance populates DB via Map
     const stage1 = createDedup(db);
-    const ctx1 = makeCtx({ sender: 'contact:chris', payload: { type: 'text', body: 'cold-start-dup' } }, db);
+    const ctx1 = makeCtx({ sender: 'contact:alice', payload: { type: 'text', body: 'cold-start-dup' } }, db);
     const result1 = await stage1(ctx1);
     expect(result1).not.toBeNull();
     const dedupKey = result1!.dedupKey!;
@@ -108,7 +108,7 @@ describe('dedup stage', () => {
 
     // New stage instance (fresh Map) — must fall back to DB
     const stage2 = createDedup(db);
-    const ctx2 = makeCtx({ sender: 'contact:chris', payload: { type: 'text', body: 'cold-start-dup' } }, db);
+    const ctx2 = makeCtx({ sender: 'contact:alice', payload: { type: 'text', body: 'cold-start-dup' } }, db);
     const result2 = await stage2(ctx2);
     expect(result2).toBeNull();
   });
@@ -128,7 +128,7 @@ describe('dedup stage', () => {
   it('different sender produces different key', async () => {
     const db = makeDb();
     const stage = createDedup(db);
-    const ctx1 = makeCtx({ sender: 'contact:chris', payload: { type: 'text', body: 'hello' } }, db);
+    const ctx1 = makeCtx({ sender: 'contact:alice', payload: { type: 'text', body: 'hello' } }, db);
     const ctx2 = makeCtx({ sender: 'contact:alice', payload: { type: 'text', body: 'hello' } }, db);
     const r1 = await stage(ctx1);
     const r2 = await stage(ctx2);

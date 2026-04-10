@@ -12,7 +12,7 @@
 
 ## Epic Summary
 
-E3 delivers the Telegram channel: a persistent daemon process that long-polls the Telegram Bot API for new messages, wraps them in `Envelope` objects, submits them to the bus inbound pipeline, and sends replies back to Telegram when the bus delivers outbound messages. After E3, Chris can message Peggy via Telegram and receive replies, with full typing indicators, read receipts, and native slash command autocomplete.
+E3 delivers the Telegram channel: a persistent daemon process that long-polls the Telegram Bot API for new messages, wraps them in `Envelope` objects, submits them to the bus inbound pipeline, and sends replies back to Telegram when the bus delivers outbound messages. After E3, users can message the agent via Telegram and receive replies, with full typing indicators, read receipts, and native slash command autocomplete.
 
 ---
 
@@ -73,7 +73,7 @@ E3 delivers the Telegram channel: a persistent daemon process that long-polls th
 
 ### S3.3 — Outbound Message Delivery
 
-**User story:** As the bus, I want to deliver outbound messages to Telegram by calling `sendMessage` so that Peggy's replies reach Chris in his Telegram chat.
+**User story:** As the bus, I want to deliver outbound messages to Telegram by calling `sendMessage` so that the agent's replies reach Chris in his Telegram chat.
 
 **Acceptance criteria:**
 - Adapter exposes `sendMessage(envelope: Envelope): Promise<void>` on its `AdapterInstance` interface implementation
@@ -104,9 +104,9 @@ E3 delivers the Telegram channel: a persistent daemon process that long-polls th
 
 ## Notes
 
-- **Long-polling vs. webhooks:** Long-polling is the right choice here since the Mac mini is behind a NAT/router and doesn't have a public IP. Telegram supports long-polling indefinitely; it's not a "fallback" — it's a fully supported mode.
+- **Long-polling vs. webhooks:** Long-polling is the right choice here since the the host machine is behind a NAT/router and doesn't have a public IP. Telegram supports long-polling indefinitely; it's not a "fallback" — it's a fully supported mode.
 - **`offset` persistence:** The current design resets `offset` on restart, relying on Telegram to re-deliver unprocessed updates (messages received while the adapter was down). Telegram keeps updates for 24 hours. For a personal assistant, this is acceptable. If at-most-once delivery is needed, persist `offset` to SQLite.
 - **Rate limiting:** Telegram Bot API allows 30 messages/second to different chats, 1 message/second to the same chat. For a personal assistant with one primary user, this is never a concern. Don't add rate limiting logic in E3.
 - **Group chat messages:** The allowlist check uses `from.id` (the user), not `chat.id`. If the bot is added to a group, messages from the allowed sender in that group would pass the filter. Consider adding a `allowed_chat_ids` config alongside `allowed_sender_ids` for tighter control.
-- **Markdown parsing:** Using `parse_mode: "Markdown"` means Peggy can use `*bold*`, `_italic_`, and `` `code` `` in replies. However, unescaped special characters in her replies could cause Telegram API errors. Consider switching to `MarkdownV2` with proper escaping or using `HTML` mode. Document the choice.
+- **Markdown parsing:** Using `parse_mode: "Markdown"` means the agent can use `*bold*`, `_italic_`, and `` `code` `` in replies. However, unescaped special characters in its replies could cause Telegram API errors. Consider switching to `MarkdownV2` with proper escaping or using `HTML` mode. Document the choice.
 - **Delivery worker architecture:** The Telegram adapter hosts its own outbound delivery loop (polling the bus queue). This is a deliberate architectural choice: each adapter is responsible for its own delivery timing, retry policy, and formatting. Bus-core enqueues; adapters dequeue and deliver.

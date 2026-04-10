@@ -1,6 +1,6 @@
 # AgentBus
 
-TypeScript message bus for AI agents. Unifies Claude Code (via MCP), Telegram, and BlueBubbles (iMessage) into a single ambient inbox/outbox for an AI agent named Peggy, running persistently on a Mac mini.
+TypeScript message bus for AI agents. Unifies Claude Code (via MCP), Telegram, and BlueBubbles (iMessage) into a single ambient inbox/outbox for an AI agent.
 
 ## Architecture
 

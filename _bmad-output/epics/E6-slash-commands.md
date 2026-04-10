@@ -12,7 +12,7 @@
 
 ## Epic Summary
 
-E6 builds the command dispatch layer that sits on top of the pipeline's slash-command detection. When Stage 40 flags a message as a slash command, E6's `CommandRegistry` intercepts it before queue delivery and dispatches to the appropriate handler — either a built-in bus command or an agent-space command handled by Peggy. After E6, Chris can type `/status`, `/help`, `/pause`, and other commands from any connected channel and get structured responses routed back through the bus.
+E6 builds the command dispatch layer that sits on top of the pipeline's slash-command detection. When Stage 40 flags a message as a slash command, E6's `CommandRegistry` intercepts it before queue delivery and dispatches to the appropriate handler — either a built-in bus command or an agent-space command handled by the agent. After E6, the operator can type `/status`, `/help`, `/pause`, and other commands from any connected channel and get structured responses routed back through the bus.
 
 ---
 
@@ -44,7 +44,7 @@ E6 builds the command dispatch layer that sits on top of the pipeline's slash-co
 
 **Acceptance criteria:**
 - `CommandRegistry` exposes `register(command: CommandDefinition): void` where `CommandDefinition` = `{ name: string, description: string, usage: string, scope: "bus"|"agent", handler: CommandHandler }`
-- `scope: "bus"` means the bus handles the command directly and responds; `scope: "agent"` means the command is forwarded to Peggy via a channel event instead of being handled locally
+- `scope: "bus"` means the bus handles the command directly and responds; `scope: "agent"` means the command is forwarded to the agent via a channel event instead of being handled locally
 - `lookup(name: string): CommandDefinition | undefined` supports both exact match (`/status`) and prefix match (`/session list`)
 - `register()` throws if a command name is already registered (prevents accidental overwrites)
 - `list(): CommandDefinition[]` returns all registered commands sorted alphabetically by name
@@ -56,7 +56,7 @@ E6 builds the command dispatch layer that sits on top of the pipeline's slash-co
 
 ### S6.2 — Built-in Bus Commands
 
-**User story:** As Chris, I want to use slash commands from any connected channel to check system status, manage adapter pausing, review sessions, and control memory so that I can operate AgentBus without needing SSH access to the Mac mini.
+**User story:** As Chris, I want to use slash commands from any connected channel to check system status, manage adapter pausing, review sessions, and control memory so that I can operate AgentBus without needing SSH access to the the host machine.
 
 **Acceptance criteria:**
 
@@ -100,4 +100,4 @@ Each command returns a human-readable response string routed back through the or
 - **`/replay` size management:** Transcripts can be long. Implement a simple character-count splitter; send multiple messages in sequence with a small delay (100ms) between them to avoid rate limiting.
 - **`/forget` and E8 dependency:** `/forget` can be registered in E6 but should return `{ available: false }` if the `memories` table doesn't exist yet. When E8 lands, the handler will find the table and operate normally — no code change needed, just the table presence check.
 - **Command naming convention:** Commands use lowercase with hyphens for multi-word names (e.g., `/dead-letter`, not `/deadLetter`). Keep names short — they're typed by humans.
-- **Agent-scope commands:** `scope: "agent"` commands are not implemented in E6. They are registered in E6's registry as placeholders and forwarded to Peggy as `type: "command_invocation"` channel events. Peggy handles them in her system prompt. This scope distinction allows future agent-custom commands without touching bus-core.
+- **Agent-scope commands:** `scope: "agent"` commands are not implemented in E6. They are registered in E6's registry as placeholders and forwarded to the agent as `type: "command_invocation"` channel events. the agent handles them in her system prompt. This scope distinction allows future agent-custom commands without touching bus-core.

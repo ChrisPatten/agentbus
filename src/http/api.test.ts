@@ -40,8 +40,8 @@ async function makeServer(): Promise<{ server: FastifyInstance; queue: MessageQu
 
 const validMessage = {
   channel: 'telegram',
-  sender: 'contact:chris',
-  recipient: 'agent:peggy',
+  sender: 'contact:alice',
+  recipient: 'agent:claude',
   payload: { type: 'text', body: 'hello' },
 };
 
@@ -67,17 +67,17 @@ describe('HTTP API — auth middleware', () => {
   });
 
   it('returns 401 when X-Bus-Token header is absent', async () => {
-    const res = await server.inject({ method: 'GET', url: '/api/v1/messages/pending?agent=peggy' });
+    const res = await server.inject({ method: 'GET', url: '/api/v1/messages/pending?agent=claude' });
     expect(res.statusCode).toBe(401);
   });
 
   it('returns 401 when X-Bus-Token header is wrong', async () => {
-    const res = await server.inject({ method: 'GET', url: '/api/v1/messages/pending?agent=peggy', headers: { 'x-bus-token': 'wrong' } });
+    const res = await server.inject({ method: 'GET', url: '/api/v1/messages/pending?agent=claude', headers: { 'x-bus-token': 'wrong' } });
     expect(res.statusCode).toBe(401);
   });
 
   it('allows access with correct X-Bus-Token header', async () => {
-    const res = await server.inject({ method: 'GET', url: '/api/v1/messages/pending?agent=peggy', headers: { 'x-bus-token': 'secret-token' } });
+    const res = await server.inject({ method: 'GET', url: '/api/v1/messages/pending?agent=claude', headers: { 'x-bus-token': 'secret-token' } });
     expect(res.statusCode).toBe(200);
   });
 
@@ -116,7 +116,7 @@ describe('HTTP API', () => {
     it('clamps limit=-1 to 1 (previously returned all messages via SQLite LIMIT -1)', async () => {
       const res = await server.inject({
         method: 'GET',
-        url: '/api/v1/messages/pending?agent=peggy&limit=-1',
+        url: '/api/v1/messages/pending?agent=claude&limit=-1',
       });
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body) as { count: number };
@@ -126,7 +126,7 @@ describe('HTTP API', () => {
     it('falls back to 10 on NaN limit (previously returned 0 via SQLite LIMIT NaN)', async () => {
       const res = await server.inject({
         method: 'GET',
-        url: '/api/v1/messages/pending?agent=peggy&limit=abc',
+        url: '/api/v1/messages/pending?agent=claude&limit=abc',
       });
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body) as { count: number };
@@ -137,7 +137,7 @@ describe('HTTP API', () => {
     it('treats limit=0 as the default (0 is falsy, falls back to 10)', async () => {
       const res = await server.inject({
         method: 'GET',
-        url: '/api/v1/messages/pending?agent=peggy&limit=0',
+        url: '/api/v1/messages/pending?agent=claude&limit=0',
       });
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body) as { count: number };
@@ -153,9 +153,9 @@ describe('HTTP API', () => {
         url: '/api/v1/messages',
         payload: {
           channel: 'telegram',
-          sender: 'agent:peggy',
-          recipient: 'contact:chris',
-          payload: { type: 'text', body: 'hi from peggy' },
+          sender: 'agent:claude',
+          recipient: 'contact:alice',
+          payload: { type: 'text', body: 'hi from claude' },
         },
       });
     });
@@ -163,7 +163,7 @@ describe('HTTP API', () => {
     it('returns messages for a raw contact: recipient via ?recipient=', async () => {
       const res = await server.inject({
         method: 'GET',
-        url: '/api/v1/messages/pending?recipient=contact:chris',
+        url: '/api/v1/messages/pending?recipient=contact:alice',
       });
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body) as { count: number };
@@ -178,27 +178,27 @@ describe('HTTP API', () => {
     it('?recipient= takes precedence when both ?agent= and ?recipient= are provided', async () => {
       const res = await server.inject({
         method: 'GET',
-        url: '/api/v1/messages/pending?agent=peggy&recipient=contact:chris',
+        url: '/api/v1/messages/pending?agent=claude&recipient=contact:alice',
       });
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body) as { count: number };
-      expect(body.count).toBe(1); // message is for contact:chris, not agent:peggy
+      expect(body.count).toBe(1); // message is for contact:alice, not agent:claude
     });
 
-    it('?agent= still works as before (returns messages for agent:peggy)', async () => {
-      // Enqueue a message for agent:peggy
+    it('?agent= still works as before (returns messages for agent:claude)', async () => {
+      // Enqueue a message for agent:claude
       await server.inject({
         method: 'POST',
         url: '/api/v1/messages',
-        payload: { ...validMessage, payload: { type: 'text', body: 'hi peggy' } },
+        payload: { ...validMessage, payload: { type: 'text', body: 'hi' } },
       });
       const res = await server.inject({
         method: 'GET',
-        url: '/api/v1/messages/pending?agent=peggy',
+        url: '/api/v1/messages/pending?agent=claude',
       });
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body) as { count: number };
-      expect(body.count).toBe(1); // only the agent:peggy message
+      expect(body.count).toBe(1); // only the agent:claude message
     });
   });
 

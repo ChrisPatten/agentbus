@@ -152,8 +152,8 @@ await fetch('http://localhost:3000/api/v1/messages', {
   body: JSON.stringify({
     channel: 'myplatform',
     topic: 'general',          // or derive from platform context
-    sender: 'contact:chris',   // resolved contact ID
-    recipient: 'agent:peggy',
+    sender: 'contact:alice',   // resolved contact ID
+    recipient: 'agent:claude',
     reply_to: null,
     priority: 'normal',
     payload: { type: 'text', body: messageText },

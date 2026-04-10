@@ -18,8 +18,8 @@ function makeEnvelope(overrides: Partial<MessageEnvelope> = {}): MessageEnvelope
     timestamp: new Date().toISOString(),
     channel: 'telegram',
     topic: 'general',
-    sender: 'contact:chris',
-    recipient: 'agent:peggy',
+    sender: 'contact:alice',
+    recipient: 'agent:claude',
     reply_to: null,
     priority: 'normal',
     payload: { type: 'text', body: 'hello' },
@@ -42,7 +42,7 @@ describe('MessageQueue', () => {
       queue.enqueue(makeEnvelope({ topic: 'code' }));
       queue.enqueue(makeEnvelope({ topic: 'general' }));
 
-      const results = queue.dequeue('agent:peggy', 'code', 10);
+      const results = queue.dequeue('agent:claude', 'code', 10);
       expect(results).toHaveLength(1);
       expect(results[0].envelope.topic).toBe('code');
     });
@@ -51,7 +51,7 @@ describe('MessageQueue', () => {
       queue.enqueue(makeEnvelope({ topic: 'code' }));
       queue.enqueue(makeEnvelope({ topic: 'general' }));
 
-      const results = queue.dequeue('agent:peggy', undefined, 10);
+      const results = queue.dequeue('agent:claude', undefined, 10);
       expect(results).toHaveLength(2);
     });
 
@@ -59,7 +59,7 @@ describe('MessageQueue', () => {
       // topic='telegram' should NOT match channel='telegram'
       queue.enqueue(makeEnvelope({ channel: 'telegram', topic: 'general' }));
 
-      const results = queue.dequeue('agent:peggy', 'telegram', 10);
+      const results = queue.dequeue('agent:claude', 'telegram', 10);
       expect(results).toHaveLength(0);
     });
   });
@@ -70,21 +70,21 @@ describe('MessageQueue', () => {
     it('resets processing messages older than maxAgeMs back to pending', () => {
       const envelope = makeEnvelope();
       queue.enqueue(envelope);
-      queue.dequeue('agent:peggy'); // transitions to processing
+      queue.dequeue('agent:claude'); // transitions to processing
 
       // maxAgeMs=0 means anything in processing qualifies immediately
       const recovered = queue.recoverStuck(0);
       expect(recovered).toBe(1);
 
       // Should now be dequeue-able again
-      const results = queue.dequeue('agent:peggy');
+      const results = queue.dequeue('agent:claude');
       expect(results).toHaveLength(1);
       expect(results[0].envelope.id).toBe(envelope.id);
     });
 
     it('does not recover recently processing messages', () => {
       queue.enqueue(makeEnvelope());
-      queue.dequeue('agent:peggy');
+      queue.dequeue('agent:claude');
 
       // 1-hour threshold: a just-dequeued message should not be recovered
       const recovered = queue.recoverStuck(60 * 60 * 1000);
@@ -134,7 +134,7 @@ describe('MessageQueue', () => {
       queue.enqueue(envelope, past);
 
       expect(queue.sweepExpired()).toBe(1);
-      expect(queue.dequeue('agent:peggy')).toHaveLength(0);
+      expect(queue.dequeue('agent:claude')).toHaveLength(0);
       expect(queue.getById(envelope.id)).not.toBeNull(); // findable via dead_letter
     });
 
@@ -143,13 +143,13 @@ describe('MessageQueue', () => {
       queue.enqueue(makeEnvelope(), future);
 
       expect(queue.sweepExpired()).toBe(0);
-      expect(queue.dequeue('agent:peggy')).toHaveLength(1);
+      expect(queue.dequeue('agent:claude')).toHaveLength(1);
     });
 
     it('does not sweep processing messages even if their expiry has passed', () => {
       const past = new Date(Date.now() - 1000).toISOString();
       queue.enqueue(makeEnvelope(), past);
-      queue.dequeue('agent:peggy'); // move to processing
+      queue.dequeue('agent:claude'); // move to processing
 
       expect(queue.sweepExpired()).toBe(0);
     });
@@ -158,7 +158,7 @@ describe('MessageQueue', () => {
       queue.enqueue(makeEnvelope()); // no expires_at
 
       expect(queue.sweepExpired()).toBe(0);
-      expect(queue.dequeue('agent:peggy')).toHaveLength(1);
+      expect(queue.dequeue('agent:claude')).toHaveLength(1);
     });
   });
 });

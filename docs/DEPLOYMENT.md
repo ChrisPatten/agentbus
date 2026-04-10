@@ -1,6 +1,6 @@
 # AgentBus Deployment Guide
 
-Deploying AgentBus to the Mac mini. The system runs as four pm2-managed processes. Most operational tasks can be done without SSH using pm2's monitoring tools.
+Deploying AgentBus. The system runs as four pm2-managed processes. Most operational tasks can be done without SSH using pm2's monitoring tools.
 
 ---
 

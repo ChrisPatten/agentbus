@@ -81,7 +81,7 @@ const authToken = config.bus.auth_token;
 const allowedSenderIds = new Set<string>();
 /** Map from contact id (e.g. "chris") to their Telegram user ID (for outbound chat_id resolution). */
 const contactChatIdMap = new Map<string, number>();
-/** List of contact recipients (e.g. ["contact:chris"]) that this adapter delivers to. */
+/** List of contact recipients (e.g. ["contact:alice"]) that this adapter delivers to. */
 const telegramRecipients: string[] = [];
 
 for (const contact of Object.values(config.contacts)) {

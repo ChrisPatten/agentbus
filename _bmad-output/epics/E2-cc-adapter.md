@@ -12,7 +12,7 @@
 
 ## Epic Summary
 
-E2 delivers the first working end-to-end communication path: after this epic, Chris can send a message to Peggy via Claude Code and receive a reply routed back through the bus. The Claude Code adapter runs as an MCP server over stdio, spawned directly by Claude Code. It polls the bus HTTP API for pending inbound messages, exposes a `reply` tool for Peggy to respond, and emits structured channel events that Claude Code can observe as conversation context.
+E2 delivers the first working end-to-end communication path: after this epic, users can send a message to the agent via Claude Code and receive a reply routed back through the bus. The Claude Code adapter runs as an MCP server over stdio, spawned directly by Claude Code. It polls the bus HTTP API for pending inbound messages, exposes a `reply` tool for the agent to respond, and emits structured channel events that Claude Code can observe as conversation context.
 
 ---
 
@@ -29,7 +29,7 @@ E2 delivers the first working end-to-end communication path: after this epic, Ch
 
 - Running `npx tsx src/adapters/claude-code/index.ts` starts an MCP server that Claude Code can connect to over stdio
 - Claude Code receives pending messages as MCP tool responses / channel events within 1–2 seconds of delivery
-- Peggy (Claude) can call `reply` with a `message_id` and `body` and the message is delivered to the bus
+- the agent (Claude) can call `reply` with a `message_id` and `body` and the message is delivered to the bus
 - Health check endpoint or status tool reports adapter up/down and bus connectivity
 - Adapter reconnects automatically if bus becomes unavailable without requiring a process restart
 - All MCP tool schemas are validated with Zod; malformed arguments are rejected with a clear error message
@@ -56,10 +56,10 @@ E2 delivers the first working end-to-end communication path: after this epic, Ch
 
 ### S2.2 — Bus Polling Loop
 
-**User story:** As Claude Code, I want the adapter to continuously poll the bus for messages addressed to Peggy so that incoming messages appear in Claude Code's context within seconds of being enqueued, without requiring a persistent WebSocket connection.
+**User story:** As Claude Code, I want the adapter to continuously poll the bus for messages addressed to the agent so that incoming messages appear in Claude Code's context within seconds of being enqueued, without requiring a persistent WebSocket connection.
 
 **Acceptance criteria:**
-- Polling loop calls `GET /api/v1/messages/pending/peggy?channel=claude-code` every 1000ms (interval configurable via `AppConfig`)
+- Polling loop calls `GET /api/v1/messages/pending/claude?channel=claude-code` every 1000ms (interval configurable via `AppConfig`)
 - Each pending message is emitted as an MCP `channel` event with the full `Envelope` payload serialized as JSON
 - Successfully fetched messages are immediately acknowledged via `POST /api/v1/messages/ack` to prevent re-delivery
 - If the HTTP request fails (network error, 5xx), the loop logs a warning and retries after the next interval; it does not crash
@@ -72,7 +72,7 @@ E2 delivers the first working end-to-end communication path: after this epic, Ch
 
 ### S2.3 — `reply` Tool
 
-**User story:** As Peggy (Claude), I want to call a `reply` MCP tool with a message ID and body so that my responses are routed back through the bus to the correct contact and channel without me needing to know the underlying transport.
+**User story:** As the agent (Claude), I want to call a `reply` MCP tool with a message ID and body so that my responses are routed back through the bus to the correct contact and channel without me needing to know the underlying transport.
 
 **Acceptance criteria:**
 - `reply` tool is registered with Zod-validated schema: `{ message_id: z.string(), body: z.string().min(1).max(4000) }`

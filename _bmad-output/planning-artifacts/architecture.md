@@ -26,7 +26,7 @@
 
 ## 1. System Overview
 
-AgentBus is a persistent TypeScript message bus server running on a Mac mini that unifies Claude Code (via MCP), Telegram, and BlueBubbles (iMessage) into a single ambient inbox/outbox for an AI agent named Peggy. Each communication channel is implemented as a separate long-running daemon process that connects to a central **bus-core** over an internal HTTP API. Inbound messages from any channel flow through an 8-stage normalization pipeline before landing in a SQLite-backed queue, where Peggy polls them via MCP tools. Outbound replies are dispatched back through the originating (or specified) adapter. A persistent memory system transcribes every conversation, summarizes inactive sessions, and injects context at session start — giving Peggy continuous ambient awareness across all channels and restarts.
+AgentBus is a persistent TypeScript message bus server running on the host machine that unifies Claude Code (via MCP), Telegram, and BlueBubbles (iMessage) into a single ambient inbox/outbox for an AI agent. Each communication channel is implemented as a separate long-running daemon process that connects to a central **bus-core** over an internal HTTP API. Inbound messages from any channel flow through an 8-stage normalization pipeline before landing in a SQLite-backed queue, where the agent polls them via MCP tools. Outbound replies are dispatched back through the originating (or specified) adapter. A persistent memory system transcribes every conversation, summarizes inactive sessions, and injects context at session start — giving the agent continuous ambient awareness across all channels and restarts.
 
 ### Architecture Diagram
 
@@ -131,12 +131,12 @@ Responsibilities:
 
 **Entry point:** `src/adapters/cc.ts`
 **Process manager:** Spawned by Claude Code over stdio (not pm2)
-**Role:** MCP server. Provides all 12 MCP tools to Peggy's Claude Code session.
+**Role:** MCP server. Provides all 12 MCP tools to the agent's Claude Code session.
 
 Responsibilities:
 - Implements the Model Context Protocol over stdio using `@modelcontextprotocol/sdk`
 - Exposes all 12 MCP tools (see §6)
-- Polls `GET /api/v1/messages/pending?agent=peggy` approximately every 1 second
+- Polls `GET /api/v1/messages/pending?agent=claude` approximately every 1 second
 - On new pending messages, surfaces them via the `claude/channel` experimental capability push event
 - On session start, calls `GET /api/v1/memory/summaries?hours=48` and fires a `context_load` event with the result
 - Does **not** persist state; all state is in bus-core's SQLite
@@ -247,8 +247,8 @@ interface MessageEnvelope {
   timestamp: string;       // ISO 8601, e.g. "2025-09-15T14:32:00.000Z"
   channel: string;         // "telegram" | "bluebubbles" | "claude-code"
   topic: string;           // "general" | "reminders" | "code" | "personal" | ...
-  sender: string;          // "contact:chris" | "agent:peggy"
-  recipient: string;       // "agent:peggy" | "contact:chris"
+  sender: string;          // "contact:alice" | "agent:claude"
+  recipient: string;       // "agent:claude" | "contact:alice"
   reply_to: string | null; // id of message being replied to, or null
   priority: 'normal' | 'high' | 'urgent';
   payload: {
@@ -340,7 +340,7 @@ interface BusCommand {
   name: string;                  // "remind", "status", "help"
   description: string;
   pattern: RegExp;               // e.g. /^\/remind\s+(.+)$/i
-  scope: 'bus' | 'agent';        // 'bus' = handled by bus; 'agent' = forwarded to Peggy
+  scope: 'bus' | 'agent';        // 'bus' = handled by bus; 'agent' = forwarded to the agent
   handler: (
     args: string[],
     ctx: MessageContext
@@ -445,7 +445,7 @@ Submit a `MessageEnvelope` to the inbound pipeline. The bus runs the full 8-stag
 Poll for pending messages destined for a specific agent.
 
 **Query params:**
-- `agent` (required): e.g. `peggy`
+- `agent` (required): e.g. `claude`
 - `limit` (optional, default 10, max 100)
 - `topic` (optional): filter by topic
 
@@ -629,7 +629,7 @@ All tools communicate with bus-core's HTTP API at `localhost:config.bus.http_por
 
 **`get_pending_messages`**
 ```ts
-// Returns all messages in the pending queue for agent:peggy
+// Returns all messages in the pending queue for agent:claude
 // Input: { limit?: number; topic?: string }
 // Output: { messages: MessageEnvelope[] }
 ```
@@ -654,7 +654,7 @@ All tools communicate with bus-core's HTTP API at `localhost:config.bus.http_por
 ```ts
 // Send a new message to a contact via a specified channel
 // Input: {
-//   recipient: string;      // "contact:chris"
+//   recipient: string;      // "contact:alice"
 //   channel: string;        // "telegram" | "bluebubbles" | "claude-code"
 //   body: string;
 //   topic?: string;
@@ -743,7 +743,7 @@ The cc-adapter maintains a 1-second polling interval after session start:
 async function startPolling(busUrl: string, server: Server) {
   const poll = async () => {
     try {
-      const res = await fetch(`${busUrl}/api/v1/messages/pending?agent=peggy&limit=10`);
+      const res = await fetch(`${busUrl}/api/v1/messages/pending?agent=claude&limit=10`);
       const { messages } = await res.json();
       if (messages.length > 0) {
         await server.sendNotification({
@@ -1051,7 +1051,7 @@ adapters:
 
 contacts:
   chris:
-    displayName: Chris
+    displayName: the operator
     platforms:
       telegram:
         userId: 123456789
@@ -1187,7 +1187,7 @@ Responsibilities:
 - Log unresolved contacts for potential future registration
 - Populate `metadata.contact` with the resolved `Contact` object (if found)
 
-Canonical sender format: `contact:chris` | `agent:peggy` | `platform:telegram:987654`
+Canonical sender format: `contact:alice` | `agent:claude` | `platform:telegram:987654`
 
 ### Stage 3 — Dedup (slot 30)
 
@@ -1219,9 +1219,9 @@ Responsibilities:
 - If **no match** (decision S6):
   - Set `payload.type = 'slash_command'`
   - Set `metadata.command_unrecognized = true`
-  - **Pass through** — unrecognized commands reach Peggy enriched
+  - **Pass through** — unrecognized commands reach the agent enriched
 
-This design means Peggy always sees slash commands, even unregistered ones.
+This design means the agent always sees slash commands, even unregistered ones.
 
 ### Stage 5 — Topic Classify (slot 50)
 
@@ -1246,7 +1246,7 @@ Responsibilities:
   - `+1` if sender is a priority contact (config flag)
   - `+1` if body contains urgency keywords ("urgent", "ASAP", "help", "911", etc.)
   - `+1` if it's a `/slash_command` of high-priority type
-  - `+1` if it's a reply to a message Peggy sent within last 5 minutes
+  - `+1` if it's a reply to a message the agent sent within last 5 minutes
 - Score 0 → `'normal'`; Score 1-2 → `'high'`; Score 3+ → `'urgent'`
 - Update `envelope.priority`
 
@@ -1255,7 +1255,7 @@ Responsibilities:
 **File:** `src/pipeline/route.ts`
 
 Responsibilities:
-- Determine `recipient` if not set (default: `agent:peggy` for all inbound from contacts)
+- Determine `recipient` if not set (default: `agent:claude` for all inbound from contacts)
 - For fan-out scenarios (broadcast): produce N copies of the envelope — one per target channel (decision S2). When fan-out occurs, return the **first** envelope and enqueue the remaining copies directly.
 - Compute `conversation_id = sha256(contact_id + ':' + channel + ':' + topic).slice(0, 16)`
 - Store `conversation_id` in `metadata.conversation_id`
@@ -1337,12 +1337,12 @@ The summarizer runs in the bus-core process but is fully async and non-blocking.
 **Summarization prompt template:**
 
 ```
-The following is a conversation transcript between a user and an AI agent named Peggy.
+The following is a conversation transcript between a user and an AI agent .
 Channel: {channel}. Contact: {displayName}.
 Duration: {start} to {end} ({message_count} messages).
 
 Summarize the key topics, decisions, tasks, and any open items in 2-4 sentences.
-Focus on what Peggy would need to know to continue this conversation naturally.
+Focus on what the agent would need to know to continue this conversation naturally.
 
 Transcript:
 {transcript_text}
@@ -1384,7 +1384,7 @@ Chris asked about the weather and requested a reminder for tomorrow morning.
 
 [Telegram - Chris - 1 day ago]
 Long conversation about the project planning. Key decisions: use TypeScript ESM,
-deploy on Mac mini with pm2.
+deploy with pm2.
 ```
 
 ### 10.4 /resume Flow (Decision A6)
@@ -1667,7 +1667,7 @@ These decisions are finalized and should not be revisited without explicit BMAD 
 | **S3** | Each adapter's `send()` handles platform-specific constraints (length limits, encoding); no bus-level transformation |
 | **S4** | Pipeline stages registered with numeric slots (10, 20, 30...); external stages can be inserted at any slot |
 | **S5** | `conversation_id = hash(contact_id + ':' + channel + ':' + topic)`; `/resume` bridges by finding last session any channel |
-| **S6** | Unrecognized slash commands pass through the pipeline enriched with `metadata.command_unrecognized = true`; Peggy receives them |
+| **S6** | Unrecognized slash commands pass through the pipeline enriched with `metadata.command_unrecognized = true`; the agent receives them |
 | **A1** | Commands registered with capable adapters via `registerCommands()` at bus-core startup |
 | **A2** | Plugin loader stub present in v1; external npm adapters supported in v2+ via dynamic import |
 | **A3** | Static `AdapterCapabilities` interface; bus checks flags before calling optional methods |

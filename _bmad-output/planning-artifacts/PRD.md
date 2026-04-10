@@ -9,11 +9,11 @@
 
 ## 1. Problem Statement
 
-Personal AI agents like Peggy need to communicate with their human across multiple platforms (iMessage, Telegram, Claude Code) while maintaining continuity of context across sessions. Today these are three completely separate channels with no shared memory, no unified routing, and no way to correlate conversations.
+Personal AI agents need to communicate with their human across multiple platforms (iMessage, Telegram, Claude Code) while maintaining continuity of context across sessions. Today these are three completely separate channels with no shared memory, no unified routing, and no way to correlate conversations.
 
 There is no existing tool that provides:
 - A **pluggable transport layer** — existing solutions (Cross-Claude MCP, AgentChatBus, Claude Peers) are all tightly coupled to a single transport
-- A **human-to-agent** focus — existing tools are agent-to-agent; this is about you reaching Peggy and Peggy reaching back, from wherever you are
+- A **human-to-agent** focus — existing tools are agent-to-agent; this is about the operator reaching the agent and the agent reaching back, from wherever you are
 - An **ambient memory pipeline** that captures conversational context across sessions without requiring the agent to do anything special
 
 AgentBus solves all three.
@@ -39,12 +39,12 @@ AgentBus solves all three.
 
 ## 4. Non-Goals (v1)
 
-- NG1: Multi-user support — this is a single-owner personal system (Chris + Peggy)
+- NG1: Multi-user support — this is a single-operator system (the operator and agent)
 - NG2: Authentication — Tailscale provides the network boundary; no auth in v1
 - NG3: Agent-to-agent routing — the bus routes human→agent and agent→human only in v1
 - NG4: Vector/semantic search — FTS5 keyword search is sufficient for v1; embeddings are a future upgrade
 - NG5: Web UI or dashboard — CLI and MCP tools only in v1
-- NG6: Cloud deployment — runs on Mac mini only
+- NG6: Cloud deployment — runs only
 - NG7: Webhook-based Telegram — long polling is sufficient behind Tailscale
 
 ---
@@ -52,13 +52,13 @@ AgentBus solves all three.
 ## 5. Users and Personas
 
 ### Chris (Human Owner)
-Sends and receives messages to/from Peggy across iMessage, Telegram, and Claude Code. Expects Peggy to remember context from previous sessions. Does not want to think about which platform is "active." Primary success metric: Peggy feels continuous, not amnesiac.
+Sends and receives messages to/from the agent across iMessage, Telegram, and Claude Code. Expects the agent to remember context from previous sessions. Does not want to think about which platform is "active." Primary success metric: the agent feels continuous, not amnesiac.
 
-### Peggy (AI Agent — Claude Code)
+### the AI agent (Claude Code)
 Receives incoming messages from Chris via the Claude Code channel adapter. Uses MCP tools to send replies, search memory, log facts, and retrieve briefings. Needs context injected at session start without having to ask for it.
 
 ### Future Agents
-The bus is designed to support multiple named agents sharing the same bus infrastructure (namespaced subscriptions), but v1 has only Peggy.
+The bus is designed to support multiple named agents sharing the same bus infrastructure (namespaced subscriptions), but v1 has only one agent.
 
 ---
 
@@ -74,12 +74,12 @@ Every message on the bus — regardless of origin — is wrapped in a standard e
   "channel": "telegram",
   "topic": "general",
   "sender": "user:chris",
-  "recipient": "agent:peggy",
+  "recipient": "agent:claude",
   "reply_to": "msg-uuid-or-null",
   "priority": "normal",
   "payload": {
     "type": "text",
-    "body": "Hey Peggy, what's on my calendar?"
+    "body": "Hey, what.s on my calendar?"
   },
   "metadata": {}
 }
@@ -175,7 +175,7 @@ A bounded window of conversation activity. A session starts when the first messa
 
 ## 9. Slash Commands
 
-**Processing Model: Hybrid.** Bus-level commands execute immediately. Agent-level/unknown commands are enriched and routed to Peggy.
+**Processing Model: Hybrid.** Bus-level commands execute immediately. Agent-level/unknown commands are enriched and routed to the agent.
 
 ### Built-in Bus Commands
 
@@ -196,7 +196,7 @@ A bounded window of conversation activity. A session starts when the first messa
 
 Three-layer architecture: Transcript Logger (every message) → Summarizer Pipeline (async, 15min inactivity) → Context Injector (last 48h injected at session start)
 
-**Short-term** = ambient buffer through the pipeline. **Long-term** = files Peggy maintains herself.
+**Short-term** = ambient buffer through the pipeline. **Long-term** = files the agent maintains herself.
 
 ---
 
@@ -212,7 +212,7 @@ WAL mode. See architecture.md for full schema.
 
 ```
 POST /api/v1/messages          — submit envelope to queue
-GET  /api/v1/messages/pending  — poll pending (?agent=peggy&limit=10)
+GET  /api/v1/messages/pending  — poll pending (?agent=claude&limit=10)
 POST /api/v1/messages/:id/ack  — acknowledge
 GET  /api/v1/health            — bus health + adapter statuses
 POST /api/v1/inbound           — webhook receiver (BlueBubbles)

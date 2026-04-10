@@ -14,13 +14,13 @@ adapters:
     poll_interval_ms: 1000
 
 contacts:
-  chris:
-    id: chris
-    displayName: Chris
+  alice:
+    id: alice
+    displayName: Alice
     platforms:
       telegram:
         userId: 123456789
-        username: chrispatten
+        username: alice_example
       bluebubbles:
         handle: "+15551234567"
 

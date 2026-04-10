@@ -21,9 +21,9 @@ export interface MessageEnvelope {
   channel: string;
   /** "general" | "reminders" | "code" | "personal" | ... */
   topic: string;
-  /** "contact:chris" | "agent:peggy" */
+  /** "contact:alice" | "agent:claude" */
   sender: string;
-  /** "agent:peggy" | "contact:chris" */
+  /** "agent:claude" | "contact:alice" */
   recipient: string;
   /** id of message being replied to, or null */
   reply_to: string | null;

@@ -113,7 +113,7 @@ describe('inbound pipeline — integration', () => {
     expect(body.id).toBeTruthy();
   });
 
-  it('resolves telegram sender to contact:chris', async () => {
+  it('resolves telegram sender to contact:alice', async () => {
     await server.inject({
       method: 'POST',
       url: '/api/v1/inbound',
@@ -124,9 +124,9 @@ describe('inbound pipeline — integration', () => {
       },
     });
 
-    const msgs = queue.dequeue('agent:peggy', undefined, 10);
+    const msgs = queue.dequeue('agent:claude', undefined, 10);
     expect(msgs).toHaveLength(1);
-    expect(msgs[0]!.envelope.sender).toBe('contact:chris');
+    expect(msgs[0]!.envelope.sender).toBe('contact:alice');
   });
 
   it('creates a transcript row in the database', async () => {
@@ -200,7 +200,7 @@ describe('inbound pipeline — integration', () => {
       },
     });
 
-    const msgs = queue.dequeue('agent:peggy', undefined, 10);
+    const msgs = queue.dequeue('agent:claude', undefined, 10);
     expect(msgs).toHaveLength(1);
     expect(msgs[0]!.envelope.payload.type).toBe('slash_command');
   });
@@ -216,7 +216,7 @@ describe('inbound pipeline — integration', () => {
       },
     });
 
-    const msgs = queue.dequeue('agent:peggy', undefined, 10);
+    const msgs = queue.dequeue('agent:claude', undefined, 10);
     expect(msgs[0]!.envelope.topic).toBe('code');
   });
 
@@ -228,7 +228,7 @@ describe('inbound pipeline — integration', () => {
         routes: [
           {
             match: { channel: 'telegram' },
-            target: { adapterId: 'claude-code', recipientId: 'agent:peggy' },
+            target: { adapterId: 'claude-code', recipientId: 'agent:claude' },
             also_notify: [{ adapterId: 'log-adapter', recipientId: 'log:sink' }],
           },
         ],
@@ -247,7 +247,7 @@ describe('inbound pipeline — integration', () => {
     });
 
     // Dequeue from both recipients
-    const msgs1 = q2.dequeue('agent:peggy', undefined, 10);
+    const msgs1 = q2.dequeue('agent:claude', undefined, 10);
     const msgs2 = q2.dequeue('log:sink', undefined, 10);
     expect(msgs1).toHaveLength(1);
     expect(msgs2).toHaveLength(1);
@@ -264,8 +264,8 @@ describe('inbound pipeline — integration', () => {
       url: '/api/v1/messages',
       payload: {
         channel: 'telegram',
-        sender: 'contact:chris',
-        recipient: 'agent:peggy',
+        sender: 'contact:alice',
+        recipient: 'agent:claude',
         payload: { type: 'text', body: 'direct enqueue' },
       },
     });

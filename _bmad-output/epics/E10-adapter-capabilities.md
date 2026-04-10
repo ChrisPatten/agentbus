@@ -72,7 +72,7 @@ E10 wires the capability system together end-to-end. Individual adapters declare
 
 ### S10.3 — `react_to_message` End-to-End Wiring
 
-**User story:** As Peggy, I want `react_to_message` to work end-to-end — from MCP tool call through transcript lookup to adapter reaction — so that I can send emoji reactions that actually appear in the user's messaging app.
+**User story:** As the agent, I want `react_to_message` to work end-to-end — from MCP tool call through transcript lookup to adapter reaction — so that I can send emoji reactions that actually appear in the user's messaging app.
 
 **Acceptance criteria:**
 - `react_to_message({ message_id, emoji })` flow: look up `message_id` in `transcripts` → extract `adapter_id` and `channel` → call `CapabilityChecker.can(adapterId, "canReact")` → if true, call `adapter.react(messageId, emoji)` → return `{ success: true, emoji, message_id, channel }`

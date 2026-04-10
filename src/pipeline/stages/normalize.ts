@@ -26,7 +26,7 @@ import type { PipelineStage } from '../types.js';
  *   priority     → 'normal'
  *   reply_to     → null
  *   metadata     → {}
- *   recipient    → 'agent:peggy'
+ *   recipient    → 'agent:claude'
  *
  * Also stamps metadata.raw_received_at (unix ms) for latency tracking.
  */
@@ -47,7 +47,7 @@ export const normalize: PipelineStage = async (ctx) => {
   e.priority = e.priority || 'normal';
   e.reply_to = e.reply_to ?? null;
   e.metadata = e.metadata ?? {};
-  e.recipient = e.recipient || 'agent:peggy';
+  e.recipient = e.recipient || 'agent:claude';
   e.metadata['raw_received_at'] = Date.now();
 
   return ctx;

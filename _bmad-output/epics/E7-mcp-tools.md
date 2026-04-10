@@ -12,7 +12,7 @@
 
 ## Epic Summary
 
-E7 implements all 12 MCP tools that Peggy uses to interact with the bus, her memory, and her active sessions. These tools are the primary API surface Peggy operates through — they are the verbs she uses to receive messages, send replies, recall memories, and understand context. After E7, Peggy has a complete programmatic interface to AgentBus, even if the memory and session backends are only partially implemented in later epics.
+E7 implements all 12 MCP tools that the agent uses to interact with the bus, the agent's memory, and her active sessions. These tools are the primary API surface the agent operates through — they are the verbs the agent uses to receive messages, send replies, recall memories, and understand context. After E7, the agent has a complete programmatic interface to AgentBus, even if the memory and session backends are only partially implemented in later epics.
 
 ---
 
@@ -40,10 +40,10 @@ E7 implements all 12 MCP tools that Peggy uses to interact with the bus, her mem
 
 ### S7.1 — Inbox Tools: `receive_messages`, `ack_message`, `subscribe`, `list_channels`
 
-**User story:** As Peggy, I want inbox management tools so that I can check for new messages, confirm I've processed them, subscribe to specific channels, and see what communication channels are available to me.
+**User story:** As the agent, I want inbox management tools so that I can check for new messages, confirm I've processed them, subscribe to specific channels, and see what communication channels are available to me.
 
 **Acceptance criteria:**
-- `receive_messages({ channel?: string, limit?: number })` calls `MessageQueue.dequeue("peggy", channel, limit)` and returns an array of `Envelope` objects; returns empty array (not error) when queue is empty
+- `receive_messages({ channel?: string, limit?: number })` calls `MessageQueue.dequeue("claude", channel, limit)` and returns an array of `Envelope` objects; returns empty array (not error) when queue is empty
 - `ack_message({ message_id: string })` calls `MessageQueue.ack(messageId)` and returns `{ success: true }`; returns structured error if `message_id` is unknown
 - `subscribe({ channel: string, filter?: object })` persists a subscription preference for the session and returns `{ subscribed: true, channel }`; validates channel exists in `AdapterRegistry` before accepting
 - `list_channels()` calls `AdapterRegistry.list()` and returns each adapter's `id`, `channels[]`, and `capabilities` summary
@@ -55,12 +55,12 @@ E7 implements all 12 MCP tools that Peggy uses to interact with the bus, her mem
 
 ### S7.2 — Outbound Tool: `send_message`
 
-**User story:** As Peggy, I want a `send_message` tool with full routing metadata so that I can compose and deliver messages to any contact on any channel without knowing the underlying adapter implementation.
+**User story:** As the agent, I want a `send_message` tool with full routing metadata so that I can compose and deliver messages to any contact on any channel without knowing the underlying adapter implementation.
 
 **Acceptance criteria:**
 - Input schema: `{ to: string, channel: string, body: string, reply_to?: string, priority?: "low"|"normal"|"high", metadata?: Record<string, unknown> }`
 - Validates that `channel` resolves to a registered adapter via `AdapterRegistry.lookupByChannel()`; returns error if channel is unknown
-- Constructs an `Envelope` with `sender_id: "peggy"`, `recipient_id: to`, `channel`, `body`, and optional fields, then enqueues via `MessageQueue.enqueue()`
+- Constructs an `Envelope` with `sender_id: "claude"`, `recipient_id: to`, `channel`, `body`, and optional fields, then enqueues via `MessageQueue.enqueue()`
 - Returns `{ success: true, message_id: string, queued_at: string }`
 - Supports `priority: "high"` which sets `priority = 100` in the queue row (normal = 50, low = 10)
 - If `reply_to` is provided, validates the referenced message exists in `transcripts` before accepting
@@ -71,7 +71,7 @@ E7 implements all 12 MCP tools that Peggy uses to interact with the bus, her mem
 
 ### S7.3 — Memory Tools: `recall_memory`, `log_memory`, `search_transcripts`
 
-**User story:** As Peggy, I want memory tools so that I can retrieve relevant facts about contacts and conversations, explicitly record important information, and search my conversation history by topic.
+**User story:** As the agent, I want memory tools so that I can retrieve relevant facts about contacts and conversations, explicitly record important information, and search my conversation history by topic.
 
 **Acceptance criteria:**
 - `recall_memory({ query: string, contact_id?: string, limit?: number })` runs FTS5 search on `memories_fts`, filtered optionally by `contact_id`, ordered by `confidence DESC, updated_at DESC`; returns up to `limit` (default 10) memory objects with `{ id, contact_id, content, confidence, source, updated_at }`
@@ -86,7 +86,7 @@ E7 implements all 12 MCP tools that Peggy uses to interact with the bus, her mem
 
 ### S7.4 — Session Tools: `get_briefing`, `get_session`, `list_sessions`
 
-**User story:** As Peggy, I want session tools so that I can receive a context briefing at the start of a conversation, inspect specific session details, and enumerate past sessions for review or resumption.
+**User story:** As the agent, I want session tools so that I can receive a context briefing at the start of a conversation, inspect specific session details, and enumerate past sessions for review or resumption.
 
 **Acceptance criteria:**
 - `get_briefing({ session_id?: string })` returns the most recent `session_summaries` row for the given session (or current session if omitted), including `summary_text`, `key_topics[]`, `decisions[]`, `open_questions[]`, and `participants[]`; returns `{ available: false }` if no summary exists yet
@@ -101,7 +101,7 @@ E7 implements all 12 MCP tools that Peggy uses to interact with the bus, her mem
 
 ### S7.5 — Reaction Tool: `react_to_message`
 
-**User story:** As Peggy, I want a `react_to_message` tool that sends emoji reactions to messages on supported channels so that I can acknowledge messages expressively without composing a full reply.
+**User story:** As the agent, I want a `react_to_message` tool that sends emoji reactions to messages on supported channels so that I can acknowledge messages expressively without composing a full reply.
 
 **Acceptance criteria:**
 - Input schema: `{ message_id: string, emoji: "❤️"|"👍"|"👎"|"😂"|"‼️"|"❓" }` (normalized set matching BlueBubbles tapback mapping)

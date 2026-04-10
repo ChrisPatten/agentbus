@@ -12,7 +12,7 @@
 
 ## Epic Summary
 
-E4 delivers the iMessage channel via BlueBubbles: a Fastify webhook receiver that accepts incoming message events from the BlueBubbles server running on the Mac mini, plus an HTTP client that delivers outbound messages and reactions back through BlueBubbles. After E4, Chris can message Peggy via iMessage and receive replies with heart/thumbs reactions supported. Unlike the Telegram adapter's pull model, BlueBubbles pushes events to the adapter via webhooks.
+E4 delivers the iMessage channel via BlueBubbles: a Fastify webhook receiver that accepts incoming message events from the BlueBubbles server running, plus an HTTP client that delivers outbound messages and reactions back through BlueBubbles. After E4, users can message the agent via iMessage and receive replies with heart/thumbs reactions supported. Unlike the Telegram adapter's pull model, BlueBubbles pushes events to the adapter via webhooks.
 
 ---
 
@@ -20,7 +20,7 @@ E4 delivers the iMessage channel via BlueBubbles: a Fastify webhook receiver tha
 
 - E1 complete: `AppConfig` (including `adapters.bluebubbles.*` section with `server_url`, `password`, `webhook_port`), `AdapterRegistry`, and `Envelope` type are available
 - E5 complete: `POST /api/v1/message/inbound` pipeline endpoint is live
-- BlueBubbles server is running on the Mac mini and configured to send webhooks to `http://localhost:{webhook_port}`
+- BlueBubbles server is running and configured to send webhooks to `http://localhost:{webhook_port}`
 - E11 `AdapterInstance` interface is stable (or working draft exists)
 - BlueBubbles API authentication (password) is set in `.env` (`BLUEBUBBLES_PASSWORD`)
 
@@ -41,7 +41,7 @@ E4 delivers the iMessage channel via BlueBubbles: a Fastify webhook receiver tha
 
 ### S4.1 — Webhook Receiver
 
-**User story:** As the bus, I want a Fastify webhook server that receives BlueBubbles `new-message` events and submits them to the inbound pipeline so that iMessages appear in Peggy's queue within seconds of being received on the Mac mini.
+**User story:** As the bus, I want a Fastify webhook server that receives BlueBubbles `new-message` events and submits them to the inbound pipeline so that iMessages appear in the agent's queue within seconds of being received.
 
 **Acceptance criteria:**
 - Adapter entry point: loads `AppConfig` → registers self with `AdapterRegistry` (id: `"bluebubbles"`, channels: `["imessage"]`) → starts Fastify on `AppConfig.adapters.bluebubbles.webhook_port` → starts outbound delivery loop
@@ -57,7 +57,7 @@ E4 delivers the iMessage channel via BlueBubbles: a Fastify webhook receiver tha
 
 ### S4.2 — Outbound Message Delivery
 
-**User story:** As the bus, I want to deliver outbound messages to iMessage by calling the BlueBubbles REST API so that Peggy's replies reach Chris in his iMessage conversation.
+**User story:** As the bus, I want to deliver outbound messages to iMessage by calling the BlueBubbles REST API so that the agent's replies reach Chris in his iMessage conversation.
 
 **Acceptance criteria:**
 - Outbound delivery loop polls `GET /api/v1/messages/pending/bluebubbles` on bus-core every 1s
@@ -73,7 +73,7 @@ E4 delivers the iMessage channel via BlueBubbles: a Fastify webhook receiver tha
 
 ### S4.3 — Adapter Capabilities: `markRead` and `react`
 
-**User story:** As the bus, I want the BlueBubbles adapter to support iMessage tapback reactions and read receipts so that Peggy can respond expressively to messages and Chris can see when his messages have been seen.
+**User story:** As the bus, I want the BlueBubbles adapter to support iMessage tapback reactions and read receipts so that the agent can respond expressively to messages and Chris can see when his messages have been seen.
 
 **Acceptance criteria:**
 - `markRead(messageId: string, chatGuid: string): Promise<void>` — calls `POST {server_url}/api/v1/chat/{chatGuid}/read`; logs `warn` on failure but does not throw (fire-and-forget)

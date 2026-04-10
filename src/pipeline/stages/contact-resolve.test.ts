@@ -42,7 +42,7 @@ function makeCtx(envelope: Partial<MessageEnvelope> = {}, config?: AppConfig): P
       channel: 'telegram',
       topic: 'general',
       sender: '123456789',
-      recipient: 'agent:peggy',
+      recipient: 'agent:claude',
       reply_to: null,
       priority: 'normal',
       payload: { type: 'text', body: 'hello' },
@@ -68,7 +68,7 @@ describe('contact-resolve stage', () => {
     const stage = createContactResolve(makeConfig());
     const ctx = makeCtx({ channel: 'telegram', sender: '123456789' });
     const result = await stage(ctx);
-    expect(result!.envelope.sender).toBe('contact:chris');
+    expect(result!.envelope.sender).toBe('contact:alice');
     expect(result!.contact?.id).toBe('chris');
     expect(result!.contact?.displayName).toBe('Chris');
   });
@@ -77,30 +77,30 @@ describe('contact-resolve stage', () => {
     const stage = createContactResolve(makeConfig());
     const ctx = makeCtx({ channel: 'telegram', sender: 'chrispatten' });
     const result = await stage(ctx);
-    expect(result!.envelope.sender).toBe('contact:chris');
+    expect(result!.envelope.sender).toBe('contact:alice');
   });
 
   it('resolves known bluebubbles sender by handle', async () => {
     const stage = createContactResolve(makeConfig());
     const ctx = makeCtx({ channel: 'bluebubbles', sender: '+15551234567' });
     const result = await stage(ctx);
-    expect(result!.envelope.sender).toBe('contact:chris');
+    expect(result!.envelope.sender).toBe('contact:alice');
     expect(result!.contact?.id).toBe('chris');
   });
 
   it('passes through already-canonical contact: sender', async () => {
     const stage = createContactResolve(makeConfig());
-    const ctx = makeCtx({ sender: 'contact:chris' });
+    const ctx = makeCtx({ sender: 'contact:alice' });
     const result = await stage(ctx);
-    expect(result!.envelope.sender).toBe('contact:chris');
+    expect(result!.envelope.sender).toBe('contact:alice');
     expect(result!.contact?.id).toBe('chris');
   });
 
   it('passes through agent: senders unchanged', async () => {
     const stage = createContactResolve(makeConfig());
-    const ctx = makeCtx({ sender: 'agent:peggy' });
+    const ctx = makeCtx({ sender: 'agent:claude' });
     const result = await stage(ctx);
-    expect(result!.envelope.sender).toBe('agent:peggy');
+    expect(result!.envelope.sender).toBe('agent:claude');
     expect(result!.contact).toBeNull();
   });
 

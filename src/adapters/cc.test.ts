@@ -12,11 +12,11 @@ function makeEnvelope(overrides: Partial<MessageEnvelope> = {}): MessageEnvelope
     timestamp: new Date().toISOString(),
     channel: 'telegram',
     topic: 'general',
-    sender: 'contact:chris',
-    recipient: 'agent:peggy',
+    sender: 'contact:alice',
+    recipient: 'agent:claude',
     reply_to: null,
     priority: 'normal',
-    payload: { type: 'text', body: 'Hello Peggy!' },
+    payload: { type: 'text', body: 'Hello!' },
     metadata: {},
     ...overrides,
   };
@@ -35,7 +35,7 @@ describe('processAckedMessages', () => {
     expect(buffer).toHaveLength(1);
     expect(notify).toHaveBeenCalledOnce();
     expect(notify).toHaveBeenCalledWith(
-      'New message from contact:chris via telegram [id:msg-001]:\nHello Peggy!'
+      'New message from contact:alice via telegram [id:msg-001]:\nHello!'
     );
   });
 
@@ -83,7 +83,7 @@ describe('formatMessagesForSampling', () => {
   it('formats a single message correctly', () => {
     const result = formatMessagesForSampling([makeEnvelope()]);
     expect(result).toBe(
-      'New message from contact:chris via telegram [id:msg-001]:\nHello Peggy!'
+      'New message from contact:alice via telegram [id:msg-001]:\nHello!'
     );
   });
 
@@ -99,7 +99,7 @@ describe('formatMessagesForSampling', () => {
     ];
     const result = formatMessagesForSampling(envelopes);
     expect(result).toBe(
-      'New message from contact:chris via telegram [id:msg-001]:\nFirst\n\n' +
+      'New message from contact:alice via telegram [id:msg-001]:\nFirst\n\n' +
         'New message from contact:alice via bluebubbles [id:msg-002]:\nSecond'
     );
   });

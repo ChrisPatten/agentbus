@@ -12,9 +12,9 @@
 
 ## Epic Summary
 
-E13 closes the trigger gap in the Claude Code adapter. In the current implementation (E2), the cc adapter polls the bus and buffers inbound messages, but has no mechanism to wake Claude Code when a message arrives — Claude Code only processes buffered messages if she's already mid-turn or if a human types something. Without the `--channels` flag (which is being replaced by AgentBus), Peggy sits idle even as messages accumulate.
+E13 closes the trigger gap in the Claude Code adapter. In the current implementation (E2), the cc adapter polls the bus and buffers inbound messages, but has no mechanism to wake Claude Code when a message arrives — Claude Code only processes buffered messages if it is already mid-turn or if a human types something. Without the `--channels` flag (which is being replaced by AgentBus), the agent sits idle even as messages accumulate.
 
-This epic implements `sampling/createMessage` — the MCP-native mechanism for an MCP server to ask the connected Claude Code client to generate a response. When the polling loop finds new messages, it fires `createMessage` with the message content as the conversation context. Claude Code wakes up, reads the message, and calls `reply` to respond. This makes Peggy fully autonomous: she responds to Telegram (and other channel) messages without any human prompt.
+This epic implements `sampling/createMessage` — the MCP-native mechanism for an MCP server to ask the connected Claude Code client to generate a response. When the polling loop finds new messages, it fires `createMessage` with the message content as the conversation context. Claude Code wakes up, reads the message, and calls `reply` to respond. This makes the agent fully autonomous: it responds to Telegram (and other channel) messages without any human prompt.
 
 ---
 
@@ -22,17 +22,17 @@ This epic implements `sampling/createMessage` — the MCP-native mechanism for a
 
 - E2 complete: cc adapter is running, `reply` tool is registered, polling loop is operational
 - E3 complete: Telegram adapter delivers inbound messages to the bus
-- E5 complete: inbound pipeline routes messages to `agent:peggy`
+- E5 complete: inbound pipeline routes messages to `agent:claude`
 - Claude Code version in use supports `sampling/createMessage` client capability (verify at runtime)
 
 ---
 
 ## Exit Criteria
 
-- Sending a Telegram message to the bot causes Peggy to wake up and generate a reply within a few seconds, with no human interaction required
+- Sending a Telegram message to the bot causes the agent to wake up and generate a reply within a few seconds, with no human interaction required
 - If Claude Code does not declare the `sampling` capability, the adapter logs a clear error and falls back to the buffering approach (no crash)
-- Concurrent messages are serialized — if a second message arrives while Peggy is responding to the first, it is queued and delivered after the current turn completes
-- The `createMessage` call includes sufficient context for Peggy to respond correctly: sender, channel, message body, and message ID for use with `reply`
+- Concurrent messages are serialized — if a second message arrives while the agent is responding to the first, it is queued and delivered after the current turn completes
+- The `createMessage` call includes sufficient context for the agent to respond correctly: sender, channel, message body, and message ID for use with `reply`
 - All errors from `createMessage` (timeout, client rejection, tool call failures) are caught and logged; failed messages are not lost — they remain in `messageBuffer` for manual recovery via `get_pending_messages`
 
 ---
@@ -56,7 +56,7 @@ This epic implements `sampling/createMessage` — the MCP-native mechanism for a
 
 ### S13.2 — `createMessage` Trigger on Inbound Messages
 
-**User story:** As Peggy, I want the cc adapter to call `sampling/createMessage` when new messages arrive so that I am woken up and given the message context without requiring a human to type anything.
+**User story:** As the agent, I want the cc adapter to call `sampling/createMessage` when new messages arrive so that I am woken up and given the message context without requiring a human to type anything.
 
 **Acceptance criteria:**
 - When the polling loop dequeues ≥1 new messages and `samplingAvailable` is true, adapter calls `mcpServer.createMessage()` with the messages formatted as a user turn
@@ -77,7 +77,7 @@ This epic implements `sampling/createMessage` — the MCP-native mechanism for a
 
 ### S13.3 — Message Queue Serialization
 
-**User story:** As Peggy, I want inbound messages to be delivered to me one batch at a time so that I am not overwhelmed by overlapping `createMessage` calls if messages arrive faster than I can respond.
+**User story:** As the agent, I want inbound messages to be delivered to me one batch at a time so that I am not overwhelmed by overlapping `createMessage` calls if messages arrive faster than I can respond.
 
 **Acceptance criteria:**
 - A simple async queue (FIFO) serializes `createMessage` calls — only one is in-flight at a time
@@ -93,8 +93,8 @@ This epic implements `sampling/createMessage` — the MCP-native mechanism for a
 
 ## Notes
 
-- **Why not await `createMessage` in the polling loop?** Awaiting would block the loop for the full duration of Peggy's response (potentially 10–30s), causing inbound messages to pile up unacked. Fire-and-forget with a serialization queue is the right pattern.
-- **`createMessage` vs. `sendLoggingMessage`:** `sendLoggingMessage` only reaches Claude if she's already mid-turn. `createMessage` initiates a new turn. E2 used `sendLoggingMessage` as a stopgap; this epic replaces it with the proper mechanism.
+- **Why not await `createMessage` in the polling loop?** Awaiting would block the loop for the full duration of the agent's response (potentially 10–30s), causing inbound messages to pile up unacked. Fire-and-forget with a serialization queue is the right pattern.
+- **`createMessage` vs. `sendLoggingMessage`:** `sendLoggingMessage` only reaches Claude if it is already mid-turn. `createMessage` initiates a new turn. E2 used `sendLoggingMessage` as a stopgap; this epic replaces it with the proper mechanism.
 - **Tool call handling in `createMessage` response:** The response from `createMessage` may contain tool calls (e.g., `reply`). Claude Code handles tool call execution as part of its normal MCP loop — the cc adapter does not need to intercept or re-execute them. The `createMessage` response is informational and can be discarded.
-- **Peggy's CLAUDE.md:** Update Peggy's instructions to describe how AgentBus messages arrive (via `createMessage`) and remind her to use the `reply` tool with the message ID from the delivered context. This is a docs change, not a code change, but it is a required part of this epic's exit criteria.
-- **Fallback path:** The `get_pending_messages` tool remains registered and usable. If sampling is unavailable (older Claude Code version), a human can trigger Peggy manually or a `/loop` skill can be configured as a stopgap.
+- **the agent's CLAUDE.md:** Update the agent's instructions to describe how AgentBus messages arrive (via `createMessage`) and remind the agent to use the `reply` tool with the message ID from the delivered context. This is a docs change, not a code change, but it is a required part of this epic's exit criteria.
+- **Fallback path:** The `get_pending_messages` tool remains registered and usable. If sampling is unavailable (older Claude Code version), a human can trigger the agent manually or a `/loop` skill can be configured as a stopgap.

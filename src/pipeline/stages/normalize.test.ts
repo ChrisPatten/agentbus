@@ -30,7 +30,7 @@ function makeCtx(envelope: Partial<MessageEnvelope> = {}): PipelineContext {
       timestamp: '',
       channel: 'telegram',
       topic: '',
-      sender: 'contact:chris',
+      sender: 'contact:alice',
       recipient: '',
       reply_to: null,
       priority: 'normal',
@@ -86,10 +86,10 @@ describe('normalize stage', () => {
     expect(result!.envelope.topic).toBe('code');
   });
 
-  it('defaults recipient to agent:peggy when empty', async () => {
+  it('defaults recipient to agent:claude when empty', async () => {
     const ctx = makeCtx({ recipient: '' });
     const result = await normalize(ctx);
-    expect(result!.envelope.recipient).toBe('agent:peggy');
+    expect(result!.envelope.recipient).toBe('agent:claude');
   });
 
   it('sets raw_received_at in metadata', async () => {

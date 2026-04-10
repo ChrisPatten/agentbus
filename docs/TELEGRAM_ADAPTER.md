@@ -44,9 +44,9 @@ adapters:
 
 ```yaml
 contacts:
-  chris:
-    id: chris
-    displayName: Chris
+  alice:
+    id: alice
+    displayName: Alice
     platforms:
       telegram:
         userId: 123456789
@@ -69,7 +69,7 @@ There is no separate `allowed_sender_ids` config — the contacts map is the sou
      - `sender: "{from.id}"` (raw Telegram user ID)
      - `metadata.telegram_chat_id` and `metadata.telegram_message_id`
 3. The inbound pipeline's contact-resolve stage maps the raw user ID to `contact:{id}`
-4. Route-resolve routes the message to the CC adapter / Peggy
+4. Route-resolve routes the message to the CC adapter
 
 **Offset management:** The Telegram update offset is only advanced after a successful POST to the bus. If the POST fails, the offset stays at the failed update, causing Telegram to redeliver on the next poll.
 
@@ -82,7 +82,7 @@ There is no separate `allowed_sender_ids` config — the contacts map is the sou
 ## Outbound Flow
 
 1. At startup, the adapter derives the list of Telegram-reachable recipients from `config.contacts`
-2. Every 2 seconds, for each recipient (e.g. `contact:chris`), it polls `GET /api/v1/messages/pending?recipient=contact:{id}&limit=10`
+2. Every 2 seconds, for each recipient (e.g. `contact:alice`), it polls `GET /api/v1/messages/pending?recipient=contact:{id}&limit=10`
 3. For each pending message:
    - Sends a typing indicator (`sendChatAction`) as fire-and-forget (failures are logged as warnings, not silently swallowed)
    - Splits the body into chunks ≤4096 chars (Telegram's hard limit), splitting on newlines where possible
@@ -136,10 +136,10 @@ If `config.bus.auth_token` is set, the adapter injects it as an `X-Bus-Token` he
 - Confirm bus-core is running: `curl http://localhost:3000/api/v1/health`
 
 **Replies not being delivered:**
-- Check that `pipeline.routes` in `config.yaml` routes inbound messages to `{ adapterId: "claude-code", recipientId: "agent:peggy" }`
+- Check that `pipeline.routes` in `config.yaml` routes inbound messages to `{ adapterId: "claude-code", recipientId: "agent:claude" }`
 - Check `pm2 logs telegram-adapter` for delivery errors
 - Inspect the dead-letter queue via `GET /api/v1/dead-letter`
 
 **Markdown rendering issues:**
 - The adapter retries failed sends without `parse_mode` when Telegram returns HTTP 400
-- If replies contain unescaped special characters frequently, consider updating Peggy's system prompt to avoid them
+- If replies contain unescaped special characters frequently, consider updating the agent's system prompt to avoid them

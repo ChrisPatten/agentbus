@@ -1,11 +1,11 @@
 # Claude Code Adapter
 
-The `cc` adapter (`src/adapters/cc.ts`) is an MCP server that runs as a subprocess of Claude Code. It bridges the AgentBus message pipeline to Claude Code (Peggy) using the MCP protocol over stdio.
+The `cc` adapter (`src/adapters/cc.ts`) is an MCP server that runs as a subprocess of Claude Code. It bridges the AgentBus message pipeline to a Claude Code agent using the MCP protocol over stdio.
 
 ## How It Works
 
 1. Claude Code launches the adapter as an MCP server (configured in `.mcp.json`).
-2. The adapter polls the bus HTTP API for messages addressed to `agent:peggy`.
+2. The adapter polls the bus HTTP API for messages addressed to the configured agent ID (e.g. `agent:claude`).
 3. When messages arrive, the adapter wakes Claude Code using `sampling/createMessage`, delivering the message content as a new user turn.
 4. Claude Code processes the message and calls the `reply` MCP tool to send a response back through the bus.
 
@@ -19,8 +19,8 @@ The server declares `experimental: { 'claude/channel': {} }` in its capabilities
 
 ```
 <channel source="agentbus-claude-code" ts="2026-04-10T12:00:00.000Z">
-New message from contact:chris via telegram [id:msg-abc123]:
-Hey Peggy!
+New message from contact:alice via telegram [id:msg-abc123]:
+Hey, how are you?
 </channel>
 ```
 
@@ -59,7 +59,7 @@ If `createMessage` fails (client rejection, timeout, network error), the error i
 
 ## Configuring Your Agent
 
-This section describes what the agent (e.g., Claude Code running as Peggy) needs to know to participate in the AgentBus message loop.
+This section describes what the agent (e.g., a Claude Code instance) needs to know to participate in the AgentBus message loop.
 
 ### How Messages Arrive
 
@@ -67,18 +67,18 @@ When a message is delivered to the agent, the adapter emits a `notifications/cla
 
 ```
 <channel source="agentbus" ts="2026-04-10T12:00:00.000Z">
-New message from contact:chris via telegram [id:msg-abc123]:
-Hey Peggy, what's the weather like?
+New message from contact:alice via telegram [id:msg-abc123]:
+What's the weather like?
 </channel>
 ```
 
 For a batch of messages arriving in the same poll cycle, each message is separated by a blank line inside the `<channel>` wrapper:
 
 ```
-New message from contact:chris via telegram [id:msg-001]:
+New message from contact:alice via telegram [id:msg-001]:
 First message here.
 
-New message from contact:alice via bluebubbles [id:msg-002]:
+New message from contact:bob via bluebubbles [id:msg-002]:
 Second message here.
 ```
 

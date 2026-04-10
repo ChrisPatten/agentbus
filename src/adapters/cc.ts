@@ -1,5 +1,5 @@
 /**
- * Claude Code adapter — MCP server for Peggy.
+ * Claude Code adapter — MCP server for a Claude Code agent.
  *
  * Run as a separate process spawned by Claude Code over stdio:
  *   AGENTBUS_CONFIG=/path/to/config.yaml npx tsx src/adapters/cc.ts
@@ -17,7 +17,7 @@ import { createMcpServer } from '../mcp/server.js';
 import { registerTools, type HealthState } from '../mcp/tools.js';
 import type { MessageEnvelope } from '../types/envelope.js';
 
-const AGENT_ID = process.env['AGENTBUS_AGENT_ID'] ?? 'peggy';
+const AGENT_ID = process.env['AGENTBUS_AGENT_ID'] ?? 'claude';
 const DEGRADED_THRESHOLD = 3;
 const DISCONNECTED_THRESHOLD = 10;
 const BACKOFF_INTERVAL_MS = 5000;

@@ -12,7 +12,7 @@
 
 ## Epic Summary
 
-E8 delivers the memory backbone: durable transcript logging, session lifecycle tracking, LLM-powered summarization, and the memory storage layer. After E8, every message is durably stored in a searchable transcript, sessions are automatically detected and closed, and Peggy's memories about contacts and topics are extracted from conversations and persisted for future recall. This is the system that gives Peggy continuity across sessions.
+E8 delivers the memory backbone: durable transcript logging, session lifecycle tracking, LLM-powered summarization, and the memory storage layer. After E8, every message is durably stored in a searchable transcript, sessions are automatically detected and closed, and the agent's memories about contacts and topics are extracted from conversations and persisted for future recall. This is the system that gives the agent continuity across sessions.
 
 ---
 
@@ -72,7 +72,7 @@ E8 delivers the memory backbone: durable transcript logging, session lifecycle t
 
 ### S8.3 — Summarizer Pipeline
 
-**User story:** As bus-core, I want a `Summarizer` that calls the Claude API with a session's full transcript and extracts structured memories so that Peggy has rich, queryable context about past conversations without reading every transcript message.
+**User story:** As bus-core, I want a `Summarizer` that calls the Claude API with a session's full transcript and extracts structured memories so that the agent has rich, queryable context about past conversations without reading every transcript message.
 
 **Acceptance criteria:**
 - `Summarizer.summarize(sessionId: string): Promise<void>` fetches all `transcripts` rows for the session ordered by `received_at ASC`
@@ -88,7 +88,7 @@ E8 delivers the memory backbone: durable transcript logging, session lifecycle t
 
 ### S8.4 — Memory Lifecycle
 
-**User story:** As Peggy, I want memories to have confidence scores, expiry dates, and supersession tracking so that outdated or explicitly forgotten information doesn't pollute future recall results.
+**User story:** As the agent, I want memories to have confidence scores, expiry dates, and supersession tracking so that outdated or explicitly forgotten information doesn't pollute future recall results.
 
 **Acceptance criteria:**
 - `memories` table rows include: `confidence REAL` (0.0–1.0), `expires_at TEXT` (nullable ISO timestamp), `superseded_by TEXT` (nullable — either a newer `memory_id` or a special string like `"manual_forget"`)

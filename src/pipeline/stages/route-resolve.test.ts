@@ -41,8 +41,8 @@ function makeCtx(envelope: Partial<MessageEnvelope> = {}, config?: AppConfig, db
       timestamp: new Date().toISOString(),
       channel: 'telegram',
       topic: 'general',
-      sender: 'contact:chris',
-      recipient: 'agent:peggy',
+      sender: 'contact:alice',
+      recipient: 'agent:claude',
       reply_to: null,
       priority: 'normal',
       payload: { type: 'text', body: 'hello' },
@@ -77,8 +77,8 @@ describe('route-resolve stage', () => {
     const db = makeDb();
     const config = makeConfig();
     const stage = createRouteResolve(config, db);
-    const ctx1 = makeCtx({ sender: 'contact:chris', channel: 'telegram', topic: 'general' }, config, db);
-    const ctx2 = makeCtx({ sender: 'contact:chris', channel: 'telegram', topic: 'general' }, config, db);
+    const ctx1 = makeCtx({ sender: 'contact:alice', channel: 'telegram', topic: 'general' }, config, db);
+    const ctx2 = makeCtx({ sender: 'contact:alice', channel: 'telegram', topic: 'general' }, config, db);
     const r1 = await stage(ctx1);
     const r2 = await stage(ctx2);
     expect(r1!.conversationId).toBe(r2!.conversationId);
@@ -88,11 +88,11 @@ describe('route-resolve stage', () => {
     const db = makeDb();
     const config = makeConfig();
     const stage = createRouteResolve(config, db);
-    const ctx = makeCtx({ recipient: 'agent:peggy' }, config, db);
+    const ctx = makeCtx({ recipient: 'agent:claude' }, config, db);
     const result = await stage(ctx);
     expect(result!.routes).toHaveLength(1);
     expect(result!.routes[0]!.adapterId).toBe('claude-code');
-    expect(result!.routes[0]!.recipientId).toBe('agent:peggy');
+    expect(result!.routes[0]!.recipientId).toBe('agent:claude');
   });
 
   it('matches route rule by channel', async () => {
@@ -111,12 +111,12 @@ describe('route-resolve stage', () => {
   it('matches route rule by sender', async () => {
     const config = makeConfig({
       routes: [
-        { match: { sender: 'contact:chris' }, target: { adapterId: 'special', recipientId: 'bot:x' } },
+        { match: { sender: 'contact:alice' }, target: { adapterId: 'special', recipientId: 'bot:x' } },
       ],
     });
     const db = makeDb();
     const stage = createRouteResolve(config, db);
-    const ctx = makeCtx({ sender: 'contact:chris' }, config, db);
+    const ctx = makeCtx({ sender: 'contact:alice' }, config, db);
     const result = await stage(ctx);
     expect(result!.routes[0]!.adapterId).toBe('special');
   });

@@ -12,7 +12,7 @@
 
 ## Epic Summary
 
-E12 makes AgentBus production-ready on the Mac mini: a health API that surfaces system state, a pm2 ecosystem file that manages all four daemon processes with correct restart policies, and a dead-letter management system for inspecting and recovering from message delivery failures. After E12, AgentBus can be started with a single `pm2 start ecosystem.config.js` command, monitored with `pm2 status`, and operated day-to-day without SSH debugging.
+E12 makes AgentBus production-ready: a health API that surfaces system state, a pm2 ecosystem file that manages all four daemon processes with correct restart policies, and a dead-letter management system for inspecting and recovering from message delivery failures. After E12, AgentBus can be started with a single `pm2 start ecosystem.config.js` command, monitored with `pm2 status`, and operated day-to-day without SSH debugging.
 
 ---
 
@@ -20,7 +20,7 @@ E12 makes AgentBus production-ready on the Mac mini: a health API that surfaces 
 
 - All adapter epics complete (E2, E3, E4) — processes are defined and start correctly in isolation
 - E1 complete: `MessageQueue` has `dead_letter` table; E6's `/status` command is ready to consume health API
-- pm2 is installed globally on the Mac mini (`npm install -g pm2`)
+- pm2 is installed globally (`npm install -g pm2`)
 - Log directory exists or is created by pm2 config (e.g., `~/.agentbus/logs/`)
 - `AppConfig` includes `http.port` for bus-core's API server
 
@@ -34,7 +34,7 @@ E12 makes AgentBus production-ready on the Mac mini: a health API that surfaces 
 - `pm2 status` shows all 4 processes as `online`; `pm2 logs` shows output from all processes
 - If bus-core crashes and restarts, all adapters reconnect automatically without manual intervention
 - Dead-lettered messages are listed by `/dead-letter` command and auto-expired after 24 hours
-- `pm2 save` + `pm2 startup` ensures all processes restart after Mac mini reboot
+- `pm2 save` + `pm2 startup` ensures all processes restart after the host machine reboot
 
 ---
 
@@ -42,7 +42,7 @@ E12 makes AgentBus production-ready on the Mac mini: a health API that surfaces 
 
 ### S12.1 — Health API
 
-**User story:** As a system operator, I want a `/api/v1/health` endpoint that returns the current status of all bus components so that I can monitor AgentBus health from the command line or a dashboard without SSH-ing into the Mac mini.
+**User story:** As a system operator, I want a `/api/v1/health` endpoint that returns the current status of all bus components so that I can monitor AgentBus health from the command line or a dashboard without SSH-ing into the the host machine.
 
 **Acceptance criteria:**
 - `GET /api/v1/health` returns HTTP 200 with JSON body: `{ status: "healthy"|"degraded"|"unhealthy", uptime_seconds: number, started_at: string, adapters: [{ id, status: "online"|"degraded"|"offline", last_seen_at: string, capabilities: AdapterCapabilities }], queue: { pending: number, processing: number, dead_letter: number }, memory: { last_summarizer_run: string|null, sessions_pending_summary: number }, version: string }`
@@ -66,7 +66,7 @@ E12 makes AgentBus production-ready on the Mac mini: a health API that surfaces 
 - `claude-code-adapter` is set to `exec_mode: "fork"` and `autorestart: false` (it is spawned by Claude Code on demand, not kept alive by pm2); or alternatively, it is excluded from the ecosystem file with a note
 - Log paths use `~/.agentbus/logs/{name}-out.log` and `~/.agentbus/logs/{name}-error.log`; a `scripts/setup.sh` creates these directories if absent
 - `README.md` updated with: `pm2 start ecosystem.config.js`, `pm2 save`, `pm2 startup` instructions
-- Integration check: run `pm2 start ecosystem.config.js --env production` on the Mac mini → verify all processes start and `pm2 status` shows `online`
+- Integration check: run `pm2 start ecosystem.config.js --env production` → verify all processes start and `pm2 status` shows `online`
 
 **Complexity:** S
 
