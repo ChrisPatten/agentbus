@@ -1,13 +1,13 @@
 # AgentBus Deployment Guide
 
-Deploying AgentBus. The system runs as four pm2-managed processes. Most operational tasks can be done without SSH using pm2's monitoring tools.
+Deploying AgentBus. The system runs as two pm2-managed processes (`bus-core` and `telegram-adapter`). Most operational tasks can be done via `make` targets or pm2 directly.
 
 ---
 
 ## Prerequisites
 
 - Node.js 20+ and npm installed
-- pm2 installed globally: `npm install -g pm2`
+- pm2 (installed as a dev dependency — no global install needed)
 - A Telegram bot token (from @BotFather)
 - BlueBubbles server running and accessible on the local network
 - `config.yaml` and `.env` populated (see below)
@@ -92,48 +92,42 @@ npx tsx src/index.ts
 ### 5. Start with pm2
 
 ```bash
-pm2 start ecosystem.config.js
-pm2 save       # persist process list across reboots
-pm2 startup    # generates and prints a command — run that command as root
+make start     # starts both processes and saves the process list
 ```
 
-After `pm2 startup`, run the printed command (e.g., `sudo env PATH=... pm2 startup`) to register pm2 with launchd so processes restart after a reboot.
+To survive reboots, run pm2's startup hook once:
+
+```bash
+./node_modules/.bin/pm2 startup
+# run the printed command (e.g. sudo env PATH=... pm2 startup systemd)
+```
+
+After that, processes auto-restart after a reboot with no manual intervention.
 
 ---
 
 ## Daily Operations
 
-### Check process status
+Makefile targets cover the common cases:
+
+| Command | What it does |
+|---------|-------------|
+| `make start` | Start (or restart) all processes, save process list |
+| `make stop` | Stop and remove all processes from pm2 |
+| `make restart` | Restart all processes (use after config changes) |
+| `make status` | Overview of all process states |
+| `make logs` | Tail all process logs |
+
+For lower-level pm2 operations, use `./node_modules/.bin/pm2` directly:
 
 ```bash
-pm2 status          # overview of all processes
-pm2 show bus-core   # detailed info for one process
-```
-
-### View logs
-
-```bash
-pm2 logs            # tail all processes
-pm2 logs bus-core   # tail one process
-pm2 logs --lines 200 bus-core   # last 200 lines
+./node_modules/.bin/pm2 show bus-core          # detailed info for one process
+./node_modules/.bin/pm2 logs bus-core          # tail one process
+./node_modules/.bin/pm2 logs --lines 200 bus-core
+./node_modules/.bin/pm2 restart bus-core       # restart one process
 ```
 
 Log files: `~/.agentbus/logs/{name}-out.log` and `~/.agentbus/logs/{name}-error.log`
-
-### Restart a process
-
-```bash
-pm2 restart bus-core
-pm2 restart telegram-adapter
-pm2 restart all
-```
-
-### Stop and start
-
-```bash
-pm2 stop bus-core
-pm2 start bus-core
-```
 
 ---
 
@@ -150,7 +144,7 @@ If adapters keep crashing, check `pm2 logs telegram-adapter` — the most common
 After editing `config.yaml` or `.env`:
 
 ```bash
-pm2 restart all
+make restart
 ```
 
 Changes take effect on the next restart. No reload mechanism exists yet.
@@ -162,9 +156,9 @@ Changes take effect on the next restart. No reload mechanism exists yet.
 If the FTS search index becomes out of sync (e.g., after restoring from backup):
 
 ```bash
-pm2 stop bus-core
+./node_modules/.bin/pm2 stop bus-core
 AGENTBUS_CONFIG=/path/to/config.yaml npx tsx src/index.ts --rebuild-fts
-pm2 start bus-core
+./node_modules/.bin/pm2 start bus-core
 ```
 
 The `--rebuild-fts` flag rebuilds all FTS5 indices from source tables and then exits. The process should not stay running — let pm2 start it normally afterward.
@@ -177,7 +171,7 @@ The `--rebuild-fts` flag rebuilds all FTS5 indices from source tables and then e
 
 1. Get new token from @BotFather
 2. Update `.env`: `TELEGRAM_BOT_TOKEN=new-token`
-3. `pm2 restart telegram-adapter`
+3. `./node_modules/.bin/pm2 restart telegram-adapter`
 
 The adapter reads the token at startup; no db changes needed.
 
@@ -185,7 +179,7 @@ The adapter reads the token at startup; no db changes needed.
 
 1. Rotate at console.anthropic.com
 2. Update `.env`: `CLAUDE_API_KEY=new-key`
-3. `pm2 restart bus-core` (the summarizer uses it)
+3. `./node_modules/.bin/pm2 restart bus-core` (the summarizer uses it)
 
 ---
 
@@ -212,14 +206,13 @@ curl -X POST http://localhost:3000/api/v1/dead-letter/<id>/retry
 After a hard reboot (power loss, OS update):
 
 1. pm2 auto-restarts all processes if `pm2 startup` was run during setup
-2. Verify with `pm2 status` — all processes should be `online` within ~30s
-3. If any process is `errored`, check `pm2 logs <name>` for the cause
+2. Verify with `make status` — all processes should be `online` within ~30s
+3. If any process is `errored`, check `./node_modules/.bin/pm2 logs <name>` for the cause
 
 If pm2 startup was never set up, processes won't auto-start. Fix:
 ```bash
-pm2 start ecosystem.config.js
-pm2 save
-pm2 startup   # run the printed command as root
+make start
+./node_modules/.bin/pm2 startup   # run the printed command as root
 ```
 
 ---
@@ -230,9 +223,9 @@ pm2 startup   # run the printed command as root
 
 **Symptom:** `/status` reports many dead-lettered messages, or delivery is silently failing.
 
-1. `pm2 logs` — look for repeated errors in the relevant adapter
+1. `make logs` — look for repeated errors in the relevant adapter
 2. Check adapter health: `curl http://localhost:3000/api/v1/health`
-3. If Telegram is rate-limiting, wait and retry: `pm2 restart telegram-adapter`
+3. If Telegram is rate-limiting, wait and retry: `./node_modules/.bin/pm2 restart telegram-adapter`
 4. Inspect dead letters: `/dead-letter` from any channel
 5. Retry recoverable messages: `/dead-letter retry <id>`
 6. Messages that fail 3 retries require manual investigation
@@ -241,7 +234,7 @@ pm2 startup   # run the printed command as root
 
 **Symptom:** `memory.last_summarizer_run` is stale in the health response, or context injection at session start returns no summaries.
 
-1. `pm2 logs bus-core` — look for errors in the summarizer loop
+1. `./node_modules/.bin/pm2 logs bus-core` — look for errors in the summarizer loop
 2. Most common cause: invalid or expired Claude API key
 3. Verify: `curl https://api.anthropic.com/v1/models -H "x-api-key: $CLAUDE_API_KEY"`
 4. Rotate the key if needed (see above), then `pm2 restart bus-core`
@@ -250,7 +243,7 @@ pm2 startup   # run the printed command as root
 
 **Symptom:** `pm2 status` shows bus-core `errored` and it keeps restarting.
 
-1. `pm2 logs bus-core --lines 50` — most likely a config validation error
+1. `./node_modules/.bin/pm2 logs bus-core --lines 50` — most likely a config validation error
 2. Common causes:
    - `config.yaml` references an env var not set in `.env`
    - `db_path` directory doesn't exist
