@@ -1,0 +1,21 @@
+# Build output
+dist/
+*.js.map
+
+# Dependencies
+node_modules/
+
+# Planning artifacts (not implementation)
+_bmad-output/
+
+# Compiled native binaries
+**/*.node
+
+# Runtime / environment
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.DS_Store
+.vscode/
