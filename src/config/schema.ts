@@ -141,7 +141,7 @@ const PipelineConfigSchema = z.object({
   dedup_window_ms: z.number().int().positive().default(30000),
   drop_unrouted: z.boolean().default(false),
   topic_rules: z.array(TopicRuleSchema).default([]),
-  priority_weights: PriorityWeightsSchema.default({}),
+  priority_weights: PriorityWeightsSchema.default({ base_score: 0, topic_bonus: 40, vip_sender_bonus: 20, urgency_keyword_bonus: 15 }),
   urgency_keywords: z.array(z.string()).default(['urgent', 'asap', 'emergency', 'critical']),
   vip_contacts: z.array(z.string()).default([]),
   routes: z.array(RouteRuleSchema).default([]),
@@ -171,7 +171,15 @@ export const AppConfigSchema = z.object({
   }),
   topics: z.array(z.string()).default(['general']),
   memory: MemoryConfigSchema,
-  pipeline: PipelineConfigSchema.default({}),
+  pipeline: PipelineConfigSchema.default({
+    dedup_window_ms: 30000,
+    drop_unrouted: false,
+    topic_rules: [],
+    priority_weights: { base_score: 0, topic_bonus: 40, vip_sender_bonus: 20, urgency_keyword_bonus: 15 },
+    urgency_keywords: ['urgent', 'asap', 'emergency', 'critical'],
+    vip_contacts: [],
+    routes: [],
+  }),
 });
 
 /** Fully-typed application configuration */

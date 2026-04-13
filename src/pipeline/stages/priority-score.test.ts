@@ -111,7 +111,7 @@ describe('priority-score stage', () => {
   it('applies VIP sender bonus', async () => {
     const config = makeConfig({ vip_contacts: ['chris'] });
     const stage = createPriorityScore(config);
-    const ctx = makeCtx({ sender: 'contact:alice' }, config);
+    const ctx = makeCtx({ sender: 'contact:chris' }, config);
     const result = await stage(ctx);
     expect(result!.priorityScore).toBe(20); // vip_sender_bonus
   });
@@ -128,7 +128,7 @@ describe('priority-score stage', () => {
     const stage = createPriorityScore(config);
     // VIP (20) + urgent keyword (15) + non-general topic (40) = 75
     const ctx = makeCtx({
-      sender: 'contact:alice',
+      sender: 'contact:chris',
       topic: 'code',
       payload: { type: 'text', body: 'urgent fix needed' },
     }, config);

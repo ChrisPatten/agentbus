@@ -5,7 +5,7 @@ bmad_status:
   planning: complete
   architecture: complete
   implementation: in-progress
-current_epic: E4
+current_epic: E10
 epics:
   E1:
     status: complete
@@ -22,8 +22,8 @@ epics:
     stories:
       S2.1: complete  # MCP Scaffold + HTTP API (src/mcp/server.ts, src/http/api.ts)
       S2.2: complete  # Polling Loop (src/adapters/cc.ts)
-      S2.3: complete  # reply tool (src/mcp/tools.ts)
-      S2.4: complete  # get_adapter_status tool (src/mcp/tools.ts)
+      S2.3: complete  # reply tool (src/mcp/tools/index.ts — moved from tools.ts in E7)
+      S2.4: complete  # get_adapter_status tool (src/mcp/tools/index.ts — moved from tools.ts in E7)
   E3:
     status: complete
     completed: 2026-04-09
@@ -40,4 +40,42 @@ epics:
       S5.2: complete  # Stages 1–4: normalize, contact-resolve, dedup, slash-command
       S5.3: complete  # Stages 5–8: topic-classify, priority-score, route-resolve, transcript-log + config expansion
       S5.4: complete  # Fan-out + wiring (POST /api/v1/inbound, createHttpServer deps refactor, index.ts pipeline wiring)
-last_updated: 2026-04-09
+  E7:
+    status: complete
+    completed: 2026-04-12
+    notes: >
+      tools/ directory created; reply+get_adapter_status moved to index.ts;
+      get_pending_messages removed (push model); 5 new HTTP endpoints added to api.ts;
+      8 MCP tools registered; recall_memory+log_memory are stubs (pending E8/E9);
+      search_transcripts, get_session, list_sessions, react_to_message fully functional
+    stories:
+      S7.1: complete  # list_channels (GET /api/v1/adapters, src/mcp/tools/channels.ts)
+      S7.2: complete  # send_message (src/mcp/tools/messaging.ts)
+      S7.3: complete  # recall_memory+log_memory (stubs), search_transcripts (GET /api/v1/transcripts/search, src/mcp/tools/memory.ts)
+      S7.4: complete  # get_session+list_sessions (GET /api/v1/sessions, GET /api/v1/sessions/:id, src/mcp/tools/sessions.ts)
+      S7.5: complete  # react_to_message (POST /api/v1/messages/:id/react, src/mcp/tools/reactions.ts)
+  E13:
+    status: complete
+    completed: 2026-04-12
+    notes: implemented via notifications/claude/channel instead of sampling/createMessage
+    stories:
+      S13.1: complete  # Proactive delivery via channel notification (sendChannelNotification, cc.ts)
+      S13.2: complete  # Message formatting + polling loop trigger (formatMessagesForSampling, processAckedMessages)
+      S13.3: complete  # Fire-and-forget; Claude Code handles sequencing natively
+  ARCH:
+    status: complete
+    completed: 2026-04-13
+    notes: >
+      Architecture redesign: platform adapters (Telegram, BlueBubbles) now run
+      in-process with bus-core; agent connectors (Claude Code) remain separate.
+      TelegramAdapter refactored to AdapterInstance class; DeliveryWorker
+      dispatches contact-bound messages; processInbound() extracted for shared
+      pipeline access; ecosystem.config.cjs simplified to single process.
+    stories:
+      ARCH.1: complete  # Extract processInbound() from HTTP handler
+      ARCH.2: complete  # Refactor TelegramAdapter to in-process class
+      ARCH.3: complete  # Wire adapter registration in bus-core index.ts
+      ARCH.4: complete  # Implement DeliveryWorker (src/core/delivery.ts)
+      ARCH.5: complete  # Remove Telegram outbound polling + simplify pm2
+      ARCH.6: complete  # Update docs (DEPLOYMENT, TELEGRAM_ADAPTER, HTTP_API)
+last_updated: 2026-04-13

@@ -129,7 +129,7 @@ describe('dedup stage', () => {
     const db = makeDb();
     const stage = createDedup(db);
     const ctx1 = makeCtx({ sender: 'contact:alice', payload: { type: 'text', body: 'hello' } }, db);
-    const ctx2 = makeCtx({ sender: 'contact:alice', payload: { type: 'text', body: 'hello' } }, db);
+    const ctx2 = makeCtx({ sender: 'contact:bob', payload: { type: 'text', body: 'hello' } }, db);
     const r1 = await stage(ctx1);
     const r2 = await stage(ctx2);
     expect(r1!.dedupKey).not.toBe(r2!.dedupKey);

@@ -2,7 +2,7 @@
 
 Internal API served by bus-core on `localhost:${config.bus.http_port}` (default **3000**).
 
-**Not exposed to the public internet.** All adapters communicate with bus-core through this API. It is a localhost-only interface between the four AgentBus processes.
+**Not exposed to the public internet.** Agent connectors (Claude Code) communicate with bus-core through this API. Platform adapters (Telegram, BlueBubbles) run in-process with bus-core and use the pipeline/queue directly, but the HTTP API remains available for external callers and testing.
 
 **Implementation status:** Defined here for E12. Routes marked _(pending)_ are designed but not yet wired.
 
@@ -198,9 +198,9 @@ Returns health status of bus-core and all registered adapters. Always returns HT
 
 ## Adapter Management
 
-### `GET /api/v1/adapters` _(pending — E12)_
+### `GET /api/v1/adapters`
 
-List all registered adapters and their capabilities.
+List all registered adapters and their capabilities. Used by the `list_channels` MCP tool.
 
 **Response (200):**
 ```json
@@ -209,19 +209,160 @@ List all registered adapters and their capabilities.
   "adapters": [
     {
       "id": "telegram",
-      "name": "Telegram",
-      "status": "active",
-      "capabilities": { "send": true, "react": true, "typing": true }
+      "name": "telegram",
+      "channels": ["telegram"],
+      "capabilities": { "send": true, "react": true, "typing": true, "channels": ["telegram"] }
     },
     {
       "id": "bluebubbles",
-      "name": "BlueBubbles",
-      "status": "active",
-      "capabilities": { "send": true, "react": true, "markRead": true }
+      "name": "bluebubbles",
+      "channels": ["bluebubbles"],
+      "capabilities": { "send": true, "react": true, "markRead": true, "channels": ["bluebubbles"] }
     }
   ]
 }
 ```
+
+---
+
+## Sessions
+
+### `GET /api/v1/sessions`
+
+List sessions with optional filters. Used by the `list_sessions` MCP tool.
+
+**Query params:**
+
+| Param | Default | Description |
+|---|---|---|
+| `channel` | — | Filter by channel name |
+| `contact_id` | — | Filter by contact ID (e.g. `contact:chris`) |
+| `since` | — | ISO 8601 timestamp — only sessions started after this time |
+| `limit` | 20 | Max sessions to return (max 100) |
+
+**Response (200):**
+```json
+{
+  "ok": true,
+  "sessions": [
+    {
+      "id": "sess-uuid",
+      "conversation_id": "conv-hash",
+      "channel": "telegram",
+      "contact_id": "contact:chris",
+      "started_at": "2026-04-12T10:00:00.000Z",
+      "last_activity": "2026-04-12T10:30:00.000Z",
+      "ended_at": null,
+      "message_count": 15,
+      "summary": {
+        "summary": "Discussed weekend plans and a shopping list.",
+        "model": "claude-opus-4-6",
+        "token_count": 420,
+        "created_at": "2026-04-12T10:45:00.000Z"
+      }
+    }
+  ],
+  "count": 1
+}
+```
+
+`summary` is `null` when no AI summary has been generated yet (session still active, or E8/E9 not yet deployed).
+
+---
+
+### `GET /api/v1/sessions/:id`
+
+Fetch a specific session by ID. Used by the `get_session` MCP tool.
+
+**Response (200):** Same shape as a single item from `GET /api/v1/sessions` but wrapped in `{ ok, session }`.
+
+**Response (404):**
+```json
+{ "ok": false, "error": "Session not found" }
+```
+
+---
+
+## Transcripts
+
+### `GET /api/v1/transcripts/search`
+
+FTS5 full-text search across conversation transcripts. Used by the `search_transcripts` MCP tool.
+
+**Query params:**
+
+| Param | Required | Default | Description |
+|---|---|---|---|
+| `q` | yes | — | Full-text search query (FTS5 MATCH syntax) |
+| `channel` | no | — | Filter by channel |
+| `since` | no | — | ISO 8601 — only messages after this time |
+| `limit` | no | 10 | Max results (max 100) |
+
+**Response (200) — results found:**
+```json
+{
+  "ok": true,
+  "results": [
+    {
+      "message_id": "msg-uuid",
+      "session_id": "sess-uuid",
+      "channel": "telegram",
+      "contact_id": "contact:chris",
+      "direction": "inbound",
+      "body": "Hey, what's on my calendar today?",
+      "created_at": "2026-04-12T10:05:00.000Z"
+    }
+  ],
+  "count": 1
+}
+```
+
+**Response (200) — FTS table not initialized (pre-E8):**
+```json
+{ "ok": true, "available": false, "reason": "Transcript search not available" }
+```
+
+**Response (400) — missing query or malformed FTS syntax:**
+```json
+{ "ok": false, "error": "FTS query error: ..." }
+```
+
+---
+
+## Reactions
+
+### `POST /api/v1/messages/:id/react`
+
+Send an emoji reaction to a message. Used by the `react_to_message` MCP tool.
+
+The `:id` is a **bus message ID** (not a platform message ID). The endpoint looks up the transcript, resolves the adapter, checks capability, and calls `adapter.react()`. The platform message ID is extracted from `transcripts.metadata.platform_message_id`; if absent, the bus message ID is used as fallback.
+
+**Request body:**
+```json
+{ "emoji": "👍" }
+```
+
+**Response (200) — success:**
+```json
+{ "ok": true, "success": true, "emoji": "👍", "message_id": "msg-uuid" }
+```
+
+**Response (400) — reactions not supported on channel:**
+```json
+{ "ok": false, "success": false, "reason": "Reactions not supported on channel: claude-code-channels" }
+```
+
+**Response (404) — message not in transcripts:**
+```json
+{ "ok": false, "error": "Message not found in transcripts: msg-uuid" }
+```
+
+**Response (502) — adapter.react() threw:**
+```json
+{ "ok": false, "success": false, "error": "Telegram API timeout" }
+```
+
+---
 
 ### `POST /api/v1/adapters/:id/pause` _(pending — E12)_
 

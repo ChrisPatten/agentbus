@@ -126,7 +126,7 @@ describe('inbound pipeline — integration', () => {
 
     const msgs = queue.dequeue('agent:claude', undefined, 10);
     expect(msgs).toHaveLength(1);
-    expect(msgs[0]!.envelope.sender).toBe('contact:alice');
+    expect(msgs[0]!.envelope.sender).toBe('contact:chris');
   });
 
   it('creates a transcript row in the database', async () => {

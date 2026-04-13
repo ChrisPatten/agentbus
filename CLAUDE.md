@@ -1,40 +1,37 @@
 # AgentBus
 
-TypeScript MCP message bus for AI agents.
-
-## Project Structure
-
-- `src/core/` — Bus core: pipeline engine, adapter registry, message queue
-- `src/adapters/` — Adapter implementations (claude-code, telegram, bluebubbles)
-- `src/mcp/` — MCP server and tool definitions
-- `src/memory/` — Transcript logger, summarizer, context injector
-- `src/pipeline/` — Inbound/outbound pipeline middleware
-- `src/commands/` — Slash command registry and built-in handlers
-- `src/config/` — Config loader and Zod schema
-- `src/db/` — SQLite client and schema
-- `src/http/` — Fastify HTTP API
-- `_bmad-output/` — BMAD planning artifacts (PRD, architecture, epics)
-
-## Tech Stack
-
-- TypeScript (ESM, NodeNext)
-- SQLite (better-sqlite3) with WAL mode and FTS5
-- MCP SDK (@modelcontextprotocol/sdk)
-- Fastify for HTTP API
-- Zod for config validation
-- js-yaml + dotenv for config loading
-
-## Development
+## Commands
 
 ```bash
-npx tsx src/index.ts          # Run bus core
-npx tsx src/adapters/cc.ts    # Run Claude Code adapter
+# Run
+npx tsx src/index.ts            # Run bus core
+npx tsx src/adapters/cc.ts      # Run Claude Code adapter
+
+# Test & type-check
+npx vitest run                  # Run all tests
+npx vitest run src/path/to.test.ts  # Run a single test file
+npx tsc --noEmit                # Type-check without building
+
+# Build
+npm run build                   # Compile to dist/
 ```
 
-## Documentation
+## TypeScript / ESM
 
-**All implementation work MUST include creation or updates of documentation in the `docs/` directory.** When adding or modifying functionality, create or update the relevant doc file(s) in `docs/` as part of the same change. Do not complete an implementation task without a corresponding documentation update.
+This project uses `"module": "NodeNext"`. All imports between `.ts` files **must** use `.js` extensions, not `.ts`:
 
-## BMAD Status
+```ts
+// correct
+import { foo } from './foo.js';
 
-See sprint-status.yaml for current phase and epic progress.
+// wrong — will fail at runtime
+import { foo } from './foo';
+```
+
+## Documentation requirement
+
+**Every implementation change must include a corresponding update to `docs/`.** Create or update the relevant doc file(s) in the same change. Do not mark a task complete without updating docs.
+
+## Sprint status
+
+See `sprint-status.yaml` for current epic and phase.

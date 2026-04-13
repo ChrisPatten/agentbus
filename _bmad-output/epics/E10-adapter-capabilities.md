@@ -4,7 +4,7 @@
 |---|---|
 | Epic ID | E10 |
 | Build Order Position | 10 of 12 |
-| Dependencies | E3 (Telegram adapter with capabilities), E4 (BlueBubbles adapter with capabilities), E7 (`react_to_message` tool registered) |
+| Dependencies | E3 (Telegram adapter with capabilities), E7 (`react_to_message` tool registered) |
 | Story Count | 3 |
 | Estimated Complexity | S |
 
@@ -19,8 +19,8 @@ E10 wires the capability system together end-to-end. Individual adapters declare
 ## Entry Criteria
 
 - E3 complete: Telegram adapter's `capabilities` object is declared with `canReact: false`, `canMarkRead: false`, `canTypingIndicator: true`
-- E4 complete: BlueBubbles adapter's `capabilities` object is declared with `canReact: true`, `canMarkRead: true`, `canTypingIndicator: false`
 - E7 complete: `react_to_message` tool is registered and performs a capability check stub
+- Note: E4 (BlueBubbles) is not required — the capability system is adapter-agnostic; any adapter declaring `canReact: true` will work
 - `AdapterRegistry` supports `lookup(adapterId).capabilities` access
 - Delivery worker exists in each adapter (polls queue and dispatches outbound messages)
 

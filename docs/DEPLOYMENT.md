@@ -1,6 +1,6 @@
 # AgentBus Deployment Guide
 
-Deploying AgentBus. The system runs as two pm2-managed processes (`bus-core` and `telegram-adapter`). Most operational tasks can be done via `make` targets or pm2 directly.
+Deploying AgentBus. The system runs as a single pm2-managed process (`bus-core`) with platform adapters (Telegram, BlueBubbles) running in-process. Agent connectors (Claude Code) are separate processes spawned by their respective runtimes. Most operational tasks can be done via `make` targets or pm2 directly.
 
 ---
 
@@ -133,9 +133,7 @@ Log files: `~/.agentbus/logs/{name}-out.log` and `~/.agentbus/logs/{name}-error.
 
 ## Startup Order
 
-pm2 starts all processes in parallel, but adapters depend on bus-core being ready. If an adapter starts before bus-core's HTTP API is up, it will fail its registration and pm2 will restart it after `restart_delay` (default 3s). After 1–2 restarts, all adapters should be connected.
-
-If adapters keep crashing, check `pm2 logs telegram-adapter` — the most common cause is bus-core not ready yet or a credential error.
+pm2 starts bus-core, which in turn starts all platform adapters in-process. The Telegram adapter's inbound loop begins polling immediately after the HTTP server is ready. If the Telegram API is unreachable, the inbound loop backs off exponentially and retries automatically.
 
 ---
 
@@ -171,7 +169,7 @@ The `--rebuild-fts` flag rebuilds all FTS5 indices from source tables and then e
 
 1. Get new token from @BotFather
 2. Update `.env`: `TELEGRAM_BOT_TOKEN=new-token`
-3. `./node_modules/.bin/pm2 restart telegram-adapter`
+3. `make restart` (Telegram adapter runs in-process with bus-core)
 
 The adapter reads the token at startup; no db changes needed.
 
@@ -223,9 +221,9 @@ make start
 
 **Symptom:** `/status` reports many dead-lettered messages, or delivery is silently failing.
 
-1. `make logs` — look for repeated errors in the relevant adapter
+1. `make logs` — look for repeated errors in the delivery worker or adapter
 2. Check adapter health: `curl http://localhost:3000/api/v1/health`
-3. If Telegram is rate-limiting, wait and retry: `./node_modules/.bin/pm2 restart telegram-adapter`
+3. If Telegram is rate-limiting, wait and restart: `make restart`
 4. Inspect dead letters: `/dead-letter` from any channel
 5. Retry recoverable messages: `/dead-letter retry <id>`
 6. Messages that fail 3 retries require manual investigation

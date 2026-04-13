@@ -12,7 +12,7 @@
 
 ## Epic Summary
 
-E7 implements all 12 MCP tools that the agent uses to interact with the bus, the agent's memory, and her active sessions. These tools are the primary API surface the agent operates through — they are the verbs the agent uses to receive messages, send replies, recall memories, and understand context. After E7, the agent has a complete programmatic interface to AgentBus, even if the memory and session backends are only partially implemented in later epics.
+E7 implements the 8 MCP tools that the agent uses to interact with the bus, memory, and sessions. These tools are the primary API surface the agent operates through — the verbs it uses to send replies, recall memories, react to messages, and understand context. Inbound messages are always pushed by AgentBus; the agent never polls. After E7, the agent has a complete programmatic interface to AgentBus, even if the memory and session backends are only partially implemented in later epics.
 
 ---
 
@@ -20,14 +20,14 @@ E7 implements all 12 MCP tools that the agent uses to interact with the bus, the
 
 - E1 complete: `MessageQueue`, `AdapterRegistry`, and SQLite schema exist and are tested
 - E2 complete: MCP server is initialized, tool registration pattern (`server.setRequestHandler(ListToolsRequestSchema, ...)`) is established and working for `reply`
-- All 12 tool names and their input/output schemas are agreed and documented (can be a single `tools-spec.md` file)
+- All 8 tool names and their input/output schemas are agreed and documented (can be a single `tools-spec.md` file)
 - Bus HTTP API routes for `/api/v1/messages/*` and `/api/v1/memory/*` are at minimum stubbed
 
 ---
 
 ## Exit Criteria
 
-- All 12 tools are registered with the MCP server and return valid MCP responses (not raw throws)
+- All 8 tools are registered with the MCP server and return valid MCP responses (not raw throws)
 - All tool input schemas are Zod-validated; invalid arguments produce structured MCP error responses with descriptive messages
 - Tools that depend on unimplemented backends (e.g., memory search before E8/E9) return a graceful "not yet available" response rather than crashing
 - `react_to_message` performs a capability check and returns a clear error if the target adapter doesn't support reactions
@@ -38,18 +38,16 @@ E7 implements all 12 MCP tools that the agent uses to interact with the bus, the
 
 ## Stories
 
-### S7.1 — Inbox Tools: `receive_messages`, `ack_message`, `subscribe`, `list_channels`
+### S7.1 — Channel Discovery: `list_channels`
 
-**User story:** As the agent, I want inbox management tools so that I can check for new messages, confirm I've processed them, subscribe to specific channels, and see what communication channels are available to me.
+**User story:** As the agent, I want to know what channels are available so that I can route outbound messages and reactions to the right adapter.
 
 **Acceptance criteria:**
-- `receive_messages({ channel?: string, limit?: number })` calls `MessageQueue.dequeue("claude", channel, limit)` and returns an array of `Envelope` objects; returns empty array (not error) when queue is empty
-- `ack_message({ message_id: string })` calls `MessageQueue.ack(messageId)` and returns `{ success: true }`; returns structured error if `message_id` is unknown
-- `subscribe({ channel: string, filter?: object })` persists a subscription preference for the session and returns `{ subscribed: true, channel }`; validates channel exists in `AdapterRegistry` before accepting
 - `list_channels()` calls `AdapterRegistry.list()` and returns each adapter's `id`, `channels[]`, and `capabilities` summary
-- All four tools handle DB errors by catching, logging at `error` level, and returning a structured MCP error (not a thrown exception)
+- Remove `get_pending_messages` from `src/mcp/tools.ts` — it was a polling fallback that no longer fits the push model; messages are always delivered via channel notification
+- Note: `receive_messages`, `ack_message`, and `subscribe` are not implemented — AgentBus always pushes inbound messages into the agent's session context via channel notification; the agent never needs to poll or subscribe
 
-**Complexity:** S
+**Complexity:** XS
 
 ---
 
@@ -84,13 +82,12 @@ E7 implements all 12 MCP tools that the agent uses to interact with the bus, the
 
 ---
 
-### S7.4 — Session Tools: `get_briefing`, `get_session`, `list_sessions`
+### S7.4 — Session Tools: `get_session`, `list_sessions`
 
-**User story:** As the agent, I want session tools so that I can receive a context briefing at the start of a conversation, inspect specific session details, and enumerate past sessions for review or resumption.
+**User story:** As the agent, I want session tools so that I can receive a context briefing at the start of a conversation and enumerate past sessions for review or resumption.
 
 **Acceptance criteria:**
-- `get_briefing({ session_id?: string })` returns the most recent `session_summaries` row for the given session (or current session if omitted), including `summary_text`, `key_topics[]`, `decisions[]`, `open_questions[]`, and `participants[]`; returns `{ available: false }` if no summary exists yet
-- `get_session({ session_id: string })` returns the full session row from `sessions` plus a count of transcript messages; returns structured error if `session_id` is not found
+- `get_session({ session_id?: string })` returns the most recent `session_summaries` row for the given session (or current session if omitted), including `summary_text`, `key_topics[]`, `decisions[]`, `open_questions[]`, `participants[]`, plus session metadata from the `sessions` row (`channel`, `started_at`, `message_count`); returns `{ available: false }` if no summary exists yet
 - `list_sessions({ channel?: string, contact_id?: string, limit?: number, since?: string })` queries `sessions` with optional filters, returns array of session summaries sorted by `started_at DESC`; supports pagination via `limit` (default 20, max 100)
 - `list_sessions` never returns raw SQL errors; DB errors are caught and returned as structured MCP errors
 - All session tool responses include `session_id` in the top-level object for easy chaining
@@ -117,9 +114,10 @@ E7 implements all 12 MCP tools that the agent uses to interact with the bus, the
 
 ## Notes
 
-- **Tool registration pattern:** All 12 tools should be defined in separate files under `/src/adapters/claude-code/tools/` (one file per story group is reasonable). Each file exports a `ToolDefinition[]` array that is spread into the master `ListToolsRequestSchema` handler. This keeps the MCP server entry point clean.
+- **Tool registration pattern:** Tools should be defined in separate files under `src/mcp/tools/` (one file per story group is reasonable), following the pattern established in `src/mcp/tools.ts`. This keeps the MCP server entry point clean.
 - **Zod schemas as single source of truth:** Define each tool's Zod schema in the tool file and derive the JSON Schema from it using `zodToJsonSchema` (from `zod-to-json-schema`) for the MCP tool manifest. Don't write JSON Schema by hand.
 - **Graceful degradation before E8/E9:** Memory tools are registered in E7 but back-end implementations arrive in E8/E9. The pattern for graceful degradation is: check if the backing table exists via `SELECT name FROM sqlite_master WHERE type='table' AND name=?`, return `{ available: false }` if not. This allows E7 to be fully functional as scaffolding before memory is live.
 - **`react_to_message` emoji normalization:** The emoji set in the tool schema must exactly match what BlueBubbles accepts. The tapback integer mapping (`heart=0, thumbsUp=1, ...`) lives in the BlueBubbles adapter (E4), not here. E7 passes the emoji string; E4 does the translation.
 - **Error response shape:** All tools should return errors as `{ content: [{ type: "text", text: "Error: ..." }], isError: true }` per MCP spec. Create a shared `toolError(message: string)` helper in E2 and import it in all E7 tool files.
-- **Tool count reconciliation:** The 12 tools are: `receive_messages`, `ack_message`, `subscribe`, `list_channels` (S7.1), `send_message` (S7.2), `recall_memory`, `log_memory`, `search_transcripts` (S7.3), `get_briefing`, `get_session`, `list_sessions` (S7.4), `react_to_message` (S7.5). The `reply` tool from E2 counts separately as part of the adapter, not the MCP tool surface.
+- **Tool count reconciliation:** The 8 tools are: `list_channels` (S7.1), `send_message` (S7.2), `recall_memory`, `log_memory`, `search_transcripts` (S7.3), `get_session`, `list_sessions` (S7.4), `react_to_message` (S7.5). `receive_messages`, `ack_message`, and `subscribe` are omitted — AgentBus pushes messages into the session; agents never poll. The `reply` tool from E2 counts separately as part of the adapter, not the MCP tool surface.
+- **Interaction model:** Inbound messages are always pushed by AgentBus into the agent's session context. Outbound responses flow from the agent through MCP tools (`reply`, `send_message`, `react_to_message`) to adapters. The agent is always triggered by AgentBus — it never polls for messages.

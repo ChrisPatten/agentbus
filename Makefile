@@ -4,14 +4,10 @@ AGENTBUS_CONFIG ?= config.yaml
 PM2 := ./node_modules/.bin/pm2
 
 dev:
-	@trap 'kill 0' INT TERM; \
-	npx tsx src/index.ts & \
-	AGENTBUS_CONFIG=$(AGENTBUS_CONFIG) npx tsx src/adapters/telegram.ts & \
-	wait
+	AGENTBUS_CONFIG=$(AGENTBUS_CONFIG) npx tsx src/index.ts
 
 kill:
 	-pkill -f "src/index.ts"
-	-pkill -f "src/adapters/telegram.ts"
 
 start:
 	mkdir -p ~/.agentbus/logs

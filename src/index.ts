@@ -1,19 +1,20 @@
 /**
  * bus-core — the central orchestrator process.
  *
- * AgentBus runs as four independent processes. This is the only one that owns
- * shared state: the SQLite database, message queue, and adapter registry. All
- * other processes (telegram-adapter, bluebubbles-adapter, claude-code-adapter)
- * are separate daemons that communicate exclusively over the HTTP API on
- * localhost:${config.bus.http_port}. They do not import from this package.
+ * Owns all shared state: SQLite database, message queue, adapter registry.
+ * Platform adapters (Telegram, BlueBubbles) run in-process and are registered
+ * in the AdapterRegistry at startup. Agent connectors (Claude Code) are
+ * separate processes that communicate via the HTTP API.
  *
  * Startup sequence:
  *   1. Load and validate config.yaml — exits non-zero on any error
  *   2. Open SQLite, apply pending migrations
  *   3. (optional) Rebuild FTS indices if --rebuild-fts flag is present
- *   4. Instantiate MessageQueue and AdapterRegistry
- *   5. Register SIGTERM/SIGINT handlers for graceful shutdown
+ *   4. Instantiate MessageQueue, AdapterRegistry, PipelineEngine
+ *   5. Instantiate and register platform adapters from config
  *   6. Start Fastify HTTP API on localhost:${config.bus.http_port}
+ *   7. Start platform adapters (inbound loops)
+ *   8. Register SIGTERM/SIGINT handlers for graceful shutdown
  */
 import { resolve } from 'node:path';
 import { loadConfig } from './config/loader.js';
@@ -31,6 +32,8 @@ import { createTopicClassify } from './pipeline/stages/topic-classify.js';
 import { createPriorityScore } from './pipeline/stages/priority-score.js';
 import { createRouteResolve } from './pipeline/stages/route-resolve.js';
 import { createTranscriptLog } from './pipeline/stages/transcript-log.js';
+import { TelegramAdapter } from './adapters/telegram.js';
+import { DeliveryWorker } from './core/delivery.js';
 
 const configPath = process.env['AGENTBUS_CONFIG'] ?? resolve(process.cwd(), 'config.yaml');
 
@@ -58,7 +61,27 @@ pipeline.use({ slot: 80, name: 'transcript-log',   stage: createTranscriptLog(db
 
 const httpServer = await createHttpServer({ queue, registry, config, pipeline, db });
 
-// Periodic maintenance: sweep expired messages and recover stuck-processing ones.
+// ── Platform adapter registration ────────────────────────────────────────────
+// Platform adapters run in-process. They are instantiated from config,
+// registered in the AdapterRegistry, and started after the HTTP server is
+// ready. Agent connectors (CC adapter) are separate processes — they
+// communicate via the HTTP API and are not registered here.
+
+const adapterDeps = { config, queue, pipeline, db };
+
+if (config.adapters.telegram) {
+  const telegram = new TelegramAdapter(adapterDeps);
+  registry.register(telegram);
+}
+
+// ── Delivery worker ──────────────────────────────────────────────────────────
+// Dequeues contact-bound messages and dispatches to platform adapters.
+// Agent-bound messages (agent:*) stay in the queue for CC adapter to poll.
+
+const deliveryWorker = new DeliveryWorker({ queue, registry });
+
+// ── Periodic maintenance ─────────────────────────────────────────────────────
+// Sweep expired messages and recover stuck-processing ones.
 // Stuck threshold: messages in `processing` for > 5 minutes are reset to `pending`.
 const STUCK_THRESHOLD_MS = 5 * 60 * 1000;
 const SWEEP_INTERVAL_MS = 60 * 1000;
@@ -69,8 +92,11 @@ const maintenanceTimer = setInterval(() => {
   if (swept > 0) console.log(`[agentbus] Swept ${swept} expired message(s)`);
 }, SWEEP_INTERVAL_MS);
 
+// ── Shutdown ─────────────────────────────────────────────────────────────────
+
 function shutdown() {
   console.log('AgentBus shutting down…');
+  deliveryWorker.stop();
   clearInterval(maintenanceTimer);
   const stops = registry.list().map((a) => a.stop().catch(() => {}));
   Promise.allSettled(stops).finally(() => {
@@ -84,7 +110,15 @@ function shutdown() {
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
 
+// ── Start ────────────────────────────────────────────────────────────────────
+
 await httpServer.listen({ port: config.bus.http_port, host: '127.0.0.1' });
 console.log(`AgentBus bus-core ready — HTTP :${config.bus.http_port}`);
+
+// Start platform adapters and delivery worker after HTTP server is listening
+for (const adapter of registry.list()) {
+  await adapter.start();
+}
+deliveryWorker.start();
 
 export { config, queue, registry };

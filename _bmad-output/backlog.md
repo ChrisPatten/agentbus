@@ -13,6 +13,9 @@ Allow prompts or tasks to be enqueued for delivery at a future time or on a recu
 ### Evaluate A2A (Agent-to-Agent) protocol adoption
 Research Google's A2A protocol and assess fit for AgentBus: what it offers (agent discovery, task delegation, streaming responses), where it overlaps with current MCP+bus design, and whether to adopt it as a transport/protocol layer, expose an A2A-compatible endpoint, or skip it. Output should be a short spike doc in `_bmad-output/planning-artifacts/`.
 
+### Multi-bot support: run multiple Telegram bots from a single AgentBus instance
+Allow `adapters.telegram` to accept a list of bot configs (each with its own token, name, and contact set) so a single AgentBus process can host several distinct bots. Use case: a personal assistant bot and a purpose-specific bot (e.g. a Pokémon companion bot at `~/workspace/pokeclaudebot`) managed centrally with shared routing infrastructure. Needs a spike covering: config schema change (single object → named map or array), adapter refactor to spin up one long-poll loop per token, message tagging to track which bot received each inbound message, and routing rules that dispatch by bot identity.
+
 <!-- Add ideas below. Format: short title, one-line description, optional notes. -->
 
 ### CC adapter: include message timestamp in agent delivery

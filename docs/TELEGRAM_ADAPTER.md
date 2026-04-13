@@ -1,31 +1,33 @@
 # Telegram Adapter
 
-The Telegram adapter (`src/adapters/telegram.ts`) is a persistent daemon process that bridges Telegram and the AgentBus bus-core. It runs as a separate process alongside bus-core, communicating with it exclusively over the bus HTTP API.
+The Telegram adapter (`src/adapters/telegram.ts`) is a platform adapter that bridges Telegram and the AgentBus bus-core. It runs in-process with bus-core and is registered in the `AdapterRegistry` at startup.
 
 ---
 
 ## Architecture
 
 ```
-Telegram Bot API  <──long-poll──>  telegram adapter  <──HTTP──>  bus-core
+Telegram Bot API  <──long-poll──>  TelegramAdapter (in bus-core)  <──direct──>  pipeline / queue
 ```
 
-Two concurrent loops run inside the process:
+The adapter class implements `AdapterInstance` and provides:
 
-- **Inbound loop** — long-polls `getUpdates` from Telegram, submits messages to `POST /api/v1/inbound`
-- **Outbound loop** — polls `GET /api/v1/messages/pending?recipient=contact:{id}` for each Telegram-enabled contact, delivers replies via `sendMessage`
+- **Inbound loop** — long-polls `getUpdates` from Telegram, submits messages directly to the pipeline via `processInbound()` (no HTTP hop)
+- **`send(envelope)`** — called by the delivery worker to deliver outbound messages via Telegram's `sendMessage` API
 
-The adapter does not import bus-core internals. It shares only `src/config/loader.ts` and `src/types/envelope.ts`.
+The adapter does not communicate with bus-core over HTTP. It receives infrastructure dependencies (config, pipeline, queue, db) via constructor injection.
 
 ---
 
 ## Running
 
+The Telegram adapter starts automatically when bus-core starts, provided `adapters.telegram` is present in `config.yaml`:
+
 ```bash
-AGENTBUS_CONFIG=/path/to/config.yaml npx tsx src/adapters/telegram.ts
+AGENTBUS_CONFIG=/path/to/config.yaml npx tsx src/index.ts
 ```
 
-Or via pm2 (see `docs/DEPLOYMENT.md`).
+Or via pm2: `make start`
 
 ---
 
@@ -54,7 +56,7 @@ contacts:
 
 There is no separate `allowed_sender_ids` config — the contacts map is the source of truth.
 
-**Validation:** At startup, each contact's `platforms.telegram.userId` is validated to be a positive integer. An invalid value causes the adapter to exit immediately with an error.
+**Validation:** At construction, each contact's `platforms.telegram.userId` is validated to be a positive integer. An invalid value throws an error that prevents bus-core from starting.
 
 ---
 
@@ -64,35 +66,35 @@ There is no separate `allowed_sender_ids` config — the contacts map is the sou
 2. For each `message` update:
    - Sender `from.id` is checked against the allowed-sender set (derived from contacts); unknown senders are silently dropped
    - Body is taken from `message.text` or `message.caption`; non-text updates (stickers, etc.) are skipped
-   - Envelope is POSTed to `POST /api/v1/inbound` with:
+   - Message is submitted directly to `processInbound()` with:
      - `channel: "telegram"`
      - `sender: "{from.id}"` (raw Telegram user ID)
      - `metadata.telegram_chat_id` and `metadata.telegram_message_id`
 3. The inbound pipeline's contact-resolve stage maps the raw user ID to `contact:{id}`
 4. Route-resolve routes the message to the CC adapter
 
-**Offset management:** The Telegram update offset is only advanced after a successful POST to the bus. If the POST fails, the offset stays at the failed update, causing Telegram to redeliver on the next poll.
+**Offset management:** The Telegram update offset is only advanced after a successful pipeline submission. If processing fails, the offset stays at the failed update, causing Telegram to redeliver on the next poll.
 
-**Backoff:** On Telegram API errors, the inbound loop backs off exponentially: 1s → 2s → 4s → 8s → 16s → 30s (max), resetting to 1s on success.
+**Backoff:** On Telegram API errors, the inbound loop backs off exponentially: 1s -> 2s -> 4s -> 8s -> 16s -> 30s (max), resetting to 1s on success.
 
-**Loop supervision:** Both loops run under a `supervise()` wrapper. If a loop throws unexpectedly, the crash is logged and the loop is restarted after 5 seconds. Shutdown signals (`SIGTERM`/`SIGINT`) interrupt sleeping loops immediately via `AbortController`.
+**Loop supervision:** The inbound loop runs under a `supervise()` wrapper. If the loop throws unexpectedly, the crash is logged and the loop is restarted after 5 seconds. The adapter's `stop()` method interrupts sleeping loops immediately via `AbortController`.
 
 ---
 
 ## Outbound Flow
 
-1. At startup, the adapter derives the list of Telegram-reachable recipients from `config.contacts`
-2. Every 2 seconds, for each recipient (e.g. `contact:alice`), it polls `GET /api/v1/messages/pending?recipient=contact:{id}&limit=10`
-3. For each pending message:
-   - Sends a typing indicator (`sendChatAction`) as fire-and-forget (failures are logged as warnings, not silently swallowed)
-   - Splits the body into chunks ≤4096 chars (Telegram's hard limit), splitting on newlines where possible
-   - Sends each chunk via `sendMessage` with `parse_mode: "Markdown"`
-   - If Telegram returns HTTP 400 (malformed markdown), retries without `parse_mode` (text is delivered as plain text)
-   - If delivery fails mid-way through a multi-part message, the error is enriched with partial delivery context (`Partial delivery (N/M parts sent): ...`) before dead-lettering
-   - ACKs the message via `POST /api/v1/messages/:id/ack { status: "delivered" }` with up to 3 retries on transient failures
-   - On unrecoverable delivery failure, dead-letters via `{ status: "failed", error: ... }` (also retried up to 3 times)
+Outbound delivery is handled by the bus-core delivery worker, which calls `adapter.send(envelope)` directly:
 
-The chat ID for outbound messages is resolved from `contact.platforms.telegram.userId` in the config (correct for DM conversations; Telegram DM `chat.id === user.id`).
+1. Delivery worker dequeues messages with `contact:*` recipients from the message queue
+2. Resolves the target adapter from `metadata.adapter_id` or by channel lookup
+3. Calls `TelegramAdapter.send(envelope)` which:
+   - Resolves the chat ID from the contact's `platforms.telegram.userId` in config
+   - Sends a typing indicator (`sendChatAction`) as fire-and-forget
+   - Splits the body into chunks <=4096 chars (Telegram's hard limit), splitting on newlines where possible
+   - Sends each chunk via `sendMessage` with `parse_mode: "Markdown"`
+   - If Telegram returns HTTP 400 (malformed markdown), retries without `parse_mode`
+   - Returns `DeliveryResult` with success/failure status
+4. Delivery worker ACKs or dead-letters the message based on the result
 
 ---
 
@@ -109,21 +111,15 @@ This causes Telegram to display autocomplete suggestions when users type `/` in 
 
 ---
 
-## Auth
-
-If `config.bus.auth_token` is set, the adapter injects it as an `X-Bus-Token` header on all requests to bus-core. This matches the auth middleware in `src/http/api.ts`.
-
----
-
 ## Capabilities
 
 | Capability | Supported |
 |---|---|
 | Typing indicator | Yes (`sendChatAction: "typing"`) |
-| Read receipts | No (offset advancement is implicit) |
+| Read receipts | No |
 | Slash command registration | Yes (`setMyCommands`) |
-| Reactions | No |
-| Message splitting | Yes (chunks ≤4096 chars) |
+| Reactions | No (planned) |
+| Message splitting | Yes (chunks <=4096 chars) |
 | Markdown formatting | Yes (`parse_mode: "Markdown"`) |
 
 ---
@@ -134,11 +130,12 @@ If `config.bus.auth_token` is set, the adapter injects it as an `X-Bus-Token` he
 - Verify `TELEGRAM_BOT_TOKEN` is set in `.env` and that the token is valid
 - Check that your Telegram user ID is in `config.contacts` under `platforms.telegram.userId`
 - Confirm bus-core is running: `curl http://localhost:3000/api/v1/health`
+- Check `make logs` for `[telegram]` errors
 
 **Replies not being delivered:**
-- Check that `pipeline.routes` in `config.yaml` routes inbound messages to `{ adapterId: "claude-code", recipientId: "agent:claude" }`
-- Check `pm2 logs telegram-adapter` for delivery errors
-- Inspect the dead-letter queue via `GET /api/v1/dead-letter`
+- Check that `pipeline.routes` in `config.yaml` routes inbound messages correctly
+- Check `make logs` for `[delivery]` or `[telegram]` errors
+- Confirm the health endpoint shows the Telegram adapter: `curl http://localhost:3000/api/v1/health`
 
 **Markdown rendering issues:**
 - The adapter retries failed sends without `parse_mode` when Telegram returns HTTP 400

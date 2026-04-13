@@ -14,7 +14,7 @@ import { resolve } from 'node:path';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { loadConfig } from '../config/loader.js';
 import { createMcpServer } from '../mcp/server.js';
-import { registerTools, type HealthState } from '../mcp/tools.js';
+import { registerAllTools, type HealthState } from '../mcp/tools/index.js';
 import type { MessageEnvelope } from '../types/envelope.js';
 
 const AGENT_ID = process.env['AGENTBUS_AGENT_ID'] ?? 'claude';
@@ -43,7 +43,7 @@ const messageBuffer: MessageEnvelope[] = [];
 // ── MCP server ────────────────────────────────────────────────────────────────
 
 const mcpServer = createMcpServer();
-registerTools(mcpServer, busBaseUrl, healthState, messageBuffer);
+registerAllTools(mcpServer, busBaseUrl, healthState);
 
 // ── Message formatting ────────────────────────────────────────────────────────
 
@@ -70,7 +70,7 @@ export function formatMessagesForSampling(envelopes: MessageEnvelope[]): string 
  * Do NOT wrap the content in XML here.
  */
 export function sendChannelNotification(
-  server: { notification(n: { method: string; params: unknown }): void },
+  server: { notification(n: { method: string; params?: Record<string, unknown> }): void },
   text: string,
 ): void {
   server.notification({

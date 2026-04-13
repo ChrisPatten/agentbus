@@ -131,7 +131,7 @@ A bounded window of conversation activity. A session starts when the first messa
 | `ack_message` | `(message_id)` | Mark a message processed; prevents re-delivery |
 | `recall_memory` | `(query, limit?)` | FTS5 search across the memory store |
 | `log_memory` | `(content, category, expires_at?)` | Agent explicitly writes a fact to memory |
-| `get_briefing` | `()` | Compile: recent unread messages + open action items + time-sensitive context |
+| `get_session` | `(session_id?)` | Compile: session metadata + summary, key topics, decisions, open questions |
 | `search_transcripts` | `(query, session_id?, platform?, since?, limit?)` | FTS5 search across raw transcripts |
 | `get_session` | `(session_id)` | Return full transcript for a session |
 | `list_sessions` | `(since?, limit?)` | Browse recent sessions with their summaries |

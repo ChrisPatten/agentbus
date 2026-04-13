@@ -155,6 +155,47 @@ export class MessageQueue {
   }
 
   /**
+   * Dequeue up to `limit` pending messages where the recipient matches the
+   * given prefix (e.g. "contact:" for all contact-bound messages).
+   * Used by the delivery worker to pick up platform-adapter-bound messages.
+   */
+  dequeueByPrefix(recipientPrefix: string, limit = 10): QueuedMessage[] {
+    const dequeueTransaction = this.db.transaction(
+      (prefix: string, limit: number) => {
+        const rows = this.db
+          .prepare(
+            `SELECT ${MESSAGE_COLS} FROM message_queue
+             WHERE status = 'pending'
+               AND recipient LIKE ? || '%'
+             ORDER BY
+               CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 ELSE 2 END,
+               created_at ASC
+             LIMIT ?`
+          )
+          .all(prefix, limit) as MessageRow[];
+
+        if (rows.length === 0) return [];
+
+        const ids = rows.map((r) => r.id);
+        const placeholders = ids.map(() => '?').join(', ');
+        const now = new Date().toISOString();
+
+        this.db
+          .prepare(
+            `UPDATE message_queue
+             SET status = 'processing', updated_at = ?
+             WHERE id IN (${placeholders})`
+          )
+          .run(now, ...ids);
+
+        return rows.map(rowToQueuedMessage);
+      }
+    );
+
+    return dequeueTransaction(recipientPrefix, limit);
+  }
+
+  /**
    * Acknowledge a message as delivered.
    * Only transitions messages in `processing` status.
    * Returns `true` if the message was acked, `false` if it was not in `processing` state.

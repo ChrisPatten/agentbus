@@ -98,6 +98,108 @@ const InboundSchema = z.object({
   metadata: z.record(z.string(), z.unknown()).optional(),
 });
 
+// ── Inbound pipeline processing ──────────────────────────────────────────────
+
+export interface InboundMessage {
+  id?: string;
+  timestamp?: string;
+  channel: string;
+  topic?: string;
+  sender: string;
+  recipient?: string;
+  reply_to?: string | null;
+  priority?: 'normal' | 'high' | 'urgent';
+  payload: { type: 'text'; body: string };
+  metadata?: Record<string, unknown>;
+}
+
+export interface InboundResult {
+  ok: true;
+  queued: true;
+  id: string;
+  enqueued_count: number;
+}
+
+export interface InboundAbort {
+  ok: true;
+  queued: false;
+  reason: string;
+}
+
+/**
+ * Process an inbound message through the pipeline and enqueue the results.
+ *
+ * Extracted from the POST /api/v1/inbound handler so that both the HTTP
+ * route and in-process platform adapters can share the same pipeline logic.
+ */
+export async function processInbound(
+  message: InboundMessage,
+  deps: { queue: MessageQueue; pipeline: PipelineEngine; config: AppConfig; db: Database.Database },
+): Promise<InboundResult | InboundAbort> {
+  const envelope: MessageEnvelope = {
+    id: message.id ?? '',
+    timestamp: message.timestamp ?? '',
+    channel: message.channel,
+    topic: message.topic ?? '',
+    sender: message.sender,
+    recipient: message.recipient ?? '',
+    reply_to: message.reply_to ?? null,
+    priority: message.priority ?? 'normal',
+    payload: message.payload as MessageEnvelope['payload'],
+    metadata: message.metadata ?? {},
+  };
+
+  const ctx: PipelineContext = {
+    envelope,
+    contact: null,
+    dedupKey: null,
+    isSlashCommand: false,
+    slashCommand: null,
+    topics: [],
+    priorityScore: 0,
+    routes: [],
+    conversationId: null,
+    sessionId: null,
+    config: deps.config,
+    db: deps.db,
+  };
+
+  const result = await deps.pipeline.process(ctx);
+
+  if (!result) {
+    return { ok: true, queued: false, reason: ctx.abortReason ?? 'pipeline_abort' };
+  }
+
+  // Fan-out: enqueue one copy per route target produced by Stage 70.
+  let enqueuedCount = 0;
+  const primaryId = result.envelope.id;
+
+  for (let i = 0; i < result.routes.length; i++) {
+    const route = result.routes[i]!;
+    const fanEnvelope: MessageEnvelope = {
+      ...result.envelope,
+      payload: { ...result.envelope.payload },
+      id: i === 0 ? primaryId : randomUUID(),
+      recipient: route.recipientId,
+      metadata: {
+        ...result.envelope.metadata,
+        adapter_id: route.adapterId,
+        conversation_id: result.conversationId ?? undefined,
+      },
+    };
+    try {
+      deps.queue.enqueue(fanEnvelope);
+      enqueuedCount++;
+    } catch (err) {
+      console.error(`[inbound] Failed to enqueue route ${route.adapterId}:${route.recipientId}`, err);
+    }
+  }
+
+  return { ok: true, id: primaryId, queued: true, enqueued_count: enqueuedCount };
+}
+
+// ── HTTP server ──────────────────────────────────────────────────────────────
+
 export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyInstance> {
   const { queue, registry, pipeline, config, db } = deps;
   const server = Fastify({ logger: false });
@@ -226,84 +328,255 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     return { ok: true, message: message.envelope };
   });
 
+  // GET /api/v1/adapters — list registered adapters with capabilities
+  server.get('/api/v1/adapters', async (_req, _reply) => {
+    const adapters = registry.list().map((a) => ({
+      id: a.id,
+      name: a.name,
+      channels: a.capabilities.channels,
+      capabilities: a.capabilities,
+    }));
+    return { ok: true, adapters };
+  });
+
+  // GET /api/v1/transcripts/search — FTS5 full-text search over transcripts
+  server.get<{
+    Querystring: { q?: string; channel?: string; since?: string; limit?: string };
+  }>('/api/v1/transcripts/search', (req, reply) => {
+    const { q, channel, since, limit: limitStr } = req.query;
+    if (!q || q.trim() === '') {
+      return reply.status(400).send({ ok: false, error: '?q= query parameter is required' });
+    }
+
+    // Graceful degradation: check if FTS table exists
+    const ftsExists = db
+      .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='transcripts_fts'`)
+      .get();
+    if (!ftsExists) {
+      return { ok: true, available: false, reason: 'Transcript search not available' };
+    }
+
+    const parsedLimit = Math.max(1, Math.min(parseInt(limitStr ?? '10', 10) || 10, 100));
+
+    let sql = `
+      SELECT t.message_id, t.session_id, t.channel, t.contact_id, t.direction, t.body, t.created_at
+      FROM transcripts t
+      JOIN transcripts_fts fts ON fts.rowid = t.rowid
+      WHERE fts.body MATCH ?
+    `;
+    const params: unknown[] = [q];
+
+    if (channel) {
+      sql += ` AND t.channel = ?`;
+      params.push(channel);
+    }
+    if (since) {
+      sql += ` AND t.created_at > ?`;
+      params.push(since);
+    }
+    sql += ` ORDER BY t.created_at DESC LIMIT ?`;
+    params.push(parsedLimit);
+
+    try {
+      const results = db.prepare(sql).all(...params) as Array<{
+        message_id: string;
+        session_id: string;
+        channel: string;
+        contact_id: string;
+        direction: string;
+        body: string;
+        created_at: string;
+      }>;
+      return { ok: true, results, count: results.length };
+    } catch (err) {
+      // FTS5 throws on malformed queries (e.g. unmatched quotes)
+      return reply.status(400).send({ ok: false, error: `FTS query error: ${String(err)}` });
+    }
+  });
+
+  // GET /api/v1/sessions — list sessions with optional filters
+  server.get<{
+    Querystring: { channel?: string; contact_id?: string; since?: string; limit?: string };
+  }>('/api/v1/sessions', (req, reply) => {
+    const { channel, contact_id, since, limit: limitStr } = req.query;
+    const parsedLimit = Math.max(1, Math.min(parseInt(limitStr ?? '20', 10) || 20, 100));
+
+    let sql = `
+      SELECT s.id, s.conversation_id, s.channel, s.contact_id,
+             s.started_at, s.last_activity, s.ended_at, s.message_count,
+             ss.summary, ss.model, ss.token_count, ss.created_at AS summary_created_at
+      FROM sessions s
+      LEFT JOIN session_summaries ss ON ss.session_id = s.id
+      WHERE 1=1
+    `;
+    const params: unknown[] = [];
+
+    if (channel) {
+      sql += ` AND s.channel = ?`;
+      params.push(channel);
+    }
+    if (contact_id) {
+      sql += ` AND s.contact_id = ?`;
+      params.push(contact_id);
+    }
+    if (since) {
+      sql += ` AND s.started_at > ?`;
+      params.push(since);
+    }
+    sql += ` ORDER BY s.started_at DESC LIMIT ?`;
+    params.push(parsedLimit);
+
+    try {
+      const rows = db.prepare(sql).all(...params) as Array<{
+        id: string;
+        conversation_id: string;
+        channel: string;
+        contact_id: string;
+        started_at: string;
+        last_activity: string;
+        ended_at: string | null;
+        message_count: number;
+        summary: string | null;
+        model: string | null;
+        token_count: number | null;
+        summary_created_at: string | null;
+      }>;
+
+      const sessions = rows.map(({ summary, model, token_count, summary_created_at, ...s }) => ({
+        ...s,
+        summary: summary
+          ? { summary, model, token_count, created_at: summary_created_at }
+          : null,
+      }));
+
+      return { ok: true, sessions, count: sessions.length };
+    } catch (err) {
+      return reply.status(500).send({ ok: false, error: `Database error: ${String(err)}` });
+    }
+  });
+
+  // GET /api/v1/sessions/:id — get a specific session
+  server.get<{ Params: { id: string } }>('/api/v1/sessions/:id', (req, reply) => {
+    const { id } = req.params;
+
+    const row = db
+      .prepare(
+        `SELECT s.id, s.conversation_id, s.channel, s.contact_id,
+                s.started_at, s.last_activity, s.ended_at, s.message_count,
+                ss.summary, ss.model, ss.token_count, ss.created_at AS summary_created_at
+         FROM sessions s
+         LEFT JOIN session_summaries ss ON ss.session_id = s.id
+         WHERE s.id = ?`
+      )
+      .get(id) as
+      | {
+          id: string;
+          conversation_id: string;
+          channel: string;
+          contact_id: string;
+          started_at: string;
+          last_activity: string;
+          ended_at: string | null;
+          message_count: number;
+          summary: string | null;
+          model: string | null;
+          token_count: number | null;
+          summary_created_at: string | null;
+        }
+      | undefined;
+
+    if (!row) {
+      return reply.status(404).send({ ok: false, error: 'Session not found' });
+    }
+
+    const { summary, model, token_count, summary_created_at, ...sessionFields } = row;
+    const session = {
+      ...sessionFields,
+      summary: summary
+        ? { summary, model, token_count, created_at: summary_created_at }
+        : null,
+    };
+
+    return { ok: true, session };
+  });
+
+  // POST /api/v1/messages/:id/react — send a reaction emoji to a message
+  server.post<{ Params: { id: string }; Body: { emoji: string } }>(
+    '/api/v1/messages/:id/react',
+    async (req, reply) => {
+      const { id: messageId } = req.params;
+      const { emoji } = req.body ?? {};
+
+      if (!emoji || typeof emoji !== 'string') {
+        return reply.status(400).send({ ok: false, error: 'emoji is required' });
+      }
+
+      // Look up transcript by message_id
+      const transcript = db
+        .prepare(`SELECT channel, metadata FROM transcripts WHERE message_id = ? LIMIT 1`)
+        .get(messageId) as { channel: string; metadata: string } | undefined;
+
+      if (!transcript) {
+        return reply.status(404).send({ ok: false, error: `Message not found in transcripts: ${messageId}` });
+      }
+
+      // Resolve adapter from channel
+      const adapters = registry.lookupByChannel(transcript.channel);
+      if (adapters.length === 0) {
+        return reply.status(404).send({
+          ok: false,
+          error: `No adapter registered for channel: ${transcript.channel}`,
+        });
+      }
+      const adapter = adapters[0]!;
+
+      // Capability check
+      if (!adapter.capabilities.react) {
+        return reply.status(400).send({
+          ok: false,
+          success: false,
+          reason: `Reactions not supported on channel: ${transcript.channel}`,
+        });
+      }
+
+      if (typeof adapter.react !== 'function') {
+        return reply.status(400).send({
+          ok: false,
+          success: false,
+          reason: `Adapter "${adapter.id}" does not implement react()`,
+        });
+      }
+
+      // Extract platform message ID from transcript metadata
+      let platformMessageId: string;
+      try {
+        const meta = JSON.parse(transcript.metadata) as Record<string, unknown>;
+        platformMessageId = (meta['platform_message_id'] as string | undefined) ?? messageId;
+      } catch {
+        platformMessageId = messageId;
+      }
+
+      // Call adapter.react()
+      try {
+        await adapter.react(platformMessageId, emoji);
+        return { ok: true, success: true, emoji, message_id: messageId };
+      } catch (err) {
+        return reply.status(502).send({
+          ok: false,
+          success: false,
+          error: String(err),
+        });
+      }
+    }
+  );
+
   // POST /api/v1/inbound — pipeline entry point for raw inbound messages
   server.post<{ Body: unknown }>('/api/v1/inbound', async (req, reply) => {
     const parsed = InboundSchema.safeParse(req.body);
     if (!parsed.success) {
       return reply.status(400).send({ ok: false, error: parsed.error.message });
     }
-    const data = parsed.data;
-
-    const envelope: MessageEnvelope = {
-      id: data.id ?? '',
-      timestamp: data.timestamp ?? '',
-      channel: data.channel,
-      topic: data.topic ?? '',
-      sender: data.sender,
-      recipient: data.recipient ?? '',
-      reply_to: data.reply_to ?? null,
-      priority: data.priority ?? 'normal',
-      payload: data.payload as MessageEnvelope['payload'],
-      metadata: (data.metadata as Record<string, unknown>) ?? {},
-    };
-
-    const ctx: PipelineContext = {
-      envelope,
-      contact: null,
-      dedupKey: null,
-      isSlashCommand: false,
-      slashCommand: null,
-      topics: [],
-      priorityScore: 0,
-      routes: [],
-      conversationId: null,
-      sessionId: null,
-      config,
-      db,
-    };
-
-    const result = await pipeline.process(ctx);
-
-    if (!result) {
-      // ctx.abortReason is set on the original ctx reference by PipelineEngine
-      // even though the return value is null, so we can surface it to callers.
-      return { ok: true, queued: false, reason: ctx.abortReason ?? 'pipeline_abort' };
-    }
-
-    // Fan-out: enqueue one copy per route target produced by Stage 70.
-    // Each copy gets independent id/recipient/metadata and a shallow-cloned
-    // payload object so that a downstream consumer mutating one copy's payload
-    // does not affect the other copies still in the queue.
-    let enqueuedCount = 0;
-    const primaryId = result.envelope.id;
-
-    for (let i = 0; i < result.routes.length; i++) {
-      const route = result.routes[i]!;
-      const fanEnvelope: MessageEnvelope = {
-        ...result.envelope,
-        payload: { ...result.envelope.payload }, // shallow clone — see note above
-        id: i === 0 ? primaryId : randomUUID(),
-        recipient: route.recipientId,
-        metadata: {
-          ...result.envelope.metadata,
-          adapter_id: route.adapterId,
-          conversation_id: result.conversationId ?? undefined,
-        },
-      };
-      try {
-        queue.enqueue(fanEnvelope);
-        enqueuedCount++;
-      } catch (err) {
-        console.error(`[inbound] Failed to enqueue route ${route.adapterId}:${route.recipientId}`, err);
-      }
-    }
-
-    return {
-      ok: true,
-      id: primaryId,
-      queued: true,
-      enqueued_count: enqueuedCount,
-    };
+    return processInbound(parsed.data, { queue, pipeline, config, db });
   });
 
   return server;

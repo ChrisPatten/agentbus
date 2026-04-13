@@ -38,7 +38,7 @@ function makeCtx(
     timestamp: new Date().toISOString(),
     channel: 'telegram',
     topic: 'general',
-    sender: 'contact:alice',
+    sender: 'contact:chris',
     recipient: 'agent:claude',
     reply_to: null,
     priority: 'normal' as const,
