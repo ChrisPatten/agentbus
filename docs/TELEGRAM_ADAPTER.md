@@ -79,7 +79,7 @@ There is no separate `allowed_sender_ids` config — the contacts map is the sou
 
 **Loop supervision:** The inbound loop runs under a `supervise()` wrapper. If the loop throws unexpectedly, the crash is logged and the loop is restarted after 5 seconds. The adapter's `stop()` method interrupts sleeping loops immediately via `AbortController`.
 
-**Typing indicator:** After each inbound message is accepted, a per-chat typing loop starts and resends `sendChatAction('typing')` every 4 seconds. The loop runs until the agent calls `reply`/`send_message` (which triggers `send()`, stopping the loop), or until a 2-minute safety timeout expires. Only one loop runs per chat at a time.
+**Typing indicator:** The typing loop does not start when the message is received — it starts when the CC adapter confirms the message was delivered to the agent (via `POST /api/v1/adapters/telegram/typing`). This prevents the indicator from firing for messages that are queued but never reach an active Claude Code session. Once started, the loop resends `sendChatAction('typing')` every 4 seconds until `send()` is called for that chat, or the 2-minute safety timeout expires. Only one loop runs per chat at a time.
 
 **Reactions:** Inbound messages include `platform_message_id` in metadata, encoded as `"{chat_id}:{message_id}"`. The `react()` method parses this string and calls `sendReaction` with the emoji. Input emoji are normalised by stripping variation selectors (U+FE0F) before the API call. If the emoji is not in Telegram's supported reaction set, it is sent as a plain text message to the chat instead — reactions never fail silently or throw for an unsupported emoji.
 

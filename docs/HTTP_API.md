@@ -364,6 +364,24 @@ The `:id` is a **bus message ID** (not a platform message ID). The endpoint look
 
 ---
 
+### `POST /api/v1/adapters/:id/typing`
+
+Signal that the agent has received a message from a contact and is now working on a reply. The adapter starts its typing indicator (if `capabilities.typing` is true). Called by the CC adapter after it acks and channel-notifies each inbound message.
+
+Always returns HTTP 200 — no-ops silently if the adapter is not found or does not support typing.
+
+**Request body:**
+```json
+{ "contact_id": "contact:chris" }
+```
+
+**Response (200):**
+```json
+{ "ok": true }
+```
+
+---
+
 ### `POST /api/v1/adapters/:id/pause` _(pending — E12)_
 
 Pause inbound and outbound processing for an adapter. Messages continue to accumulate in the queue but are not delivered until the adapter is resumed.

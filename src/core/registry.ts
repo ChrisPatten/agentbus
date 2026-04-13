@@ -49,6 +49,8 @@ export interface AdapterInstance {
   poll?(): Promise<MessageEnvelope[]>;
   markRead?(platformMessageId: string): Promise<void>;
   react?(platformMessageId: string, reaction: string): Promise<void>;
+  /** Start a typing indicator for a contact. Called when the agent confirms receipt. */
+  startTyping?(contactId: string): void;
 }
 
 /**

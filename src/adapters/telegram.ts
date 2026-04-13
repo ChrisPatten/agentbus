@@ -333,6 +333,23 @@ export class TelegramAdapter implements AdapterInstance {
     });
   }
 
+  // ── AdapterInstance startTyping ───────────────────────────────────────────
+
+  /**
+   * Called by bus-core when the CC adapter confirms a message has been
+   * delivered to the agent. Starts the persistent typing loop for the
+   * contact's chat so the indicator appears while the agent works.
+   */
+  startTyping(contactId: string): void {
+    const id = contactId.startsWith('contact:') ? contactId.slice('contact:'.length) : contactId;
+    const chatId = this.contactChatIdMap.get(id);
+    if (chatId) {
+      this.startTypingIndicator(chatId);
+    } else {
+      console.warn(`[telegram] startTyping: no chat_id for contact "${contactId}"`);
+    }
+  }
+
   // ── Typing indicator ──────────────────────────────────────────────────────
 
   /**
@@ -438,10 +455,6 @@ export class TelegramAdapter implements AdapterInstance {
 
       await processInbound(message, this.deps);
       this.lastActivity = new Date().toISOString();
-
-      // Start persistent typing indicator — stays active until the agent replies
-      this.startTypingIndicator(msg.chat.id);
-
       return true;
     } catch (err) {
       console.error(`[telegram] Failed to process inbound message ${update.update_id}: ${String(err)}`);

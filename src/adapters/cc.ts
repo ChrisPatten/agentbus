@@ -144,6 +144,16 @@ async function poll(): Promise<void> {
       processAckedMessages(acked, messageBuffer, (text) => {
         sendChannelNotification(mcpServer.server, text);
       });
+
+      // Now that Claude Code has the messages, signal each source adapter to
+      // start its typing indicator. Fire-and-forget — never blocks the poll loop.
+      for (const envelope of acked) {
+        fetch(`${busBaseUrl}/api/v1/adapters/${envelope.channel}/typing`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contact_id: envelope.sender }),
+        }).catch(() => {});
+      }
     }
 
     // Reset health on success

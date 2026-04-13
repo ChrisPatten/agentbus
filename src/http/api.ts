@@ -339,6 +339,21 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     return { ok: true, adapters };
   });
 
+  // POST /api/v1/adapters/:id/typing — signal that the agent received a message;
+  // adapter starts its typing indicator so the user sees activity while Claude works.
+  // Fire-and-forget by callers — always returns 200, even when adapter is not found
+  // or doesn't support typing (no-op in those cases).
+  server.post<{ Params: { id: string }; Body: { contact_id?: string } }>(
+    '/api/v1/adapters/:id/typing',
+    async (req, _reply) => {
+      const adapter = registry.lookup(req.params.id);
+      if (adapter?.capabilities.typing && typeof adapter.startTyping === 'function') {
+        adapter.startTyping(req.body.contact_id ?? '');
+      }
+      return { ok: true };
+    },
+  );
+
   // GET /api/v1/transcripts/search — FTS5 full-text search over transcripts
   server.get<{
     Querystring: { q?: string; channel?: string; since?: string; limit?: string };
