@@ -232,9 +232,9 @@ Browse recent sessions with their summaries.
 
 ### `react_to_message`
 
-Send an emoji reaction to a message. Only works on channels that support reactions (Telegram, BlueBubbles). Returns a graceful `success: false` (not an error) for unsupported channels.
+Send an emoji reaction to a message. Only works on channels that support reactions (`react: true` in adapter capabilities). Returns a graceful `success: false` (not an error) for unsupported channels.
 
-**Allowed emoji:** `❤️` `👍` `👎` `😂` `‼️` `❓`
+**Telegram emoji handling:** Telegram supports a specific set of ~74 reaction emoji. Any emoji not in that set is sent as a plain text message to the chat instead of a reaction bubble — the intent still lands, just in a different form. Variation selectors (U+FE0F) are stripped automatically before sending.
 
 **Input:**
 ```json

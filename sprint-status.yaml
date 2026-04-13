@@ -78,4 +78,18 @@ epics:
       ARCH.4: complete  # Implement DeliveryWorker (src/core/delivery.ts)
       ARCH.5: complete  # Remove Telegram outbound polling + simplify pm2
       ARCH.6: complete  # Update docs (DEPLOYMENT, TELEGRAM_ADAPTER, HTTP_API)
+  E10:
+    status: complete
+    completed: 2026-04-13
+    notes: >
+      S10.1 (CapabilityChecker utility) skipped — inline checks in api.ts are
+      sufficient at current scale. S10.2 (markRead) deferred to BlueBubbles
+      (E4). S10.3 fully implemented for Telegram: persistent typing indicator
+      loop (4s resend, 2-min timeout) started on inbound, stopped on send();
+      react() implemented via sendReaction with platform_message_id encoded as
+      "{chatId}:{messageId}" in inbound metadata.
+    stories:
+      S10.2: skipped  # markRead: Telegram doesn't support it; deferred to E4/BlueBubbles
+      S10.3: complete  # react_to_message end-to-end (src/adapters/telegram.ts)
+      S10.typing: complete  # Persistent typing loop in TelegramAdapter (src/adapters/telegram.ts)
 last_updated: 2026-04-13

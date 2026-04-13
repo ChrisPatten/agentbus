@@ -30,6 +30,22 @@ const BACKOFF_INITIAL_MS = 1000;
 const BACKOFF_MAX_MS = 30_000;
 const LOOP_RESTART_DELAY_MS = 5000;
 
+/**
+ * Emoji that Telegram's Bot API accepts for sendReaction.
+ * Stored without variation selectors (U+FE0F) — that's the form the API expects.
+ * Source: https://core.telegram.org/bots/api#reactiontypeemoji
+ */
+const TELEGRAM_REACTION_EMOJIS = new Set([
+  '👍', '👎', '❤', '🔥', '🥰', '👏', '😁', '🤔', '🤯', '😱',
+  '🤬', '😢', '🎉', '🤩', '🤮', '💩', '🙏', '👌', '🕊', '🤡',
+  '🥱', '🥴', '😍', '🐳', '❤\u200D🔥', '🌚', '🌭', '💯', '🤣', '⚡',
+  '🍌', '🏆', '💔', '🤨', '😐', '🍓', '🍾', '💋', '🖕', '😈',
+  '😴', '😭', '🤓', '👻', '👨\u200D💻', '👀', '🎃', '🙈', '😇', '😨',
+  '🤝', '✍', '🤗', '🫡', '🎅', '🎄', '☃', '💅', '🤪', '🗿',
+  '🆒', '💘', '🙉', '🦄', '😘', '💊', '🙊', '😎', '👾',
+  '🤷\u200D♂', '🤷', '🤷\u200D♀', '😡',
+]);
+
 // ── Minimal Telegram Bot API types ────────────────────────────────────────────
 
 interface TelegramUser {
@@ -111,7 +127,7 @@ export class TelegramAdapter implements AdapterInstance {
   readonly name = 'telegram';
   readonly capabilities: AdapterCapabilities = {
     send: true,
-    react: false,
+    react: true,
     markRead: false,
     typing: true,
     registerCommands: true,
@@ -133,6 +149,8 @@ export class TelegramAdapter implements AdapterInstance {
   private inboundBackoffMs = BACKOFF_INITIAL_MS;
   private lastActivity: string | null = null;
   private consecutiveFailures = 0;
+  /** Per-chat typing indicator loops. Key is the Telegram chat_id. */
+  private readonly typingLoops = new Map<number, AbortController>();
 
   constructor(deps: TelegramAdapterDeps) {
     const telegramConfig = deps.config.adapters.telegram;
@@ -178,6 +196,8 @@ export class TelegramAdapter implements AdapterInstance {
   async stop(): Promise<void> {
     console.log('[telegram] Stopping');
     this.stopping = true;
+    for (const controller of this.typingLoops.values()) controller.abort();
+    this.typingLoops.clear();
     this.stopController.abort();
   }
 
@@ -229,10 +249,8 @@ export class TelegramAdapter implements AdapterInstance {
 
     const parts = splitMessage(envelope.payload.body);
 
-    // Typing indicator — fire-and-forget
-    this.callTelegram('sendChatAction', { chat_id: chatId, action: 'typing' }).catch((err) =>
-      console.warn(`[telegram] Typing indicator failed for chat ${chatId}: ${String(err)}`),
-    );
+    // Stop the persistent typing loop for this chat now that we're delivering
+    this.stopTypingIndicator(chatId);
 
     let sentParts = 0;
     let platformMessageId: string | undefined;
@@ -279,6 +297,75 @@ export class TelegramAdapter implements AdapterInstance {
 
     this.lastActivity = new Date().toISOString();
     return { success: true, platformMessageId };
+  }
+
+  // ── AdapterInstance react ─────────────────────────────────────────────────
+
+  async react(platformMessageId: string, reaction: string): Promise<void> {
+    // platform_message_id is encoded as "{chatId}:{messageId}" by processUpdate()
+    const colonIdx = platformMessageId.indexOf(':');
+    if (colonIdx === -1) {
+      throw new Error(`Invalid Telegram platform_message_id "${platformMessageId}" — expected "chatId:messageId"`);
+    }
+    const chatId = parseInt(platformMessageId.slice(0, colonIdx), 10);
+    const messageId = parseInt(platformMessageId.slice(colonIdx + 1), 10);
+    if (isNaN(chatId) || isNaN(messageId)) {
+      throw new Error(`Invalid Telegram platform_message_id "${platformMessageId}" — could not parse chat or message ID`);
+    }
+
+    // Telegram requires emoji without variation selectors (U+FE0F)
+    const normalized = reaction.replace(/\uFE0F/g, '');
+
+    if (!TELEGRAM_REACTION_EMOJIS.has(normalized)) {
+      // Unsupported reaction — send as a text message instead
+      console.log(`[telegram] "${reaction}" is not a supported Telegram reaction; sending as text`);
+      await this.callTelegram('sendMessage', {
+        chat_id: chatId,
+        text: reaction,
+      });
+      return;
+    }
+
+    await this.callTelegram('sendReaction', {
+      chat_id: chatId,
+      message_id: messageId,
+      reaction: [{ type: 'emoji', emoji: normalized }],
+    });
+  }
+
+  // ── Typing indicator ──────────────────────────────────────────────────────
+
+  /**
+   * Start a persistent typing indicator loop for `chatId`. Resends
+   * `sendChatAction('typing')` every 4 seconds so the indicator stays visible
+   * while the agent processes the message. Auto-stops after 2 minutes as a
+   * safety valve. Idempotent — calling while a loop is already running is a no-op.
+   */
+  private startTypingIndicator(chatId: number): void {
+    if (this.typingLoops.has(chatId)) return;
+
+    const controller = new AbortController();
+    this.typingLoops.set(chatId, controller);
+
+    void (async () => {
+      const deadline = Date.now() + 120_000;
+      while (!controller.signal.aborted && !this.stopping && Date.now() < deadline) {
+        this.callTelegram('sendChatAction', { chat_id: chatId, action: 'typing' }).catch((err) =>
+          console.warn(`[telegram] Typing indicator failed for chat ${chatId}: ${String(err)}`),
+        );
+        await this.sleep(4000);
+      }
+      this.typingLoops.delete(chatId);
+    })();
+  }
+
+  /** Stop the typing indicator loop for `chatId`, if one is running. */
+  private stopTypingIndicator(chatId: number): void {
+    const controller = this.typingLoops.get(chatId);
+    if (controller) {
+      controller.abort();
+      this.typingLoops.delete(chatId);
+    }
   }
 
   // ── Telegram API helper ──────────────────────────────────────────────────
@@ -344,11 +431,17 @@ export class TelegramAdapter implements AdapterInstance {
         metadata: {
           telegram_chat_id: msg.chat.id,
           telegram_message_id: msg.message_id,
+          // Encodes both IDs so react() can call sendReaction without a separate lookup
+          platform_message_id: `${msg.chat.id}:${msg.message_id}`,
         },
       };
 
       await processInbound(message, this.deps);
       this.lastActivity = new Date().toISOString();
+
+      // Start persistent typing indicator — stays active until the agent replies
+      this.startTypingIndicator(msg.chat.id);
+
       return true;
     } catch (err) {
       console.error(`[telegram] Failed to process inbound message ${update.update_id}: ${String(err)}`);

@@ -69,7 +69,7 @@ There is no separate `allowed_sender_ids` config — the contacts map is the sou
    - Message is submitted directly to `processInbound()` with:
      - `channel: "telegram"`
      - `sender: "{from.id}"` (raw Telegram user ID)
-     - `metadata.telegram_chat_id` and `metadata.telegram_message_id`
+     - `metadata.telegram_chat_id`, `metadata.telegram_message_id`, and `metadata.platform_message_id` (encoded as `"{chat_id}:{message_id}"` for use by `react()`)
 3. The inbound pipeline's contact-resolve stage maps the raw user ID to `contact:{id}`
 4. Route-resolve routes the message to the CC adapter
 
@@ -78,6 +78,10 @@ There is no separate `allowed_sender_ids` config — the contacts map is the sou
 **Backoff:** On Telegram API errors, the inbound loop backs off exponentially: 1s -> 2s -> 4s -> 8s -> 16s -> 30s (max), resetting to 1s on success.
 
 **Loop supervision:** The inbound loop runs under a `supervise()` wrapper. If the loop throws unexpectedly, the crash is logged and the loop is restarted after 5 seconds. The adapter's `stop()` method interrupts sleeping loops immediately via `AbortController`.
+
+**Typing indicator:** After each inbound message is accepted, a per-chat typing loop starts and resends `sendChatAction('typing')` every 4 seconds. The loop runs until the agent calls `reply`/`send_message` (which triggers `send()`, stopping the loop), or until a 2-minute safety timeout expires. Only one loop runs per chat at a time.
+
+**Reactions:** Inbound messages include `platform_message_id` in metadata, encoded as `"{chat_id}:{message_id}"`. The `react()` method parses this string and calls `sendReaction` with the emoji. Input emoji are normalised by stripping variation selectors (U+FE0F) before the API call. If the emoji is not in Telegram's supported reaction set, it is sent as a plain text message to the chat instead — reactions never fail silently or throw for an unsupported emoji.
 
 ---
 
@@ -89,7 +93,7 @@ Outbound delivery is handled by the bus-core delivery worker, which calls `adapt
 2. Resolves the target adapter from `metadata.adapter_id` or by channel lookup
 3. Calls `TelegramAdapter.send(envelope)` which:
    - Resolves the chat ID from the contact's `platforms.telegram.userId` in config
-   - Sends a typing indicator (`sendChatAction`) as fire-and-forget
+   - Stops the persistent typing indicator loop for this chat (if one is running)
    - Splits the body into chunks <=4096 chars (Telegram's hard limit), splitting on newlines where possible
    - Sends each chunk via `sendMessage` with `parse_mode: "Markdown"`
    - If Telegram returns HTTP 400 (malformed markdown), retries without `parse_mode`
@@ -115,10 +119,10 @@ This causes Telegram to display autocomplete suggestions when users type `/` in 
 
 | Capability | Supported |
 |---|---|
-| Typing indicator | Yes (`sendChatAction: "typing"`) |
+| Typing indicator | Yes — persistent loop, stays active while agent works |
 | Read receipts | No |
 | Slash command registration | Yes (`setMyCommands`) |
-| Reactions | No (planned) |
+| Reactions | Yes (`sendReaction` with emoji) |
 | Message splitting | Yes (chunks <=4096 chars) |
 | Markdown formatting | Yes (`parse_mode: "Markdown"`) |
 
