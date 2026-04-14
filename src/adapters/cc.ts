@@ -59,9 +59,12 @@ registerAllTools(mcpServer, busBaseUrl, healthState);
 export function formatMessagesForSampling(envelopes: MessageEnvelope[]): string {
   const parts: string[] = [];
 
-  const memoryContext = envelopes[0]?.metadata?.memory_context;
+  const firstMeta = envelopes[0]?.metadata;
+  const memoryContext = firstMeta?.memory_context;
   if (typeof memoryContext === 'string' && memoryContext.length > 0) {
     parts.push(memoryContext);
+    // Clear after consuming so a retry call doesn't prepend the block twice.
+    delete firstMeta!['memory_context'];
   }
 
   for (const env of envelopes) {

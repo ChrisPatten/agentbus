@@ -36,9 +36,18 @@ interface SummaryQueryRow {
   channel: string;
 }
 
-/** Format a date string (ISO 8601) as "Apr 12, 14:30" */
+/** Escape XML special characters to prevent injection into the <memory> block. */
+function escapeXml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+/** Format a date string (ISO 8601) as "Apr 12, 14:30" (UTC). */
 function fmtDate(iso: string): string {
-  // Slice "2026-04-12T14:30:00.000Z" → "Apr 12, 14:30"
   const d = new Date(iso);
   return d.toLocaleString('en-US', {
     month: 'short',
@@ -46,6 +55,7 @@ function fmtDate(iso: string): string {
     hour: '2-digit',
     minute: '2-digit',
     hour12: false,
+    timeZone: 'UTC',
   });
 }
 
@@ -58,14 +68,50 @@ function extractSummaryText(summaryJson: string): string {
     const parsed = JSON.parse(summaryJson) as { summary?: string };
     return parsed.summary ?? summaryJson;
   } catch {
+    console.warn(`[memory-inject] Failed to parse summary JSON: ${summaryJson.slice(0, 100)}`);
     return summaryJson;
   }
 }
 
+/**
+ * Build the <memory> XML block from memories and summaries.
+ * All user-controlled strings are XML-escaped before inclusion.
+ */
+function buildContextBlock(
+  contactId: string,
+  memories: MemoryQueryRow[],
+  summaries: SummaryQueryRow[],
+): string {
+  const lines: string[] = [`<memory contact="${escapeXml(contactId)}">`];
+
+  if (memories.length > 0) {
+    lines.push('## Known facts');
+    for (const m of memories) {
+      lines.push(
+        `- [${escapeXml(m.category)}] ${escapeXml(m.content)} (confidence: ${m.confidence.toFixed(2)})`,
+      );
+    }
+  }
+
+  if (summaries.length > 0) {
+    if (memories.length > 0) lines.push('');
+    lines.push('## Recent conversations');
+    for (const s of summaries) {
+      const text = extractSummaryText(s.summary);
+      lines.push(
+        `- ${escapeXml(s.channel)} (${fmtDate(s.started_at)} - ${fmtDate(s.ended_at)}): ${escapeXml(text)}`,
+      );
+    }
+  }
+
+  lines.push('</memory>');
+  return lines.join('\n');
+}
+
 export function createMemoryInject(db: Database.Database, config: AppConfig): PipelineStage {
   return async (ctx) => {
-    // Only fire on new sessions with a known contact
-    if (!ctx.sessionCreated || !ctx.contact) {
+    // Only fire on new sessions with a known contact (non-empty ID)
+    if (!ctx.sessionCreated || !ctx.contact || !ctx.contact.id) {
       return ctx;
     }
 
@@ -101,71 +147,37 @@ export function createMemoryInject(db: Database.Database, config: AppConfig): Pi
       return ctx;
     }
 
-    // 3. Format context block
-    const lines: string[] = [`<memory contact="${contactId}">`];
-
-    if (memories.length > 0) {
-      lines.push('## Known facts');
-      for (const m of memories) {
-        lines.push(`- [${m.category}] ${m.content} (confidence: ${m.confidence.toFixed(2)})`);
-      }
-    }
-
-    if (summaries.length > 0) {
-      if (memories.length > 0) lines.push('');
-      lines.push('## Recent conversations');
-      for (const s of summaries) {
-        const text = extractSummaryText(s.summary);
-        lines.push(`- ${s.channel} (${fmtDate(s.started_at)} - ${fmtDate(s.ended_at)}): ${text}`);
-      }
-    }
-
-    lines.push('</memory>');
-
-    let context = lines.join('\n');
+    // 3. Format context block (all user content XML-escaped)
+    let context = buildContextBlock(contactId, memories, summaries);
 
     // 4. Apply character cap — trim summaries first, then memories
     if (context.length > MAX_INJECT_CHARS) {
-      // Rebuild with progressively fewer summaries
+      let trimmed = false;
+
+      // Remove summaries one by one until it fits
       for (let summaryCount = summaries.length - 1; summaryCount >= 0; summaryCount--) {
-        const trimmedSummaries = summaries.slice(0, summaryCount);
-        const trimLines: string[] = [`<memory contact="${contactId}">`];
-
-        if (memories.length > 0) {
-          trimLines.push('## Known facts');
-          for (const m of memories) {
-            trimLines.push(`- [${m.category}] ${m.content} (confidence: ${m.confidence.toFixed(2)})`);
-          }
+        context = buildContextBlock(contactId, memories, summaries.slice(0, summaryCount));
+        if (context.length <= MAX_INJECT_CHARS) {
+          trimmed = true;
+          break;
         }
-
-        if (trimmedSummaries.length > 0) {
-          if (memories.length > 0) trimLines.push('');
-          trimLines.push('## Recent conversations');
-          for (const s of trimmedSummaries) {
-            const text = extractSummaryText(s.summary);
-            trimLines.push(`- ${s.channel} (${fmtDate(s.started_at)} - ${fmtDate(s.ended_at)}): ${text}`);
-          }
-        }
-
-        trimLines.push('</memory>');
-        context = trimLines.join('\n');
-
-        if (context.length <= MAX_INJECT_CHARS) break;
       }
 
       // If still too long after removing all summaries, trim memories by count
       if (context.length > MAX_INJECT_CHARS) {
         for (let memCount = memories.length - 1; memCount >= 0; memCount--) {
-          const trimLines: string[] = [`<memory contact="${contactId}">`];
-          trimLines.push('## Known facts');
-          for (const m of memories.slice(0, memCount)) {
-            trimLines.push(`- [${m.category}] ${m.content} (confidence: ${m.confidence.toFixed(2)})`);
+          context = buildContextBlock(contactId, memories.slice(0, memCount), []);
+          if (context.length <= MAX_INJECT_CHARS) {
+            trimmed = true;
+            break;
           }
-          trimLines.push('</memory>');
-          context = trimLines.join('\n');
-
-          if (context.length <= MAX_INJECT_CHARS) break;
         }
+      }
+
+      if (trimmed) {
+        console.warn(
+          `[memory-inject] context trimmed to ${context.length} chars (limit: ${MAX_INJECT_CHARS}) for contact ${contactId}`,
+        );
       }
     }
 

@@ -144,4 +144,16 @@ describe('formatMessagesForSampling', () => {
     expect(result).toContain('msg-001');
     expect(result).toContain('msg-002');
   });
+
+  it('does not double-inject memory_context if called twice on the same envelope', () => {
+    const context = '<memory contact="alice">\n## Known facts\n- [fact] Likes hiking\n</memory>';
+    const env = makeEnvelope({ metadata: { memory_context: context } });
+    const first = formatMessagesForSampling([env]);
+    const second = formatMessagesForSampling([env]);
+
+    expect(first.startsWith(context)).toBe(true);
+    // memory_context was cleared after first call; second call omits it
+    expect(second.startsWith('New message')).toBe(true);
+    expect(second).not.toContain('<memory');
+  });
 });
