@@ -84,6 +84,31 @@ const MemoryConfigSchema = z.object({
   claude_api_model: z.string().default('claude-sonnet-4-6'),
   /** Max tokens for the summarization API response (default: 8192) */
   summary_max_tokens: z.number().int().positive().default(8192),
+  /**
+   * Shell command(s) to run when a session is closed due to inactivity.
+   * Executed via /bin/sh -c, so shell syntax is supported.
+   *
+   * Two forms:
+   *   - string: runs for every channel
+   *   - record: runs the command for the matching channel only; channels not
+   *     listed are silently skipped
+   *
+   * Env vars available to the command:
+   *   AGENTBUS_SESSION_ID    — full session UUID
+   *   AGENTBUS_CHANNEL       — e.g. "claude-code", "telegram"
+   *   AGENTBUS_CONTACT_ID    — contact identifier
+   *   AGENTBUS_MESSAGE_COUNT — number of messages in the session
+   *
+   * Examples:
+   *   # Global (all channels):
+   *   on_session_close: "tmux send-keys -t my-pane '/clear' Enter"
+   *
+   *   # Per-channel:
+   *   on_session_close:
+   *     claude-code: "tmux send-keys -t pane-cc '/clear' Enter"
+   *     telegram:    "tmux send-keys -t pane-tg '/clear' Enter"
+   */
+  on_session_close: z.union([z.string(), z.record(z.string(), z.string())]).optional(),
 });
 
 /**

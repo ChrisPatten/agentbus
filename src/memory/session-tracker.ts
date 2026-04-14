@@ -13,6 +13,7 @@
  * threshold). It handles the complementary case: sessions that go idle without
  * any subsequent message — they would never close otherwise.
  */
+import { exec, type ExecOptionsWithStringEncoding } from 'node:child_process';
 import type Database from 'better-sqlite3';
 import type { AppConfig } from '../config/schema.js';
 import type { Summarizer } from './summarizer.js';
@@ -104,6 +105,7 @@ export class SessionTracker {
         `[session-tracker] Closed idle session ${session.id.slice(0, 8)} ` +
           `(${session.channel}/${session.contact_id}, ${session.message_count} msgs)`,
       );
+      this.runOnSessionCloseHook(session);
       // Fire-and-forget — summarizer handles retries and error marking internally.
       // The outer .catch() is a last-resort guard: if summarize() itself throws
       // unexpectedly (e.g. DB failure inside its own error handler), we still
@@ -171,6 +173,43 @@ export class SessionTracker {
         }
       });
     }
+  }
+
+  /**
+   * Run the on_session_close hook command, if configured.
+   * Fires asynchronously — a hook failure never blocks session processing.
+   */
+  private runOnSessionCloseHook(session: SessionRow): void {
+    const hookConfig = this.config.memory.on_session_close;
+    if (!hookConfig) return;
+
+    const cmd =
+      typeof hookConfig === 'string' ? hookConfig : hookConfig[session.channel];
+    if (!cmd) return;
+
+    const options: ExecOptionsWithStringEncoding = {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        AGENTBUS_SESSION_ID: session.id,
+        AGENTBUS_CHANNEL: session.channel,
+        AGENTBUS_CONTACT_ID: session.contact_id,
+        AGENTBUS_MESSAGE_COUNT: String(session.message_count),
+      },
+    };
+
+    exec(cmd, options, (err, stdout, stderr) => {
+      if (err) {
+        console.error(
+          `[session-tracker] on_session_close hook failed for ${session.id.slice(0, 8)}:`,
+          err.message,
+        );
+        if (stderr) console.error('[session-tracker] hook stderr:', stderr.trim());
+      } else {
+        console.log(`[session-tracker] on_session_close hook ran for ${session.id.slice(0, 8)}`);
+        if (stdout.trim()) console.log('[session-tracker] hook stdout:', stdout.trim());
+      }
+    });
   }
 
   /**

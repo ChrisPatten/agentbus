@@ -83,7 +83,40 @@ memory:
   context_window_hours: 48            # Context window for E9 injection (hours)
   claude_api_model: claude-sonnet-4-6 # Model used for summarization
   summary_max_tokens: 8192            # Max tokens for the summarization API response
+  on_session_close: ""                # Optional shell command to run when a session closes (see below)
 ```
+
+### `on_session_close` hook
+
+Run a shell command whenever a session is closed due to inactivity.
+Executed via `/bin/sh -c`, so shell syntax, pipes, and `&&` chains work.
+
+Accepts two forms:
+
+**Global** — runs for every channel:
+```yaml
+memory:
+  on_session_close: "tmux send-keys -t my-pane '/clear' Enter"
+```
+
+**Per-channel** — only runs for the listed channels; unlisted channels are skipped:
+```yaml
+memory:
+  on_session_close:
+    claude-code: "tmux send-keys -t pane-cc '/clear' Enter"
+    telegram:    "tmux send-keys -t pane-tg '/clear' Enter"
+```
+
+The following environment variables are set for the duration of the command:
+
+| Variable | Example |
+|---|---|
+| `AGENTBUS_SESSION_ID` | `a1b2c3d4-...` |
+| `AGENTBUS_CHANNEL` | `claude-code` |
+| `AGENTBUS_CONTACT_ID` | `contact:alice` |
+| `AGENTBUS_MESSAGE_COUNT` | `12` |
+
+Hook failures are logged but never block session closing or summarization.
 
 Requires `ANTHROPIC_API_KEY` in `.env`. If the key is missing, the bus starts
 normally but summarization is disabled (sessions are still tracked and closed).
