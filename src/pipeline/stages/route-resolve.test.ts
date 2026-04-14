@@ -58,6 +58,7 @@ function makeCtx(envelope: Partial<MessageEnvelope> = {}, config?: AppConfig, db
     routes: [],
     conversationId: null,
     sessionId: null,
+    sessionCreated: false,
     config: config ?? makeConfig(),
     db: theDb,
   };

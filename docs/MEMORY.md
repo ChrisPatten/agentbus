@@ -169,6 +169,53 @@ Results are ordered by confidence DESC, then recency.
 
 ---
 
+## Context Injection (E9)
+
+On the **first message of a new session**, the bus automatically injects remembered context
+into the envelope so the agent starts each conversation with continuity.
+
+### What gets injected
+
+| Source | Query | Time scope |
+|--------|-------|-----------|
+| **Memories** | All active memories for the contact, ordered by confidence | All time (no cutoff — memories have their own lifecycle) |
+| **Session summaries** | Recent session summaries for the contact | `context_window_hours` (default 48h) |
+
+Nothing is injected if both queries return empty results.
+
+### Format
+
+The context block is attached to `envelope.metadata.memory_context` and prepended to the
+channel notification received by Claude Code:
+
+```
+<memory contact="alice">
+## Known facts
+- [preference] Prefers dark mode (confidence: 0.95)
+- [work] Senior engineer at Acme Corp (confidence: 0.90)
+
+## Recent conversations
+- claude-code (Apr 12, 14:30 - 15:45): Discussed deployment strategy for the new API.
+</memory>
+
+New message from contact:alice via claude-code [id:msg-001]:
+Hello, I had a question about...
+```
+
+### Configuration
+
+```yaml
+memory:
+  context_window_hours: 48  # How far back session summaries are retrieved (hours)
+```
+
+### Opt-out and E15 (Temp Chat)
+
+Sessions started with `/temp` (E15, backlog) will skip context injection — the temp flag
+signals that this session should not receive or contribute to long-term memory.
+
+---
+
 ## Troubleshooting
 
 ### Summarization keeps failing

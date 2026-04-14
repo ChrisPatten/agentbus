@@ -59,6 +59,7 @@ function makeCtx(
     routes: [{ adapterId: 'claude-code', recipientId: 'agent:claude' }],
     conversationId: cid,
     sessionId: null,
+    sessionCreated: false,
     config: stubConfig,
     db: theDb,
   };
@@ -164,5 +165,45 @@ describe('transcript-log stage', () => {
     const ctx = makeCtx({}, db);
     const result = await stage(ctx);
     expect(result).not.toBeNull();
+  });
+
+  // ── E9: sessionCreated flag ──────────────────────────────────────────────────
+
+  it('sets sessionCreated = true when creating a brand-new session', async () => {
+    const db = makeDb();
+    const stage = createTranscriptLog(db, stubConfig);
+    const ctx = makeCtx({}, db);
+    const result = await stage(ctx);
+    expect(result!.sessionCreated).toBe(true);
+  });
+
+  it('sets sessionCreated = true when session rotates due to idle gap', async () => {
+    const db = makeDb();
+    const config: AppConfig = { ...stubConfig, memory: { ...stubConfig.memory, session_idle_threshold_ms: 1 } };
+    const stage = createTranscriptLog(db, config);
+    const cid = convId('chris', 'telegram', 'general');
+
+    const ctx1 = makeCtx({}, db, cid);
+    await stage(ctx1);
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    const ctx2 = makeCtx({ id: 'msg-2' }, db, cid);
+    const result = await stage(ctx2);
+    expect(result!.sessionCreated).toBe(true);
+  });
+
+  it('leaves sessionCreated = false when extending an existing session', async () => {
+    const db = makeDb();
+    const config: AppConfig = { ...stubConfig, memory: { ...stubConfig.memory, session_idle_threshold_ms: 1800000 } };
+    const stage = createTranscriptLog(db, config);
+    const cid = convId('chris', 'telegram', 'general');
+
+    const ctx1 = makeCtx({}, db, cid);
+    await stage(ctx1);
+
+    const ctx2 = makeCtx({ id: 'msg-2' }, db, cid);
+    const result = await stage(ctx2);
+    expect(result!.sessionCreated).toBe(false);
   });
 });

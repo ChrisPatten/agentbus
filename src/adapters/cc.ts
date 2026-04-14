@@ -51,14 +51,25 @@ registerAllTools(mcpServer, busBaseUrl, healthState);
  * Format a batch of message envelopes into a single string for delivery.
  * Each message becomes one paragraph; multiple messages in a batch are
  * separated by a blank line.
+ *
+ * If the first envelope carries E9 memory context (metadata.memory_context),
+ * it is prepended before the message text so Claude receives it as part of
+ * the channel notification for that new session.
  */
 export function formatMessagesForSampling(envelopes: MessageEnvelope[]): string {
-  return envelopes
-    .map((env) => {
-      const body = env.payload.type === 'text' ? env.payload.body : `[${env.payload.type}]`;
-      return `New message from ${env.sender} via ${env.channel} [id:${env.id}]:\n${body}`;
-    })
-    .join('\n\n');
+  const parts: string[] = [];
+
+  const memoryContext = envelopes[0]?.metadata?.memory_context;
+  if (typeof memoryContext === 'string' && memoryContext.length > 0) {
+    parts.push(memoryContext);
+  }
+
+  for (const env of envelopes) {
+    const body = env.payload.type === 'text' ? env.payload.body : `[${env.payload.type}]`;
+    parts.push(`New message from ${env.sender} via ${env.channel} [id:${env.id}]:\n${body}`);
+  }
+
+  return parts.join('\n\n');
 }
 
 /**

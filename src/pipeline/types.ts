@@ -44,6 +44,8 @@ export interface PipelineContext {
   conversationId: string | null;
   /** Session ID for transcript logging */
   sessionId: string | null;
+  /** Whether Stage 80 created a brand-new session (vs. extending an existing one) */
+  sessionCreated: boolean;
   /** Reason the pipeline was aborted (set by the stage returning null) */
   abortReason?: string;
   /** Infrastructure references — stages read these, never mutate */

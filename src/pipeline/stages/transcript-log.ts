@@ -66,6 +66,7 @@ export function createTranscriptLog(db: Database.Database, config: AppConfig): P
         `INSERT INTO sessions (id, conversation_id, channel, contact_id, started_at, last_activity)
          VALUES (?, ?, ?, ?, ?, ?)`,
       ).run(sessionId, conversationId, e.channel, contactId, now, now);
+      ctx.sessionCreated = true;
     } else {
       const lastActivity = new Date(activeSession.last_activity).getTime();
       const gapMs = Date.now() - lastActivity;
@@ -78,6 +79,7 @@ export function createTranscriptLog(db: Database.Database, config: AppConfig): P
           `INSERT INTO sessions (id, conversation_id, channel, contact_id, started_at, last_activity)
            VALUES (?, ?, ?, ?, ?, ?)`,
         ).run(sessionId, conversationId, e.channel, contactId, now, now);
+        ctx.sessionCreated = true;
       } else {
         // Extend existing session
         sessionId = activeSession.id;

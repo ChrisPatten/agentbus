@@ -46,6 +46,7 @@ function makeCtx(envelope: Partial<MessageEnvelope> = {}): PipelineContext {
     routes: [],
     conversationId: null,
     sessionId: null,
+    sessionCreated: false,
     config: stubConfig,
     db: makeDb(),
   };

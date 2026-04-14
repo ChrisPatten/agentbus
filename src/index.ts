@@ -32,6 +32,7 @@ import { createTopicClassify } from './pipeline/stages/topic-classify.js';
 import { createPriorityScore } from './pipeline/stages/priority-score.js';
 import { createRouteResolve } from './pipeline/stages/route-resolve.js';
 import { createTranscriptLog } from './pipeline/stages/transcript-log.js';
+import { createMemoryInject } from './pipeline/stages/memory-inject.js';
 import { TelegramAdapter } from './adapters/telegram.js';
 import { DeliveryWorker } from './core/delivery.js';
 import { createCommandSystem } from './commands/index.js';
@@ -68,6 +69,7 @@ pipeline.use({ slot: 50, name: 'topic-classify',   stage: createTopicClassify(co
 pipeline.use({ slot: 60, name: 'priority-score',   stage: createPriorityScore(config) });
 pipeline.use({ slot: 70, name: 'route-resolve',    stage: createRouteResolve(config, db) });
 pipeline.use({ slot: 80, name: 'transcript-log',   stage: createTranscriptLog(db, config), critical: false });
+pipeline.use({ slot: 85, name: 'memory-inject',    stage: createMemoryInject(db, config),  critical: false });
 
 const httpServer = await createHttpServer({ queue, registry, config, pipeline, db, commandRegistry, pauseSet });
 

@@ -181,6 +181,7 @@ export async function processInbound(
     routes: [],
     conversationId: null,
     sessionId: null,
+    sessionCreated: false,
     config: deps.config,
     db: deps.db,
   };

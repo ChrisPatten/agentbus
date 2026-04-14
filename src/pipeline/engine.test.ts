@@ -69,6 +69,7 @@ function makePipelineContext(overrides: Partial<PipelineContext> = {}): Pipeline
     routes: [],
     conversationId: null,
     sessionId: null,
+    sessionCreated: false,
     config: stubConfig,
     db: makeDb(),
     ...overrides,

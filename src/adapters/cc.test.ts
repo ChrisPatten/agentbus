@@ -110,4 +110,38 @@ describe('formatMessagesForSampling', () => {
     expect(result).toContain('[image]');
     expect(result).not.toContain('undefined');
   });
+
+  // ── E9: memory context prepending ────────────────────────────────────────────
+
+  it('prepends memory_context when present in first envelope metadata', () => {
+    const context = '<memory contact="alice">\n## Known facts\n- [fact] Likes hiking\n</memory>';
+    const env = makeEnvelope({ metadata: { memory_context: context } });
+    const result = formatMessagesForSampling([env]);
+    expect(result.startsWith(context)).toBe(true);
+    expect(result).toContain('New message from contact:alice');
+  });
+
+  it('does not prepend when memory_context is absent', () => {
+    const env = makeEnvelope();
+    const result = formatMessagesForSampling([env]);
+    expect(result.startsWith('New message')).toBe(true);
+  });
+
+  it('does not prepend when memory_context is empty string', () => {
+    const env = makeEnvelope({ metadata: { memory_context: '' } });
+    const result = formatMessagesForSampling([env]);
+    expect(result.startsWith('New message')).toBe(true);
+  });
+
+  it('only reads memory_context from the first envelope in a batch', () => {
+    const context = '<memory contact="alice">\n## Known facts\n- [fact] Likes hiking\n</memory>';
+    const env1 = makeEnvelope({ id: 'msg-001', metadata: { memory_context: context } });
+    const env2 = makeEnvelope({ id: 'msg-002', metadata: {} });
+    const result = formatMessagesForSampling([env1, env2]);
+    // Context appears once at the start
+    expect(result.indexOf(context)).toBe(0);
+    expect(result.indexOf(context, 1)).toBe(-1); // not repeated
+    expect(result).toContain('msg-001');
+    expect(result).toContain('msg-002');
+  });
 });

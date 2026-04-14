@@ -5,7 +5,7 @@ bmad_status:
   planning: complete
   architecture: complete
   implementation: in-progress
-current_epic: E8
+current_epic: E9
 epics:
   E1:
     status: complete
@@ -122,6 +122,20 @@ epics:
       S8.2: complete  # SessionTracker (src/memory/session-tracker.ts)
       S8.3: complete  # Summarizer Pipeline (src/memory/summarizer.ts)
       S8.4: complete  # Memory Lifecycle (migration 003 + HTTP endpoints + MCP tools)
+  E9:
+    status: complete
+    completed: 2026-04-14
+    notes: >
+      Context injection on first message of new session. Stage 85 (memory-inject,
+      critical: false) queries active memories for the sender and session summaries
+      within context_window_hours, formats a <memory> block, and attaches it to
+      envelope.metadata.memory_context. CC adapter prepends it to channel
+      notifications. context_window_hours (previously unused) now gates how far
+      back session summaries are retrieved.
+    stories:
+      S9.1: complete  # sessionCreated flag in PipelineContext + transcript-log
+      S9.2: complete  # Stage 85 memory-inject (src/pipeline/stages/memory-inject.ts)
+      S9.3: complete  # CC adapter formatMessagesForSampling prepends memory_context
   E14:
     status: backlog
     notes: >
@@ -179,4 +193,4 @@ epics:
       S17.2: pending  # Telegram adapter: detect photo/document/video/audio, resolve via getFile, emit attachment envelope
       S17.3: pending  # Pipeline + TranscriptLogger: persist attachment rows alongside transcript rows
       S17.4: pending  # CC adapter: forward images as base64 content blocks, non-image as text description
-last_updated: 2026-04-14  # E8 complete
+last_updated: 2026-04-14  # E9 complete
