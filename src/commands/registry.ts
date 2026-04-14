@@ -8,9 +8,9 @@
  * The registry is the extension point for custom commands: any code with
  * access to the registry can call register() to add a command at startup.
  */
-import type Database from 'better-sqlite3';
 import type { MessageEnvelope } from '../types/envelope.js';
 import type { AppConfig } from '../config/schema.js';
+import type { SafeDatabase } from '../db/safe-database.js';
 
 /** Minimal command descriptor sent to adapters for autocomplete registration */
 export interface CommandManifest {
@@ -41,8 +41,8 @@ export interface SlashCommandContext {
   argsRaw: string;
   /** Full original message envelope */
   envelope: MessageEnvelope;
-  /** SQLite database handle for queries */
-  db: Database.Database;
+  /** Read-only database handle for queries (use HandlerDeps.db for writes) */
+  db: SafeDatabase;
   /** Bus config */
   config: AppConfig;
 }

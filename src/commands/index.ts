@@ -16,7 +16,8 @@ import type { AppConfig } from '../config/schema.js';
 import type { AdapterRegistry } from '../core/registry.js';
 import type { MessageQueue } from '../core/queue.js';
 import { CommandRegistry } from './registry.js';
-import { createBuiltinCommands, bindHelpToRegistry } from './handlers.js';
+import { createBuiltinCommands, createHelpHandler } from './handlers.js';
+import { createSafeDatabase } from '../db/safe-database.js';
 
 export type { CommandRegistry } from './registry.js';
 export type {
@@ -26,6 +27,8 @@ export type {
   CommandManifest,
   SlashCommandContext,
 } from './registry.js';
+export { createSafeDatabase } from '../db/safe-database.js';
+export type { SafeDatabase } from '../db/safe-database.js';
 
 export interface CommandSystemDeps {
   adapterRegistry: AdapterRegistry;
@@ -46,24 +49,38 @@ export interface CommandSystem {
  */
 export function createCommandSystem(deps: CommandSystemDeps): CommandSystem {
   const registry = new CommandRegistry();
+
+  // Load persisted pause state from previous runs
   const pauseSet = new Set<string>();
+  const pausedRows = deps.db
+    .prepare('SELECT adapter_id, paused_by FROM paused_adapters')
+    .all() as Array<{ adapter_id: string; paused_by: string }>;
+  for (const row of pausedRows) {
+    pauseSet.add(row.adapter_id);
+    console.log(`[commands] Adapter "${row.adapter_id}" is paused (by ${row.paused_by} — persisted from previous run)`);
+  }
 
   const builtins = createBuiltinCommands({
     adapterRegistry: deps.adapterRegistry,
     queue: deps.queue,
     pauseSet,
+    db: deps.db,
   });
 
   for (const cmd of builtins) {
     registry.register(cmd);
   }
 
-  // Late-bind /help to the registry so it can list all commands including
-  // any plugin commands registered after createCommandSystem() returns.
-  bindHelpToRegistry(
-    () => registry.list(),
-    (name) => registry.lookup(name),
-  );
+  // Register /help last — its handler captures the registry directly,
+  // so it can list all commands including any registered after this point
+  // (registry.list() is called at handler invocation time, not at creation).
+  registry.register({
+    name: 'help',
+    description: 'List commands or show usage for a specific command',
+    usage: '/help [command]',
+    scope: 'bus',
+    handler: createHelpHandler(registry),
+  });
 
   return { registry, pauseSet };
 }

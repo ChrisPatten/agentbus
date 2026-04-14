@@ -202,7 +202,11 @@ describe('inbound pipeline — integration', () => {
 
     const msgs = queue.dequeue('agent:claude', undefined, 10);
     expect(msgs).toHaveLength(1);
-    expect(msgs[0]!.envelope.payload.type).toBe('slash_command');
+    // Slash command payloads are restored to text before enqueue (D5);
+    // parsed command info lands in metadata.slash_command.
+    expect(msgs[0]!.envelope.payload.type).toBe('text');
+    expect(msgs[0]!.envelope.payload.body).toBe('/status');
+    expect(msgs[0]!.envelope.metadata['slash_command']).toEqual({ command: 'status', args_raw: '' });
   });
 
   it('classifies topic from message body keywords', async () => {

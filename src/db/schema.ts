@@ -19,6 +19,11 @@ function loadMigrations(): Migration[] {
       description: 'Initial schema',
       sql: readFileSync(join(migrationsDir, '001_initial_schema.sql'), 'utf-8'),
     },
+    {
+      version: 2,
+      description: 'Paused adapters',
+      sql: readFileSync(join(migrationsDir, '002_paused_adapters.sql'), 'utf-8'),
+    },
   ];
 }
 

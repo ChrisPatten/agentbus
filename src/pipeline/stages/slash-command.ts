@@ -14,7 +14,8 @@ export const slashCommandDetect: PipelineStage = async (ctx) => {
   const match = /^\/(\S+)(?:\s+([\s\S]*))?$/.exec(body);
   if (!match) return ctx;
 
-  const commandName = match[1]!;
+  // Strip @botname suffix (Telegram sends "/status@MyBot" in group chats)
+  const commandName = match[1]!.split('@')[0]!;
   const argsRaw = (match[2] ?? '').trim();
   const args = argsRaw ? argsRaw.split(/\s+/) : [];
 

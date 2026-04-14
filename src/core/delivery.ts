@@ -119,7 +119,6 @@ export class DeliveryWorker {
     }
 
     // Fallback: resolve by channel
-    const adapters = this.registry.lookupByChannel(envelope.channel);
-    return adapters[0];
+    return this.registry.lookupPrimaryByChannel(envelope.channel);
   }
 }

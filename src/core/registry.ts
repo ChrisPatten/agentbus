@@ -12,6 +12,8 @@ export interface AdapterCapabilities {
   typing?: boolean;
   /** Can accept slash command registration */
   registerCommands?: boolean;
+  /** Maximum message length in characters. Default: 4096 (Telegram limit) */
+  maxMessageLength?: number;
   /** Channels this adapter serves, e.g. ["telegram"] */
   channels: string[];
 }
@@ -97,6 +99,18 @@ export class AdapterRegistry {
     return Array.from(this.adapters.values()).filter((a) =>
       a.capabilities.channels.includes(channel)
     );
+  }
+
+  /**
+   * Return the primary adapter for a channel — the first registered adapter
+   * that declares the channel in its `capabilities.channels[]`.
+   *
+   * This makes the "first registered wins" policy explicit and centralised.
+   * Use this wherever a single adapter must be selected from a channel name,
+   * e.g. command dispatch, pause checks, and fallback delivery.
+   */
+  lookupPrimaryByChannel(channel: string): AdapterInstance | undefined {
+    return this.lookupByChannel(channel)[0];
   }
 
   /**

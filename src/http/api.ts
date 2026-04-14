@@ -41,6 +41,7 @@ import type { PipelineEngine } from '../pipeline/engine.js';
 import type { PipelineContext } from '../pipeline/types.js';
 import type Database from 'better-sqlite3';
 import type { CommandRegistry, SlashCommandContext } from '../commands/registry.js';
+import { createSafeDatabase } from '../db/safe-database.js';
 
 export interface HttpServerDeps {
   queue: MessageQueue;
@@ -149,6 +150,13 @@ export async function processInbound(
     pauseSet?: Set<string>;
   },
 ): Promise<InboundResult | InboundAbort> {
+  // Validate payload for in-process callers that bypass Zod (e.g. TelegramAdapter).
+  // The HTTP route validates via InboundSchema, but processInbound is also called
+  // directly. Reject non-text payloads to prevent bypassing Stage 40 detection.
+  if (message.payload.type !== 'text' || !message.payload.body) {
+    return { ok: true, queued: false, reason: 'invalid_payload' };
+  }
+
   const envelope: MessageEnvelope = {
     id: message.id ?? '',
     timestamp: message.timestamp ?? '',
@@ -195,8 +203,7 @@ export async function processInbound(
     const cmd = deps.commandRegistry.lookup(commandName);
 
     // Determine originating adapter from the channel
-    const originAdapters = deps.registry?.lookupByChannel(result.envelope.channel) ?? [];
-    const originAdapter = originAdapters[0];
+    const originAdapter = deps.registry?.lookupPrimaryByChannel(result.envelope.channel);
     const adapterId = originAdapter?.id ?? 'unknown';
 
     const cmdCtx: SlashCommandContext = {
@@ -205,12 +212,11 @@ export async function processInbound(
       adapterId,
       argsRaw: result.slashCommand.argsRaw,
       envelope: result.envelope,
-      db: deps.db,
+      db: createSafeDatabase(deps.db),
       config: deps.config,
     };
 
-    let responseBody: string;
-    let commandHandled = false;
+    let responseBody: string | undefined;
 
     if (cmd && cmd.scope === 'bus') {
       try {
@@ -219,14 +225,12 @@ export async function processInbound(
       } catch (err) {
         responseBody = `Command error: ${String(err)}`;
       }
-      commandHandled = true;
     } else if (!cmd) {
       responseBody = `Unknown command: /${commandName}\nType /help to see available commands.`;
-      commandHandled = true;
     }
     // scope: 'agent' falls through to normal fan-out enqueue below
 
-    if (commandHandled) {
+    if (responseBody !== undefined) {
       // Send response directly via the originating adapter (bypass queue)
       if (originAdapter) {
         const responseEnvelope: MessageEnvelope = {
@@ -238,7 +242,7 @@ export async function processInbound(
           recipient: result.envelope.sender,
           reply_to: result.envelope.id,
           priority: 'normal',
-          payload: { type: 'text', body: responseBody! },
+          payload: { type: 'text', body: responseBody },
           metadata: { command_response: true, command: commandName },
         };
 
@@ -270,7 +274,7 @@ export async function processInbound(
                 result.envelope.channel,
                 contactId,
                 'outbound',
-                responseBody!,
+                responseBody,
                 JSON.stringify({ command_response: true, command: commandName }),
               );
           } catch (err) {
@@ -289,8 +293,7 @@ export async function processInbound(
   // Non-command messages from paused adapters are dropped here. Slash
   // commands are exempt (handled above) so /resume always gets through.
   if (deps.pauseSet && deps.registry) {
-    const originAdapters = deps.registry.lookupByChannel(result.envelope.channel);
-    const originAdapterId = originAdapters[0]?.id;
+    const originAdapterId = deps.registry.lookupPrimaryByChannel(result.envelope.channel)?.id;
     if (originAdapterId && deps.pauseSet.has(originAdapterId)) {
       return { ok: true, queued: false, reason: 'adapter_paused' };
     }
@@ -300,17 +303,29 @@ export async function processInbound(
   let enqueuedCount = 0;
   const primaryId = result.envelope.id;
 
+  // If the envelope carries a slash_command payload (Stage 40 rewrite), restore
+  // it to a plain text payload before enqueuing for agents. Agents should not
+  // need to handle the slash_command payload type; the parsed command info is
+  // available in metadata.slash_command instead.
+  const outboundPayload: MessageEnvelope['payload'] =
+    result.isSlashCommand && result.slashCommand && result.envelope.payload.type === 'slash_command'
+      ? { type: 'text', body: result.envelope.payload.body }
+      : { ...result.envelope.payload };
+
   for (let i = 0; i < result.routes.length; i++) {
     const route = result.routes[i]!;
     const fanEnvelope: MessageEnvelope = {
       ...result.envelope,
-      payload: { ...result.envelope.payload },
+      payload: outboundPayload,
       id: i === 0 ? primaryId : randomUUID(),
       recipient: route.recipientId,
       metadata: {
         ...result.envelope.metadata,
         adapter_id: route.adapterId,
         conversation_id: result.conversationId ?? undefined,
+        ...(result.isSlashCommand && result.slashCommand
+          ? { slash_command: { command: result.slashCommand.name, args_raw: result.slashCommand.argsRaw } }
+          : {}),
       },
     };
     try {
@@ -662,14 +677,13 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       }
 
       // Resolve adapter from channel
-      const adapters = registry.lookupByChannel(transcript.channel);
-      if (adapters.length === 0) {
+      const adapter = registry.lookupPrimaryByChannel(transcript.channel);
+      if (!adapter) {
         return reply.status(404).send({
           ok: false,
           error: `No adapter registered for channel: ${transcript.channel}`,
         });
       }
-      const adapter = adapters[0]!;
 
       // Capability check
       if (!adapter.capabilities.react) {

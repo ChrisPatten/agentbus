@@ -9,7 +9,9 @@
  *   /forget — returns "Memory system not yet available" until E8 lands.
  */
 import { randomUUID } from 'node:crypto';
-import type { CommandDefinition, CommandResponse, SlashCommandContext } from './registry.js';
+import type Database from 'better-sqlite3';
+import type { CommandDefinition, CommandHandler, CommandResponse, SlashCommandContext } from './registry.js';
+import type { CommandRegistry } from './registry.js';
 import type { AdapterRegistry } from '../core/registry.js';
 import type { MessageQueue } from '../core/queue.js';
 
@@ -17,6 +19,8 @@ export interface HandlerDeps {
   adapterRegistry: AdapterRegistry;
   queue: MessageQueue;
   pauseSet: Set<string>;
+  /** Raw DB handle for built-in commands that need write access */
+  db: Database.Database;
 }
 
 // ── /status ──────────────────────────────────────────────────────────────────
@@ -54,50 +58,37 @@ async function statusHandler(
 
 // ── /help ─────────────────────────────────────────────────────────────────────
 
-// Handler receives the full registry via closure — set after all commands registered.
-// We use a late-binding ref pattern (thunk) so help can list all registered commands.
-let getRegistryList: (() => CommandDefinition[]) | undefined;
-let getRegistryLookup: ((name: string) => CommandDefinition | undefined) | undefined;
-
-export function bindHelpToRegistry(
-  list: () => CommandDefinition[],
-  lookup: (name: string) => CommandDefinition | undefined,
-): void {
-  getRegistryList = list;
-  getRegistryLookup = lookup;
-}
-
-async function helpHandler(
-  args: string[],
-  _ctx: SlashCommandContext,
-): Promise<CommandResponse> {
-  if (!getRegistryList || !getRegistryLookup) {
-    return { body: 'Help system not yet initialized.' };
-  }
-
-  if (args.length > 0) {
-    const name = args[0]!;
-    const cmd = getRegistryLookup(name);
-    if (!cmd) {
-      return { body: `Unknown command: ${name}\nType /help to list all commands.` };
+/**
+ * Create a /help handler bound to a specific CommandRegistry instance.
+ * Called from createCommandSystem() after all other commands are registered,
+ * so the handler can list everything in the registry at call time.
+ */
+export function createHelpHandler(registry: CommandRegistry): CommandHandler {
+  return async (args: string[]): Promise<CommandResponse> => {
+    if (args.length > 0) {
+      const name = args[0]!;
+      const cmd = registry.lookup(name);
+      if (!cmd) {
+        return { body: `Unknown command: ${name}\nType /help to list all commands.` };
+      }
+      return { body: `${cmd.usage}\n\n${cmd.description}` };
     }
-    return { body: `${cmd.usage}\n\n${cmd.description}` };
-  }
 
-  const commands = getRegistryList().filter((c) => c.scope === 'bus');
-  const lines = ['Available commands:', ''];
-  for (const cmd of commands) {
-    lines.push(`  /${cmd.name} — ${cmd.description}`);
-  }
-  lines.push('', 'Type /help <command> for detailed usage.');
-  return { body: lines.join('\n') };
+    const commands = registry.list().filter((c) => c.scope === 'bus');
+    const lines = ['Available commands:', ''];
+    for (const cmd of commands) {
+      lines.push(`  /${cmd.name} — ${cmd.description}`);
+    }
+    lines.push('', 'Type /help <command> for detailed usage.');
+    return { body: lines.join('\n') };
+  };
 }
 
 // ── /pause ────────────────────────────────────────────────────────────────────
 
 async function pauseHandler(
   args: string[],
-  _ctx: SlashCommandContext,
+  ctx: SlashCommandContext,
   deps: HandlerDeps,
 ): Promise<CommandResponse> {
   const adapterId = args[0];
@@ -112,6 +103,9 @@ async function pauseHandler(
     return { body: `Adapter "${adapterId}" is already paused.` };
   }
   deps.pauseSet.add(adapterId);
+  deps.db
+    .prepare(`INSERT OR REPLACE INTO paused_adapters (adapter_id, paused_at, paused_by) VALUES (?, ?, ?)`)
+    .run(adapterId, new Date().toISOString(), ctx.sender);
   return { body: `Adapter "${adapterId}" paused. Inbound messages will be dropped until resumed.` };
 }
 
@@ -134,6 +128,7 @@ async function resumeHandler(
     return { body: `Adapter "${adapterId}" is not paused.` };
   }
   deps.pauseSet.delete(adapterId);
+  deps.db.prepare(`DELETE FROM paused_adapters WHERE adapter_id = ?`).run(adapterId);
   // TODO(E9): trigger context briefing for this conversation on resume
   return { body: `Adapter "${adapterId}" resumed. Messages will flow normally.` };
 }
@@ -197,25 +192,83 @@ interface SessionRow {
   ended_at: string | null;
 }
 
+// ── Playback state (for paginated /replay) ──────────────────────────────────
+
+const DEFAULT_MAX_MESSAGE_LENGTH = 4096;
+const REPLAY_FOOTER = '\n\nReply /next for next message or /cancel to stop playback.';
+
+export interface PlaybackState {
+  pages: string[];
+  currentPage: number;
+}
+
+/** Per-sender playback state for paginated /replay */
+export const playbackStates = new Map<string, PlaybackState>();
+
+/**
+ * Split transcript lines into pages that fit within maxLength.
+ * If a single line exceeds the effective limit, it is split mid-line.
+ */
+export function paginateLines(lines: string[], maxLength: number): string[] {
+  const hasMultiplePages = lines.join('\n').length > maxLength;
+  // Reserve space for the pagination footer on multi-page output.
+  // Floor at 1 to prevent negative/zero effective limits.
+  const effectiveMax = hasMultiplePages ? Math.max(1, maxLength - REPLAY_FOOTER.length) : maxLength;
+
+  const pages: string[] = [];
+  let currentPage = '';
+
+  for (const line of lines) {
+    // If a single line exceeds the limit, split it into chunks
+    if (line.length > effectiveMax) {
+      // Flush current page first
+      if (currentPage) {
+        pages.push(currentPage);
+        currentPage = '';
+      }
+      let remaining = line;
+      while (remaining.length > effectiveMax) {
+        pages.push(remaining.slice(0, effectiveMax));
+        remaining = remaining.slice(effectiveMax);
+      }
+      if (remaining) currentPage = remaining;
+      continue;
+    }
+
+    const candidate = currentPage ? currentPage + '\n' + line : line;
+    if (candidate.length > effectiveMax) {
+      pages.push(currentPage);
+      currentPage = line;
+    } else {
+      currentPage = candidate;
+    }
+  }
+  if (currentPage) pages.push(currentPage);
+
+  return pages;
+}
+
 // ── /replay ───────────────────────────────────────────────────────────────────
 
 async function replayHandler(
   args: string[],
   ctx: SlashCommandContext,
+  deps: HandlerDeps,
 ): Promise<CommandResponse> {
   const sessionId = args[0];
   if (!sessionId) {
     return { body: 'Usage: /replay <session_id>\nGet session IDs with /sessions.' };
   }
 
-  // Allow short ID prefix matching (first 8 chars)
+  // Allow short ID prefix matching (first 8 chars).
+  // Use ORDER BY + LIMIT 1 for deterministic results on prefix collisions.
   const session =
     ctx.db
       .prepare(`SELECT id, channel, contact_id, started_at, ended_at, message_count FROM sessions WHERE id = ?`)
       .get(sessionId) as SessionRow | undefined ??
     (sessionId.length < 36
       ? (ctx.db
-          .prepare(`SELECT id, channel, contact_id, started_at, ended_at, message_count FROM sessions WHERE id LIKE ?`)
+          .prepare(`SELECT id, channel, contact_id, started_at, ended_at, message_count FROM sessions WHERE id LIKE ? ORDER BY started_at DESC LIMIT 1`)
           .get(sessionId + '%') as SessionRow | undefined)
       : undefined);
 
@@ -244,14 +297,64 @@ async function replayHandler(
     lines.push(`${time} ${who} ${row.body}`);
   }
 
-  return { body: lines.join('\n') };
+  // Determine max message length from adapter capabilities
+  const adapter = deps.adapterRegistry.lookup(ctx.adapterId);
+  const maxLen = adapter?.capabilities.maxMessageLength ?? DEFAULT_MAX_MESSAGE_LENGTH;
+
+  const pages = paginateLines(lines, maxLen);
+
+  if (pages.length === 1) {
+    playbackStates.delete(ctx.sender);
+    return { body: pages[0]! };
+  }
+
+  // Multi-page: store state and send first page with footer
+  playbackStates.set(ctx.sender, { pages, currentPage: 0 });
+  return { body: pages[0]! + REPLAY_FOOTER };
+}
+
+// ── /next ────────────────────────────────────────────────────────────────────
+
+async function nextHandler(
+  _args: string[],
+  ctx: SlashCommandContext,
+): Promise<CommandResponse> {
+  const state = playbackStates.get(ctx.sender);
+  if (!state) {
+    return { body: 'No active playback. Use /replay <session_id> to start.' };
+  }
+
+  state.currentPage++;
+  const page = state.pages[state.currentPage]!;
+  const isLast = state.currentPage >= state.pages.length - 1;
+
+  if (isLast) {
+    playbackStates.delete(ctx.sender);
+    return { body: page };
+  }
+
+  return { body: page + REPLAY_FOOTER };
+}
+
+// ── /cancel ──────────────────────────────────────────────────────────────────
+
+async function cancelHandler(
+  _args: string[],
+  ctx: SlashCommandContext,
+): Promise<CommandResponse> {
+  if (!playbackStates.has(ctx.sender)) {
+    return { body: 'No active playback to cancel.' };
+  }
+  playbackStates.delete(ctx.sender);
+  return { body: 'Playback cancelled.' };
 }
 
 // ── /forget ───────────────────────────────────────────────────────────────────
 
 async function forgetHandler(
   args: string[],
-  ctx: SlashCommandContext,
+  _ctx: SlashCommandContext,
+  deps: HandlerDeps,
 ): Promise<CommandResponse> {
   const contactId = args[0];
   if (!contactId) {
@@ -259,7 +362,7 @@ async function forgetHandler(
   }
 
   // Check if memories table exists (E8 may not be installed yet)
-  const tableExists = ctx.db
+  const tableExists = deps.db
     .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='memories'`)
     .get() as { name: string } | undefined;
 
@@ -268,7 +371,7 @@ async function forgetHandler(
   }
 
   const now = new Date().toISOString();
-  const result = ctx.db
+  const result = deps.db
     .prepare(
       `UPDATE memories SET superseded_by = 'manual_forget', expires_at = ?
        WHERE contact_id = ? AND (expires_at IS NULL OR expires_at > ?)`,
@@ -285,8 +388,8 @@ async function forgetHandler(
 // ── Factory ───────────────────────────────────────────────────────────────────
 
 /**
- * Build all 7 built-in command definitions, with deps injected via closure.
- * Call bindHelpToRegistry() after registering them all so /help can list everything.
+ * Build built-in command definitions, with deps injected via closure.
+ * /help is registered separately in createCommandSystem() after all others.
  */
 export function createBuiltinCommands(deps: HandlerDeps): CommandDefinition[] {
   return [
@@ -296,13 +399,6 @@ export function createBuiltinCommands(deps: HandlerDeps): CommandDefinition[] {
       usage: '/status',
       scope: 'bus',
       handler: (_args, ctx) => statusHandler(_args, ctx, deps),
-    },
-    {
-      name: 'help',
-      description: 'List commands or show usage for a specific command',
-      usage: '/help [command]',
-      scope: 'bus',
-      handler: helpHandler,
     },
     {
       name: 'pause',
@@ -330,14 +426,28 @@ export function createBuiltinCommands(deps: HandlerDeps): CommandDefinition[] {
       description: 'Replay transcript for a session',
       usage: '/replay <session_id>',
       scope: 'bus',
-      handler: replayHandler,
+      handler: (args, ctx) => replayHandler(args, ctx, deps),
+    },
+    {
+      name: 'next',
+      description: 'Show next page of replay playback',
+      usage: '/next',
+      scope: 'bus',
+      handler: nextHandler,
+    },
+    {
+      name: 'cancel',
+      description: 'Cancel active replay playback',
+      usage: '/cancel',
+      scope: 'bus',
+      handler: cancelHandler,
     },
     {
       name: 'forget',
       description: 'Expire all memories for a contact',
       usage: '/forget <contact_id>',
       scope: 'bus',
-      handler: forgetHandler,
+      handler: (args, ctx) => forgetHandler(args, ctx, deps),
     },
   ];
 }

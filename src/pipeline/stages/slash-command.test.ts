@@ -107,6 +107,21 @@ describe('slash-command stage', () => {
     expect(result).not.toBeNull();
   });
 
+  it('strips @botname suffix from command name (Telegram group chats)', async () => {
+    const ctx = makeCtx({ payload: { type: 'text', body: '/status@MyBotName' } });
+    const result = await slashCommandDetect(ctx);
+    expect(result!.isSlashCommand).toBe(true);
+    expect(result!.slashCommand?.name).toBe('status');
+    expect(result!.slashCommand?.args).toEqual([]);
+  });
+
+  it('strips @botname suffix and preserves args', async () => {
+    const ctx = makeCtx({ payload: { type: 'text', body: '/pause@MyBot telegram' } });
+    const result = await slashCommandDetect(ctx);
+    expect(result!.slashCommand?.name).toBe('pause');
+    expect(result!.slashCommand?.args).toEqual(['telegram']);
+  });
+
   it('handles slash command with multiword args (argsRaw preserves spaces)', async () => {
     const ctx = makeCtx({ payload: { type: 'text', body: '/note this is a longer message' } });
     const result = await slashCommandDetect(ctx);

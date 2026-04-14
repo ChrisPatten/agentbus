@@ -1,11 +1,12 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
 import { runMigrations } from '../db/schema.js';
-import { createBuiltinCommands, bindHelpToRegistry } from './handlers.js';
+import { createBuiltinCommands, createHelpHandler, paginateLines, playbackStates } from './handlers.js';
 import { CommandRegistry } from './registry.js';
 import type { SlashCommandContext } from './registry.js';
 import type { AppConfig } from '../config/schema.js';
 import type { MessageEnvelope } from '../types/envelope.js';
+import { createSafeDatabase } from '../db/safe-database.js';
 
 function makeDb() {
   const db = new Database(':memory:');
@@ -58,20 +59,24 @@ function makeCtx(db: Database.Database, overrides: Partial<SlashCommandContext> 
     adapterId: 'telegram',
     argsRaw: '',
     envelope: makeEnvelope(),
-    db,
+    db: createSafeDatabase(db),
     config: stubConfig,
     ...overrides,
   };
 }
 
-function makeAdapterRegistry(adapters: Array<{ id: string; status?: string }> = []) {
+function makeAdapterRegistry(adapters: Array<{ id: string; status?: string; maxMessageLength?: number }> = []) {
   const map = new Map(
     adapters.map((a) => [
       a.id,
       {
         id: a.id,
         name: a.id,
-        capabilities: { send: true as const, channels: ['telegram'] },
+        capabilities: {
+          send: true as const,
+          channels: ['telegram'],
+          ...(a.maxMessageLength != null ? { maxMessageLength: a.maxMessageLength } : {}),
+        },
         health: vi.fn().mockResolvedValue({ status: a.status ?? 'healthy' }),
         start: vi.fn(),
         stop: vi.fn(),
@@ -91,58 +96,62 @@ function makeQueue(counts: Record<string, number> = {}) {
   };
 }
 
+function makeDeps(overrides: { db?: Database.Database; adapters?: Array<{ id: string; status?: string; maxMessageLength?: number }>; pauseSet?: Set<string>; counts?: Record<string, number> } = {}) {
+  const db = overrides.db ?? makeDb();
+  return {
+    adapterRegistry: makeAdapterRegistry(overrides.adapters ?? []) as never,
+    queue: makeQueue(overrides.counts) as never,
+    pauseSet: overrides.pauseSet ?? new Set<string>(),
+    db,
+  };
+}
+
 describe('command handlers', () => {
+  afterEach(() => {
+    playbackStates.clear();
+  });
+
   describe('/status', () => {
     it('returns adapter status and queue counts', async () => {
-      const registry = makeAdapterRegistry([{ id: 'telegram', status: 'healthy' }]);
-      const pauseSet = new Set<string>();
-      const commands = createBuiltinCommands({
-        adapterRegistry: registry as never,
-        queue: makeQueue({ pending: 3 }) as never,
-        pauseSet,
-      });
+      const deps = makeDeps({ adapters: [{ id: 'telegram', status: 'healthy' }], counts: { pending: 3 } });
+      const commands = createBuiltinCommands(deps);
       const status = commands.find((c) => c.name === 'status')!;
-      const db = makeDb();
-      const result = await status.handler([], makeCtx(db));
+      const result = await status.handler([], makeCtx(deps.db));
       expect(result.body).toContain('telegram');
       expect(result.body).toContain('healthy');
       expect(result.body).toContain('pending:    3');
     });
 
     it('shows [PAUSED] for paused adapters', async () => {
-      const registry = makeAdapterRegistry([{ id: 'telegram' }]);
-      const pauseSet = new Set(['telegram']);
-      const commands = createBuiltinCommands({
-        adapterRegistry: registry as never,
-        queue: makeQueue() as never,
-        pauseSet,
-      });
+      const deps = makeDeps({ adapters: [{ id: 'telegram' }], pauseSet: new Set(['telegram']) });
+      const commands = createBuiltinCommands(deps);
       const status = commands.find((c) => c.name === 'status')!;
-      const result = await status.handler([], makeCtx(makeDb()));
+      const result = await status.handler([], makeCtx(deps.db));
       expect(result.body).toContain('[PAUSED]');
     });
   });
 
   describe('/help', () => {
     let registry: CommandRegistry;
+    let db: Database.Database;
     beforeEach(() => {
+      db = makeDb();
       registry = new CommandRegistry();
-      const pauseSet = new Set<string>();
-      const commands = createBuiltinCommands({
-        adapterRegistry: makeAdapterRegistry() as never,
-        queue: makeQueue() as never,
-        pauseSet,
-      });
+      const deps = makeDeps({ db });
+      const commands = createBuiltinCommands(deps);
       for (const cmd of commands) registry.register(cmd);
-      bindHelpToRegistry(
-        () => registry.list(),
-        (name) => registry.lookup(name),
-      );
+      registry.register({
+        name: 'help',
+        description: 'List commands or show usage for a specific command',
+        usage: '/help [command]',
+        scope: 'bus',
+        handler: createHelpHandler(registry),
+      });
     });
 
     it('lists all bus-scope commands without args', async () => {
       const help = registry.lookup('help')!;
-      const result = await help.handler([], makeCtx(makeDb()));
+      const result = await help.handler([], makeCtx(db));
       expect(result.body).toContain('/status');
       expect(result.body).toContain('/help');
       expect(result.body).toContain('/pause');
@@ -150,110 +159,121 @@ describe('command handlers', () => {
 
     it('shows usage for a specific command', async () => {
       const help = registry.lookup('help')!;
-      const result = await help.handler(['pause'], makeCtx(makeDb()));
+      const result = await help.handler(['pause'], makeCtx(db));
       expect(result.body).toContain('/pause <adapterId>');
     });
 
     it('returns error for unknown command', async () => {
       const help = registry.lookup('help')!;
-      const result = await help.handler(['nonexistent'], makeCtx(makeDb()));
+      const result = await help.handler(['nonexistent'], makeCtx(db));
       expect(result.body).toContain('Unknown command: nonexistent');
+    });
+
+    it('includes plugin commands registered after createHelpHandler()', async () => {
+      registry.register({
+        name: 'ping',
+        description: 'Responds with pong',
+        usage: '/ping',
+        scope: 'bus',
+        handler: async () => ({ body: 'pong' }),
+      });
+      const help = registry.lookup('help')!;
+      const result = await help.handler([], makeCtx(db));
+      expect(result.body).toContain('/ping');
     });
   });
 
   describe('/pause', () => {
-    it('adds adapter to pauseSet', async () => {
-      const registry = makeAdapterRegistry([{ id: 'telegram' }]);
+    it('adds adapter to pauseSet and persists to DB', async () => {
+      const db = makeDb();
       const pauseSet = new Set<string>();
-      const commands = createBuiltinCommands({
-        adapterRegistry: registry as never,
-        queue: makeQueue() as never,
-        pauseSet,
-      });
+      const deps = makeDeps({ db, adapters: [{ id: 'telegram' }], pauseSet });
+      const commands = createBuiltinCommands(deps);
       const pause = commands.find((c) => c.name === 'pause')!;
-      const result = await pause.handler(['telegram'], makeCtx(makeDb()));
+      const result = await pause.handler(['telegram'], makeCtx(db));
       expect(pauseSet.has('telegram')).toBe(true);
       expect(result.body).toContain('paused');
+
+      // Verify persisted to DB
+      const row = db.prepare('SELECT adapter_id, paused_by FROM paused_adapters WHERE adapter_id = ?').get('telegram') as { adapter_id: string; paused_by: string } | undefined;
+      expect(row).toBeDefined();
+      expect(row!.paused_by).toBe('contact:chris');
     });
 
     it('returns error for unknown adapter', async () => {
-      const registry = makeAdapterRegistry([]);
-      const pauseSet = new Set<string>();
-      const commands = createBuiltinCommands({
-        adapterRegistry: registry as never,
-        queue: makeQueue() as never,
-        pauseSet,
-      });
+      const deps = makeDeps();
+      const commands = createBuiltinCommands(deps);
       const pause = commands.find((c) => c.name === 'pause')!;
-      const result = await pause.handler(['nonexistent'], makeCtx(makeDb()));
+      const result = await pause.handler(['nonexistent'], makeCtx(deps.db));
       expect(result.body).toContain('Unknown adapter');
     });
 
     it('returns message when already paused', async () => {
-      const registry = makeAdapterRegistry([{ id: 'telegram' }]);
-      const pauseSet = new Set(['telegram']);
-      const commands = createBuiltinCommands({
-        adapterRegistry: registry as never,
-        queue: makeQueue() as never,
-        pauseSet,
-      });
+      const deps = makeDeps({ adapters: [{ id: 'telegram' }], pauseSet: new Set(['telegram']) });
+      const commands = createBuiltinCommands(deps);
       const pause = commands.find((c) => c.name === 'pause')!;
-      const result = await pause.handler(['telegram'], makeCtx(makeDb()));
+      const result = await pause.handler(['telegram'], makeCtx(deps.db));
       expect(result.body).toContain('already paused');
     });
 
     it('returns usage when no arg given', async () => {
-      const registry = makeAdapterRegistry([]);
-      const pauseSet = new Set<string>();
-      const commands = createBuiltinCommands({
-        adapterRegistry: registry as never,
-        queue: makeQueue() as never,
-        pauseSet,
-      });
+      const deps = makeDeps();
+      const commands = createBuiltinCommands(deps);
       const pause = commands.find((c) => c.name === 'pause')!;
-      const result = await pause.handler([], makeCtx(makeDb()));
+      const result = await pause.handler([], makeCtx(deps.db));
       expect(result.body).toContain('Usage:');
     });
   });
 
   describe('/resume', () => {
-    it('removes adapter from pauseSet', async () => {
-      const registry = makeAdapterRegistry([{ id: 'telegram' }]);
+    it('removes adapter from pauseSet and deletes from DB', async () => {
+      const db = makeDb();
       const pauseSet = new Set(['telegram']);
-      const commands = createBuiltinCommands({
-        adapterRegistry: registry as never,
-        queue: makeQueue() as never,
-        pauseSet,
-      });
+      db.prepare('INSERT INTO paused_adapters (adapter_id, paused_at, paused_by) VALUES (?, ?, ?)').run('telegram', new Date().toISOString(), 'contact:chris');
+
+      const deps = makeDeps({ db, adapters: [{ id: 'telegram' }], pauseSet });
+      const commands = createBuiltinCommands(deps);
       const resume = commands.find((c) => c.name === 'resume')!;
-      const result = await resume.handler(['telegram'], makeCtx(makeDb()));
+      const result = await resume.handler(['telegram'], makeCtx(db));
       expect(pauseSet.has('telegram')).toBe(false);
       expect(result.body).toContain('resumed');
+
+      // Verify deleted from DB
+      const row = db.prepare('SELECT adapter_id FROM paused_adapters WHERE adapter_id = ?').get('telegram');
+      expect(row).toBeUndefined();
     });
 
     it('returns message when not paused', async () => {
-      const registry = makeAdapterRegistry([{ id: 'telegram' }]);
-      const pauseSet = new Set<string>();
-      const commands = createBuiltinCommands({
-        adapterRegistry: registry as never,
-        queue: makeQueue() as never,
-        pauseSet,
-      });
+      const deps = makeDeps({ adapters: [{ id: 'telegram' }] });
+      const commands = createBuiltinCommands(deps);
       const resume = commands.find((c) => c.name === 'resume')!;
-      const result = await resume.handler(['telegram'], makeCtx(makeDb()));
+      const result = await resume.handler(['telegram'], makeCtx(deps.db));
       expect(result.body).toContain('not paused');
+    });
+
+    it('returns error for unknown adapter', async () => {
+      const deps = makeDeps();
+      const commands = createBuiltinCommands(deps);
+      const resume = commands.find((c) => c.name === 'resume')!;
+      const result = await resume.handler(['nonexistent'], makeCtx(deps.db));
+      expect(result.body).toContain('Unknown adapter');
+    });
+
+    it('returns usage when no arg given', async () => {
+      const deps = makeDeps();
+      const commands = createBuiltinCommands(deps);
+      const resume = commands.find((c) => c.name === 'resume')!;
+      const result = await resume.handler([], makeCtx(deps.db));
+      expect(result.body).toContain('Usage:');
     });
   });
 
   describe('/sessions', () => {
     it('returns "no sessions" when empty', async () => {
-      const commands = createBuiltinCommands({
-        adapterRegistry: makeAdapterRegistry() as never,
-        queue: makeQueue() as never,
-        pauseSet: new Set(),
-      });
+      const deps = makeDeps();
+      const commands = createBuiltinCommands(deps);
       const sessions = commands.find((c) => c.name === 'sessions')!;
-      const result = await sessions.handler([], makeCtx(makeDb()));
+      const result = await sessions.handler([], makeCtx(deps.db));
       expect(result.body).toBe('No sessions found.');
     });
 
@@ -265,11 +285,8 @@ describe('command handlers', () => {
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
       ).run(sessionId, 'conv-1', 'telegram', 'chris', new Date().toISOString(), new Date().toISOString(), 5);
 
-      const commands = createBuiltinCommands({
-        adapterRegistry: makeAdapterRegistry() as never,
-        queue: makeQueue() as never,
-        pauseSet: new Set(),
-      });
+      const deps = makeDeps({ db });
+      const commands = createBuiltinCommands(deps);
       const sessions = commands.find((c) => c.name === 'sessions')!;
       const result = await sessions.handler([], makeCtx(db));
       expect(result.body).toContain('telegram');
@@ -288,38 +305,75 @@ describe('command handlers', () => {
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
       ).run('s2', 'c2', 'imessage', 'peggy', new Date().toISOString(), new Date().toISOString(), 2);
 
-      const commands = createBuiltinCommands({
-        adapterRegistry: makeAdapterRegistry() as never,
-        queue: makeQueue() as never,
-        pauseSet: new Set(),
-      });
+      const deps = makeDeps({ db });
+      const commands = createBuiltinCommands(deps);
       const sessions = commands.find((c) => c.name === 'sessions')!;
       const result = await sessions.handler(['imessage'], makeCtx(db));
       expect(result.body).toContain('imessage');
       expect(result.body).not.toContain('telegram');
     });
+
+    it('respects --limit flag', async () => {
+      const db = makeDb();
+      for (let i = 0; i < 5; i++) {
+        db.prepare(
+          `INSERT INTO sessions (id, conversation_id, channel, contact_id, started_at, last_activity, message_count)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        ).run(`s${i}`, `c${i}`, 'telegram', 'chris', new Date().toISOString(), new Date().toISOString(), i);
+      }
+
+      const deps = makeDeps({ db });
+      const commands = createBuiltinCommands(deps);
+      const sessions = commands.find((c) => c.name === 'sessions')!;
+      const result = await sessions.handler(['--limit', '2'], makeCtx(db));
+      expect(result.body).toContain('2 shown');
+    });
+
+    it('clamps --limit to 50', async () => {
+      const db = makeDb();
+      db.prepare(
+        `INSERT INTO sessions (id, conversation_id, channel, contact_id, started_at, last_activity, message_count)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ).run('s1', 'c1', 'telegram', 'chris', new Date().toISOString(), new Date().toISOString(), 1);
+
+      const deps = makeDeps({ db });
+      const commands = createBuiltinCommands(deps);
+      const sessions = commands.find((c) => c.name === 'sessions')!;
+      // Should not crash with limit > 50 — just clamp
+      const result = await sessions.handler(['--limit', '999'], makeCtx(db));
+      expect(result.body).toContain('1 shown');
+    });
+
+    it('ignores invalid --limit value', async () => {
+      const db = makeDb();
+      db.prepare(
+        `INSERT INTO sessions (id, conversation_id, channel, contact_id, started_at, last_activity, message_count)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ).run('s1', 'c1', 'telegram', 'chris', new Date().toISOString(), new Date().toISOString(), 1);
+
+      const deps = makeDeps({ db });
+      const commands = createBuiltinCommands(deps);
+      const sessions = commands.find((c) => c.name === 'sessions')!;
+      // "abc" is not a number — should use default limit 10
+      const result = await sessions.handler(['--limit', 'abc'], makeCtx(db));
+      expect(result.body).toContain('1 shown');
+    });
   });
 
   describe('/replay', () => {
     it('returns usage when no session_id given', async () => {
-      const commands = createBuiltinCommands({
-        adapterRegistry: makeAdapterRegistry() as never,
-        queue: makeQueue() as never,
-        pauseSet: new Set(),
-      });
+      const deps = makeDeps();
+      const commands = createBuiltinCommands(deps);
       const replay = commands.find((c) => c.name === 'replay')!;
-      const result = await replay.handler([], makeCtx(makeDb()));
+      const result = await replay.handler([], makeCtx(deps.db));
       expect(result.body).toContain('Usage:');
     });
 
     it('returns error for unknown session', async () => {
-      const commands = createBuiltinCommands({
-        adapterRegistry: makeAdapterRegistry() as never,
-        queue: makeQueue() as never,
-        pauseSet: new Set(),
-      });
+      const deps = makeDeps();
+      const commands = createBuiltinCommands(deps);
       const replay = commands.find((c) => c.name === 'replay')!;
-      const result = await replay.handler(['nonexistent-id'], makeCtx(makeDb()));
+      const result = await replay.handler(['nonexistent-id'], makeCtx(deps.db));
       expect(result.body).toContain('Session not found');
     });
 
@@ -336,11 +390,8 @@ describe('command handlers', () => {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run('t1', 'm1', convId, sessionId, new Date().toISOString(), 'telegram', 'chris', 'inbound', 'Hello there', '{}');
 
-      const commands = createBuiltinCommands({
-        adapterRegistry: makeAdapterRegistry() as never,
-        queue: makeQueue() as never,
-        pauseSet: new Set(),
-      });
+      const deps = makeDeps({ db });
+      const commands = createBuiltinCommands(deps);
       const replay = commands.find((c) => c.name === 'replay')!;
       const result = await replay.handler([sessionId], makeCtx(db));
       expect(result.body).toContain('Hello there');
@@ -355,37 +406,141 @@ describe('command handlers', () => {
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
       ).run(sessionId, 'conv-1', 'telegram', 'chris', new Date().toISOString(), new Date().toISOString(), 0);
 
-      const commands = createBuiltinCommands({
-        adapterRegistry: makeAdapterRegistry() as never,
-        queue: makeQueue() as never,
-        pauseSet: new Set(),
-      });
+      const deps = makeDeps({ db });
+      const commands = createBuiltinCommands(deps);
       const replay = commands.find((c) => c.name === 'replay')!;
       const result = await replay.handler(['aaaabbbb'], makeCtx(db));
       expect(result.body).toContain('aaaabbbb');
+    });
+
+    it('paginates long transcripts and includes footer', async () => {
+      const db = makeDb();
+      const sessionId = 'aaaabbbb-0000-0000-0000-000000000000';
+      const convId = 'conv-1';
+      db.prepare(
+        `INSERT INTO sessions (id, conversation_id, channel, contact_id, started_at, last_activity, message_count)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ).run(sessionId, convId, 'telegram', 'chris', '2026-04-14T10:00:00.000Z', '2026-04-14T10:30:00.000Z', 50);
+
+      // Insert many transcript entries that exceed a small limit
+      for (let i = 0; i < 50; i++) {
+        db.prepare(
+          `INSERT INTO transcripts (id, message_id, conversation_id, session_id, created_at, channel, contact_id, direction, body, metadata)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(`t${i}`, `m${i}`, convId, sessionId, `2026-04-14T10:${String(i).padStart(2, '0')}:00.000Z`, 'telegram', 'chris', 'inbound', `Message number ${i} with some extra text`, '{}');
+      }
+
+      // Use a small maxMessageLength adapter
+      const deps = makeDeps({ db, adapters: [{ id: 'telegram', maxMessageLength: 300 }] });
+      const commands = createBuiltinCommands(deps);
+      const replay = commands.find((c) => c.name === 'replay')!;
+      const result = await replay.handler([sessionId], makeCtx(db));
+
+      expect(result.body).toContain('/next');
+      expect(result.body).toContain('/cancel');
+      expect(playbackStates.has('contact:chris')).toBe(true);
+    });
+
+    it('returns single page without footer for small transcripts', async () => {
+      const db = makeDb();
+      const sessionId = 'bbbbcccc-0000-0000-0000-000000000000';
+      const convId = 'conv-2';
+      db.prepare(
+        `INSERT INTO sessions (id, conversation_id, channel, contact_id, started_at, last_activity, message_count)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ).run(sessionId, convId, 'telegram', 'chris', '2026-04-14T10:00:00.000Z', '2026-04-14T10:00:00.000Z', 1);
+      db.prepare(
+        `INSERT INTO transcripts (id, message_id, conversation_id, session_id, created_at, channel, contact_id, direction, body, metadata)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run('t1', 'm1', convId, sessionId, '2026-04-14T10:00:00.000Z', 'telegram', 'chris', 'inbound', 'Short msg', '{}');
+
+      const deps = makeDeps({ db });
+      const commands = createBuiltinCommands(deps);
+      const replay = commands.find((c) => c.name === 'replay')!;
+      const result = await replay.handler([sessionId], makeCtx(db));
+
+      expect(result.body).not.toContain('/next');
+      expect(playbackStates.has('contact:chris')).toBe(false);
+    });
+  });
+
+  describe('/next', () => {
+    it('returns error when no active playback', async () => {
+      const deps = makeDeps();
+      const commands = createBuiltinCommands(deps);
+      const next = commands.find((c) => c.name === 'next')!;
+      const result = await next.handler([], makeCtx(deps.db));
+      expect(result.body).toContain('No active playback');
+    });
+
+    it('advances to next page with footer', async () => {
+      playbackStates.set('contact:chris', {
+        pages: ['page1', 'page2', 'page3'],
+        currentPage: 0,
+      });
+
+      const deps = makeDeps();
+      const commands = createBuiltinCommands(deps);
+      const next = commands.find((c) => c.name === 'next')!;
+      const result = await next.handler([], makeCtx(deps.db));
+      expect(result.body).toContain('page2');
+      expect(result.body).toContain('/next');
+    });
+
+    it('returns last page without footer and clears state', async () => {
+      playbackStates.set('contact:chris', {
+        pages: ['page1', 'page2'],
+        currentPage: 0,
+      });
+
+      const deps = makeDeps();
+      const commands = createBuiltinCommands(deps);
+      const next = commands.find((c) => c.name === 'next')!;
+      const result = await next.handler([], makeCtx(deps.db));
+      expect(result.body).toBe('page2');
+      expect(result.body).not.toContain('/next');
+      expect(playbackStates.has('contact:chris')).toBe(false);
+    });
+  });
+
+  describe('/cancel', () => {
+    it('returns error when no active playback', async () => {
+      const deps = makeDeps();
+      const commands = createBuiltinCommands(deps);
+      const cancel = commands.find((c) => c.name === 'cancel')!;
+      const result = await cancel.handler([], makeCtx(deps.db));
+      expect(result.body).toContain('No active playback to cancel');
+    });
+
+    it('clears playback state', async () => {
+      playbackStates.set('contact:chris', {
+        pages: ['page1', 'page2'],
+        currentPage: 0,
+      });
+
+      const deps = makeDeps();
+      const commands = createBuiltinCommands(deps);
+      const cancel = commands.find((c) => c.name === 'cancel')!;
+      const result = await cancel.handler([], makeCtx(deps.db));
+      expect(result.body).toBe('Playback cancelled.');
+      expect(playbackStates.has('contact:chris')).toBe(false);
     });
   });
 
   describe('/forget', () => {
     it('returns graceful message when memories table does not exist', async () => {
-      const commands = createBuiltinCommands({
-        adapterRegistry: makeAdapterRegistry() as never,
-        queue: makeQueue() as never,
-        pauseSet: new Set(),
-      });
+      const deps = makeDeps();
+      const commands = createBuiltinCommands(deps);
       const forget = commands.find((c) => c.name === 'forget')!;
-      const result = await forget.handler(['chris'], makeCtx(makeDb()));
+      const result = await forget.handler(['chris'], makeCtx(deps.db));
       expect(result.body).toContain('Memory system not yet available');
     });
 
     it('returns usage when no contact_id given', async () => {
-      const commands = createBuiltinCommands({
-        adapterRegistry: makeAdapterRegistry() as never,
-        queue: makeQueue() as never,
-        pauseSet: new Set(),
-      });
+      const deps = makeDeps();
+      const commands = createBuiltinCommands(deps);
       const forget = commands.find((c) => c.name === 'forget')!;
-      const result = await forget.handler([], makeCtx(makeDb()));
+      const result = await forget.handler([], makeCtx(deps.db));
       expect(result.body).toContain('Usage:');
     });
 
@@ -404,14 +559,42 @@ describe('command handlers', () => {
       db.prepare(`INSERT INTO memories (id, contact_id, content) VALUES (?, ?, ?)`).run('m1', 'chris', 'likes coffee');
       db.prepare(`INSERT INTO memories (id, contact_id, content) VALUES (?, ?, ?)`).run('m2', 'chris', 'works remotely');
 
-      const commands = createBuiltinCommands({
-        adapterRegistry: makeAdapterRegistry() as never,
-        queue: makeQueue() as never,
-        pauseSet: new Set(),
-      });
+      const deps = makeDeps({ db });
+      const commands = createBuiltinCommands(deps);
       const forget = commands.find((c) => c.name === 'forget')!;
       const result = await forget.handler(['chris'], makeCtx(db));
       expect(result.body).toContain('2 memory records');
+    });
+  });
+
+  describe('paginateLines', () => {
+    it('returns single page when content fits', () => {
+      const pages = paginateLines(['line1', 'line2', 'line3'], 100);
+      expect(pages).toHaveLength(1);
+      expect(pages[0]).toBe('line1\nline2\nline3');
+    });
+
+    it('splits into multiple pages when content exceeds limit', () => {
+      // Generate lines that together exceed 200 chars
+      const lines = Array.from({ length: 20 }, (_, i) => `Line ${i}: some content here`);
+      const pages = paginateLines(lines, 200);
+      expect(pages.length).toBeGreaterThan(1);
+    });
+
+    it('splits a single long line into chunks', () => {
+      const longLine = 'a'.repeat(500);
+      const pages = paginateLines([longLine], 200);
+      expect(pages.length).toBeGreaterThan(1);
+      // Each page should fit within the effective limit
+      // (effectiveMax = 200 - footer length)
+      for (const page of pages) {
+        expect(page.length).toBeLessThanOrEqual(200);
+      }
+    });
+
+    it('handles empty input', () => {
+      const pages = paginateLines([], 100);
+      expect(pages).toEqual([]);
     });
   });
 });
