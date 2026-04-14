@@ -530,3 +530,166 @@ describe('POST /api/v1/messages/:id/react', () => {
     expect(calledPlatformId).toBe(msgId);
   });
 });
+
+// ── Memory API (E8) ───────────────────────────────────────────────────────────
+
+describe('POST /api/v1/memories', () => {
+  let server: FastifyInstance;
+  let db: Database.Database;
+
+  beforeEach(async () => {
+    ({ server, db } = await makeServer());
+  });
+
+  afterEach(async () => {
+    await server.close();
+  });
+
+  it('creates a memory and returns 201', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/memories',
+      payload: { contact_id: 'alice', content: 'Alice prefers morning meetings', category: 'preference' },
+    });
+    expect(res.statusCode).toBe(201);
+    const body = JSON.parse(res.body) as { ok: boolean; id: string; superseded: string | null };
+    expect(body.ok).toBe(true);
+    expect(typeof body.id).toBe('string');
+    expect(body.superseded).toBeNull();
+  });
+
+  it('supersedes the previous active memory for same contact+category', async () => {
+    const r1 = await server.inject({
+      method: 'POST',
+      url: '/api/v1/memories',
+      payload: { contact_id: 'alice', content: 'Alice likes tea', category: 'preference' },
+    });
+    const { id: firstId } = JSON.parse(r1.body) as { id: string };
+
+    const r2 = await server.inject({
+      method: 'POST',
+      url: '/api/v1/memories',
+      payload: { contact_id: 'alice', content: 'Alice now likes coffee', category: 'preference' },
+    });
+    expect(r2.statusCode).toBe(201);
+    const body2 = JSON.parse(r2.body) as { id: string; superseded: string };
+    expect(body2.superseded).toBe(firstId);
+
+    const first = db.prepare('SELECT superseded_by FROM memories WHERE id = ?').get(firstId) as { superseded_by: string };
+    expect(first.superseded_by).toBe(body2.id);
+  });
+
+  it('does not supersede memories of a different category', async () => {
+    await server.inject({
+      method: 'POST',
+      url: '/api/v1/memories',
+      payload: { contact_id: 'alice', content: 'Alice is a developer', category: 'fact' },
+    });
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/memories',
+      payload: { contact_id: 'alice', content: 'Alice prefers mornings', category: 'preference' },
+    });
+    expect(JSON.parse(res.body).superseded).toBeNull();
+  });
+
+  it('rejects an invalid category with 400', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/memories',
+      payload: { contact_id: 'alice', content: 'foo', category: 'admin' },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('rejects missing contact_id with 400', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/memories',
+      payload: { content: 'foo', category: 'general' },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('rejects missing content with 400', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/memories',
+      payload: { contact_id: 'alice', category: 'general' },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+});
+
+describe('GET /api/v1/memories/recall', () => {
+  let server: FastifyInstance;
+
+  beforeEach(async () => {
+    ({ server } = await makeServer());
+    // Seed memories
+    await server.inject({
+      method: 'POST',
+      url: '/api/v1/memories',
+      payload: { contact_id: 'alice', content: 'Alice enjoys hiking on weekends', category: 'preference' },
+    });
+    await server.inject({
+      method: 'POST',
+      url: '/api/v1/memories',
+      payload: { contact_id: 'bob', content: 'Bob is a software engineer', category: 'work' },
+    });
+  });
+
+  afterEach(async () => {
+    await server.close();
+  });
+
+  it('returns 400 when q is missing', async () => {
+    const res = await server.inject({ method: 'GET', url: '/api/v1/memories/recall' });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('returns memories matching the query', async () => {
+    const res = await server.inject({ method: 'GET', url: '/api/v1/memories/recall?q=hiking' });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body) as { ok: boolean; memories: { content: string }[]; count: number };
+    expect(body.ok).toBe(true);
+    expect(body.count).toBeGreaterThan(0);
+    expect(body.memories[0]!.content).toContain('hiking');
+  });
+
+  it('filters results by contact_id', async () => {
+    const res = await server.inject({ method: 'GET', url: '/api/v1/memories/recall?q=engineer&contact_id=bob' });
+    const body = JSON.parse(res.body) as { memories: { contact_id: string }[] };
+    expect(body.memories.every((m) => m.contact_id === 'bob')).toBe(true);
+  });
+
+  it('filters results by category', async () => {
+    const res = await server.inject({ method: 'GET', url: '/api/v1/memories/recall?q=hiking&category=preference' });
+    const body = JSON.parse(res.body) as { memories: { category: string }[] };
+    expect(body.memories.every((m) => m.category === 'preference')).toBe(true);
+  });
+
+  it('does not return superseded memories', async () => {
+    // Create a memory then supersede it
+    const r1 = await server.inject({
+      method: 'POST',
+      url: '/api/v1/memories',
+      payload: { contact_id: 'carol', content: 'Carol drives a sedan', category: 'fact' },
+    });
+    const { id: oldId } = JSON.parse(r1.body) as { id: string };
+    await server.inject({
+      method: 'POST',
+      url: '/api/v1/memories',
+      payload: { contact_id: 'carol', content: 'Carol now drives an EV', category: 'fact' },
+    });
+
+    const res = await server.inject({ method: 'GET', url: '/api/v1/memories/recall?q=sedan' });
+    const body = JSON.parse(res.body) as { memories: { id: string }[] };
+    expect(body.memories.find((m) => m.id === oldId)).toBeUndefined();
+  });
+
+  it('clamps limit to a maximum of 50', async () => {
+    const res = await server.inject({ method: 'GET', url: '/api/v1/memories/recall?q=hiking&limit=999' });
+    expect(res.statusCode).toBe(200);
+  });
+});

@@ -128,16 +128,21 @@ export class Summarizer {
       return false;
     }
 
-    // Fetch transcript rows ordered chronologically
+    // Fetch transcript rows ordered chronologically.
+    // Exclude command responses (slash commands): their output is system artefacts,
+    // not conversation content, and should not be extracted as memories.
     const transcripts = this.db
       .prepare(
         `SELECT direction, body, created_at, contact_id FROM transcripts
-         WHERE session_id = ? ORDER BY created_at ASC`,
+         WHERE session_id = ?
+           AND json_extract(metadata, '$.command_response') IS NOT 1
+         ORDER BY created_at ASC`,
       )
       .all(sessionId) as TranscriptRow[];
 
     if (transcripts.length === 0) {
-      // Nothing to summarize — mark as done
+      // Nothing to summarize — mark as done.
+      // Note: no session_summaries row is written for empty sessions.
       this.db
         .prepare(`UPDATE sessions SET status = 'summarized' WHERE id = ?`)
         .run(sessionId);

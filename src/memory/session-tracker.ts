@@ -104,12 +104,29 @@ export class SessionTracker {
         `[session-tracker] Closed idle session ${session.id.slice(0, 8)} ` +
           `(${session.channel}/${session.contact_id}, ${session.message_count} msgs)`,
       );
-      // Fire-and-forget — summarizer handles retries and error marking
+      // Fire-and-forget — summarizer handles retries and error marking internally.
+      // The outer .catch() is a last-resort guard: if summarize() itself throws
+      // unexpectedly (e.g. DB failure inside its own error handler), we still
+      // need to move the session out of 'summarize_pending' so it is not orphaned.
       this.summarizer.summarize(session.id).catch((err) => {
         console.error(
           `[session-tracker] Unhandled error summarizing ${session.id.slice(0, 8)}:`,
           err,
         );
+        try {
+          this.db
+            .prepare(
+              `UPDATE sessions
+               SET status = 'summarize_failed', summary_attempts = summary_attempts + 1
+               WHERE id = ?`,
+            )
+            .run(session.id);
+        } catch (dbErr) {
+          console.error(
+            `[session-tracker] Failed to mark session ${session.id.slice(0, 8)} as failed:`,
+            dbErr,
+          );
+        }
       });
     }
   }
@@ -138,6 +155,20 @@ export class SessionTracker {
           `[session-tracker] Unhandled error retrying ${session.id.slice(0, 8)}:`,
           err,
         );
+        try {
+          this.db
+            .prepare(
+              `UPDATE sessions
+               SET status = 'summarize_failed', summary_attempts = summary_attempts + 1
+               WHERE id = ?`,
+            )
+            .run(session.id);
+        } catch (dbErr) {
+          console.error(
+            `[session-tracker] Failed to mark session ${session.id.slice(0, 8)} as failed:`,
+            dbErr,
+          );
+        }
       });
     }
   }

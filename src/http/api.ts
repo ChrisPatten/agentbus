@@ -779,10 +779,13 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
   );
 
   // POST /api/v1/memories — manually log a memory
+  const MEMORY_CATEGORIES = [
+    'preference', 'fact', 'plan', 'relationship', 'work', 'health', 'general',
+  ] as const;
   const MemoryInsertSchema = z.object({
     contact_id: z.string().min(1),
     content: z.string().min(1),
-    category: z.string().default('general'),
+    category: z.enum(MEMORY_CATEGORIES).default('general'),
     confidence: z.number().min(0).max(1).default(0.9),
     source: z.string().default('manual'),
     expires_at: z.string().optional(),
@@ -806,30 +809,35 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     const now = new Date().toISOString();
     const newId = randomUUID();
 
-    // Supersede existing active memory for same (contact_id, category)
-    const existing = db
-      .prepare(
-        `SELECT id FROM memories
-         WHERE contact_id = ? AND category = ? AND superseded_by IS NULL
-           AND (expires_at IS NULL OR expires_at > ?)
-         ORDER BY created_at DESC LIMIT 1`,
-      )
-      .get(contact_id, category, now) as { id: string } | undefined;
+    // Supersede + insert atomically to prevent two concurrent requests from both
+    // believing they are the sole active memory for a given (contact_id, category).
+    let supersededId: string | undefined;
+    db.transaction(() => {
+      const existing = db
+        .prepare(
+          `SELECT id FROM memories
+           WHERE contact_id = ? AND category = ? AND superseded_by IS NULL
+             AND (expires_at IS NULL OR expires_at > ?)
+           ORDER BY created_at DESC LIMIT 1`,
+        )
+        .get(contact_id, category, now) as { id: string } | undefined;
 
-    if (existing) {
-      db.prepare(`UPDATE memories SET superseded_by = ? WHERE id = ?`).run(newId, existing.id);
-    }
+      if (existing) {
+        db.prepare(`UPDATE memories SET superseded_by = ? WHERE id = ?`).run(newId, existing.id);
+        supersededId = existing.id;
+      }
 
-    db.prepare(
-      `INSERT INTO memories
-         (id, session_id, contact_id, category, content, confidence, source, created_at, expires_at, superseded_by)
-       VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL)`,
-    ).run(newId, contact_id, category, content, confidence, source, now, expires_at ?? null);
+      db.prepare(
+        `INSERT INTO memories
+           (id, session_id, contact_id, category, content, confidence, source, created_at, expires_at, superseded_by)
+         VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+      ).run(newId, contact_id, category, content, confidence, source, now, expires_at ?? null);
+    })();
 
     return reply.status(201).send({
       ok: true,
       id: newId,
-      superseded: existing?.id ?? null,
+      superseded: supersededId ?? null,
     });
   });
 
