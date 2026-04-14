@@ -14,8 +14,8 @@ All tools are registered via `registerAllTools()` in `src/mcp/tools/index.ts`.
 | `get_adapter_status` | E2 | Inspect CC adapter health |
 | `list_channels` | S7.1 | Discover available channels and adapter capabilities |
 | `send_message` | S7.2 | Send a message to any contact on any channel |
-| `recall_memory` | S7.3 | Search the memory store (stub — live after E8/E9) |
-| `log_memory` | S7.3 | Record a fact explicitly (stub — live after E8/E9) |
+| `recall_memory` | S7.3/E8 | Search the memory store for facts about contacts |
+| `log_memory` | S7.3/E8 | Record a fact explicitly |
 | `search_transcripts` | S7.3 | Full-text search across conversation transcripts |
 | `get_session` | S7.4 | Get session metadata and summary |
 | `list_sessions` | S7.4 | Browse recent sessions |
@@ -108,37 +108,77 @@ Priority values: `low`, `normal`, `high`. `low` maps to `normal` in the envelope
 
 ---
 
-## S7.3 — Memory Tools
+## S7.3/E8 — Memory Tools
 
 ### `recall_memory`
 
-Search the memory store. **Currently returns `{ available: false }` — memory system initializes in E8/E9.**
+Full-text search over the active memory store. Returns memories ordered by confidence DESC.
+Memories that are expired or superseded are excluded automatically.
 
 **Input:**
 ```json
-{ "query": "search text", "contact_id": "contact:chris", "limit": 10 }
+{
+  "query": "search text",
+  "contact_id": "contact:chris",
+  "category": "preference",
+  "limit": 10
+}
 ```
 
-**Output (pre-E8/E9):**
+`category` values: `preference`, `fact`, `plan`, `relationship`, `work`, `health`, `general`
+
+**Output:**
 ```json
-{ "available": false, "reason": "Memory system not yet initialized" }
+{
+  "memories": [
+    {
+      "id": "uuid",
+      "contact_id": "contact:chris",
+      "category": "preference",
+      "content": "Prefers tea over coffee",
+      "confidence": 0.95,
+      "source": "summarizer",
+      "created_at": "2026-04-12T10:00:00Z",
+      "expires_at": null
+    }
+  ],
+  "count": 1
+}
 ```
+
+Returns `{ available: false }` if the memory system is not initialized.
 
 ---
 
 ### `log_memory`
 
-Record a fact explicitly. **Currently returns `{ available: false }` — memory system initializes in E8/E9.**
+Record a fact explicitly to the memory store. Supersedes any existing active memory
+for the same `(contact_id, category)` pair.
 
 **Input:**
 ```json
-{ "contact_id": "contact:chris", "content": "Prefers tea over coffee", "confidence": 0.9, "source": "manual" }
+{
+  "contact_id": "contact:chris",
+  "content": "Prefers tea over coffee",
+  "category": "preference",
+  "confidence": 0.9,
+  "source": "manual",
+  "expires_at": "2026-12-31T00:00:00Z"
+}
 ```
 
-**Output (pre-E8/E9):**
+`category` and `expires_at` are optional (defaults: `general`, no expiry).
+
+**Output:**
 ```json
-{ "available": false, "reason": "Memory system not yet initialized" }
+{
+  "ok": true,
+  "id": "new-memory-uuid",
+  "superseded": "old-memory-uuid-or-null"
+}
 ```
+
+Returns `{ available: false }` if the memory system is not initialized.
 
 ---
 
@@ -270,6 +310,6 @@ Capability errors (channel doesn't support reactions) return `success: false` wi
 ## Implementation Notes
 
 - Tools are thin HTTP clients — all complex logic (DB queries, capability checks, adapter calls) lives in bus-core HTTP endpoints
-- `recall_memory` and `log_memory` are registered now (visible in tool list) but return `{ available: false }` until E8/E9
+- `recall_memory` and `log_memory` are fully functional (E8) — they call bus-core HTTP endpoints backed by FTS5
 - `search_transcripts` is fully functional — `transcripts_fts` FTS5 table exists in the E1 schema
 - Platform message IDs for `react_to_message` are stored in `transcripts.metadata.platform_message_id` by adapters during inbound processing

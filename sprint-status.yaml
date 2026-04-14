@@ -5,7 +5,7 @@ bmad_status:
   planning: complete
   architecture: complete
   implementation: in-progress
-current_epic: E10
+current_epic: E8
 epics:
   E1:
     status: complete
@@ -106,6 +106,22 @@ epics:
       S6.1: complete  # CommandRegistry (src/commands/registry.ts)
       S6.2: complete  # 7 built-in commands (src/commands/handlers.ts) — /subscribe deferred
       S6.3: complete  # Adapter command registration (TelegramAdapter.registerCommands())
+  E8:
+    status: complete
+    completed: 2026-04-14
+    notes: >
+      S8.1 (TranscriptLogger) was already complete in Stage 80.
+      Migration 003 adds sessions.status, sessions.summary_attempts, and memories table with FTS5.
+      Summarizer calls Claude API (claude-sonnet-4-6 default) with JSON extraction prompt;
+      retries 3x with exponential backoff; handles token budget guard (character heuristic).
+      SessionTracker background task closes idle sessions, retries failed, sweeps expired memories.
+      recall_memory + log_memory MCP tools now functional via GET/POST /api/v1/memories/*.
+      /retry-summary command resets failed sessions for next tracker tick.
+    stories:
+      S8.1: complete  # TranscriptLogger (already implemented in Stage 80)
+      S8.2: complete  # SessionTracker (src/memory/session-tracker.ts)
+      S8.3: complete  # Summarizer Pipeline (src/memory/summarizer.ts)
+      S8.4: complete  # Memory Lifecycle (migration 003 + HTTP endpoints + MCP tools)
   E14:
     status: backlog
     notes: >
@@ -148,4 +164,19 @@ epics:
       S16.2: pending  # CC adapter reports its session ID via a new MCP tool or handshake
       S16.3: pending  # bus-core stores cc_session_id when session is created/updated
       S16.4: pending  # Expose cc_session_id in /sessions output and get_session MCP tool
-last_updated: 2026-04-14
+  E17:
+    status: backlog
+    notes: >
+      End-to-end image and file attachment support. Telegram messages containing
+      photo/document/video/audio are currently silently dropped. E17 adds an
+      'attachment' payload type, a new attachments table (migration), Telegram
+      adapter media capture with Bot API file resolution, pipeline/DB persistence,
+      and CC adapter vision forwarding (base64 inline for images ≤5 MB, URL
+      fallback otherwise). Outbound attachment sending deferred to E18.
+      BlueBubbles attachments deferred to when E4 is implemented.
+    stories:
+      S17.1: pending  # attachment payload type + DB migration (attachments table, transcripts.attachment_id)
+      S17.2: pending  # Telegram adapter: detect photo/document/video/audio, resolve via getFile, emit attachment envelope
+      S17.3: pending  # Pipeline + TranscriptLogger: persist attachment rows alongside transcript rows
+      S17.4: pending  # CC adapter: forward images as base64 content blocks, non-image as text description
+last_updated: 2026-04-14  # E8 complete

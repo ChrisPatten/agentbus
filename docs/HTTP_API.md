@@ -329,6 +329,83 @@ FTS5 full-text search across conversation transcripts. Used by the `search_trans
 
 ---
 
+## Memory Routes (E8)
+
+### `GET /api/v1/memories/recall`
+
+Full-text search over the active memory store. Returns memories ordered by confidence DESC.
+Excludes memories where `superseded_by IS NOT NULL` or `expires_at < now()`.
+
+**Query parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `q` | string | Yes | FTS5 search query |
+| `contact_id` | string | No | Filter by contact |
+| `category` | string | No | Filter by category |
+| `limit` | number | No | Max results (default: 10, max: 50) |
+
+**Response (200):**
+```json
+{
+  "ok": true,
+  "memories": [
+    {
+      "id": "uuid",
+      "contact_id": "contact:chris",
+      "category": "preference",
+      "content": "Prefers tea over coffee",
+      "confidence": 0.95,
+      "source": "summarizer",
+      "created_at": "2026-04-12T10:00:00Z",
+      "expires_at": null
+    }
+  ],
+  "count": 1
+}
+```
+
+**Response (200) — memory system not yet initialized:**
+```json
+{ "ok": true, "available": false, "reason": "Memory system not yet initialized", "memories": [] }
+```
+
+---
+
+### `POST /api/v1/memories`
+
+Insert a memory manually. Supersedes any existing active memory for the same `(contact_id, category)` pair.
+
+**Request body:**
+```json
+{
+  "contact_id": "contact:chris",
+  "content": "Prefers tea over coffee",
+  "category": "preference",
+  "confidence": 0.9,
+  "source": "manual",
+  "expires_at": "2026-12-31T00:00:00Z"
+}
+```
+
+`category`, `confidence`, `source`, and `expires_at` are optional.
+
+**Response (201):**
+```json
+{
+  "ok": true,
+  "id": "new-memory-uuid",
+  "superseded": "old-memory-uuid-or-null"
+}
+```
+
+**Response (503) — memory system not yet initialized:**
+```json
+{ "ok": false, "error": "Memory system not yet initialized" }
+```
+
+---
+
 ## Reactions
 
 ### `POST /api/v1/messages/:id/react`

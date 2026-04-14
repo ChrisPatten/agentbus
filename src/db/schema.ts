@@ -24,6 +24,11 @@ function loadMigrations(): Migration[] {
       description: 'Paused adapters',
       sql: readFileSync(join(migrationsDir, '002_paused_adapters.sql'), 'utf-8'),
     },
+    {
+      version: 3,
+      description: 'Memories table + session status columns',
+      sql: readFileSync(join(migrationsDir, '003_memories.sql'), 'utf-8'),
+    },
   ];
 }
 
@@ -89,4 +94,11 @@ export function runMigrations(db: Database.Database): void {
  */
 export function rebuildFts(db: Database.Database): void {
   db.exec(`INSERT INTO transcripts_fts (transcripts_fts) VALUES ('rebuild')`);
+  // Rebuild memories FTS if the table exists (post-migration 003)
+  const exists = db
+    .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='memories_fts'`)
+    .get();
+  if (exists) {
+    db.exec(`INSERT INTO memories_fts (memories_fts) VALUES ('rebuild')`);
+  }
 }

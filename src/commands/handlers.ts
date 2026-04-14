@@ -349,6 +349,54 @@ async function cancelHandler(
   return { body: 'Playback cancelled.' };
 }
 
+// ── /retry-summary ────────────────────────────────────────────────────────────
+
+async function retrySummaryHandler(
+  args: string[],
+  ctx: SlashCommandContext,
+  deps: HandlerDeps,
+): Promise<CommandResponse> {
+  const sessionIdArg = args[0];
+  if (!sessionIdArg) {
+    return { body: 'Usage: /retry-summary <session_id>\nUse /sessions to list session IDs.' };
+  }
+
+  // Exact match first, then prefix match (like /replay)
+  type SessStatus = { id: string; status: string; summary_attempts: number };
+  const session =
+    (ctx.db
+      .prepare(`SELECT id, status, summary_attempts FROM sessions WHERE id = ?`)
+      .get(sessionIdArg) as SessStatus | undefined) ??
+    (sessionIdArg.length < 36
+      ? (ctx.db
+          .prepare(
+            `SELECT id, status, summary_attempts FROM sessions WHERE id LIKE ? ORDER BY started_at DESC LIMIT 1`,
+          )
+          .get(sessionIdArg + '%') as SessStatus | undefined)
+      : undefined);
+
+  if (!session) {
+    return { body: `Session not found: ${sessionIdArg}` };
+  }
+
+  if (session.status !== 'summarize_failed') {
+    return {
+      body: `Session ${session.id.slice(0, 8)} is not in a failed state (status: ${session.status}).`,
+    };
+  }
+
+  // Reset for next session tracker tick to pick up
+  deps.db
+    .prepare(
+      `UPDATE sessions SET status = 'summarize_pending', summary_attempts = 0 WHERE id = ?`,
+    )
+    .run(session.id);
+
+  return {
+    body: `Session ${session.id.slice(0, 8)} queued for re-summarization. The tracker will retry on the next tick (up to 60s).`,
+  };
+}
+
 // ── /forget ───────────────────────────────────────────────────────────────────
 
 async function forgetHandler(
@@ -448,6 +496,13 @@ export function createBuiltinCommands(deps: HandlerDeps): CommandDefinition[] {
       usage: '/forget <contact_id>',
       scope: 'bus',
       handler: (args, ctx) => forgetHandler(args, ctx, deps),
+    },
+    {
+      name: 'retry-summary',
+      description: 'Re-queue summarization for a failed session',
+      usage: '/retry-summary <session_id>',
+      scope: 'bus',
+      handler: (args, ctx) => retrySummaryHandler(args, ctx, deps),
     },
   ];
 }

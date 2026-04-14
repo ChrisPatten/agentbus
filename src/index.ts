@@ -35,6 +35,8 @@ import { createTranscriptLog } from './pipeline/stages/transcript-log.js';
 import { TelegramAdapter } from './adapters/telegram.js';
 import { DeliveryWorker } from './core/delivery.js';
 import { createCommandSystem } from './commands/index.js';
+import { Summarizer } from './memory/summarizer.js';
+import { SessionTracker } from './memory/session-tracker.js';
 
 const configPath = process.env['AGENTBUS_CONFIG'] ?? resolve(process.cwd(), 'config.yaml');
 
@@ -88,6 +90,14 @@ if (config.adapters.telegram) {
 
 const deliveryWorker = new DeliveryWorker({ queue, registry });
 
+// ── Memory system ─────────────────────────────────────────────────────────────
+// Summarizer calls the Claude API to extract memories from completed sessions.
+// SessionTracker runs a background loop to close idle sessions and trigger
+// summarization. Both degrade gracefully when ANTHROPIC_API_KEY is not set.
+
+const summarizer = new Summarizer({ db, config });
+const sessionTracker = new SessionTracker({ db, config, summarizer });
+
 // ── Periodic maintenance ─────────────────────────────────────────────────────
 // Sweep expired messages and recover stuck-processing ones.
 // Stuck threshold: messages in `processing` for > 5 minutes are reset to `pending`.
@@ -104,6 +114,7 @@ const maintenanceTimer = setInterval(() => {
 
 function shutdown() {
   console.log('AgentBus shutting down…');
+  sessionTracker.stop();
   deliveryWorker.stop();
   clearInterval(maintenanceTimer);
   const stops = registry.list().map((a) => a.stop().catch(() => {}));
@@ -128,6 +139,7 @@ for (const adapter of registry.list()) {
   await adapter.start();
 }
 deliveryWorker.start();
+sessionTracker.start();
 
 // Push command manifests to adapters that support native command registration
 // (e.g. Telegram's setMyCommands for autocomplete). Non-fatal on failure.

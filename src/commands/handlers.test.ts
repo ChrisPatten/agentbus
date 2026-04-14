@@ -528,12 +528,12 @@ describe('command handlers', () => {
   });
 
   describe('/forget', () => {
-    it('returns graceful message when memories table does not exist', async () => {
+    it('returns "no memories found" when there are no active memories for the contact', async () => {
       const deps = makeDeps();
       const commands = createBuiltinCommands(deps);
       const forget = commands.find((c) => c.name === 'forget')!;
       const result = await forget.handler(['chris'], makeCtx(deps.db));
-      expect(result.body).toContain('Memory system not yet available');
+      expect(result.body).toContain('No active memories found for contact');
     });
 
     it('returns usage when no contact_id given', async () => {
@@ -546,18 +546,10 @@ describe('command handlers', () => {
 
     it('expires memories when table exists', async () => {
       const db = makeDb();
-      // Create a minimal memories table to simulate E8
-      db.exec(`
-        CREATE TABLE memories (
-          id TEXT PRIMARY KEY,
-          contact_id TEXT NOT NULL,
-          content TEXT NOT NULL,
-          superseded_by TEXT,
-          expires_at TEXT
-        )
-      `);
-      db.prepare(`INSERT INTO memories (id, contact_id, content) VALUES (?, ?, ?)`).run('m1', 'chris', 'likes coffee');
-      db.prepare(`INSERT INTO memories (id, contact_id, content) VALUES (?, ?, ?)`).run('m2', 'chris', 'works remotely');
+      // memories table is created by migration 003
+      const now = new Date().toISOString();
+      db.prepare(`INSERT INTO memories (id, contact_id, category, content, confidence, source, created_at) VALUES (?, ?, 'general', ?, 0.9, 'manual', ?)`).run('m1', 'chris', 'likes coffee', now);
+      db.prepare(`INSERT INTO memories (id, contact_id, category, content, confidence, source, created_at) VALUES (?, ?, 'general', ?, 0.9, 'manual', ?)`).run('m2', 'chris', 'works remotely', now);
 
       const deps = makeDeps({ db });
       const commands = createBuiltinCommands(deps);

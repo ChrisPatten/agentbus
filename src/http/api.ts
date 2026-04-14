@@ -725,6 +725,114 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     }
   );
 
+  // ── Memory endpoints (E8) ────────────────────────────────────────────────────
+
+  // GET /api/v1/memories/recall — FTS5 search over memories for a contact
+  server.get<{ Querystring: { q?: string; contact_id?: string; category?: string; limit?: string } }>(
+    '/api/v1/memories/recall',
+    async (req, reply) => {
+      const { q, contact_id, category } = req.query;
+      const limit = Math.min(Math.max(1, parseInt(req.query.limit ?? '10', 10)), 50);
+
+      if (!q || q.trim().length === 0) {
+        return reply.status(400).send({ ok: false, error: 'Query parameter "q" is required' });
+      }
+
+      // Graceful degradation if memories table doesn't exist
+      const tableExists = db
+        .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='memories'`)
+        .get();
+      if (!tableExists) {
+        return { ok: true, available: false, reason: 'Memory system not yet initialized', memories: [] };
+      }
+
+      const now = new Date().toISOString();
+      try {
+        let sql = `
+          SELECT m.id, m.session_id, m.contact_id, m.category, m.content,
+                 m.confidence, m.source, m.created_at, m.expires_at
+          FROM memories m
+          JOIN memories_fts fts ON fts.rowid = m.rowid
+          WHERE fts.content MATCH ?
+            AND m.superseded_by IS NULL
+            AND (m.expires_at IS NULL OR m.expires_at > ?)
+        `;
+        const params: unknown[] = [q, now];
+
+        if (contact_id) {
+          sql += ' AND m.contact_id = ?';
+          params.push(contact_id);
+        }
+        if (category) {
+          sql += ' AND m.category = ?';
+          params.push(category);
+        }
+        sql += ' ORDER BY m.confidence DESC, m.created_at DESC LIMIT ?';
+        params.push(limit);
+
+        const memories = db.prepare(sql).all(...params);
+        return { ok: true, memories, count: memories.length };
+      } catch (err) {
+        return reply.status(500).send({ ok: false, error: String(err) });
+      }
+    }
+  );
+
+  // POST /api/v1/memories — manually log a memory
+  const MemoryInsertSchema = z.object({
+    contact_id: z.string().min(1),
+    content: z.string().min(1),
+    category: z.string().default('general'),
+    confidence: z.number().min(0).max(1).default(0.9),
+    source: z.string().default('manual'),
+    expires_at: z.string().optional(),
+  });
+
+  server.post<{ Body: unknown }>('/api/v1/memories', async (req, reply) => {
+    const parsed = MemoryInsertSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ ok: false, error: parsed.error.message });
+    }
+
+    // Graceful degradation
+    const tableExists = db
+      .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='memories'`)
+      .get();
+    if (!tableExists) {
+      return reply.status(503).send({ ok: false, error: 'Memory system not yet initialized' });
+    }
+
+    const { contact_id, content, category, confidence, source, expires_at } = parsed.data;
+    const now = new Date().toISOString();
+    const newId = randomUUID();
+
+    // Supersede existing active memory for same (contact_id, category)
+    const existing = db
+      .prepare(
+        `SELECT id FROM memories
+         WHERE contact_id = ? AND category = ? AND superseded_by IS NULL
+           AND (expires_at IS NULL OR expires_at > ?)
+         ORDER BY created_at DESC LIMIT 1`,
+      )
+      .get(contact_id, category, now) as { id: string } | undefined;
+
+    if (existing) {
+      db.prepare(`UPDATE memories SET superseded_by = ? WHERE id = ?`).run(newId, existing.id);
+    }
+
+    db.prepare(
+      `INSERT INTO memories
+         (id, session_id, contact_id, category, content, confidence, source, created_at, expires_at, superseded_by)
+       VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+    ).run(newId, contact_id, category, content, confidence, source, now, expires_at ?? null);
+
+    return reply.status(201).send({
+      ok: true,
+      id: newId,
+      superseded: existing?.id ?? null,
+    });
+  });
+
   // POST /api/v1/inbound — pipeline entry point for raw inbound messages
   server.post<{ Body: unknown }>('/api/v1/inbound', async (req, reply) => {
     const parsed = InboundSchema.safeParse(req.body);

@@ -81,7 +81,9 @@ const MemoryConfigSchema = z.object({
   summarizer_interval_ms: z.number().int().positive().default(60000),
   session_idle_threshold_ms: z.number().int().positive().default(1800000),
   context_window_hours: z.number().positive().default(48),
-  claude_api_model: z.string().default('claude-opus-4-6'),
+  claude_api_model: z.string().default('claude-sonnet-4-6'),
+  /** Max tokens for the summarization API response (default: 8192) */
+  summary_max_tokens: z.number().int().positive().default(8192),
 });
 
 /**
