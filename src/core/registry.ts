@@ -1,4 +1,5 @@
 import type { MessageEnvelope } from '../types/envelope.js';
+import type { CommandManifest } from '../commands/registry.js';
 
 /** Capabilities advertised by an adapter */
 export interface AdapterCapabilities {
@@ -51,7 +52,14 @@ export interface AdapterInstance {
   react?(platformMessageId: string, reaction: string): Promise<void>;
   /** Start a typing indicator for a contact. Called when the agent confirms receipt. */
   startTyping?(contactId: string): void;
+  /**
+   * Register slash commands with the platform (e.g. Telegram setMyCommands).
+   * Called at startup after all commands are registered. Failure is non-fatal.
+   */
+  registerCommands?(commands: CommandManifest[]): Promise<void>;
 }
+
+export type { CommandManifest };
 
 /**
  * Registry of active adapter instances.

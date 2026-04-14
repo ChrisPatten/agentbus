@@ -15,11 +15,14 @@ import type {
   AdapterCapabilities,
   DeliveryResult,
   HealthStatus,
+  CommandManifest,
 } from '../core/registry.js';
 import type { AppConfig } from '../config/schema.js';
 import { processInbound, type InboundMessage } from '../http/api.js';
 import type { MessageQueue } from '../core/queue.js';
 import type { PipelineEngine } from '../pipeline/engine.js';
+import type { AdapterRegistry } from '../core/registry.js';
+import type { CommandRegistry } from '../commands/registry.js';
 import type Database from 'better-sqlite3';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -87,6 +90,9 @@ export interface TelegramAdapterDeps {
   queue: MessageQueue;
   pipeline: PipelineEngine;
   db: Database.Database;
+  registry?: AdapterRegistry;
+  commandRegistry?: CommandRegistry;
+  pauseSet?: Set<string>;
 }
 
 // ── Message splitting ─────────────────────────────────────────────────────────
@@ -185,7 +191,8 @@ export class TelegramAdapter implements AdapterInstance {
     );
 
     await this.clearWebhook();
-    await this.registerCommands();
+    // Command registration is deferred to bus-core startup after all commands
+    // are registered — bus-core calls adapter.registerCommands(manifests).
 
     // Launch inbound loop in background (supervised)
     void this.supervise('inboundLoop', () => this.inboundLoop());
@@ -521,11 +528,11 @@ export class TelegramAdapter implements AdapterInstance {
     }
   }
 
-  private async registerCommands(): Promise<void> {
-    const commands = [
-      { command: 'status', description: 'Check AgentBus status' },
-      { command: 'help', description: 'Show available commands' },
-    ];
+  async registerCommands(manifests: CommandManifest[]): Promise<void> {
+    const commands = manifests.map((m) => ({
+      command: m.name,
+      description: m.description,
+    }));
 
     try {
       await this.callTelegram('setMyCommands', { commands });

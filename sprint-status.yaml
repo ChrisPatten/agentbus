@@ -92,4 +92,18 @@ epics:
       S10.2: skipped  # markRead: Telegram doesn't support it; deferred to E4/BlueBubbles
       S10.3: complete  # react_to_message end-to-end (src/adapters/telegram.ts)
       S10.typing: complete  # Persistent typing loop in TelegramAdapter (src/adapters/telegram.ts)
+  E6:
+    status: complete
+    completed: 2026-04-13
+    notes: >
+      7 built-in commands (subscribe deferred). Post-pipeline dispatch: slash
+      commands intercept after Stage 80 so they're always logged to transcripts.
+      Pause check is also post-pipeline so /resume works from paused adapters.
+      Command responses logged with command_response:true metadata for E8 filtering.
+      Plugin API: CommandRegistry.register() for custom commands. TelegramAdapter
+      updated to accept dynamic CommandManifest[] from bus-core at startup.
+    stories:
+      S6.1: complete  # CommandRegistry (src/commands/registry.ts)
+      S6.2: complete  # 7 built-in commands (src/commands/handlers.ts) — /subscribe deferred
+      S6.3: complete  # Adapter command registration (TelegramAdapter.registerCommands())
 last_updated: 2026-04-13

@@ -34,6 +34,7 @@ import { createRouteResolve } from './pipeline/stages/route-resolve.js';
 import { createTranscriptLog } from './pipeline/stages/transcript-log.js';
 import { TelegramAdapter } from './adapters/telegram.js';
 import { DeliveryWorker } from './core/delivery.js';
+import { createCommandSystem } from './commands/index.js';
 
 const configPath = process.env['AGENTBUS_CONFIG'] ?? resolve(process.cwd(), 'config.yaml');
 
@@ -49,6 +50,13 @@ if (process.argv.includes('--rebuild-fts')) {
 const queue = new MessageQueue(db);
 const registry = new AdapterRegistry();
 
+const { registry: commandRegistry, pauseSet } = createCommandSystem({
+  adapterRegistry: registry,
+  queue,
+  db,
+  config,
+});
+
 const pipeline = new PipelineEngine();
 pipeline.use({ slot: 10, name: 'normalize',        stage: normalize });
 pipeline.use({ slot: 20, name: 'contact-resolve',  stage: createContactResolve(config) });
@@ -59,7 +67,7 @@ pipeline.use({ slot: 60, name: 'priority-score',   stage: createPriorityScore(co
 pipeline.use({ slot: 70, name: 'route-resolve',    stage: createRouteResolve(config, db) });
 pipeline.use({ slot: 80, name: 'transcript-log',   stage: createTranscriptLog(db, config), critical: false });
 
-const httpServer = await createHttpServer({ queue, registry, config, pipeline, db });
+const httpServer = await createHttpServer({ queue, registry, config, pipeline, db, commandRegistry, pauseSet });
 
 // ── Platform adapter registration ────────────────────────────────────────────
 // Platform adapters run in-process. They are instantiated from config,
@@ -67,7 +75,7 @@ const httpServer = await createHttpServer({ queue, registry, config, pipeline, d
 // ready. Agent connectors (CC adapter) are separate processes — they
 // communicate via the HTTP API and are not registered here.
 
-const adapterDeps = { config, queue, pipeline, db };
+const adapterDeps = { config, queue, pipeline, db, registry, commandRegistry, pauseSet };
 
 if (config.adapters.telegram) {
   const telegram = new TelegramAdapter(adapterDeps);
@@ -120,5 +128,16 @@ for (const adapter of registry.list()) {
   await adapter.start();
 }
 deliveryWorker.start();
+
+// Push command manifests to adapters that support native command registration
+// (e.g. Telegram's setMyCommands for autocomplete). Non-fatal on failure.
+const commandManifests = commandRegistry.manifests();
+for (const adapter of registry.list()) {
+  if (adapter.capabilities.registerCommands && adapter.registerCommands) {
+    adapter.registerCommands(commandManifests).catch((err: unknown) => {
+      console.warn(`[agentbus] Failed to register commands with ${adapter.id}: ${String(err)}`);
+    });
+  }
+}
 
 export { config, queue, registry };

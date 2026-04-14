@@ -40,6 +40,7 @@ import type { MessageEnvelope } from '../types/envelope.js';
 import type { PipelineEngine } from '../pipeline/engine.js';
 import type { PipelineContext } from '../pipeline/types.js';
 import type Database from 'better-sqlite3';
+import type { CommandRegistry, SlashCommandContext } from '../commands/registry.js';
 
 export interface HttpServerDeps {
   queue: MessageQueue;
@@ -47,6 +48,10 @@ export interface HttpServerDeps {
   config: AppConfig;
   pipeline: PipelineEngine;
   db: Database.Database;
+  /** Optional — when present, slash commands are dispatched inline */
+  commandRegistry?: CommandRegistry;
+  /** Optional — set of adapter IDs currently paused; mutated by /pause and /resume */
+  pauseSet?: Set<string>;
 }
 
 const MessagePayloadSchema = z.discriminatedUnion('type', [
@@ -134,7 +139,15 @@ export interface InboundAbort {
  */
 export async function processInbound(
   message: InboundMessage,
-  deps: { queue: MessageQueue; pipeline: PipelineEngine; config: AppConfig; db: Database.Database },
+  deps: {
+    queue: MessageQueue;
+    pipeline: PipelineEngine;
+    config: AppConfig;
+    db: Database.Database;
+    registry?: AdapterRegistry;
+    commandRegistry?: CommandRegistry;
+    pauseSet?: Set<string>;
+  },
 ): Promise<InboundResult | InboundAbort> {
   const envelope: MessageEnvelope = {
     id: message.id ?? '',
@@ -168,6 +181,119 @@ export async function processInbound(
 
   if (!result) {
     return { ok: true, queued: false, reason: ctx.abortReason ?? 'pipeline_abort' };
+  }
+
+  // ── Slash command dispatch (post-pipeline) ───────────────────────────────
+  // Slash commands are handled here, after all pipeline stages have run
+  // (including transcript-log at Stage 80). Responses bypass the outbound
+  // queue and are sent directly via the originating adapter.
+  //
+  // Paused adapters can still send slash commands — the pause check below
+  // only drops non-command messages, so /resume always works.
+  if (result.isSlashCommand && result.slashCommand && deps.commandRegistry) {
+    const commandName = result.slashCommand.name;
+    const cmd = deps.commandRegistry.lookup(commandName);
+
+    // Determine originating adapter from the channel
+    const originAdapters = deps.registry?.lookupByChannel(result.envelope.channel) ?? [];
+    const originAdapter = originAdapters[0];
+    const adapterId = originAdapter?.id ?? 'unknown';
+
+    const cmdCtx: SlashCommandContext = {
+      channel: result.envelope.channel,
+      sender: result.envelope.sender,
+      adapterId,
+      argsRaw: result.slashCommand.argsRaw,
+      envelope: result.envelope,
+      db: deps.db,
+      config: deps.config,
+    };
+
+    let responseBody: string;
+    let commandHandled = false;
+
+    if (cmd && cmd.scope === 'bus') {
+      try {
+        const response = await cmd.handler(result.slashCommand.args, cmdCtx);
+        responseBody = response.body;
+      } catch (err) {
+        responseBody = `Command error: ${String(err)}`;
+      }
+      commandHandled = true;
+    } else if (!cmd) {
+      responseBody = `Unknown command: /${commandName}\nType /help to see available commands.`;
+      commandHandled = true;
+    }
+    // scope: 'agent' falls through to normal fan-out enqueue below
+
+    if (commandHandled) {
+      // Send response directly via the originating adapter (bypass queue)
+      if (originAdapter) {
+        const responseEnvelope: MessageEnvelope = {
+          id: randomUUID(),
+          timestamp: new Date().toISOString(),
+          channel: result.envelope.channel,
+          topic: 'command',
+          sender: 'system:bus',
+          recipient: result.envelope.sender,
+          reply_to: result.envelope.id,
+          priority: 'normal',
+          payload: { type: 'text', body: responseBody! },
+          metadata: { command_response: true, command: commandName },
+        };
+
+        try {
+          await originAdapter.send(responseEnvelope);
+        } catch (err) {
+          console.error(`[inbound] Failed to send command response via ${adapterId}: ${String(err)}`);
+        }
+
+        // Log command response to transcripts for auditability.
+        // Marked with command_response:true so E8/E9 can exclude from memory processing.
+        if (result.sessionId && result.conversationId) {
+          try {
+            const now = new Date().toISOString();
+            const contactId = result.envelope.sender.startsWith('contact:')
+              ? result.envelope.sender.slice('contact:'.length)
+              : result.envelope.sender;
+            deps.db
+              .prepare(
+                `INSERT INTO transcripts (id, message_id, conversation_id, session_id, created_at, channel, contact_id, direction, body, metadata)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, json(?))`,
+              )
+              .run(
+                randomUUID(),
+                responseEnvelope.id,
+                result.conversationId,
+                result.sessionId,
+                now,
+                result.envelope.channel,
+                contactId,
+                'outbound',
+                responseBody!,
+                JSON.stringify({ command_response: true, command: commandName }),
+              );
+          } catch (err) {
+            console.error(`[inbound] Failed to log command response transcript: ${String(err)}`);
+          }
+        }
+      } else {
+        console.warn(`[inbound] No adapter found for channel "${result.envelope.channel}" — command response not sent`);
+      }
+
+      return { ok: true, queued: false, reason: 'command_handled' };
+    }
+  }
+
+  // ── Pause check (post-pipeline) ──────────────────────────────────────────
+  // Non-command messages from paused adapters are dropped here. Slash
+  // commands are exempt (handled above) so /resume always gets through.
+  if (deps.pauseSet && deps.registry) {
+    const originAdapters = deps.registry.lookupByChannel(result.envelope.channel);
+    const originAdapterId = originAdapters[0]?.id;
+    if (originAdapterId && deps.pauseSet.has(originAdapterId)) {
+      return { ok: true, queued: false, reason: 'adapter_paused' };
+    }
   }
 
   // Fan-out: enqueue one copy per route target produced by Stage 70.
@@ -591,7 +717,15 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     if (!parsed.success) {
       return reply.status(400).send({ ok: false, error: parsed.error.message });
     }
-    return processInbound(parsed.data, { queue, pipeline, config, db });
+    return processInbound(parsed.data, {
+      queue,
+      pipeline,
+      config,
+      db,
+      registry,
+      commandRegistry: deps.commandRegistry,
+      pauseSet: deps.pauseSet,
+    });
   });
 
   return server;
