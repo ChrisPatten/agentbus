@@ -118,4 +118,34 @@ epics:
       S14.2: pending  # Add authorization check to command dispatch in api.ts
       S14.3: pending  # Scope /replay and /sessions to requesting contact
       S14.4: pending  # Scope /forget to own contact unless admin
+  E15:
+    status: backlog
+    notes: >
+      Temporary/incognito chat mode. A slash command (e.g. /temp or /incognito)
+      starts a fresh session that is excluded from memory summarization and context
+      injection. The session is still logged to transcripts for auditability but
+      E8/E9 skip it entirely — no memories are created, and the temp session's
+      history is not included in future context windows. Session ends on explicit
+      /end or idle timeout. Useful for sensitive conversations or testing agent
+      behavior without polluting long-term memory.
+    stories:
+      S15.1: pending  # Add /temp slash command that creates a new session with temp=true flag
+      S15.2: pending  # E8 memory summarizer skips sessions with temp=true
+      S15.3: pending  # E9 context injection excludes temp sessions from context window
+      S15.4: pending  # /end command (or idle timeout) to explicitly close temp session
+  E16:
+    status: backlog
+    notes: >
+      Link AgentBus sessions to native Claude Code sessions. When the CC adapter
+      receives a message, capture the active Claude Code session ID (e.g. from
+      MCP context or a handshake tool call) and store it in sessions.cc_session_id.
+      Enables cross-referencing: given a bus session you can find the CC session
+      that handled it, and vice versa. Unlocks future features like session
+      continuity (resume a bus conversation in the same CC session), transcript
+      merging, and per-session tool-call attribution.
+    stories:
+      S16.1: pending  # Add cc_session_id column to sessions table (migration)
+      S16.2: pending  # CC adapter reports its session ID via a new MCP tool or handshake
+      S16.3: pending  # bus-core stores cc_session_id when session is created/updated
+      S16.4: pending  # Expose cc_session_id in /sessions output and get_session MCP tool
 last_updated: 2026-04-14
