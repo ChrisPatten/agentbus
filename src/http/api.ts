@@ -842,6 +842,201 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     });
   });
 
+  // ── Schedule endpoints (E18) ─────────────────────────────────────────────────
+
+  const ScheduleCreateSchema = z
+    .object({
+      type: z.enum(['once', 'cron']),
+      cron_expr: z.string().optional(),
+      fire_at: z.string().optional(),
+      timezone: z.string().default('UTC'),
+      channel: z.string().min(1),
+      sender: z.string().min(1),
+      payload_body: z.string().min(1),
+      topic: z.string().default('general'),
+      priority: z.enum(['normal', 'high', 'urgent']).default('normal'),
+      label: z.string().optional(),
+      created_by: z.string().default('http'),
+      max_fires: z.number().int().positive().optional(),
+    })
+    .refine(
+      (d) => {
+        if (d.type === 'cron') return !!d.cron_expr;
+        if (d.type === 'once') return !!d.fire_at;
+        return false;
+      },
+      { message: 'cron schedules require cron_expr; once schedules require fire_at' },
+    );
+
+  const SchedulePatchSchema = z.object({
+    label: z.string().optional(),
+    max_fires: z.number().int().positive().nullable().optional(),
+    status: z.enum(['active', 'paused']).optional(),
+  });
+
+  // POST /api/v1/schedules — create a schedule
+  server.post<{ Body: unknown }>('/api/v1/schedules', async (req, reply) => {
+    const parsed = ScheduleCreateSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ ok: false, error: parsed.error.message });
+    }
+    const data = parsed.data;
+
+    // Validate cron expression and calculate fire_at
+    let fireAt: string;
+    if (data.type === 'cron') {
+      let nextFire: string | null = null;
+      try {
+        const { Cron } = await import('croner');
+        const job = new Cron(data.cron_expr!, { timezone: data.timezone, paused: true });
+        const next = job.nextRun();
+        job.stop();
+        nextFire = next ? next.toISOString() : null;
+      } catch (err) {
+        return reply.status(400).send({ ok: false, error: `Invalid cron expression: ${String(err)}` });
+      }
+      if (!nextFire) {
+        return reply.status(400).send({ ok: false, error: 'Cron expression has no future occurrences' });
+      }
+      fireAt = nextFire;
+    } else {
+      const ts = new Date(data.fire_at!);
+      if (isNaN(ts.getTime())) {
+        return reply.status(400).send({ ok: false, error: 'fire_at is not a valid ISO 8601 timestamp' });
+      }
+      if (ts <= new Date()) {
+        return reply.status(400).send({ ok: false, error: 'fire_at must be in the future' });
+      }
+      fireAt = ts.toISOString();
+    }
+
+    const id = randomUUID();
+    const now = new Date().toISOString();
+
+    db.prepare(
+      `INSERT INTO scheduled_items
+         (id, type, cron_expr, timezone, fire_at, channel, sender, payload_body,
+          topic, priority, label, created_at, created_by, fire_count, max_fires, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'active')`,
+    ).run(
+      id,
+      data.type,
+      data.cron_expr ?? null,
+      data.timezone,
+      fireAt,
+      data.channel,
+      data.sender,
+      data.payload_body,
+      data.topic,
+      data.priority,
+      data.label ?? null,
+      now,
+      data.created_by,
+      data.max_fires ?? null,
+    );
+
+    return reply.status(201).send({ ok: true, id, fire_at: fireAt });
+  });
+
+  // GET /api/v1/schedules — list schedules
+  server.get<{
+    Querystring: { status?: string; channel?: string; created_by?: string; limit?: string };
+  }>('/api/v1/schedules', (req, _reply) => {
+    const { status: statusFilter, channel, created_by, limit: limitStr } = req.query;
+    const limit = Math.max(1, Math.min(parseInt(limitStr ?? '50', 10) || 50, 200));
+
+    let sql = `SELECT * FROM scheduled_items WHERE 1=1`;
+    const params: unknown[] = [];
+
+    if (statusFilter) {
+      sql += ` AND status = ?`;
+      params.push(statusFilter);
+    }
+    if (channel) {
+      sql += ` AND channel = ?`;
+      params.push(channel);
+    }
+    if (created_by) {
+      sql += ` AND created_by = ?`;
+      params.push(created_by);
+    }
+    sql += ` ORDER BY fire_at ASC LIMIT ?`;
+    params.push(limit);
+
+    const schedules = db.prepare(sql).all(...params) as Array<Record<string, unknown>>;
+    return { ok: true, schedules, count: schedules.length };
+  });
+
+  // GET /api/v1/schedules/:id — fetch a single schedule
+  server.get<{ Params: { id: string } }>('/api/v1/schedules/:id', (req, reply) => {
+    const row = db
+      .prepare(`SELECT * FROM scheduled_items WHERE id = ?`)
+      .get(req.params.id) as Record<string, unknown> | undefined;
+    if (!row) {
+      return reply.status(404).send({ ok: false, error: 'Schedule not found' });
+    }
+    return { ok: true, schedule: row };
+  });
+
+  // DELETE /api/v1/schedules/:id — cancel a schedule
+  server.delete<{ Params: { id: string } }>('/api/v1/schedules/:id', (req, reply) => {
+    const result = db
+      .prepare(
+        `UPDATE scheduled_items SET status = 'cancelled'
+         WHERE id = ? AND status NOT IN ('completed', 'cancelled')`,
+      )
+      .run(req.params.id);
+    if (result.changes === 0) {
+      return reply.status(404).send({
+        ok: false,
+        error: 'Schedule not found or already cancelled/completed',
+      });
+    }
+    return { ok: true, id: req.params.id };
+  });
+
+  // PATCH /api/v1/schedules/:id — update label, max_fires, or status (pause↔active)
+  server.patch<{ Params: { id: string }; Body: unknown }>('/api/v1/schedules/:id', (req, reply) => {
+    const parsed = SchedulePatchSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ ok: false, error: parsed.error.message });
+    }
+    const { label, max_fires, status: newStatus } = parsed.data;
+
+    const existing = db
+      .prepare(`SELECT status FROM scheduled_items WHERE id = ?`)
+      .get(req.params.id) as { status: string } | undefined;
+
+    if (!existing) {
+      return reply.status(404).send({ ok: false, error: 'Schedule not found' });
+    }
+    if (existing.status === 'completed' || existing.status === 'cancelled') {
+      return reply.status(400).send({
+        ok: false,
+        error: `Cannot update a ${existing.status} schedule`,
+      });
+    }
+
+    const updates: string[] = [];
+    const values: unknown[] = [];
+
+    if (label !== undefined) { updates.push('label = ?'); values.push(label); }
+    if (max_fires !== undefined) { updates.push('max_fires = ?'); values.push(max_fires); }
+    if (newStatus !== undefined) { updates.push('status = ?'); values.push(newStatus); }
+
+    if (updates.length === 0) {
+      return reply.status(400).send({ ok: false, error: 'No updatable fields provided' });
+    }
+
+    values.push(req.params.id);
+    db.prepare(`UPDATE scheduled_items SET ${updates.join(', ')} WHERE id = ?`).run(...values);
+
+    const updated = db
+      .prepare(`SELECT * FROM scheduled_items WHERE id = ?`)
+      .get(req.params.id) as Record<string, unknown>;
+    return { ok: true, schedule: updated };
+  });
+
   // POST /api/v1/inbound — pipeline entry point for raw inbound messages
   server.post<{ Body: unknown }>('/api/v1/inbound', async (req, reply) => {
     const parsed = InboundSchema.safeParse(req.body);

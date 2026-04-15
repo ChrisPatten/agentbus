@@ -156,7 +156,7 @@ Results are ordered by confidence DESC, then recency.
 | Command | Description |
 |---------|-------------|
 | `/forget <contact_id>` | Soft-expire all memories for a contact |
-| `/retry-summary <session_id>` | Re-queue a failed session for summarization |
+| `/retry_summary <session_id>` | Re-queue a failed session for summarization |
 
 ---
 
@@ -222,7 +222,7 @@ signals that this session should not receive or contribute to long-term memory.
 
 1. Check `ANTHROPIC_API_KEY` is set and valid
 2. Check bus-core logs for `[summarizer]` errors
-3. Use `/retry-summary <session_id>` to manually re-trigger after fixing the issue
+3. Use `/retry_summary <session_id>` to manually re-trigger after fixing the issue
 4. If a session has `summary_attempts = 3`, use the command to reset it
 
 ### Memory not showing in recall

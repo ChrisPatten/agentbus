@@ -15,7 +15,7 @@ Slash commands let you operate AgentBus from any connected channel without SSH a
 | `/next` | Show next page of replay playback | `/next` |
 | `/cancel` | Cancel active replay playback | `/cancel` |
 | `/forget <contact_id>` | Expire all memory records for a contact | `/forget chris` |
-| `/retry-summary <session_id>` | Re-queue summarization for a failed session | `/retry-summary aaaabbbb` |
+| `/retry_summary <session_id>` | Re-queue summarization for a failed session | `/retry_summary aaaabbbb` |
 
 ### `/status`
 
@@ -121,20 +121,20 @@ Marks all memory records for a contact as superseded. Requires the memory system
 -> Forgot 7 memory records for contact: chris
 ```
 
-### `/retry-summary <session_id>`
+### `/retry_summary <session_id>`
 
 Re-queues a session that failed summarization. The session tracker will retry on
 its next tick (up to 60 seconds). Accepts the first 8 characters of the session
 ID as a prefix (same as `/replay`).
 
 ```
-/retry-summary aaaabbbb
+/retry_summary aaaabbbb
 -> Session aaaabbbb queued for re-summarization. The tracker will retry on the next tick (up to 60s).
 ```
 
 If the session is not in `summarize_failed` status:
 ```
-/retry-summary aaaabbbb
+/retry_summary aaaabbbb
 -> Session aaaabbbb is not in a failed state (status: summarized).
 ```
 

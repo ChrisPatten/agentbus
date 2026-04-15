@@ -8,6 +8,7 @@
  *   - recall_memory, log_memory, search_transcripts (S7.3)
  *   - get_session, list_sessions (S7.4)
  *   - react_to_message (S7.5)
+ *   - schedule_message, list_schedules, cancel_schedule (E18)
  */
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -18,6 +19,7 @@ import { registerMessagingTools } from './messaging.js';
 import { registerMemoryTools } from './memory.js';
 import { registerSessionTools } from './sessions.js';
 import { registerReactionTools } from './reactions.js';
+import { registerScheduleTools } from './scheduling.js';
 
 export { toolError, toolSuccess };
 
@@ -49,6 +51,7 @@ export function registerAllTools(
   registerMemoryTools(server, busBaseUrl);
   registerSessionTools(server, busBaseUrl);
   registerReactionTools(server, busBaseUrl);
+  registerScheduleTools(server, busBaseUrl);
 }
 
 // ── Core tools (E2) ───────────────────────────────────────────────────────────

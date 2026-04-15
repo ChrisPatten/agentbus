@@ -175,6 +175,33 @@ const PipelineConfigSchema = z.object({
 });
 
 /**
+ * A static schedule entry defined in config.yaml.
+ * Either `cron` or `fire_at` must be provided (not both).
+ */
+const ScheduleEntrySchema = z
+  .object({
+    id: z.string(),
+    cron: z.string().optional(),
+    fire_at: z.string().optional(),
+    timezone: z.string().default('UTC'),
+    channel: z.string(),
+    sender: z.string(),
+    prompt: z.string(),
+    label: z.string().optional(),
+    topic: z.string().default('general'),
+    priority: z.enum(['normal', 'high', 'urgent']).default('normal'),
+    max_fires: z.number().int().positive().optional(),
+  })
+  .refine((d) => !!(d.cron ?? d.fire_at), {
+    message: 'Each schedule entry must specify either cron or fire_at',
+  });
+
+const SchedulerConfigSchema = z.object({
+  tick_interval_ms: z.number().int().positive().default(30000),
+  enabled: z.boolean().default(true),
+});
+
+/**
  * Root application config schema. Validated at startup; an error here is
  * fatal. All stage factories, adapters, and the HTTP server receive the
  * resulting AppConfig object.
@@ -198,6 +225,8 @@ export const AppConfigSchema = z.object({
   }),
   topics: z.array(z.string()).default(['general']),
   memory: MemoryConfigSchema,
+  scheduler: SchedulerConfigSchema.default({ tick_interval_ms: 30000, enabled: true }),
+  schedules: z.array(ScheduleEntrySchema).default([]),
   pipeline: PipelineConfigSchema.default({
     dedup_window_ms: 30000,
     drop_unrouted: false,

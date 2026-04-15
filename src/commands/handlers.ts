@@ -349,7 +349,7 @@ async function cancelHandler(
   return { body: 'Playback cancelled.' };
 }
 
-// ── /retry-summary ────────────────────────────────────────────────────────────
+// ── /retry_summary ────────────────────────────────────────────────────────────
 
 async function retrySummaryHandler(
   args: string[],
@@ -358,7 +358,7 @@ async function retrySummaryHandler(
 ): Promise<CommandResponse> {
   const sessionIdArg = args[0];
   if (!sessionIdArg) {
-    return { body: 'Usage: /retry-summary <session_id>\nUse /sessions to list session IDs.' };
+    return { body: 'Usage: /retry_summary <session_id>\nUse /sessions to list session IDs.' };
   }
 
   // Exact match first, then prefix match (like /replay)
@@ -433,6 +433,106 @@ async function forgetHandler(
   return { body: `Forgot ${count} memory record${count === 1 ? '' : 's'} for contact: ${contactId}` };
 }
 
+// ── /schedule ─────────────────────────────────────────────────────────────────
+
+async function scheduleHandler(
+  args: string[],
+  ctx: SlashCommandContext,
+  deps: HandlerDeps,
+): Promise<CommandResponse> {
+  const sub = args[0]?.toLowerCase();
+
+  if (!sub || sub === 'list') {
+    // List active schedules for this channel
+    const tableExists = deps.db
+      .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='scheduled_items'`)
+      .get() as { name: string } | undefined;
+
+    if (!tableExists) {
+      return { body: 'Scheduling system not yet initialized.' };
+    }
+
+    const rows = deps.db
+      .prepare(
+        `SELECT id, type, label, fire_at, cron_expr, fire_count, max_fires, status
+         FROM scheduled_items
+         WHERE channel = ? AND status = 'active'
+         ORDER BY fire_at ASC LIMIT 20`,
+      )
+      .all(ctx.channel) as Array<{
+      id: string;
+      type: string;
+      label: string | null;
+      fire_at: string;
+      cron_expr: string | null;
+      fire_count: number;
+      max_fires: number | null;
+      status: string;
+    }>;
+
+    if (rows.length === 0) {
+      return { body: `No active schedules for channel: ${ctx.channel}` };
+    }
+
+    const lines = [`Active schedules for ${ctx.channel} (${rows.length}):\n`];
+    for (const row of rows) {
+      const shortId = row.id.slice(0, 8);
+      const name = row.label ?? (row.type === 'cron' ? row.cron_expr! : 'one-shot');
+      const nextFire = row.fire_at.slice(0, 16).replace('T', ' ');
+      const fires =
+        row.max_fires !== null ? `${row.fire_count}/${row.max_fires}` : `${row.fire_count} fired`;
+      lines.push(`  ${shortId}  ${name}  next: ${nextFire} UTC  (${fires})`);
+    }
+    lines.push('\nUse /schedule cancel <id> to cancel a schedule.');
+    return { body: lines.join('\n') };
+  }
+
+  if (sub === 'cancel') {
+    const scheduleId = args[1];
+    if (!scheduleId) {
+      return { body: 'Usage: /schedule cancel <id>\nGet IDs with /schedule list.' };
+    }
+
+    const tableExists = deps.db
+      .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='scheduled_items'`)
+      .get() as { name: string } | undefined;
+
+    if (!tableExists) {
+      return { body: 'Scheduling system not yet initialized.' };
+    }
+
+    // Scoped to this channel — prefix match (first 8 chars of UUID)
+    const existing = deps.db
+      .prepare(
+        `SELECT id, label, status FROM scheduled_items
+         WHERE (id = ? OR id LIKE ?) AND channel = ?
+         ORDER BY created_at DESC LIMIT 1`,
+      )
+      .get(scheduleId, scheduleId + '%', ctx.channel) as
+      | { id: string; label: string | null; status: string }
+      | undefined;
+
+    if (!existing) {
+      return { body: `Schedule not found in channel "${ctx.channel}": ${scheduleId}` };
+    }
+
+    if (existing.status === 'cancelled' || existing.status === 'completed') {
+      return { body: `Schedule ${existing.id.slice(0, 8)} is already ${existing.status}.` };
+    }
+
+    deps.db
+      .prepare(`UPDATE scheduled_items SET status = 'cancelled' WHERE id = ?`)
+      .run(existing.id);
+
+    const name = existing.label ? ` (${existing.label})` : '';
+    return { body: `Schedule ${existing.id.slice(0, 8)}${name} cancelled.` };
+  }
+
+  return {
+    body: 'Usage:\n  /schedule list            — list active schedules for this channel\n  /schedule cancel <id>    — cancel a schedule by ID',
+  };
+}
+
 // ── Factory ───────────────────────────────────────────────────────────────────
 
 /**
@@ -498,11 +598,18 @@ export function createBuiltinCommands(deps: HandlerDeps): CommandDefinition[] {
       handler: (args, ctx) => forgetHandler(args, ctx, deps),
     },
     {
-      name: 'retry-summary',
+      name: 'retry_summary',
       description: 'Re-queue summarization for a failed session',
-      usage: '/retry-summary <session_id>',
+      usage: '/retry_summary <session_id>',
       scope: 'bus',
       handler: (args, ctx) => retrySummaryHandler(args, ctx, deps),
+    },
+    {
+      name: 'schedule',
+      description: 'List or cancel scheduled messages for this channel',
+      usage: '/schedule [list | cancel <id>]',
+      scope: 'bus',
+      handler: (args, ctx) => scheduleHandler(args, ctx, deps),
     },
   ];
 }

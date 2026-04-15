@@ -122,6 +122,25 @@ epics:
       S8.2: complete  # SessionTracker (src/memory/session-tracker.ts)
       S8.3: complete  # Summarizer Pipeline (src/memory/summarizer.ts)
       S8.4: complete  # Memory Lifecycle (migration 003 + HTTP endpoints + MCP tools)
+  E18:
+    status: complete
+    completed: 2026-04-15
+    notes: >
+      Scheduled messages — fire prompts into the inbound pipeline on a time-based
+      schedule. Scheduler background worker (setInterval, 30s default tick) queries
+      due items and calls processInbound() directly. Config.yaml static schedules
+      upserted on startup by stable ID; removed entries cancelled on next startup.
+      HTTP CRUD endpoints (POST/GET/GET/:id/DELETE/PATCH /api/v1/schedules).
+      MCP tools: schedule_message, list_schedules, cancel_schedule.
+      /schedule slash command: list (active schedules for channel), cancel <id>.
+      croner used for cron expression parsing and next-fire calculation.
+    stories:
+      S18.1: complete  # DB migration 004 + ScheduledItem type + config schema
+      S18.2: complete  # Scheduler background worker (src/scheduler/scheduler.ts)
+      S18.3: complete  # HTTP API endpoints (src/http/api.ts)
+      S18.4: complete  # MCP tools (src/mcp/tools/scheduling.ts)
+      S18.5: complete  # /schedule slash command (src/commands/handlers.ts)
+      S18.6: complete  # Docs (docs/SCHEDULING.md) + sprint status
   E9:
     status: complete
     completed: 2026-04-14
@@ -193,4 +212,4 @@ epics:
       S17.2: pending  # Telegram adapter: detect photo/document/video/audio, resolve via getFile, emit attachment envelope
       S17.3: pending  # Pipeline + TranscriptLogger: persist attachment rows alongside transcript rows
       S17.4: pending  # CC adapter: forward images as base64 content blocks, non-image as text description
-last_updated: 2026-04-14  # E9 complete
+last_updated: 2026-04-15  # E18 complete

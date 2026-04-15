@@ -38,6 +38,7 @@ import { DeliveryWorker } from './core/delivery.js';
 import { createCommandSystem } from './commands/index.js';
 import { Summarizer } from './memory/summarizer.js';
 import { SessionTracker } from './memory/session-tracker.js';
+import { Scheduler } from './scheduler/scheduler.js';
 
 const configPath = process.env['AGENTBUS_CONFIG'] ?? resolve(process.cwd(), 'config.yaml');
 
@@ -100,6 +101,21 @@ const deliveryWorker = new DeliveryWorker({ queue, registry });
 const summarizer = new Summarizer({ db, config });
 const sessionTracker = new SessionTracker({ db, config, summarizer });
 
+// ── Scheduler ─────────────────────────────────────────────────────────────────
+// Fires scheduled messages into the inbound pipeline on a configurable tick.
+// Config-defined schedules are upserted on startup; dynamic schedules are
+// created via the HTTP API or MCP tools.
+
+const scheduler = new Scheduler({
+  db,
+  config,
+  queue,
+  pipeline,
+  registry,
+  commandRegistry,
+  pauseSet,
+});
+
 // ── Periodic maintenance ─────────────────────────────────────────────────────
 // Sweep expired messages and recover stuck-processing ones.
 // Stuck threshold: messages in `processing` for > 5 minutes are reset to `pending`.
@@ -116,6 +132,7 @@ const maintenanceTimer = setInterval(() => {
 
 function shutdown() {
   console.log('AgentBus shutting down…');
+  scheduler.stop();
   sessionTracker.stop();
   deliveryWorker.stop();
   clearInterval(maintenanceTimer);
@@ -142,6 +159,7 @@ for (const adapter of registry.list()) {
 }
 deliveryWorker.start();
 sessionTracker.start();
+if (config.scheduler.enabled) scheduler.start();
 
 // Push command manifests to adapters that support native command registration
 // (e.g. Telegram's setMyCommands for autocomplete). Non-fatal on failure.

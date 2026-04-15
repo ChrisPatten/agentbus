@@ -29,6 +29,11 @@ function loadMigrations(): Migration[] {
       description: 'Memories table + session status columns',
       sql: readFileSync(join(migrationsDir, '003_memories.sql'), 'utf-8'),
     },
+    {
+      version: 4,
+      description: 'Scheduled items',
+      sql: readFileSync(join(migrationsDir, '004_scheduled_items.sql'), 'utf-8'),
+    },
   ];
 }
 

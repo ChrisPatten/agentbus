@@ -529,14 +529,40 @@ export class TelegramAdapter implements AdapterInstance {
   }
 
   async registerCommands(manifests: CommandManifest[]): Promise<void> {
-    const commands = manifests.map((m) => ({
-      command: m.name,
-      description: m.description,
-    }));
+    // Telegram requires: name = [a-z0-9_]{1,32}, description = 3-256 chars.
+    // A single invalid entry causes the whole setMyCommands call to fail, so
+    // validate each manifest and skip (with a warning) rather than reject all.
+    const VALID_NAME_RE = /^[a-z0-9_]{1,32}$/;
+    const commands: Array<{ command: string; description: string }> = [];
+
+    for (const m of manifests) {
+      if (!VALID_NAME_RE.test(m.name)) {
+        console.warn(
+          `[telegram] Skipping command "${m.name}" — name must be 1-32 chars, only [a-z0-9_]`,
+        );
+        continue;
+      }
+      if (m.description.length < 3 || m.description.length > 256) {
+        console.warn(
+          `[telegram] Skipping command "${m.name}" — description must be 3-256 chars (got ${m.description.length})`,
+        );
+        continue;
+      }
+      commands.push({ command: m.name, description: m.description });
+    }
+
+    if (commands.length === 0) {
+      console.warn('[telegram] No valid commands to register');
+      return;
+    }
 
     try {
       await this.callTelegram('setMyCommands', { commands });
-      console.log(`[telegram] Registered ${commands.length} slash commands`);
+      await this.callTelegram('setChatMenuButton', { menu_button: { type: 'commands' } });
+      const stored = await this.callTelegram<Array<{ command: string }>>('getMyCommands', {});
+      console.log(
+        `[telegram] Registered ${commands.length} slash commands — Telegram confirms: ${stored.map((c) => c.command).join(', ')}`,
+      );
     } catch (err) {
       console.error(`[telegram] Failed to register slash commands: ${String(err)}`);
     }
