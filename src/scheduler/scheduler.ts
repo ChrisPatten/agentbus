@@ -9,10 +9,15 @@
  *   3. Update fire_count, last_fired_at. Mark one-shots 'completed'. Advance
  *      fire_at for recurring cron items; mark 'completed' when max_fires hit.
  *
- * Config loading (on start):
+ * Config loading (loadConfig, called on start regardless of enabled flag):
  *   - Upserts all config.schedules entries by stable ID.
  *   - Cancels config-managed schedules whose IDs no longer appear in config
  *     (i.e. the user removed them from config.yaml).
+ *
+ * Delivery semantics: at-least-once. processInbound() fires before the DB
+ * update. A process crash between the two causes the item to re-fire on the
+ * next tick. One-shot schedules should be considered best-effort-once; cron
+ * schedules are expected to tolerate the rare duplicate.
  *
  * Note: croner is used with { paused: true } exclusively for next-fire
  * calculation — it never actually schedules a background job.
@@ -25,8 +30,24 @@ import type { MessageQueue } from '../core/queue.js';
 import type { AdapterRegistry } from '../core/registry.js';
 import type { PipelineEngine } from '../pipeline/engine.js';
 import type { CommandRegistry } from '../commands/registry.js';
-import { processInbound } from '../http/api.js';
+import { processInbound as defaultProcessInbound } from '../http/api.js';
+import type { InboundMessage, InboundResult, InboundAbort } from '../http/api.js';
 import type { ScheduledItem } from './types.js';
+
+export interface ProcessInboundDeps {
+  queue: MessageQueue;
+  pipeline: PipelineEngine;
+  registry: AdapterRegistry;
+  commandRegistry: CommandRegistry;
+  pauseSet: Set<string>;
+  config: AppConfig;
+  db: Database.Database;
+}
+
+export type ProcessInboundFn = (
+  msg: InboundMessage,
+  deps: ProcessInboundDeps,
+) => Promise<InboundResult | InboundAbort>;
 
 export interface SchedulerDeps {
   db: Database.Database;
@@ -36,44 +57,60 @@ export interface SchedulerDeps {
   registry: AdapterRegistry;
   commandRegistry: CommandRegistry;
   pauseSet: Set<string>;
+  /** Override for testing — defaults to the real processInbound */
+  processInbound?: ProcessInboundFn;
 }
 
 /**
  * Calculate the next fire time for a cron expression after a given date.
- * Returns null if the expression has no future occurrences.
+ * Returns null if the expression is valid but has no future occurrences.
+ * Throws if the expression cannot be parsed.
  */
 function nextCronFire(cronExpr: string, timezone: string, after?: Date): string | null {
-  try {
-    const job = new Cron(cronExpr, { timezone, paused: true, startAt: after });
-    const next = job.nextRun(after);
-    job.stop();
-    return next ? next.toISOString() : null;
-  } catch {
-    return null;
-  }
+  const job = new Cron(cronExpr, { timezone, paused: true, startAt: after });
+  const next = job.nextRun(after);
+  job.stop();
+  return next ? next.toISOString() : null;
 }
+
+/** Maximum items processed per tick — prevents runaway catch-up bursts. */
+const TICK_ITEM_LIMIT = 50;
 
 export class Scheduler {
   private db: Database.Database;
   private config: AppConfig;
   private deps: SchedulerDeps;
+  private processInbound: ProcessInboundFn;
   private timer: ReturnType<typeof setInterval> | null = null;
+  /** Prevents concurrent tick() executions if processInbound() is slow. */
+  private isRunning = false;
 
   constructor(deps: SchedulerDeps) {
     this.db = deps.db;
     this.config = deps.config;
     this.deps = deps;
+    this.processInbound = deps.processInbound ?? defaultProcessInbound;
   }
 
   /**
-   * Start the scheduler. Upserts config schedules, then begins the tick loop.
-   * Runs one immediate tick before the interval fires.
+   * Load config-defined schedules into the DB.
+   *
+   * Called unconditionally on startup — even when scheduler.enabled = false —
+   * so that config schedules are persisted and queryable via the HTTP API.
+   * The tick loop (start/stop) is independent of this.
    */
-  start(): void {
+  loadConfig(): void {
     this.upsertConfigSchedules();
     this.cancelRemovedConfigSchedules();
-    this.tick();
-    this.timer = setInterval(() => this.tick(), this.config.scheduler.tick_interval_ms);
+  }
+
+  /**
+   * Start the tick loop. Runs one immediate tick before the first interval.
+   * Call loadConfig() separately (index.ts does this unconditionally).
+   */
+  start(): void {
+    void this.tick();
+    this.timer = setInterval(() => void this.tick(), this.config.scheduler.tick_interval_ms);
   }
 
   /** Stop the tick loop. In-flight processInbound calls complete on their own. */
@@ -86,21 +123,42 @@ export class Scheduler {
 
   /**
    * Run one scheduler tick. Exposed for testing.
-   * Queries all due items and fires them sequentially.
+   * Skipped (no-op) if a previous tick is still in progress.
    */
   async tick(): Promise<void> {
+    if (this.isRunning) return;
+    this.isRunning = true;
+    try {
+      await this._runTick();
+    } finally {
+      this.isRunning = false;
+    }
+  }
+
+  private async _runTick(): Promise<void> {
     let due: ScheduledItem[];
     try {
       due = this.db
         .prepare(
+          // Use strftime ISO format so the comparison is lexicographically
+          // correct against fire_at values stored as 'YYYY-MM-DDTHH:MM:SS.sssZ'.
+          // datetime('now') returns 'YYYY-MM-DD HH:MM:SS' (space separator);
+          // 'T' (0x54) > ' ' (0x20) so same-day past items would be skipped.
           `SELECT * FROM scheduled_items
-           WHERE status = 'active' AND fire_at <= datetime('now')
-           ORDER BY fire_at ASC LIMIT 50`,
+           WHERE status = 'active'
+             AND fire_at <= strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+           ORDER BY fire_at ASC LIMIT ${TICK_ITEM_LIMIT}`,
         )
         .all() as ScheduledItem[];
     } catch (err) {
       console.error('[scheduler] Failed to query due items:', err);
       return;
+    }
+
+    if (due.length === TICK_ITEM_LIMIT) {
+      console.warn(
+        `[scheduler] Tick hit the ${TICK_ITEM_LIMIT}-item cap — some overdue items deferred to next tick`,
+      );
     }
 
     for (const item of due) {
@@ -114,7 +172,7 @@ export class Scheduler {
 
   /** Fire a single scheduled item through the inbound pipeline. */
   private async fireItem(item: ScheduledItem): Promise<void> {
-    const result = await processInbound(
+    const result = await this.processInbound(
       {
         channel: item.channel,
         sender: item.sender,
@@ -156,9 +214,15 @@ export class Scheduler {
       );
     } else {
       // Cron: advance to next fire time
-      const nextFire = nextCronFire(item.cron_expr!, item.timezone);
-      if (!nextFire) {
-        // No future occurrences — mark completed
+      let nextFire: string | null;
+      try {
+        nextFire = nextCronFire(item.cron_expr!, item.timezone);
+      } catch (err) {
+        console.error(
+          `[scheduler] Schedule ${item.id.slice(0, 8)} has an unparseable cron expression` +
+            ` — marking completed:`,
+          err,
+        );
         this.db
           .prepare(
             `UPDATE scheduled_items
@@ -166,7 +230,19 @@ export class Scheduler {
              WHERE id = ?`,
           )
           .run(now, newFireCount, item.id);
-        console.log(`[scheduler] Schedule ${item.id.slice(0, 8)} exhausted — no future fires`);
+        return;
+      }
+
+      if (!nextFire) {
+        // Valid expression but no future occurrences — exhausted
+        this.db
+          .prepare(
+            `UPDATE scheduled_items
+             SET last_fired_at = ?, fire_count = ?, status = 'completed'
+             WHERE id = ?`,
+          )
+          .run(now, newFireCount, item.id);
+        console.log(`[scheduler] Schedule ${item.id.slice(0, 8)} exhausted — no future occurrences`);
       } else {
         this.db
           .prepare(
@@ -196,6 +272,11 @@ export class Scheduler {
    *
    * ON CONFLICT: update payload/label/cron_expr but NOT fire_at for existing
    * active items — overwriting fire_at would cause an immediate re-fire.
+   *
+   * Important: once a config schedule is manually cancelled (via /schedule cancel
+   * or DELETE /api/v1/schedules/:id), the WHERE status != 'cancelled' guard
+   * prevents it from being re-activated on restart. To revive a cancelled
+   * config schedule, update its id in config.yaml to force a fresh insert.
    */
   private upsertConfigSchedules(): void {
     const entries = this.config.schedules;
@@ -209,9 +290,21 @@ export class Scheduler {
       // Calculate initial fire_at for new insertions only
       let initialFireAt: string;
       if (type === 'cron') {
-        const next = nextCronFire(entry.cron!, entry.timezone);
+        let next: string | null;
+        try {
+          next = nextCronFire(entry.cron!, entry.timezone);
+        } catch (err) {
+          console.warn(
+            `[scheduler] Config schedule "${entry.id}" has an invalid cron expression` +
+              ` "${entry.cron}": ${String(err)}`,
+          );
+          continue;
+        }
         if (!next) {
-          console.warn(`[scheduler] Config schedule "${entry.id}" cron has no future fires — skipping`);
+          console.warn(
+            `[scheduler] Config schedule "${entry.id}" cron "${entry.cron}"` +
+              ` has no future occurrences — skipping`,
+          );
           continue;
         }
         initialFireAt = next;
@@ -221,6 +314,7 @@ export class Scheduler {
 
       // Insert new rows. For existing rows: update payload/label/cron but
       // preserve fire_at (so we don't re-trigger an already-scheduled item).
+      // Skips cancelled items — see doc comment above.
       this.db
         .prepare(
           `INSERT INTO scheduled_items

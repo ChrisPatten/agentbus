@@ -454,7 +454,7 @@ async function scheduleHandler(
 
     const rows = deps.db
       .prepare(
-        `SELECT id, type, label, fire_at, cron_expr, fire_count, max_fires, status
+        `SELECT id, type, label, fire_at, cron_expr, timezone, fire_count, max_fires, status
          FROM scheduled_items
          WHERE channel = ? AND status = 'active'
          ORDER BY fire_at ASC LIMIT 20`,
@@ -465,6 +465,7 @@ async function scheduleHandler(
       label: string | null;
       fire_at: string;
       cron_expr: string | null;
+      timezone: string;
       fire_count: number;
       max_fires: number | null;
       status: string;
@@ -479,9 +480,10 @@ async function scheduleHandler(
       const shortId = row.id.slice(0, 8);
       const name = row.label ?? (row.type === 'cron' ? row.cron_expr! : 'one-shot');
       const nextFire = row.fire_at.slice(0, 16).replace('T', ' ');
+      const tz = row.timezone && row.timezone !== 'UTC' ? ` (${row.timezone})` : ' UTC';
       const fires =
         row.max_fires !== null ? `${row.fire_count}/${row.max_fires}` : `${row.fire_count} fired`;
-      lines.push(`  ${shortId}  ${name}  next: ${nextFire} UTC  (${fires})`);
+      lines.push(`  ${shortId}  ${name}  next: ${nextFire}${tz}  (${fires})`);
     }
     lines.push('\nUse /schedule cancel <id> to cancel a schedule.');
     return { body: lines.join('\n') };
@@ -504,12 +506,12 @@ async function scheduleHandler(
     // Scoped to this channel — prefix match (first 8 chars of UUID)
     const existing = deps.db
       .prepare(
-        `SELECT id, label, status FROM scheduled_items
+        `SELECT id, label, status, created_by FROM scheduled_items
          WHERE (id = ? OR id LIKE ?) AND channel = ?
          ORDER BY created_at DESC LIMIT 1`,
       )
       .get(scheduleId, scheduleId + '%', ctx.channel) as
-      | { id: string; label: string | null; status: string }
+      | { id: string; label: string | null; status: string; created_by: string }
       | undefined;
 
     if (!existing) {
@@ -525,7 +527,11 @@ async function scheduleHandler(
       .run(existing.id);
 
     const name = existing.label ? ` (${existing.label})` : '';
-    return { body: `Schedule ${existing.id.slice(0, 8)}${name} cancelled.` };
+    const configNote =
+      existing.created_by === 'config'
+        ? '\nNote: this is a config-managed schedule. It will remain cancelled across restarts until its id is removed from config.yaml or changed.'
+        : '';
+    return { body: `Schedule ${existing.id.slice(0, 8)}${name} cancelled.${configNote}` };
   }
 
   return {

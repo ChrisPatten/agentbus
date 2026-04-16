@@ -1004,8 +1004,8 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     const { label, max_fires, status: newStatus } = parsed.data;
 
     const existing = db
-      .prepare(`SELECT status FROM scheduled_items WHERE id = ?`)
-      .get(req.params.id) as { status: string } | undefined;
+      .prepare(`SELECT status, fire_count FROM scheduled_items WHERE id = ?`)
+      .get(req.params.id) as { status: string; fire_count: number } | undefined;
 
     if (!existing) {
       return reply.status(404).send({ ok: false, error: 'Schedule not found' });
@@ -1021,8 +1021,20 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     const values: unknown[] = [];
 
     if (label !== undefined) { updates.push('label = ?'); values.push(label); }
-    if (max_fires !== undefined) { updates.push('max_fires = ?'); values.push(max_fires); }
-    if (newStatus !== undefined) { updates.push('status = ?'); values.push(newStatus); }
+    if (max_fires !== undefined) {
+      updates.push('max_fires = ?');
+      values.push(max_fires);
+      // If max_fires is now at or below the current fire_count, complete immediately
+      // rather than leaving an active schedule that can never advance.
+      if (max_fires !== null && max_fires <= existing.fire_count) {
+        updates.push('status = ?');
+        values.push('completed');
+      }
+    }
+    if (newStatus !== undefined && !values.includes('completed')) {
+      updates.push('status = ?');
+      values.push(newStatus);
+    }
 
     if (updates.length === 0) {
       return reply.status(400).send({ ok: false, error: 'No updatable fields provided' });

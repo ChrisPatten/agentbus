@@ -9,9 +9,6 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { toolError, toolSuccess } from './helpers.js';
 
-const EMOJI_SET = ['❤️', '👍', '👎', '😂', '‼️', '❓'] as const;
-type Emoji = (typeof EMOJI_SET)[number];
-
 interface ReactResponse {
   ok: boolean;
   success?: boolean;
@@ -29,12 +26,10 @@ export function registerReactionTools(server: McpServer, busBaseUrl: string): vo
         'Send an emoji reaction to a message. Only works on channels that support reactions (Telegram, BlueBubbles). Returns a graceful error on unsupported channels.',
       inputSchema: {
         message_id: z.string().min(1).describe('Bus message ID to react to'),
-        emoji: z
-          .enum(EMOJI_SET)
-          .describe('Reaction emoji: ❤️ 👍 👎 😂 ‼️ ❓'),
+        emoji: z.string().min(1).describe('Reaction emoji (any single emoji)'),
       },
     },
-    async ({ message_id, emoji }: { message_id: string; emoji: Emoji }) => {
+    async ({ message_id, emoji }: { message_id: string; emoji: string }) => {
       try {
         const res = await fetch(`${busBaseUrl}/api/v1/messages/${message_id}/react`, {
           method: 'POST',

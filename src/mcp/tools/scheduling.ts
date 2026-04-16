@@ -152,6 +152,12 @@ export function registerScheduleTools(server: McpServer, busBaseUrl: string): vo
           .string()
           .optional()
           .describe('Filter by channel (e.g. "telegram")'),
+        created_by: z
+          .string()
+          .optional()
+          .describe(
+            'Filter by creator: "agent" for agent-created, "config" for config-defined, or any custom value',
+          ),
         limit: z
           .number()
           .int()
@@ -162,10 +168,11 @@ export function registerScheduleTools(server: McpServer, busBaseUrl: string): vo
           .describe('Max results (default: 20, max: 200)'),
       },
     },
-    async ({ status, channel, limit }) => {
+    async ({ status, channel, created_by, limit }) => {
       const params = new URLSearchParams();
       if (status) params.set('status', status);
       if (channel) params.set('channel', channel);
+      if (created_by) params.set('created_by', created_by);
       if (limit) params.set('limit', String(limit));
 
       try {

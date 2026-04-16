@@ -119,14 +119,17 @@ describe('react_to_message tool', () => {
     await client.close();
   });
 
-  it('rejects invalid emoji (not in allowed set)', async () => {
+  it('accepts any non-empty emoji string (no enum constraint)', async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ ok: true, success: true }), { status: 200 }),
+    );
+
     const client = await makeClient();
-    // The Zod enum validation returns isError:true rather than throwing
     const result = await client.callTool({
       name: 'react_to_message',
       arguments: { message_id: 'msg-1', emoji: '🚀' },
     });
-    expect(result.isError).toBe(true);
+    expect(result.isError).toBeFalsy();
 
     await client.close();
   });

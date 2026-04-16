@@ -159,6 +159,7 @@ for (const adapter of registry.list()) {
 }
 deliveryWorker.start();
 sessionTracker.start();
+scheduler.loadConfig();
 if (config.scheduler.enabled) scheduler.start();
 
 // Push command manifests to adapters that support native command registration

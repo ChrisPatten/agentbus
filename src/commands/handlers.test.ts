@@ -589,4 +589,171 @@ describe('command handlers', () => {
       expect(pages).toEqual([]);
     });
   });
+
+  // ── /schedule ────────────────────────────────────────────────────────────
+
+  describe('/schedule', () => {
+    function insertSchedule(
+      db: Database.Database,
+      opts: {
+        id?: string;
+        channel?: string;
+        type?: 'once' | 'cron';
+        cron_expr?: string;
+        timezone?: string;
+        fire_at?: string;
+        label?: string | null;
+        fire_count?: number;
+        max_fires?: number | null;
+        status?: string;
+        created_by?: string;
+      } = {},
+    ): string {
+      const id = opts.id ?? `sched-${Math.random().toString(36).slice(2)}`;
+      const fireAt = opts.fire_at ?? new Date(Date.now() + 3_600_000).toISOString();
+      db.prepare(
+        `INSERT INTO scheduled_items
+           (id, type, cron_expr, timezone, fire_at, channel, sender, payload_body,
+            topic, priority, label, created_at, created_by, fire_count, max_fires, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?)`,
+      ).run(
+        id,
+        opts.type ?? 'once',
+        opts.cron_expr ?? null,
+        opts.timezone ?? 'UTC',
+        fireAt,
+        opts.channel ?? 'telegram',
+        'contact:chris',
+        'Hello',
+        'general',
+        'normal',
+        opts.label ?? null,
+        opts.created_by ?? 'http',
+        opts.fire_count ?? 0,
+        opts.max_fires ?? null,
+        opts.status ?? 'active',
+      );
+      return id;
+    }
+
+    it('lists active schedules for the current channel', async () => {
+      const db = makeDb();
+      insertSchedule(db, { channel: 'telegram', label: 'Daily briefing', cron_expr: '0 8 * * *', type: 'cron' });
+      insertSchedule(db, { channel: 'other', label: 'Other channel' });
+
+      const deps = makeDeps({ db });
+      const commands = createBuiltinCommands(deps);
+      const schedule = commands.find((c) => c.name === 'schedule')!;
+      const result = await schedule.handler(['list'], makeCtx(db, { channel: 'telegram' }));
+
+      expect(result.body).toContain('Daily briefing');
+      expect(result.body).not.toContain('Other channel');
+    });
+
+    it('shows UTC for schedules without a custom timezone', async () => {
+      const db = makeDb();
+      insertSchedule(db, { channel: 'telegram', timezone: 'UTC' });
+
+      const deps = makeDeps({ db });
+      const commands = createBuiltinCommands(deps);
+      const schedule = commands.find((c) => c.name === 'schedule')!;
+      const result = await schedule.handler(['list'], makeCtx(db, { channel: 'telegram' }));
+
+      expect(result.body).toContain('UTC');
+    });
+
+    it('shows IANA timezone name for non-UTC schedules', async () => {
+      const db = makeDb();
+      insertSchedule(db, { channel: 'telegram', timezone: 'America/New_York', type: 'cron', cron_expr: '0 8 * * *' });
+
+      const deps = makeDeps({ db });
+      const commands = createBuiltinCommands(deps);
+      const schedule = commands.find((c) => c.name === 'schedule')!;
+      const result = await schedule.handler(['list'], makeCtx(db, { channel: 'telegram' }));
+
+      expect(result.body).toContain('America/New_York');
+    });
+
+    it('shows "No active schedules" when there are none', async () => {
+      const db = makeDb();
+      const deps = makeDeps({ db });
+      const commands = createBuiltinCommands(deps);
+      const schedule = commands.find((c) => c.name === 'schedule')!;
+      const result = await schedule.handler(['list'], makeCtx(db, { channel: 'telegram' }));
+
+      expect(result.body).toContain('No active schedules');
+    });
+
+    it('defaults to list when no subcommand is provided', async () => {
+      const db = makeDb();
+      const deps = makeDeps({ db });
+      const commands = createBuiltinCommands(deps);
+      const schedule = commands.find((c) => c.name === 'schedule')!;
+      const result = await schedule.handler([], makeCtx(db, { channel: 'telegram' }));
+
+      expect(result.body).toContain('No active schedules');
+    });
+
+    it('cancels a schedule by id', async () => {
+      const db = makeDb();
+      const id = insertSchedule(db, { channel: 'telegram' });
+      const shortId = id.slice(0, 8);
+
+      const deps = makeDeps({ db });
+      const commands = createBuiltinCommands(deps);
+      const schedule = commands.find((c) => c.name === 'schedule')!;
+      const result = await schedule.handler(['cancel', shortId], makeCtx(db, { channel: 'telegram' }));
+
+      expect(result.body).toContain('cancelled');
+      const row = db.prepare(`SELECT status FROM scheduled_items WHERE id = ?`).get(id) as { status: string };
+      expect(row.status).toBe('cancelled');
+    });
+
+    it('cancel returns not-found for a schedule in a different channel', async () => {
+      const db = makeDb();
+      const id = insertSchedule(db, { channel: 'other' });
+
+      const deps = makeDeps({ db });
+      const commands = createBuiltinCommands(deps);
+      const schedule = commands.find((c) => c.name === 'schedule')!;
+      const result = await schedule.handler(['cancel', id.slice(0, 8)], makeCtx(db, { channel: 'telegram' }));
+
+      expect(result.body).toContain('not found');
+    });
+
+    it('cancel on an already-cancelled schedule is idempotent', async () => {
+      const db = makeDb();
+      const id = insertSchedule(db, { channel: 'telegram', status: 'cancelled' });
+
+      const deps = makeDeps({ db });
+      const commands = createBuiltinCommands(deps);
+      const schedule = commands.find((c) => c.name === 'schedule')!;
+      const result = await schedule.handler(['cancel', id.slice(0, 8)], makeCtx(db, { channel: 'telegram' }));
+
+      expect(result.body).toContain('already cancelled');
+    });
+
+    it('cancel of a config-managed schedule includes a note', async () => {
+      const db = makeDb();
+      const id = insertSchedule(db, { channel: 'telegram', created_by: 'config', label: 'My config schedule' });
+
+      const deps = makeDeps({ db });
+      const commands = createBuiltinCommands(deps);
+      const schedule = commands.find((c) => c.name === 'schedule')!;
+      const result = await schedule.handler(['cancel', id.slice(0, 8)], makeCtx(db, { channel: 'telegram' }));
+
+      expect(result.body).toContain('config-managed');
+      expect(result.body).toContain('config.yaml');
+    });
+
+    it('returns usage when an unknown subcommand is given', async () => {
+      const db = makeDb();
+      const deps = makeDeps({ db });
+      const commands = createBuiltinCommands(deps);
+      const schedule = commands.find((c) => c.name === 'schedule')!;
+      const result = await schedule.handler(['unknown'], makeCtx(db, { channel: 'telegram' }));
+
+      expect(result.body).toContain('Usage');
+    });
+  });
 });

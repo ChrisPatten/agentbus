@@ -131,9 +131,16 @@ epics:
       due items and calls processInbound() directly. Config.yaml static schedules
       upserted on startup by stable ID; removed entries cancelled on next startup.
       HTTP CRUD endpoints (POST/GET/GET/:id/DELETE/PATCH /api/v1/schedules).
-      MCP tools: schedule_message, list_schedules, cancel_schedule.
-      /schedule slash command: list (active schedules for channel), cancel <id>.
+      MCP tools: schedule_message, list_schedules (+ created_by filter), cancel_schedule.
+      /schedule slash command: list (active schedules for channel + timezone), cancel <id>.
       croner used for cron expression parsing and next-fire calculation.
+      Adversarial review fixes: reentrancy guard on tick(); datetime comparison bug
+      (datetime('now') -> strftime ISO format); processInbound injectable for tests;
+      nextCronFire throws on parse error (distinct from exhausted); PATCH completes
+      immediately when max_fires <= fire_count; config schedules loaded unconditionally
+      (enabled=false only stops firing, not upsert); LIMIT cap logged; migration 005
+      adds (channel,status) index; config schema validates unique IDs + fire_at format;
+      at-least-once delivery documented; config-cancelled behavior documented.
     stories:
       S18.1: complete  # DB migration 004 + ScheduledItem type + config schema
       S18.2: complete  # Scheduler background worker (src/scheduler/scheduler.ts)
@@ -141,6 +148,7 @@ epics:
       S18.4: complete  # MCP tools (src/mcp/tools/scheduling.ts)
       S18.5: complete  # /schedule slash command (src/commands/handlers.ts)
       S18.6: complete  # Docs (docs/SCHEDULING.md) + sprint status
+      S18.7: complete  # Adversarial review hardening (scheduler.test.ts, api.test.ts, handlers.test.ts)
   E9:
     status: complete
     completed: 2026-04-14

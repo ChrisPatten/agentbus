@@ -39,6 +39,8 @@ schedules:
 
 Config schedules are upserted by `id` on every startup — safe to restart with. Removing an entry from config.yaml cancels the schedule on the next startup.
 
+> **Cancelling a config schedule manually** (via `/schedule cancel` or `DELETE /api/v1/schedules/:id`) marks it cancelled permanently. Subsequent restarts will **not** revive it, even if the entry is still present in config.yaml. To reset it, change its `id` in config.yaml so a fresh row is inserted, then remove the old id.
+
 ### Scheduler config
 
 ```yaml
@@ -46,6 +48,8 @@ scheduler:
   tick_interval_ms: 30000   # how often to check for due items (default: 30s)
   enabled: true             # set false to disable all scheduled firing
 ```
+
+> **Note on `enabled: false`** — Config schedules are still upserted into the database even when the scheduler is disabled. Only the tick loop (firing) is stopped. This means schedules are visible and manageable via the HTTP API and MCP tools even when firing is paused.
 
 ## How firing works
 
@@ -59,6 +63,13 @@ When a scheduled item is due:
 6. The user sees only the agent's reply — there is no visible "inbound" message in the chat.
 
 Scheduled messages are logged to transcripts with `metadata.scheduled = true` and `metadata.schedule_id` for auditability.
+
+### Delivery semantics
+
+The scheduler uses **at-least-once** delivery. `processInbound()` is called before the database is updated. If the process is killed between those two steps, the item retains its old `fire_at` and will fire again on the next restart.
+
+- **Once schedules** (`type: once`): best-effort-once. A crash during firing may cause a duplicate. If exact-once semantics are critical, design prompts to be idempotent.
+- **Cron schedules** (`type: cron`): intended to be periodic; the occasional duplicate is benign for most use cases.
 
 ## HTTP API
 

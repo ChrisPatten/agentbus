@@ -180,7 +180,7 @@ const PipelineConfigSchema = z.object({
  */
 const ScheduleEntrySchema = z
   .object({
-    id: z.string(),
+    id: z.string().min(1),
     cron: z.string().optional(),
     fire_at: z.string().optional(),
     timezone: z.string().default('UTC'),
@@ -194,7 +194,14 @@ const ScheduleEntrySchema = z
   })
   .refine((d) => !!(d.cron ?? d.fire_at), {
     message: 'Each schedule entry must specify either cron or fire_at',
-  });
+  })
+  .refine(
+    (d) => {
+      if (!d.fire_at) return true;
+      return !isNaN(new Date(d.fire_at).getTime());
+    },
+    { message: 'fire_at must be a valid ISO 8601 timestamp' },
+  );
 
 const SchedulerConfigSchema = z.object({
   tick_interval_ms: z.number().int().positive().default(30000),
@@ -226,7 +233,20 @@ export const AppConfigSchema = z.object({
   topics: z.array(z.string()).default(['general']),
   memory: MemoryConfigSchema,
   scheduler: SchedulerConfigSchema.default({ tick_interval_ms: 30000, enabled: true }),
-  schedules: z.array(ScheduleEntrySchema).default([]),
+  schedules: z.array(ScheduleEntrySchema).default([]).superRefine((entries, ctx) => {
+    const seen = new Set<string>();
+    for (let i = 0; i < entries.length; i++) {
+      const { id } = entries[i]!;
+      if (seen.has(id)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Duplicate schedule id "${id}" — each schedule must have a unique id`,
+          path: [i, 'id'],
+        });
+      }
+      seen.add(id);
+    }
+  }),
   pipeline: PipelineConfigSchema.default({
     dedup_window_ms: 30000,
     drop_unrouted: false,

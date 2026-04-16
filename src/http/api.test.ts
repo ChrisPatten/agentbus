@@ -693,3 +693,273 @@ describe('GET /api/v1/memories/recall', () => {
     expect(res.statusCode).toBe(200);
   });
 });
+
+// ── Schedule endpoints (E18) ──────────────────────────────────────────────────
+
+describe('Schedule CRUD endpoints', () => {
+  let server: FastifyInstance;
+  let db: Database.Database;
+
+  beforeEach(async () => {
+    ({ server, db } = await makeServer());
+  });
+
+  afterEach(async () => {
+    await server.close();
+  });
+
+  const futureAt = new Date(Date.now() + 3_600_000).toISOString(); // 1 hour ahead
+
+  // ── POST /api/v1/schedules ────────────────────────────────────────────────
+
+  it('creates a once schedule and returns 201', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/schedules',
+      payload: {
+        type: 'once',
+        fire_at: futureAt,
+        channel: 'telegram',
+        sender: 'contact:chris',
+        payload_body: 'Remind me',
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const body = JSON.parse(res.body) as { ok: boolean; id: string; fire_at: string };
+    expect(body.ok).toBe(true);
+    expect(body.id).toBeTruthy();
+    expect(body.fire_at).toBe(futureAt);
+  });
+
+  it('creates a cron schedule and returns 201', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/schedules',
+      payload: {
+        type: 'cron',
+        cron_expr: '0 8 * * 1-5',
+        timezone: 'UTC',
+        channel: 'telegram',
+        sender: 'contact:chris',
+        payload_body: 'Morning briefing',
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const body = JSON.parse(res.body) as { ok: boolean; id: string; fire_at: string };
+    expect(body.ok).toBe(true);
+    expect(body.fire_at).toBeTruthy();
+  });
+
+  it('rejects a once schedule with fire_at in the past', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/schedules',
+      payload: {
+        type: 'once',
+        fire_at: '2020-01-01T00:00:00Z',
+        channel: 'telegram',
+        sender: 'contact:chris',
+        payload_body: 'Old reminder',
+      },
+    });
+    expect(res.statusCode).toBe(400);
+    const body = JSON.parse(res.body) as { ok: false; error: string };
+    expect(body.error).toMatch(/future/i);
+  });
+
+  it('rejects a cron schedule with an invalid expression', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/schedules',
+      payload: {
+        type: 'cron',
+        cron_expr: 'NOT_A_CRON',
+        channel: 'telegram',
+        sender: 'contact:chris',
+        payload_body: 'Bad cron',
+      },
+    });
+    expect(res.statusCode).toBe(400);
+    const body = JSON.parse(res.body) as { ok: false; error: string };
+    expect(body.error).toMatch(/cron/i);
+  });
+
+  it('rejects a once schedule missing fire_at', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/schedules',
+      payload: { type: 'once', channel: 'telegram', sender: 'contact:chris', payload_body: 'Hi' },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('rejects a cron schedule missing cron_expr', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/schedules',
+      payload: { type: 'cron', channel: 'telegram', sender: 'contact:chris', payload_body: 'Hi' },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  // ── GET /api/v1/schedules ─────────────────────────────────────────────────
+
+  it('lists schedules filtered by status', async () => {
+    // Create two schedules
+    await server.inject({
+      method: 'POST',
+      url: '/api/v1/schedules',
+      payload: { type: 'once', fire_at: futureAt, channel: 'telegram', sender: 'contact:chris', payload_body: 'A' },
+    });
+    await server.inject({
+      method: 'POST',
+      url: '/api/v1/schedules',
+      payload: { type: 'once', fire_at: futureAt, channel: 'telegram', sender: 'contact:chris', payload_body: 'B' },
+    });
+
+    const res = await server.inject({ method: 'GET', url: '/api/v1/schedules?status=active' });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body) as { schedules: unknown[]; count: number };
+    expect(body.count).toBe(2);
+  });
+
+  it('returns empty list when no schedules match', async () => {
+    const res = await server.inject({ method: 'GET', url: '/api/v1/schedules?status=cancelled' });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body) as { schedules: unknown[]; count: number };
+    expect(body.count).toBe(0);
+  });
+
+  // ── GET /api/v1/schedules/:id ─────────────────────────────────────────────
+
+  it('returns a specific schedule by id', async () => {
+    const createRes = await server.inject({
+      method: 'POST',
+      url: '/api/v1/schedules',
+      payload: { type: 'once', fire_at: futureAt, channel: 'telegram', sender: 'contact:chris', payload_body: 'X' },
+    });
+    const { id } = JSON.parse(createRes.body) as { id: string };
+
+    const res = await server.inject({ method: 'GET', url: `/api/v1/schedules/${id}` });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body) as { ok: boolean; schedule: { id: string } };
+    expect(body.schedule.id).toBe(id);
+  });
+
+  it('returns 404 for an unknown schedule id', async () => {
+    const res = await server.inject({ method: 'GET', url: '/api/v1/schedules/no-such-id' });
+    expect(res.statusCode).toBe(404);
+  });
+
+  // ── DELETE /api/v1/schedules/:id ─────────────────────────────────────────
+
+  it('cancels an active schedule', async () => {
+    const createRes = await server.inject({
+      method: 'POST',
+      url: '/api/v1/schedules',
+      payload: { type: 'once', fire_at: futureAt, channel: 'telegram', sender: 'contact:chris', payload_body: 'Y' },
+    });
+    const { id } = JSON.parse(createRes.body) as { id: string };
+
+    const res = await server.inject({ method: 'DELETE', url: `/api/v1/schedules/${id}` });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body) as { ok: boolean; id: string };
+    expect(body.ok).toBe(true);
+    expect(body.id).toBe(id);
+
+    // Verify status in DB
+    const row = db.prepare(`SELECT status FROM scheduled_items WHERE id = ?`).get(id) as { status: string };
+    expect(row.status).toBe('cancelled');
+  });
+
+  it('returns 404 when cancelling a non-existent schedule', async () => {
+    const res = await server.inject({ method: 'DELETE', url: '/api/v1/schedules/ghost' });
+    expect(res.statusCode).toBe(404);
+  });
+
+  // ── PATCH /api/v1/schedules/:id ───────────────────────────────────────────
+
+  it('updates label on an active schedule', async () => {
+    const createRes = await server.inject({
+      method: 'POST',
+      url: '/api/v1/schedules',
+      payload: { type: 'once', fire_at: futureAt, channel: 'telegram', sender: 'contact:chris', payload_body: 'Z' },
+    });
+    const { id } = JSON.parse(createRes.body) as { id: string };
+
+    const res = await server.inject({
+      method: 'PATCH',
+      url: `/api/v1/schedules/${id}`,
+      payload: { label: 'My label' },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body) as { ok: boolean; schedule: { label: string } };
+    expect(body.schedule.label).toBe('My label');
+  });
+
+  it('pauses an active schedule via PATCH', async () => {
+    const createRes = await server.inject({
+      method: 'POST',
+      url: '/api/v1/schedules',
+      payload: { type: 'once', fire_at: futureAt, channel: 'telegram', sender: 'contact:chris', payload_body: 'W' },
+    });
+    const { id } = JSON.parse(createRes.body) as { id: string };
+
+    const res = await server.inject({
+      method: 'PATCH',
+      url: `/api/v1/schedules/${id}`,
+      payload: { status: 'paused' },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body) as { ok: boolean; schedule: { status: string } };
+    expect(body.schedule.status).toBe('paused');
+  });
+
+  it('completes a schedule immediately when max_fires is set <= fire_count', async () => {
+    const createRes = await server.inject({
+      method: 'POST',
+      url: '/api/v1/schedules',
+      payload: {
+        type: 'cron',
+        cron_expr: '0 8 * * *',
+        channel: 'telegram',
+        sender: 'contact:chris',
+        payload_body: 'Daily',
+      },
+    });
+    const { id } = JSON.parse(createRes.body) as { id: string };
+
+    // Manually bump fire_count to 5
+    db.prepare(`UPDATE scheduled_items SET fire_count = 5 WHERE id = ?`).run(id);
+
+    const res = await server.inject({
+      method: 'PATCH',
+      url: `/api/v1/schedules/${id}`,
+      payload: { max_fires: 3 },   // 3 <= 5
+    });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body) as { ok: boolean; schedule: { status: string } };
+    expect(body.schedule.status).toBe('completed');
+  });
+
+  it('returns 400 when no updatable fields are provided', async () => {
+    const createRes = await server.inject({
+      method: 'POST',
+      url: '/api/v1/schedules',
+      payload: { type: 'once', fire_at: futureAt, channel: 'telegram', sender: 'contact:chris', payload_body: 'V' },
+    });
+    const { id } = JSON.parse(createRes.body) as { id: string };
+
+    const res = await server.inject({ method: 'PATCH', url: `/api/v1/schedules/${id}`, payload: {} });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('returns 404 for PATCH on an unknown schedule', async () => {
+    const res = await server.inject({
+      method: 'PATCH',
+      url: '/api/v1/schedules/ghost',
+      payload: { label: 'X' },
+    });
+    expect(res.statusCode).toBe(404);
+  });
+});

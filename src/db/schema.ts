@@ -34,6 +34,11 @@ function loadMigrations(): Migration[] {
       description: 'Scheduled items',
       sql: readFileSync(join(migrationsDir, '004_scheduled_items.sql'), 'utf-8'),
     },
+    {
+      version: 5,
+      description: 'Scheduled items channel/status index',
+      sql: readFileSync(join(migrationsDir, '005_scheduled_items_channel_idx.sql'), 'utf-8'),
+    },
   ];
 }
 
