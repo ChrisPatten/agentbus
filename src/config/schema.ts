@@ -109,6 +109,24 @@ const MemoryConfigSchema = z.object({
    *     telegram:    "tmux send-keys -t pane-tg '/clear' Enter"
    */
   on_session_close: z.union([z.string(), z.record(z.string(), z.string())]).optional(),
+  /**
+   * Minimum number of messages a session must have before it is eligible for
+   * idle-expiration. Sessions below this threshold are left open even after
+   * `session_idle_threshold_ms` has elapsed.
+   *
+   * Accepts the same two forms as `on_session_close`:
+   *   - number: applies to all channels (default: 0 — no guard)
+   *   - record: per-channel threshold; channels not listed default to 0
+   *
+   * Examples:
+   *   session_close_min_messages: 1          # global: require at least 1 message
+   *   session_close_min_messages:
+   *     claude-code: 1
+   *     telegram: 3
+   */
+  session_close_min_messages: z
+    .union([z.number().int().min(0), z.record(z.string(), z.number().int().min(0))])
+    .default(0),
 });
 
 /**

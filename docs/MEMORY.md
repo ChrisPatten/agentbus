@@ -83,6 +83,7 @@ memory:
   context_window_hours: 48            # Context window for E9 injection (hours)
   claude_api_model: claude-sonnet-4-6 # Model used for summarization
   summary_max_tokens: 8192            # Max tokens for the summarization API response
+  session_close_min_messages: 0       # Min messages before a session is eligible for idle-expiration (default: 0)
   on_session_close: ""                # Optional shell command to run when a session closes (see below)
 ```
 
@@ -117,6 +118,28 @@ The following environment variables are set for the duration of the command:
 | `AGENTBUS_MESSAGE_COUNT` | `12` |
 
 Hook failures are logged but never block session closing or summarization.
+
+### `session_close_min_messages`
+
+Minimum number of messages a session must contain before it is eligible for
+idle-expiration. Sessions below the threshold are left open even after
+`session_idle_threshold_ms` has elapsed. Default is `0` (no guard).
+
+Accepts the same two forms as `on_session_close`:
+
+**Global** — applies to all channels:
+```yaml
+memory:
+  session_close_min_messages: 1
+```
+
+**Per-channel** — channels not listed default to `0`:
+```yaml
+memory:
+  session_close_min_messages:
+    claude-code: 1
+    telegram: 3
+```
 
 Requires `ANTHROPIC_API_KEY` in `.env`. If the key is missing, the bus starts
 normally but summarization is disabled (sessions are still tracked and closed).

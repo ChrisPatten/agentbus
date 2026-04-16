@@ -80,17 +80,27 @@ export class SessionTracker {
     }
   }
 
+  /** Resolve the minimum message count required before a session can be closed, for a given channel. */
+  private minMessagesForChannel(channel: string): number {
+    const cfg = this.config.memory.session_close_min_messages;
+    if (cfg == null) return 0;
+    if (typeof cfg === 'number') return cfg;
+    return cfg[channel] ?? 0;
+  }
+
   /** Close sessions idle past the inactivity threshold and trigger summarization. */
   private closeIdleSessions(): void {
     const thresholdMs = this.config.memory.session_idle_threshold_ms;
     const cutoff = new Date(Date.now() - thresholdMs).toISOString();
 
-    const idleSessions = this.db
-      .prepare(
-        `SELECT * FROM sessions
-         WHERE ended_at IS NULL AND status = 'active' AND last_activity < ?`,
-      )
-      .all(cutoff) as SessionRow[];
+    const idleSessions = (
+      this.db
+        .prepare(
+          `SELECT * FROM sessions
+           WHERE ended_at IS NULL AND status = 'active' AND last_activity < ?`,
+        )
+        .all(cutoff) as SessionRow[]
+    ).filter((s) => s.message_count >= this.minMessagesForChannel(s.channel));
 
     if (idleSessions.length === 0) return;
 
