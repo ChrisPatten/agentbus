@@ -85,6 +85,7 @@ memory:
   summary_max_tokens: 8192            # Max tokens for the summarization API response
   session_close_min_messages: 0       # Min messages before a session is eligible for idle-expiration (default: 0)
   on_session_close: ""                # Optional shell command to run when a session closes (see below)
+  memory_inject_exclude: []           # Channels to skip Stage 85 memory injection entirely (see below)
 ```
 
 ### `on_session_close` hook
@@ -140,6 +141,23 @@ memory:
     claude-code: 1
     telegram: 3
 ```
+
+### `memory_inject_exclude`
+
+List of channel names for which Stage 85 (memory injection) is completely skipped. Use this
+for agents that manage their own memory context independently (e.g. pokeclaude).
+
+```yaml
+memory:
+  memory_inject_exclude:
+    - telegram:pokeclaude
+```
+
+The check is O(1) — the list is compiled into a `Set` at startup. Sessions on excluded channels
+still generate and store memories normally; only the context injection at session start is
+suppressed.
+
+---
 
 Requires `ANTHROPIC_API_KEY` in `.env`. If the key is missing, the bus starts
 normally but summarization is disabled (sessions are still tracked and closed).
