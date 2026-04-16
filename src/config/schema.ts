@@ -312,7 +312,14 @@ export function getTelegramInstances(config: AppConfig): TelegramInstanceConfig[
   const seen = new Set<string>();
   const instances: TelegramInstanceConfig[] = [];
 
+  const VALID_INSTANCE_NAME_RE = /^[a-z0-9_-]+$/;
+
   for (const [name, cfg] of Object.entries(record)) {
+    if (!VALID_INSTANCE_NAME_RE.test(name)) {
+      throw new Error(
+        `Invalid Telegram instance name "${name}" — only lowercase letters, digits, hyphens, and underscores are allowed`,
+      );
+    }
     if (seen.has(cfg.token)) {
       throw new Error(
         `Duplicate Telegram bot token for instance "${name}" — each bot must have a unique token`,

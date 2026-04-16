@@ -81,7 +81,21 @@ pipeline:
 
 Each bot/agent pair gets an independent conversation_id so their histories never collide. The same contact can message both bots — Telegram user IDs are global and the contact lookup works on any `telegram:*` channel.
 
-**Validation:** Duplicate tokens across instances cause a startup error.
+**Validation:** Duplicate tokens across instances cause a startup error. Instance names must match `^[a-z0-9_-]+$` (lowercase letters, digits, hyphens, underscores) — names containing colons, slashes, or uppercase letters are rejected at startup.
+
+**Migrating from single-bot:** Switching an existing deployment to named bots requires updating routing rules. The legacy `channel: telegram` route rule uses exact matching and will **not** match traffic from `telegram:peggy` or `telegram:jarvis`. Replace the old rule with per-instance rules as shown above.
+
+**Per-channel config (on_session_close, session_close_min_messages):** These memory settings use exact channel-name matching. A config key of `telegram` does not match `telegram:peggy` sessions. When using named instances, configure each channel explicitly:
+
+```yaml
+memory:
+  on_session_close:
+    telegram:peggy: "tmux send-keys -t peggy '/clear' Enter"
+    telegram:jarvis: "tmux send-keys -t jarvis '/clear' Enter"
+  session_close_min_messages:
+    telegram:peggy: 1
+    telegram:jarvis: 3
+```
 
 ---
 
@@ -100,6 +114,8 @@ contacts:
 There is no separate `allowed_sender_ids` config — the contacts map is the source of truth.
 
 **Validation:** At construction, each contact's `platforms.telegram.userId` is validated to be a positive integer. An invalid value throws an error that prevents bus-core from starting.
+
+**Contact access is instance-global:** All contacts with a `platforms.telegram.userId` are permitted to message every Telegram bot instance. There is no per-bot allowlist — the contacts map is the single source of truth for all instances. If you need to restrict which contacts can reach which agent, enforce that at the routing layer (e.g. `match: { channel: telegram:peggy, sender: contact:alice }`).
 
 ---
 
