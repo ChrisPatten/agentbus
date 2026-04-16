@@ -56,6 +56,20 @@ registerAllTools(mcpServer, busBaseUrl, healthState);
  * it is prepended before the message text so Claude receives it as part of
  * the channel notification for that new session.
  */
+function fmtTs(iso: string, full: boolean): string {
+  const d = new Date(iso);
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const p = new Intl.DateTimeFormat('en-CA', {
+    timeZone: tz,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  }).formatToParts(d);
+  const get = (t: Intl.DateTimeFormatPartTypes) => p.find(x => x.type === t)?.value ?? '00';
+  const hh = get('hour') === '24' ? '00' : get('hour');
+  const time = `${hh}:${get('minute')}`;
+  return full ? `${get('year')}-${get('month')}-${get('day')}T${time}` : time;
+}
+
 export function formatMessagesForSampling(envelopes: MessageEnvelope[]): string {
   const parts: string[] = [];
 
@@ -67,9 +81,11 @@ export function formatMessagesForSampling(envelopes: MessageEnvelope[]): string 
     delete firstMeta!['memory_context'];
   }
 
-  for (const env of envelopes) {
+  for (let i = 0; i < envelopes.length; i++) {
+    const env = envelopes[i]!;
     const body = env.payload.type === 'text' ? env.payload.body : `[${env.payload.type}]`;
-    parts.push(`New message from ${env.sender} via ${env.channel} [id:${env.id}]:\n${body}`);
+    const ts = env.timestamp ? ` at ${fmtTs(env.timestamp, i === 0)}` : '';
+    parts.push(`New message from ${env.sender} via ${env.channel}${ts} [id:${env.id}]:\n${body}`);
   }
 
   return parts.join('\n\n');

@@ -35,3 +35,7 @@ import { foo } from './foo';
 ## Sprint status
 
 See `sprint-status.yaml` for current epic and phase.
+
+## Ideas and Backlog
+
+The "raw" backlog is kept in `_bmad-output/backlog.md`. Anything to be actually worked MUST be created as formal epic before implementing.

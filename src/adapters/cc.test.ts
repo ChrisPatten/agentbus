@@ -6,10 +6,12 @@ import {
 } from './cc.js';
 import type { MessageEnvelope } from '../types/envelope.js';
 
+const FIXED_TS = '2026-01-01T00:00:00.000Z';
+
 function makeEnvelope(overrides: Partial<MessageEnvelope> = {}): MessageEnvelope {
   return {
     id: 'msg-001',
-    timestamp: new Date().toISOString(),
+    timestamp: FIXED_TS,
     channel: 'telegram',
     topic: 'general',
     sender: 'contact:alice',
@@ -34,9 +36,8 @@ describe('processAckedMessages', () => {
 
     expect(buffer).toHaveLength(1);
     expect(notify).toHaveBeenCalledOnce();
-    expect(notify).toHaveBeenCalledWith(
-      'New message from contact:alice via telegram [id:msg-001]:\nHello!'
-    );
+    const text = notify.mock.calls[0]![0] as string;
+    expect(text).toMatch(/^New message from contact:alice via telegram at \d{4}-\d{2}-\d{2}T\d{2}:\d{2} \[id:msg-001\]:\nHello!$/);
   });
 
   it('batches multiple acked messages into a single notify call', () => {
@@ -80,28 +81,29 @@ describe('sendChannelNotification', () => {
 // ── formatMessagesForSampling ─────────────────────────────────────────────────
 
 describe('formatMessagesForSampling', () => {
-  it('formats a single message correctly', () => {
+  it('formats a single message with full date+time', () => {
     const result = formatMessagesForSampling([makeEnvelope()]);
-    expect(result).toBe(
-      'New message from contact:alice via telegram [id:msg-001]:\nHello!'
+    expect(result).toMatch(
+      /^New message from contact:alice via telegram at \d{4}-\d{2}-\d{2}T\d{2}:\d{2} \[id:msg-001\]:\nHello!$/
     );
   });
 
-  it('joins multiple messages with a blank line', () => {
+  it('first message in batch gets full date+time, subsequent get time-only', () => {
     const envelopes = [
       makeEnvelope({ id: 'msg-001', payload: { type: 'text', body: 'First' } }),
-      makeEnvelope({
-        id: 'msg-002',
-        sender: 'contact:alice',
-        channel: 'bluebubbles',
-        payload: { type: 'text', body: 'Second' },
-      }),
+      makeEnvelope({ id: 'msg-002', channel: 'bluebubbles', payload: { type: 'text', body: 'Second' } }),
     ];
     const result = formatMessagesForSampling(envelopes);
-    expect(result).toBe(
-      'New message from contact:alice via telegram [id:msg-001]:\nFirst\n\n' +
-        'New message from contact:alice via bluebubbles [id:msg-002]:\nSecond'
-    );
+    const [first, second] = result.split('\n\n') as [string, string];
+    expect(first).toMatch(/at \d{4}-\d{2}-\d{2}T\d{2}:\d{2} /);
+    expect(second).toMatch(/at \d{2}:\d{2} /);
+    expect(second).not.toMatch(/at \d{4}-/);
+  });
+
+  it('omits timestamp segment when envelope has no timestamp', () => {
+    const env = makeEnvelope({ timestamp: undefined });
+    const result = formatMessagesForSampling([env]);
+    expect(result).toBe('New message from contact:alice via telegram [id:msg-001]:\nHello!');
   });
 
   it('renders non-text payload type as bracketed label', () => {
