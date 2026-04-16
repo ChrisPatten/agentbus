@@ -109,9 +109,15 @@ function buildContextBlock(
 }
 
 export function createMemoryInject(db: Database.Database, config: AppConfig): PipelineStage {
+  const excluded = new Set(config.memory.memory_inject_exclude);
+
   return async (ctx) => {
     // Only fire on new sessions with a known contact (non-empty ID)
     if (!ctx.sessionCreated || !ctx.contact || !ctx.contact.id) {
+      return ctx;
+    }
+
+    if (excluded.has(ctx.envelope.channel)) {
       return ctx;
     }
 

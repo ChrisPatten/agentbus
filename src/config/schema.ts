@@ -127,6 +127,15 @@ const MemoryConfigSchema = z.object({
   session_close_min_messages: z
     .union([z.number().int().min(0), z.record(z.string(), z.number().int().min(0))])
     .default(0),
+  /**
+   * Channels for which memory injection (Stage 85) is disabled.
+   * Useful for agents that manage their own memory (e.g. pokeclaude).
+   *
+   * Example:
+   *   memory_inject_exclude:
+   *     - telegram:pokeclaude
+   */
+  memory_inject_exclude: z.array(z.string()).default([]),
 });
 
 /**
