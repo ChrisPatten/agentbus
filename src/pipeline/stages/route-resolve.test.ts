@@ -174,4 +174,29 @@ describe('route-resolve stage', () => {
     const result = await stage(ctx);
     expect(result).not.toBeNull();
   });
+
+  it('same contact on different telegram:* channels gets different conversation_ids', async () => {
+    const db = makeDb();
+    const config = makeConfig();
+    const stage = createRouteResolve(config, db);
+    const ctxPeggy = makeCtx({ sender: 'contact:alice', channel: 'telegram:peggy', topic: 'general' }, config, db);
+    const ctxJarvis = makeCtx({ sender: 'contact:alice', channel: 'telegram:jarvis', topic: 'general' }, config, db);
+    const rPeggy = await stage(ctxPeggy);
+    const rJarvis = await stage(ctxJarvis);
+    expect(rPeggy!.conversationId).not.toBe(rJarvis!.conversationId);
+  });
+
+  it('routes to correct adapter by named-instance channel', async () => {
+    const config = makeConfig({
+      routes: [
+        { match: { channel: 'telegram:peggy' }, target: { adapterId: 'telegram:peggy', recipientId: 'contact:alice' } },
+        { match: { channel: 'telegram:jarvis' }, target: { adapterId: 'telegram:jarvis', recipientId: 'contact:alice' } },
+      ],
+    });
+    const db = makeDb();
+    const stage = createRouteResolve(config, db);
+    const ctx = makeCtx({ channel: 'telegram:jarvis' }, config, db);
+    const result = await stage(ctx);
+    expect(result!.routes[0]!.adapterId).toBe('telegram:jarvis');
+  });
 });

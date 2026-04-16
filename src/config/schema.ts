@@ -72,7 +72,7 @@ const ClaudeCodeAdapterSchema = z.object({
 });
 
 const AdaptersConfigSchema = z.object({
-  telegram: TelegramAdapterSchema.optional(),
+  telegram: z.union([TelegramAdapterSchema, z.record(z.string(), TelegramAdapterSchema)]).optional(),
   bluebubbles: BlueBubblesAdapterSchema.optional(),
   'claude-code': ClaudeCodeAdapterSchema.optional(),
 });
@@ -278,3 +278,49 @@ export const AppConfigSchema = z.object({
 
 /** Fully-typed application configuration */
 export type AppConfig = z.infer<typeof AppConfigSchema>;
+
+/** Normalised config for a single Telegram bot instance. */
+export interface TelegramInstanceConfig {
+  /** Bot name used as the adapter id suffix, or null for the legacy single-bot form. */
+  name: string | null;
+  token: string;
+  poll_timeout: number;
+  plugin?: string;
+}
+
+/**
+ * Normalises `config.adapters.telegram` into a flat list of instances.
+ *
+ * Accepts both forms:
+ *   - Legacy single-bot: `{ token, poll_timeout?, plugin? }` → one instance with name=null
+ *   - Named record: `{ peggy: { token, ... }, jarvis: { token, ... } }` → one instance per key
+ *
+ * Throws if any tokens are duplicated across instances.
+ */
+export function getTelegramInstances(config: AppConfig): TelegramInstanceConfig[] {
+  const telegram = config.adapters.telegram;
+  if (!telegram) return [];
+
+  // Discriminate: single-bot form has 'token' as a string at the top level.
+  if (typeof (telegram as { token?: unknown }).token === 'string') {
+    const t = telegram as { token: string; poll_timeout: number; plugin?: string };
+    return [{ name: null, token: t.token, poll_timeout: t.poll_timeout, plugin: t.plugin }];
+  }
+
+  // Named-record form.
+  const record = telegram as Record<string, { token: string; poll_timeout: number; plugin?: string }>;
+  const seen = new Set<string>();
+  const instances: TelegramInstanceConfig[] = [];
+
+  for (const [name, cfg] of Object.entries(record)) {
+    if (seen.has(cfg.token)) {
+      throw new Error(
+        `Duplicate Telegram bot token for instance "${name}" — each bot must have a unique token`,
+      );
+    }
+    seen.add(cfg.token);
+    instances.push({ name, token: cfg.token, poll_timeout: cfg.poll_timeout, plugin: cfg.plugin });
+  }
+
+  return instances;
+}

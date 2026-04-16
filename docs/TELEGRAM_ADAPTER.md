@@ -33,7 +33,7 @@ Or via pm2: `make start`
 
 ## Configuration
 
-The adapter requires an `adapters.telegram` section in `config.yaml`:
+### Single bot (default)
 
 ```yaml
 adapters:
@@ -41,6 +41,49 @@ adapters:
     token: ${TELEGRAM_BOT_TOKEN}   # from .env
     poll_timeout: 30               # Telegram long-poll timeout in seconds
 ```
+
+The adapter id is `telegram` and inbound messages use channel `telegram`.
+
+### Multiple bots
+
+Use a named record under `adapters.telegram`. Each key becomes the bot's name, which is appended to the adapter id and channel:
+
+```yaml
+adapters:
+  telegram:
+    peggy:
+      token: ${TELEGRAM_BOT_TOKEN_PEGGY}
+      poll_timeout: 30
+    jarvis:
+      token: ${TELEGRAM_BOT_TOKEN_JARVIS}
+      poll_timeout: 30
+```
+
+This registers two adapters: `telegram:peggy` and `telegram:jarvis`, with channels `telegram:peggy` and `telegram:jarvis` respectively.
+
+Route inbound messages to the correct agent with `pipeline.routes`:
+
+```yaml
+pipeline:
+  routes:
+    - match:
+        channel: telegram:peggy
+      target:
+        adapterId: claude-code
+        recipientId: agent:peggy
+
+    - match:
+        channel: telegram:jarvis
+      target:
+        adapterId: claude-code
+        recipientId: agent:jarvis
+```
+
+Each bot/agent pair gets an independent conversation_id so their histories never collide. The same contact can message both bots — Telegram user IDs are global and the contact lookup works on any `telegram:*` channel.
+
+**Validation:** Duplicate tokens across instances cause a startup error.
+
+---
 
 **Allowed senders** are derived automatically from the contacts map — any contact with a `platforms.telegram.userId` is permitted:
 
@@ -67,7 +110,7 @@ There is no separate `allowed_sender_ids` config — the contacts map is the sou
    - Sender `from.id` is checked against the allowed-sender set (derived from contacts); unknown senders are silently dropped
    - Body is taken from `message.text` or `message.caption`; non-text updates (stickers, etc.) are skipped
    - Message is submitted directly to `processInbound()` with:
-     - `channel: "telegram"`
+     - `channel: "telegram"` (single-bot) or `channel: "telegram:{name}"` (named instance, e.g. `"telegram:peggy"`)
      - `sender: "{from.id}"` (raw Telegram user ID)
      - `metadata.telegram_chat_id`, `metadata.telegram_message_id`, and `metadata.platform_message_id` (encoded as `"{chat_id}:{message_id}"` for use by `react()`)
 3. The inbound pipeline's contact-resolve stage maps the raw user ID to `contact:{id}`

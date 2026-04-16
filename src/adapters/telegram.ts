@@ -93,6 +93,16 @@ export interface TelegramAdapterDeps {
   registry?: AdapterRegistry;
   commandRegistry?: CommandRegistry;
   pauseSet?: Set<string>;
+  /**
+   * Instance name used as the adapter id suffix (e.g. "peggy" → id "telegram:peggy").
+   * Omit for the legacy single-bot form (id stays "telegram").
+   */
+  instanceName?: string;
+  /**
+   * Pre-resolved per-instance config from getTelegramInstances().
+   * When provided, the constructor uses this instead of reading from config.adapters.telegram.
+   */
+  instanceConfig?: { token: string; poll_timeout: number; plugin?: string };
 }
 
 // ── Message splitting ─────────────────────────────────────────────────────────
@@ -129,20 +139,15 @@ export function splitMessage(text: string, maxLen: number = MAX_MESSAGE_LENGTH):
 // ── TelegramAdapter class ────────────────────────────────────────────────────
 
 export class TelegramAdapter implements AdapterInstance {
-  readonly id = 'telegram';
-  readonly name = 'telegram';
-  readonly capabilities: AdapterCapabilities = {
-    send: true,
-    react: true,
-    markRead: false,
-    typing: true,
-    registerCommands: true,
-    channels: ['telegram'],
-  };
+  readonly id: string;
+  readonly name: string;
+  readonly capabilities: AdapterCapabilities;
 
   private readonly token: string;
   private readonly pollTimeout: number;
   private readonly deps: TelegramAdapterDeps;
+  /** Log tag derived from id, e.g. "[telegram]" or "[telegram:peggy]". */
+  private readonly tag: string;
 
   /** Set of Telegram user IDs (as strings) that are allowed to send messages. */
   private readonly allowedSenderIds = new Set<string>();
@@ -159,13 +164,38 @@ export class TelegramAdapter implements AdapterInstance {
   private readonly typingLoops = new Map<number, AbortController>();
 
   constructor(deps: TelegramAdapterDeps) {
-    const telegramConfig = deps.config.adapters.telegram;
-    if (!telegramConfig) {
-      throw new Error('No adapters.telegram section in config');
+    this.id = deps.instanceName ? `telegram:${deps.instanceName}` : 'telegram';
+    this.name = this.id;
+    this.tag = `[${this.id}]`;
+    this.capabilities = {
+      send: true,
+      react: true,
+      markRead: false,
+      typing: true,
+      registerCommands: true,
+      channels: [this.id],
+    };
+
+    // Resolve per-instance config. instanceConfig is always provided by
+    // getTelegramInstances(); the fallback supports legacy direct construction.
+    let resolvedToken: string;
+    let resolvedPollTimeout: number;
+
+    if (deps.instanceConfig) {
+      resolvedToken = deps.instanceConfig.token;
+      resolvedPollTimeout = deps.instanceConfig.poll_timeout;
+    } else {
+      const t = deps.config.adapters.telegram;
+      if (!t || typeof (t as { token?: unknown }).token !== 'string') {
+        throw new Error(`No Telegram config found for adapter "${this.id}"`);
+      }
+      const singleBot = t as { token: string; poll_timeout: number };
+      resolvedToken = singleBot.token;
+      resolvedPollTimeout = singleBot.poll_timeout;
     }
 
-    this.token = telegramConfig.token;
-    this.pollTimeout = telegramConfig.poll_timeout;
+    this.token = resolvedToken;
+    this.pollTimeout = resolvedPollTimeout;
     this.deps = deps;
 
     // Build contact lookup maps from config
@@ -187,7 +217,7 @@ export class TelegramAdapter implements AdapterInstance {
 
   async start(): Promise<void> {
     console.log(
-      `[telegram] Adapter starting — allowed senders: [${[...this.allowedSenderIds].join(', ')}]`,
+      `${this.tag} Adapter starting — allowed senders: [${[...this.allowedSenderIds].join(', ')}]`,
     );
 
     await this.clearWebhook();
@@ -197,11 +227,11 @@ export class TelegramAdapter implements AdapterInstance {
     // Launch inbound loop in background (supervised)
     void this.supervise('inboundLoop', () => this.inboundLoop());
 
-    console.log('[telegram] Adapter started');
+    console.log(`${this.tag} Adapter started`);
   }
 
   async stop(): Promise<void> {
-    console.log('[telegram] Stopping');
+    console.log(`${this.tag} Stopping`);
     this.stopping = true;
     for (const controller of this.typingLoops.values()) controller.abort();
     this.typingLoops.clear();
@@ -280,7 +310,7 @@ export class TelegramAdapter implements AdapterInstance {
         const status = (err as { status?: number }).status;
         if (status === 400) {
           console.error(
-            `[telegram] Markdown parse error for part ${i + 1}/${parts.length}, retrying plain text`,
+            `${this.tag} Markdown parse error for part ${i + 1}/${parts.length}, retrying plain text`,
           );
           const result = await this.callTelegram<TelegramMessage>('sendMessage', {
             chat_id: chatId,
@@ -291,7 +321,7 @@ export class TelegramAdapter implements AdapterInstance {
             platformMessageId = String(result.message_id);
           }
         } else {
-          const prefix =
+            const prefix =
             sentParts > 0 ? `Partial delivery (${sentParts}/${parts.length} parts sent): ` : '';
           return {
             success: false,
@@ -325,7 +355,7 @@ export class TelegramAdapter implements AdapterInstance {
 
     if (!TELEGRAM_REACTION_EMOJIS.has(normalized)) {
       // Unsupported reaction — send as a text message instead
-      console.log(`[telegram] "${reaction}" is not a supported Telegram reaction; sending as text`);
+      console.log(`${this.tag} "${reaction}" is not a supported Telegram reaction; sending as text`);
       await this.callTelegram('sendMessage', {
         chat_id: chatId,
         text: reaction,
@@ -353,7 +383,7 @@ export class TelegramAdapter implements AdapterInstance {
     if (chatId) {
       this.startTypingIndicator(chatId);
     } else {
-      console.warn(`[telegram] startTyping: no chat_id for contact "${contactId}"`);
+      console.warn(`${this.tag} startTyping: no chat_id for contact "${contactId}"`);
     }
   }
 
@@ -375,7 +405,7 @@ export class TelegramAdapter implements AdapterInstance {
       const deadline = Date.now() + 120_000;
       while (!controller.signal.aborted && !this.stopping && Date.now() < deadline) {
         this.callTelegram('sendChatAction', { chat_id: chatId, action: 'typing' }).catch((err) =>
-          console.warn(`[telegram] Typing indicator failed for chat ${chatId}: ${String(err)}`),
+          console.warn(`${this.tag} Typing indicator failed for chat ${chatId}: ${String(err)}`),
         );
         await this.sleep(4000);
       }
@@ -437,19 +467,19 @@ export class TelegramAdapter implements AdapterInstance {
     const senderId = String(msg.from.id);
 
     if (!this.allowedSenderIds.has(senderId)) {
-      console.log(`[telegram] Dropped message from unknown sender ${senderId}`);
+      console.log(`${this.tag} Dropped message from unknown sender ${senderId}`);
       return true;
     }
 
     const body = msg.text ?? msg.caption;
     if (!body) {
-      console.log(`[telegram] Skipped non-text update ${update.update_id} from ${senderId}`);
+      console.log(`${this.tag} Skipped non-text update ${update.update_id} from ${senderId}`);
       return true;
     }
 
     try {
       const message: InboundMessage = {
-        channel: 'telegram',
+        channel: this.id,
         sender: senderId,
         payload: { type: 'text', body },
         metadata: {
@@ -464,13 +494,13 @@ export class TelegramAdapter implements AdapterInstance {
       this.lastActivity = new Date().toISOString();
       return true;
     } catch (err) {
-      console.error(`[telegram] Failed to process inbound message ${update.update_id}: ${String(err)}`);
+      console.error(`${this.tag} Failed to process inbound message ${update.update_id}: ${String(err)}`);
       return false;
     }
   }
 
   private async inboundLoop(): Promise<void> {
-    console.log(`[telegram] Inbound loop started (poll_timeout=${this.pollTimeout}s)`);
+    console.log(`${this.tag} Inbound loop started (poll_timeout=${this.pollTimeout}s)`);
 
     while (!this.stopping) {
       try {
@@ -493,7 +523,7 @@ export class TelegramAdapter implements AdapterInstance {
         this.consecutiveFailures = 0;
       } catch (err) {
         this.consecutiveFailures++;
-        console.error(`[telegram] Inbound poll error: ${String(err)}`);
+        console.error(`${this.tag} Inbound poll error: ${String(err)}`);
         await this.sleep(this.inboundBackoffMs);
         this.inboundBackoffMs = Math.min(this.inboundBackoffMs * 2, BACKOFF_MAX_MS);
       }
@@ -507,14 +537,14 @@ export class TelegramAdapter implements AdapterInstance {
       try {
         await fn();
       } catch (err) {
-        console.error(`[telegram] ${name} crashed unexpectedly: ${String(err)}`);
+        console.error(`${this.tag} ${name} crashed unexpectedly: ${String(err)}`);
         if (!this.stopping) {
-          console.error(`[telegram] Restarting ${name} in ${LOOP_RESTART_DELAY_MS}ms`);
+          console.error(`${this.tag} Restarting ${name} in ${LOOP_RESTART_DELAY_MS}ms`);
           await this.sleep(LOOP_RESTART_DELAY_MS);
         }
       }
     }
-    console.log(`[telegram] ${name} stopped`);
+    console.log(`${this.tag} ${name} stopped`);
   }
 
   // ── Startup helpers ───────────────────────────────────────────────────────
@@ -522,9 +552,9 @@ export class TelegramAdapter implements AdapterInstance {
   private async clearWebhook(): Promise<void> {
     try {
       await this.callTelegram('deleteWebhook', { drop_pending_updates: false });
-      console.log('[telegram] Webhook cleared (polling mode active)');
+      console.log(`${this.tag} Webhook cleared (polling mode active)`);
     } catch (err) {
-      console.error(`[telegram] Failed to clear webhook: ${String(err)}`);
+      console.error(`${this.tag} Failed to clear webhook: ${String(err)}`);
     }
   }
 
@@ -538,13 +568,13 @@ export class TelegramAdapter implements AdapterInstance {
     for (const m of manifests) {
       if (!VALID_NAME_RE.test(m.name)) {
         console.warn(
-          `[telegram] Skipping command "${m.name}" — name must be 1-32 chars, only [a-z0-9_]`,
+          `${this.tag} Skipping command "${m.name}" — name must be 1-32 chars, only [a-z0-9_]`,
         );
         continue;
       }
       if (m.description.length < 3 || m.description.length > 256) {
         console.warn(
-          `[telegram] Skipping command "${m.name}" — description must be 3-256 chars (got ${m.description.length})`,
+          `${this.tag} Skipping command "${m.name}" — description must be 3-256 chars (got ${m.description.length})`,
         );
         continue;
       }
@@ -552,7 +582,7 @@ export class TelegramAdapter implements AdapterInstance {
     }
 
     if (commands.length === 0) {
-      console.warn('[telegram] No valid commands to register');
+      console.warn(`${this.tag} No valid commands to register`);
       return;
     }
 
@@ -561,10 +591,10 @@ export class TelegramAdapter implements AdapterInstance {
       await this.callTelegram('setChatMenuButton', { menu_button: { type: 'commands' } });
       const stored = await this.callTelegram<Array<{ command: string }>>('getMyCommands', {});
       console.log(
-        `[telegram] Registered ${commands.length} slash commands — Telegram confirms: ${stored.map((c) => c.command).join(', ')}`,
+        `${this.tag} Registered ${commands.length} slash commands — Telegram confirms: ${stored.map((c) => c.command).join(', ')}`,
       );
     } catch (err) {
-      console.error(`[telegram] Failed to register slash commands: ${String(err)}`);
+      console.error(`${this.tag} Failed to register slash commands: ${String(err)}`);
     }
   }
 }

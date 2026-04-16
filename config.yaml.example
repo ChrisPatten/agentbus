@@ -4,9 +4,17 @@ bus:
   log_level: info
 
 adapters:
+  # Single-bot form (adapter id: "telegram", channel: "telegram"):
   telegram:
     token: ${TELEGRAM_BOT_TOKEN}
     poll_timeout: 30
+  #
+  # Multi-bot form (adapter ids: "telegram:peggy", "telegram:jarvis"):
+  # telegram:
+  #   peggy:
+  #     token: ${TELEGRAM_BOT_TOKEN_PEGGY}
+  #   jarvis:
+  #     token: ${TELEGRAM_BOT_TOKEN_JARVIS}
   bluebubbles:
     server_url: http://localhost:1234
     webhook_port: 3002
@@ -36,4 +44,22 @@ memory:
   context_window_hours: 48
   claude_api_model: claude-opus-4-6
 
-pipeline: {}
+pipeline:
+  routes:
+    # Route all telegram messages to the claude-code agent:
+    - match:
+        channel: telegram
+      target:
+        adapterId: claude-code
+        recipientId: agent:claude
+    # Multi-bot routing example (uncomment if using named telegram instances):
+    # - match:
+    #     channel: telegram:peggy
+    #   target:
+    #     adapterId: claude-code
+    #     recipientId: agent:peggy
+    # - match:
+    #     channel: telegram:jarvis
+    #   target:
+    #     adapterId: claude-code
+    #     recipientId: agent:jarvis

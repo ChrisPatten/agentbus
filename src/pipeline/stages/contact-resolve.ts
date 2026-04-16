@@ -52,7 +52,7 @@ export function createContactResolve(config: AppConfig): PipelineStage {
 
     // Platform-specific lookup via pre-built maps
     let found: ContactEntry | undefined;
-    if (e.channel === 'telegram') {
+    if (e.channel === 'telegram' || e.channel.startsWith('telegram:')) {
       found = byTelegramUserId.get(e.sender) ?? byTelegramUsername.get(e.sender);
     } else if (e.channel === 'bluebubbles') {
       found = byBlueBubblesHandle.get(e.sender);

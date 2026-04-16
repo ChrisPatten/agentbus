@@ -125,4 +125,26 @@ describe('contact-resolve stage', () => {
     const result = await stage(ctx);
     expect(result).not.toBeNull();
   });
+
+  it('resolves telegram sender on a named-instance channel (telegram:peggy)', async () => {
+    const stage = createContactResolve(makeConfig());
+    const ctx = makeCtx({ channel: 'telegram:peggy', sender: '123456789' });
+    const result = await stage(ctx);
+    expect(result!.envelope.sender).toBe('contact:chris');
+    expect(result!.contact?.id).toBe('chris');
+  });
+
+  it('resolves telegram sender by username on named-instance channel', async () => {
+    const stage = createContactResolve(makeConfig());
+    const ctx = makeCtx({ channel: 'telegram:jarvis', sender: 'chrispatten' });
+    const result = await stage(ctx);
+    expect(result!.envelope.sender).toBe('contact:chris');
+  });
+
+  it('reformats unknown sender on named-instance channel to platform:channel:id', async () => {
+    const stage = createContactResolve(makeConfig());
+    const ctx = makeCtx({ channel: 'telegram:peggy', sender: '999999' });
+    const result = await stage(ctx);
+    expect(result!.envelope.sender).toBe('platform:telegram:peggy:999999');
+  });
 });

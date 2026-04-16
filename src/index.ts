@@ -18,6 +18,7 @@
  */
 import { resolve } from 'node:path';
 import { loadConfig } from './config/loader.js';
+import { getTelegramInstances } from './config/schema.js';
 import { getDb, closeDb } from './db/client.js';
 import { runMigrations, rebuildFts } from './db/schema.js';
 import { MessageQueue } from './core/queue.js';
@@ -82,8 +83,12 @@ const httpServer = await createHttpServer({ queue, registry, config, pipeline, d
 
 const adapterDeps = { config, queue, pipeline, db, registry, commandRegistry, pauseSet };
 
-if (config.adapters.telegram) {
-  const telegram = new TelegramAdapter(adapterDeps);
+for (const inst of getTelegramInstances(config)) {
+  const telegram = new TelegramAdapter({
+    ...adapterDeps,
+    instanceName: inst.name ?? undefined,
+    instanceConfig: inst,
+  });
   registry.register(telegram);
 }
 
