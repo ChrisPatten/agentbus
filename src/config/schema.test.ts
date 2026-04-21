@@ -180,4 +180,23 @@ describe('AppConfigSchema — agents (E17)', () => {
       }),
     ).toThrow();
   });
+
+  it('rejects relative download_path', () => {
+    expect(() =>
+      AppConfigSchema.parse({
+        ...base,
+        agents: {
+          'agent:claude': { media: { download_path: './media' } },
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      AppConfigSchema.parse({
+        ...base,
+        agents: {
+          'agent:claude': { media: { download_path: 'media/downloads' } },
+        },
+      }),
+    ).toThrow();
+  });
 });

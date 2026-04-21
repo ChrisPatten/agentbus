@@ -67,20 +67,28 @@ export class AttachmentSweeper {
 
     for (const row of rows) {
       try {
+        let canDelete = false;
         try {
           unlinkSync(row.local_path);
+          canDelete = true;
         } catch (err) {
-          // ENOENT means the file is already gone — still remove the row.
           const code = (err as NodeJS.ErrnoException).code;
-          if (code !== 'ENOENT') {
+          if (code === 'ENOENT') {
+            // File already gone — still remove the DB row so we don't retry forever.
+            canDelete = true;
+          } else {
+            // Permission error or other fs failure — leave the row so the next
+            // sweep can retry once the underlying problem is resolved.
             console.error(
               `[attachment-sweeper] Failed to unlink ${row.local_path}:`,
               err,
             );
           }
         }
-        deleteStmt.run(row.id);
-        swept++;
+        if (canDelete) {
+          deleteStmt.run(row.id);
+          swept++;
+        }
       } catch (err) {
         console.error(`[attachment-sweeper] Failed to sweep row ${row.id}:`, err);
       }

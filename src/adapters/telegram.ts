@@ -9,7 +9,7 @@
  *
  * Outbound: bus-core's delivery worker calls send(envelope) directly.
  */
-import { createWriteStream } from 'node:fs';
+import { createWriteStream, unlinkSync } from 'node:fs';
 import { join, extname } from 'node:path';
 import { pipeline as streamPipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
@@ -182,10 +182,10 @@ const MIME_EXTENSION: Record<string, string> = {
 };
 
 /** Pick the highest-resolution entry from a Telegram photo array. */
-export function pickLargestPhoto(photos: TelegramPhotoSize[]): TelegramPhotoSize {
+export function pickLargestPhoto(photos: [TelegramPhotoSize, ...TelegramPhotoSize[]]): TelegramPhotoSize {
   // Telegram conventionally returns photos in ascending size order; we still
   // choose the max by file_size/width to be safe against API changes.
-  let best = photos[0]!;
+  let best = photos[0];
   for (const p of photos) {
     const bestSize = best.file_size ?? best.width * best.height;
     const thisSize = p.file_size ?? p.width * p.height;
@@ -547,7 +547,7 @@ export class TelegramAdapter implements AdapterInstance {
     msg: TelegramMessage,
   ): { file_id: string; mime_type?: string; original_filename?: string } | null {
     if (msg.photo && msg.photo.length > 0) {
-      const largest = pickLargestPhoto(msg.photo);
+      const largest = pickLargestPhoto(msg.photo as [TelegramPhotoSize, ...TelegramPhotoSize[]]);
       return { file_id: largest.file_id, mime_type: 'image/jpeg' };
     }
     if (msg.document && msg.document.mime_type?.startsWith('image/')) {
@@ -580,8 +580,9 @@ export class TelegramAdapter implements AdapterInstance {
       return [];
     }
 
+    let localPath: string | undefined;
     try {
-      const localPath = await this.downloadImage(
+      localPath = await this.downloadImage(
         source.file_id,
         media.download_path,
         source.mime_type,
@@ -609,6 +610,9 @@ export class TelegramAdapter implements AdapterInstance {
       return [att];
     } catch (err) {
       console.error(`${this.tag} Image download failed: ${String(err)}`);
+      if (localPath) {
+        try { unlinkSync(localPath); } catch {}
+      }
       return [];
     }
   }
@@ -637,7 +641,14 @@ export class TelegramAdapter implements AdapterInstance {
 
     const ext = extensionFor(mime, filename ?? file.file_path);
     const destPath = join(downloadDir, `${randomUUID()}${ext}`);
-    await streamPipeline(Readable.fromWeb(res.body as never), createWriteStream(destPath));
+    try {
+      // Two-step cast via unknown: Node's Readable.fromWeb expects its own
+      // internal ReadableStream type, not the DOM ReadableStream that fetch returns.
+      await streamPipeline(Readable.fromWeb(res.body as unknown as Parameters<typeof Readable.fromWeb>[0]), createWriteStream(destPath));
+    } catch (err) {
+      try { unlinkSync(destPath); } catch {}
+      throw err;
+    }
     return destPath;
   }
 
@@ -683,11 +694,16 @@ export class TelegramAdapter implements AdapterInstance {
       ? await this.maybeDownloadImage(imageSource)
       : undefined;
 
+    // If an image was detected but download failed or media isn't configured,
+    // use '[Image]' as a fallback body so the message still reaches the agent
+    // (covers caption-less photo updates where body would otherwise be empty).
+    const effectiveBody = body || (imageSource && (!attachments || attachments.length === 0) ? '[Image]' : '');
+
     try {
       const message: InboundMessage = {
         channel: this.id,
         sender: senderId,
-        payload: { type: 'text', body },
+        payload: { type: 'text', body: effectiveBody },
         metadata: {
           telegram_chat_id: msg.chat.id,
           telegram_message_id: msg.message_id,

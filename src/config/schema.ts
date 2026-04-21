@@ -14,6 +14,7 @@
  *   pipeline  — Inbound message processing rules
  */
 import { z } from 'zod';
+import { isAbsolute } from 'node:path';
 
 /** Platform identifiers and credentials for a known contact. */
 const ContactPlatformsSchema = z.object({
@@ -147,7 +148,9 @@ const MemoryConfigSchema = z.object({
  *   ttl_seconds   — retention window; defaults to 1 hour
  */
 const AgentMediaSchema = z.object({
-  download_path: z.string().min(1),
+  download_path: z.string().min(1).refine(isAbsolute, {
+    message: 'download_path must be an absolute path',
+  }),
   ttl_seconds: z.number().int().positive().default(3600),
 });
 

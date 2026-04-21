@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, existsSync, chmodSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -100,5 +100,30 @@ describe('AttachmentSweeper', () => {
     sweeper.tick();
 
     expect(rowCount()).toBe(2);
+  });
+
+  it('retains the DB row when unlink fails with a non-ENOENT error (EACCES)', () => {
+    // Create a read-only directory so that unlinkSync throws EACCES.
+    const roDir = mkdtempSync(join(tmpdir(), 'sweeper-ro-'));
+    const filePath = join(roDir, `${randomUUID()}.jpg`);
+    writeFileSync(filePath, 'fake-bytes');
+    chmodSync(roDir, 0o555); // remove write permission → unlink inside dir → EACCES
+
+    const now = Date.now();
+    const id = randomUUID();
+    db.prepare(
+      `INSERT INTO attachments (id, agent_id, local_path, original_filename, mime_type, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(id, 'agent:claude', filePath, null, 'image/jpeg', now, now - 1);
+
+    sweeper.tick();
+
+    // Row must be retained so the next sweep can retry once the fs issue is fixed.
+    expect(rowCount()).toBe(1);
+    expect(existsSync(filePath)).toBe(true);
+
+    // Restore permissions so afterEach can clean up.
+    chmodSync(roDir, 0o755);
+    rmSync(roDir, { recursive: true, force: true });
   });
 });
