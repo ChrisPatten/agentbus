@@ -91,7 +91,36 @@ const MessageSubmitSchema = z.object({
  * slash_command if the body starts with '/'. Accepting slash_command here
  * would let callers bypass Stage 40 detection.
  */
-const InboundSchema = z.object({
+/**
+ * An inbound attachment recorded by a platform adapter. Currently only images
+ * are supported (E17). The `local_path` is an absolute filesystem path that
+ * the agent can read; the TTL sweeper deletes the file on expiry.
+ */
+export interface Attachment {
+  type: 'image';
+  local_path: string;
+  mime_type?: string;
+}
+
+const AttachmentSchema = z.object({
+  type: z.literal('image'),
+  local_path: z.string().min(1),
+  mime_type: z.string().optional(),
+});
+
+/**
+ * Relaxed schema for POST /api/v1/inbound.
+ *
+ * Most fields are optional here because Stage 10 (normalize) applies defaults.
+ * payload.type is intentionally restricted to "text": inbound adapters submit
+ * raw text; Stage 40 (slash-command) re-classifies the payload as
+ * slash_command if the body starts with '/'. Accepting slash_command here
+ * would let callers bypass Stage 40 detection.
+ *
+ * `payload.body` may be empty when `attachments` is non-empty — this supports
+ * image-only inbound messages from Telegram (E17).
+ */
+const InboundSchemaObject = z.object({
   id: z.string().optional(),
   timestamp: z.string().optional(),
   channel: z.string().min(1),
@@ -100,9 +129,15 @@ const InboundSchema = z.object({
   recipient: z.string().optional(),
   reply_to: z.string().nullable().optional(),
   priority: z.enum(['normal', 'high', 'urgent']).optional(),
-  payload: z.object({ type: z.literal('text'), body: z.string().min(1) }),
+  payload: z.object({ type: z.literal('text'), body: z.string() }),
   metadata: z.record(z.string(), z.unknown()).optional(),
+  attachments: z.array(AttachmentSchema).optional(),
 });
+
+const InboundSchema = InboundSchemaObject.refine(
+  (m) => m.payload.body.length > 0 || (m.attachments && m.attachments.length > 0),
+  { message: 'payload.body must be non-empty unless attachments are provided' },
+);
 
 // ── Inbound pipeline processing ──────────────────────────────────────────────
 
@@ -117,6 +152,7 @@ export interface InboundMessage {
   priority?: 'normal' | 'high' | 'urgent';
   payload: { type: 'text'; body: string };
   metadata?: Record<string, unknown>;
+  attachments?: Attachment[];
 }
 
 export interface InboundResult {
@@ -153,8 +189,20 @@ export async function processInbound(
   // Validate payload for in-process callers that bypass Zod (e.g. TelegramAdapter).
   // The HTTP route validates via InboundSchema, but processInbound is also called
   // directly. Reject non-text payloads to prevent bypassing Stage 40 detection.
-  if (message.payload.type !== 'text' || !message.payload.body) {
+  // An empty body is allowed only when attachments are present (E17 image-only messages).
+  if (message.payload.type !== 'text') {
     return { ok: true, queued: false, reason: 'invalid_payload' };
+  }
+  if (!message.payload.body && !(message.attachments && message.attachments.length > 0)) {
+    return { ok: true, queued: false, reason: 'invalid_payload' };
+  }
+
+  // Attachments travel through the envelope inside `metadata.attachments` so
+  // they survive enqueue/dequeue (metadata is persisted as JSON on the queue
+  // row; the envelope itself is rehydrated from that row).
+  const metadata: Record<string, unknown> = { ...(message.metadata ?? {}) };
+  if (message.attachments && message.attachments.length > 0) {
+    metadata['attachments'] = message.attachments;
   }
 
   const envelope: MessageEnvelope = {
@@ -167,7 +215,7 @@ export async function processInbound(
     reply_to: message.reply_to ?? null,
     priority: message.priority ?? 'normal',
     payload: message.payload as MessageEnvelope['payload'],
-    metadata: message.metadata ?? {},
+    metadata,
   };
 
   const ctx: PipelineContext = {

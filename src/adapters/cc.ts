@@ -85,10 +85,40 @@ export function formatMessagesForSampling(envelopes: MessageEnvelope[]): string 
     const env = envelopes[i]!;
     const body = env.payload.type === 'text' ? env.payload.body : `[${env.payload.type}]`;
     const ts = env.timestamp ? ` at ${fmtTs(env.timestamp, i === 0)}` : '';
-    parts.push(`New message from ${env.sender} via ${env.channel}${ts} [id:${env.id}]:\n${body}`);
+    // E17: append [Image: <local_path>] lines after the body so the agent can
+    // read or describe any attached images. Empty-body image-only messages
+    // become just the image line(s).
+    const attachments = extractImageAttachments(env.metadata);
+    const imageLines = attachments.map((a) => `[Image: ${a.local_path}]`).join('\n');
+    const bodyWithImages = body && imageLines ? `${body}\n${imageLines}` : body || imageLines;
+    parts.push(`New message from ${env.sender} via ${env.channel}${ts} [id:${env.id}]:\n${bodyWithImages}`);
   }
 
   return parts.join('\n\n');
+}
+
+/**
+ * Pull image attachments out of envelope.metadata. Tolerant of shape drift:
+ * anything that is not an object with `type: "image"` and a string `local_path`
+ * is ignored silently.
+ */
+function extractImageAttachments(
+  metadata: Record<string, unknown> | undefined,
+): Array<{ local_path: string }> {
+  const raw = metadata?.['attachments'];
+  if (!Array.isArray(raw)) return [];
+  const out: Array<{ local_path: string }> = [];
+  for (const item of raw) {
+    if (
+      item &&
+      typeof item === 'object' &&
+      (item as { type?: unknown }).type === 'image' &&
+      typeof (item as { local_path?: unknown }).local_path === 'string'
+    ) {
+      out.push({ local_path: (item as { local_path: string }).local_path });
+    }
+  }
+  return out;
 }
 
 /**

@@ -206,18 +206,26 @@ epics:
       S16.3: pending  # bus-core stores cc_session_id when session is created/updated
       S16.4: pending  # Expose cc_session_id in /sessions output and get_session MCP tool
   E17:
-    status: backlog
+    status: complete
+    completed: 2026-04-21
     notes: >
-      End-to-end image and file attachment support. Telegram messages containing
-      photo/document/video/audio are currently silently dropped. E17 adds an
-      'attachment' payload type, a new attachments table (migration), Telegram
-      adapter media capture with Bot API file resolution, pipeline/DB persistence,
-      and CC adapter vision forwarding (base64 inline for images ≤5 MB, URL
-      fallback otherwise). Outbound attachment sending deferred to E18.
-      BlueBubbles attachments deferred to when E4 is implemented.
+      Inbound image handling. Telegram adapter detects photo/document (image/*)
+      updates, resolves the target agent via pipeline.routes, calls getFile +
+      downloads to <download_path>/<uuid><ext>, inserts a row into attachments
+      (id, agent_id, local_path, original_filename, mime_type, created_at,
+      expires_at; Unix ms), and attaches the file to InboundMessage.attachments.
+      processInbound copies attachments into envelope.metadata.attachments so
+      the data survives enqueue/dequeue. CC adapter's formatMessagesForSampling
+      appends [Image: <path>] lines after the body. AttachmentSweeper runs on
+      startup and every 10 minutes (hardcoded), unlinking expired files and
+      deleting rows; ENOENT tolerated, one bad row does not abort the sweep.
+      Empty-caption messages pass the processInbound guard when attachments
+      are present. Outbound and non-image attachments remain out of scope.
     stories:
-      S17.1: pending  # attachment payload type + DB migration (attachments table, transcripts.attachment_id)
-      S17.2: pending  # Telegram adapter: detect photo/document/video/audio, resolve via getFile, emit attachment envelope
-      S17.3: pending  # Pipeline + TranscriptLogger: persist attachment rows alongside transcript rows
-      S17.4: pending  # CC adapter: forward images as base64 content blocks, non-image as text description
-last_updated: 2026-04-15  # E18 complete
+      S17.1: complete  # Config schema + startup mkdir (src/config/schema.ts, src/index.ts)
+      S17.2: complete  # Migration 006_attachments.sql (+ registration in src/db/schema.ts)
+      S17.3: complete  # Telegram adapter detect/download + InboundMessage.attachments + processInbound
+      S17.4: complete  # CC adapter formatMessagesForSampling appends [Image: ...] lines
+      S17.5: complete  # AttachmentSweeper (src/media/attachment-sweeper.ts) + index.ts lifecycle
+      S17.6: complete  # docs/ATTACHMENTS.md + config.yaml.example + TELEGRAM_ADAPTER.md pointer
+last_updated: 2026-04-21  # E17 complete

@@ -139,6 +139,27 @@ const MemoryConfigSchema = z.object({
 });
 
 /**
+ * Per-agent media handling settings. Controls where inbound images are saved
+ * on disk and how long files are retained before the TTL sweeper deletes them.
+ *
+ *   download_path — directory where attachments for this agent are written;
+ *                   created at startup if it does not exist
+ *   ttl_seconds   — retention window; defaults to 1 hour
+ */
+const AgentMediaSchema = z.object({
+  download_path: z.string().min(1),
+  ttl_seconds: z.number().int().positive().default(3600),
+});
+
+/**
+ * Per-agent configuration, keyed by recipient id (e.g. "agent:claude").
+ * Additional agent-scoped settings can be added here over time.
+ */
+const AgentConfigSchema = z.object({
+  media: AgentMediaSchema.optional(),
+});
+
+/**
  * A topic-classification rule. Rules are evaluated in order; the first match
  * wins. A rule can match by keyword list, regex pattern, or both (keyword
  * checked first). Patterns are compiled once at factory construction time to
@@ -258,6 +279,7 @@ export const AppConfigSchema = z.object({
     }
   }),
   topics: z.array(z.string()).default(['general']),
+  agents: z.record(z.string(), AgentConfigSchema).default({}),
   memory: MemoryConfigSchema,
   scheduler: SchedulerConfigSchema.default({ tick_interval_ms: 30000, enabled: true }),
   schedules: z.array(ScheduleEntrySchema).default([]).superRefine((entries, ctx) => {

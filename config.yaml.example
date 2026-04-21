@@ -44,6 +44,17 @@ memory:
   context_window_hours: 48
   claude_api_model: claude-opus-4-6
 
+# Per-agent settings, keyed by recipient id (e.g. "agent:claude").
+# See docs/ATTACHMENTS.md for the full inbound-image flow.
+agents:
+  "agent:claude":
+    # Inbound images from Telegram are downloaded here. The directory is
+    # created at startup if missing. Files are deleted after ttl_seconds
+    # (default: 3600) by the attachment sweeper.
+    media:
+      download_path: /tmp/agentbus/claude
+      ttl_seconds: 3600
+
 pipeline:
   routes:
     # Route all telegram messages to the claude-code agent:

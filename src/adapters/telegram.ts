@@ -9,6 +9,11 @@
  *
  * Outbound: bus-core's delivery worker calls send(envelope) directly.
  */
+import { createWriteStream } from 'node:fs';
+import { join, extname } from 'node:path';
+import { pipeline as streamPipeline } from 'node:stream/promises';
+import { Readable } from 'node:stream';
+import { randomUUID } from 'node:crypto';
 import type { MessageEnvelope } from '../types/envelope.js';
 import type {
   AdapterInstance,
@@ -18,7 +23,7 @@ import type {
   CommandManifest,
 } from '../core/registry.js';
 import type { AppConfig } from '../config/schema.js';
-import { processInbound, type InboundMessage } from '../http/api.js';
+import { processInbound, type InboundMessage, type Attachment } from '../http/api.js';
 import type { MessageQueue } from '../core/queue.js';
 import type { PipelineEngine } from '../pipeline/engine.js';
 import type { AdapterRegistry } from '../core/registry.js';
@@ -63,6 +68,29 @@ interface TelegramChat {
   type: string;
 }
 
+interface TelegramPhotoSize {
+  file_id: string;
+  file_unique_id: string;
+  width: number;
+  height: number;
+  file_size?: number;
+}
+
+interface TelegramDocument {
+  file_id: string;
+  file_unique_id: string;
+  file_name?: string;
+  mime_type?: string;
+  file_size?: number;
+}
+
+interface TelegramFile {
+  file_id: string;
+  file_unique_id: string;
+  file_size?: number;
+  file_path?: string;
+}
+
 interface TelegramMessage {
   message_id: number;
   from?: TelegramUser;
@@ -70,6 +98,8 @@ interface TelegramMessage {
   date: number;
   text?: string;
   caption?: string;
+  photo?: TelegramPhotoSize[];
+  document?: TelegramDocument;
 }
 
 interface TelegramUpdate {
@@ -134,6 +164,67 @@ export function splitMessage(text: string, maxLen: number = MAX_MESSAGE_LENGTH):
 
   if (remaining.length > 0) parts.push(remaining);
   return parts;
+}
+
+// ── Image attachment helpers (E17) ───────────────────────────────────────────
+
+/** MIME → file-extension map for the image types Telegram commonly delivers. */
+const MIME_EXTENSION: Record<string, string> = {
+  'image/jpeg': '.jpg',
+  'image/jpg': '.jpg',
+  'image/png': '.png',
+  'image/webp': '.webp',
+  'image/gif': '.gif',
+  'image/heic': '.heic',
+  'image/heif': '.heif',
+  'image/bmp': '.bmp',
+  'image/svg+xml': '.svg',
+};
+
+/** Pick the highest-resolution entry from a Telegram photo array. */
+export function pickLargestPhoto(photos: TelegramPhotoSize[]): TelegramPhotoSize {
+  // Telegram conventionally returns photos in ascending size order; we still
+  // choose the max by file_size/width to be safe against API changes.
+  let best = photos[0]!;
+  for (const p of photos) {
+    const bestSize = best.file_size ?? best.width * best.height;
+    const thisSize = p.file_size ?? p.width * p.height;
+    if (thisSize > bestSize) best = p;
+  }
+  return best;
+}
+
+/** Derive a safe extension from MIME type or original filename; falls back to `.bin`. */
+export function extensionFor(mime?: string, filename?: string): string {
+  if (mime && MIME_EXTENSION[mime.toLowerCase()]) return MIME_EXTENSION[mime.toLowerCase()]!;
+  if (filename) {
+    const ext = extname(filename).toLowerCase();
+    if (/^\.[a-z0-9]{1,8}$/.test(ext)) return ext;
+  }
+  return '.bin';
+}
+
+/** Resolve the media config for the target agent of an inbound channel. */
+export function resolveMediaConfig(
+  config: AppConfig,
+  channel: string,
+): { agentId: string; download_path: string; ttl_seconds: number } | null {
+  for (const rule of config.pipeline.routes) {
+    const channelMatch = rule.match.channel === undefined || rule.match.channel === channel;
+    if (!channelMatch) continue;
+    const recipientId = rule.target.recipientId;
+    const agentCfg = config.agents[recipientId];
+    if (agentCfg?.media) {
+      return {
+        agentId: recipientId,
+        download_path: agentCfg.media.download_path,
+        ttl_seconds: agentCfg.media.ttl_seconds,
+      };
+    }
+    // First route matched but agent has no media config — treat as "not configured".
+    return null;
+  }
+  return null;
 }
 
 // ── TelegramAdapter class ────────────────────────────────────────────────────
@@ -442,6 +533,114 @@ export class TelegramAdapter implements AdapterInstance {
     return data.result as T;
   }
 
+  // ── Image download (E17) ──────────────────────────────────────────────────
+
+  /**
+   * Identify whether an inbound Telegram message carries an image we should
+   * download. Returns the raw {file_id, mime, filename} triple, or null.
+   *
+   * We handle two shapes:
+   *   - `photo[]`  — Telegram's compressed photo (pick the largest size)
+   *   - `document` — only when `mime_type` starts with "image/"
+   */
+  private extractImageSource(
+    msg: TelegramMessage,
+  ): { file_id: string; mime_type?: string; original_filename?: string } | null {
+    if (msg.photo && msg.photo.length > 0) {
+      const largest = pickLargestPhoto(msg.photo);
+      return { file_id: largest.file_id, mime_type: 'image/jpeg' };
+    }
+    if (msg.document && msg.document.mime_type?.startsWith('image/')) {
+      return {
+        file_id: msg.document.file_id,
+        mime_type: msg.document.mime_type,
+        original_filename: msg.document.file_name,
+      };
+    }
+    return null;
+  }
+
+  /**
+   * Resolve media config, download the file, and insert the DB row.
+   * Returns the populated attachments list on success, an empty array if no
+   * media config is set for the target agent, or an empty array on download
+   * failure (error logged). Never throws — the inbound message is always
+   * delivered, with or without the attachment.
+   */
+  private async maybeDownloadImage(source: {
+    file_id: string;
+    mime_type?: string;
+    original_filename?: string;
+  }): Promise<Attachment[]> {
+    const media = resolveMediaConfig(this.deps.config, this.id);
+    if (!media) {
+      console.warn(
+        `${this.tag} Received an image but no agent with media config is routed from channel "${this.id}" — skipping download`,
+      );
+      return [];
+    }
+
+    try {
+      const localPath = await this.downloadImage(
+        source.file_id,
+        media.download_path,
+        source.mime_type,
+        source.original_filename,
+      );
+
+      const now = Date.now();
+      this.deps.db
+        .prepare(
+          `INSERT INTO attachments (id, agent_id, local_path, original_filename, mime_type, created_at, expires_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          randomUUID(),
+          media.agentId,
+          localPath,
+          source.original_filename ?? null,
+          source.mime_type ?? null,
+          now,
+          now + media.ttl_seconds * 1000,
+        );
+
+      const att: Attachment = { type: 'image', local_path: localPath };
+      if (source.mime_type) att.mime_type = source.mime_type;
+      return [att];
+    } catch (err) {
+      console.error(`${this.tag} Image download failed: ${String(err)}`);
+      return [];
+    }
+  }
+
+  /**
+   * Download a Telegram file by `file_id` to `<downloadDir>/<uuid><ext>`.
+   * Returns the absolute local path on success. Caller is responsible for
+   * catching failures and deciding whether to proceed without the attachment.
+   */
+  private async downloadImage(
+    file_id: string,
+    downloadDir: string,
+    mime?: string,
+    filename?: string,
+  ): Promise<string> {
+    const file = await this.callTelegram<TelegramFile>('getFile', { file_id });
+    if (!file.file_path) {
+      throw new Error(`Telegram getFile returned no file_path for ${file_id}`);
+    }
+
+    const url = `${TELEGRAM_API_BASE}/file/bot${this.token}/${file.file_path}`;
+    const res = await fetch(url);
+    if (!res.ok || !res.body) {
+      throw new Error(`Telegram file download failed: HTTP ${res.status}`);
+    }
+
+    const ext = extensionFor(mime, filename ?? file.file_path);
+    const destPath = join(downloadDir, `${randomUUID()}${ext}`);
+    await streamPipeline(Readable.fromWeb(res.body as never), createWriteStream(destPath));
+    return destPath;
+  }
+
   // ── Sleep with shutdown interruption ──────────────────────────────────────
 
   private sleep(ms: number): Promise<void> {
@@ -471,11 +670,18 @@ export class TelegramAdapter implements AdapterInstance {
       return true;
     }
 
-    const body = msg.text ?? msg.caption;
-    if (!body) {
+    // Detect an inbound image (photo or image/* document). E17.
+    const imageSource = this.extractImageSource(msg);
+
+    const body = msg.text ?? msg.caption ?? '';
+    if (!body && !imageSource) {
       console.log(`${this.tag} Skipped non-text update ${update.update_id} from ${senderId}`);
       return true;
     }
+
+    const attachments = imageSource
+      ? await this.maybeDownloadImage(imageSource)
+      : undefined;
 
     try {
       const message: InboundMessage = {
@@ -488,6 +694,7 @@ export class TelegramAdapter implements AdapterInstance {
           // Encodes both IDs so react() can call sendReaction without a separate lookup
           platform_message_id: `${msg.chat.id}:${msg.message_id}`,
         },
+        ...(attachments && attachments.length > 0 ? { attachments } : {}),
       };
 
       await processInbound(message, this.deps);

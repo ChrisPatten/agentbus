@@ -158,4 +158,62 @@ describe('formatMessagesForSampling', () => {
     expect(second.startsWith('New message')).toBe(true);
     expect(second).not.toContain('<memory');
   });
+
+  // ── E17: image attachments ───────────────────────────────────────────────────
+
+  it('appends a single [Image: path] line after the body', () => {
+    const env = makeEnvelope({
+      metadata: {
+        attachments: [{ type: 'image', local_path: '/tmp/agentbus/claude/abc.jpg' }],
+      },
+    });
+    const result = formatMessagesForSampling([env]);
+    expect(result).toContain('Hello!\n[Image: /tmp/agentbus/claude/abc.jpg]');
+  });
+
+  it('emits multiple [Image: ...] lines for multiple attachments', () => {
+    const env = makeEnvelope({
+      payload: { type: 'text', body: 'look' },
+      metadata: {
+        attachments: [
+          { type: 'image', local_path: '/tmp/a.jpg' },
+          { type: 'image', local_path: '/tmp/b.png', mime_type: 'image/png' },
+        ],
+      },
+    });
+    const result = formatMessagesForSampling([env]);
+    expect(result).toContain('look\n[Image: /tmp/a.jpg]\n[Image: /tmp/b.png]');
+  });
+
+  it('renders an image-only message (empty body) as just the [Image: ...] line', () => {
+    const env = makeEnvelope({
+      payload: { type: 'text', body: '' },
+      metadata: {
+        attachments: [{ type: 'image', local_path: '/tmp/solo.jpg' }],
+      },
+    });
+    const result = formatMessagesForSampling([env]);
+    expect(result).toMatch(/\[id:msg-001\]:\n\[Image: \/tmp\/solo\.jpg\]$/);
+  });
+
+  it('is unchanged when no attachments are present', () => {
+    const result = formatMessagesForSampling([makeEnvelope()]);
+    expect(result).not.toContain('[Image:');
+  });
+
+  it('ignores non-image or malformed attachment entries', () => {
+    const env = makeEnvelope({
+      metadata: {
+        attachments: [
+          { type: 'image', local_path: '/tmp/ok.jpg' },
+          { type: 'video', local_path: '/tmp/nope.mp4' },
+          'garbage',
+          { type: 'image' }, // missing local_path
+        ],
+      },
+    });
+    const result = formatMessagesForSampling([env]);
+    expect(result).toContain('[Image: /tmp/ok.jpg]');
+    expect(result).not.toContain('nope.mp4');
+  });
 });

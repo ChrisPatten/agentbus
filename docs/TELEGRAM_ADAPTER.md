@@ -12,7 +12,7 @@ Telegram Bot API  <──long-poll──>  TelegramAdapter (in bus-core)  <─�
 
 The adapter class implements `AdapterInstance` and provides:
 
-- **Inbound loop** — long-polls `getUpdates` from Telegram, submits messages directly to the pipeline via `processInbound()` (no HTTP hop)
+- **Inbound loop** — long-polls `getUpdates` from Telegram, submits messages directly to the pipeline via `processInbound()` (no HTTP hop). Photos and `image/*` documents are downloaded to the target agent's `media.download_path` — see [ATTACHMENTS.md](./ATTACHMENTS.md).
 - **`send(envelope)`** — called by the delivery worker to deliver outbound messages via Telegram's `sendMessage` API
 
 The adapter does not communicate with bus-core over HTTP. It receives infrastructure dependencies (config, pipeline, queue, db) via constructor injection.

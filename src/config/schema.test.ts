@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { getTelegramInstances } from './schema.js';
+import { AppConfigSchema, getTelegramInstances } from './schema.js';
 import type { AppConfig } from './schema.js';
 
 function makeConfig(telegram: AppConfig['adapters']['telegram']): AppConfig {
@@ -101,5 +101,83 @@ describe('getTelegramInstances', () => {
     } as AppConfig['adapters']['telegram']);
     const instances = getTelegramInstances(config);
     expect(instances[0]!.name).toBe('my-bot_2');
+  });
+});
+
+describe('AppConfigSchema — agents (E17)', () => {
+  const base = {
+    bus: { db_path: ':memory:' },
+    adapters: {},
+    memory: {},
+  };
+
+  it('defaults agents to empty object when omitted', () => {
+    const parsed = AppConfigSchema.parse(base);
+    expect(parsed.agents).toEqual({});
+  });
+
+  it('parses a full agent media block', () => {
+    const parsed = AppConfigSchema.parse({
+      ...base,
+      agents: {
+        'agent:claude': {
+          media: { download_path: '/tmp/agentbus/claude', ttl_seconds: 7200 },
+        },
+      },
+    });
+    expect(parsed.agents['agent:claude']?.media?.download_path).toBe('/tmp/agentbus/claude');
+    expect(parsed.agents['agent:claude']?.media?.ttl_seconds).toBe(7200);
+  });
+
+  it('defaults ttl_seconds to 3600 when omitted', () => {
+    const parsed = AppConfigSchema.parse({
+      ...base,
+      agents: {
+        'agent:claude': {
+          media: { download_path: '/tmp/agentbus/claude' },
+        },
+      },
+    });
+    expect(parsed.agents['agent:claude']?.media?.ttl_seconds).toBe(3600);
+  });
+
+  it('allows an agent entry with no media block', () => {
+    const parsed = AppConfigSchema.parse({
+      ...base,
+      agents: {
+        'agent:claude': {},
+      },
+    });
+    expect(parsed.agents['agent:claude']?.media).toBeUndefined();
+  });
+
+  it('rejects negative or zero ttl_seconds', () => {
+    expect(() =>
+      AppConfigSchema.parse({
+        ...base,
+        agents: {
+          'agent:claude': { media: { download_path: '/tmp', ttl_seconds: -1 } },
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      AppConfigSchema.parse({
+        ...base,
+        agents: {
+          'agent:claude': { media: { download_path: '/tmp', ttl_seconds: 0 } },
+        },
+      }),
+    ).toThrow();
+  });
+
+  it('rejects empty download_path', () => {
+    expect(() =>
+      AppConfigSchema.parse({
+        ...base,
+        agents: {
+          'agent:claude': { media: { download_path: '' } },
+        },
+      }),
+    ).toThrow();
   });
 });

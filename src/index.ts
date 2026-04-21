@@ -16,6 +16,7 @@
  *   7. Start platform adapters (inbound loops)
  *   8. Register SIGTERM/SIGINT handlers for graceful shutdown
  */
+import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { loadConfig } from './config/loader.js';
 import { getTelegramInstances } from './config/schema.js';
@@ -40,10 +41,22 @@ import { createCommandSystem } from './commands/index.js';
 import { Summarizer } from './memory/summarizer.js';
 import { SessionTracker } from './memory/session-tracker.js';
 import { Scheduler } from './scheduler/scheduler.js';
+import { AttachmentSweeper } from './media/attachment-sweeper.js';
 
 const configPath = process.env['AGENTBUS_CONFIG'] ?? resolve(process.cwd(), 'config.yaml');
 
 const config = loadConfig(configPath);
+
+// Ensure per-agent media download directories exist (E17)
+for (const [agentId, agentCfg] of Object.entries(config.agents)) {
+  if (agentCfg.media) {
+    mkdirSync(agentCfg.media.download_path, { recursive: true });
+    console.log(
+      `[agentbus] Ensured media download path for ${agentId}: ${agentCfg.media.download_path}`,
+    );
+  }
+}
+
 const db = getDb(config.bus.db_path);
 
 runMigrations(db);
@@ -106,6 +119,12 @@ const deliveryWorker = new DeliveryWorker({ queue, registry });
 const summarizer = new Summarizer({ db, config });
 const sessionTracker = new SessionTracker({ db, config, summarizer });
 
+// ── Attachment sweeper (E17) ──────────────────────────────────────────────────
+// Periodically deletes expired image files + their DB rows. Runs on a fixed
+// 10-minute interval with an immediate tick on startup.
+
+const attachmentSweeper = new AttachmentSweeper({ db });
+
 // ── Scheduler ─────────────────────────────────────────────────────────────────
 // Fires scheduled messages into the inbound pipeline on a configurable tick.
 // Config-defined schedules are upserted on startup; dynamic schedules are
@@ -139,6 +158,7 @@ function shutdown() {
   console.log('AgentBus shutting down…');
   scheduler.stop();
   sessionTracker.stop();
+  attachmentSweeper.stop();
   deliveryWorker.stop();
   clearInterval(maintenanceTimer);
   const stops = registry.list().map((a) => a.stop().catch(() => {}));
@@ -164,6 +184,7 @@ for (const adapter of registry.list()) {
 }
 deliveryWorker.start();
 sessionTracker.start();
+attachmentSweeper.start();
 scheduler.loadConfig();
 if (config.scheduler.enabled) scheduler.start();
 
