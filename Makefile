@@ -1,4 +1,4 @@
-.PHONY: dev kill start stop restart status logs help
+.PHONY: dev debug-payloads kill start stop restart status logs help
 
 AGENTBUS_CONFIG ?= config.yaml
 PM2 := ./node_modules/.bin/pm2
@@ -18,6 +18,10 @@ help:
 ## Run the server in development mode
 dev:
 	AGENTBUS_CONFIG=$(AGENTBUS_CONFIG) npx tsx src/index.ts
+
+## Log raw Telegram payloads without forwarding to agents (for debugging attachment types)
+debug-payloads:
+	AGENTBUS_CONFIG=$(AGENTBUS_CONFIG) TELEGRAM_DEBUG_PAYLOADS=1 npx tsx src/index.ts
 
 ## Kill the running process
 kill:

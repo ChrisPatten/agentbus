@@ -1,9 +1,8 @@
 # Attachments
 
-AgentBus supports **inbound images only** from Telegram, delivered to the
-Claude Code agent as file paths embedded in the channel notification text.
-Outbound images and non-image attachments (video, audio, arbitrary documents)
-are out of scope.
+AgentBus supports **inbound images and documents** from Telegram, delivered to
+the Claude Code agent as file paths embedded in the channel notification text.
+Outbound attachments and non-file types (video, audio, stickers) are out of scope.
 
 ## Config
 
@@ -28,20 +27,27 @@ agents:
 
 Multiple agents can each have their own download path and retention.
 
+## Supported attachment types
+
+| Telegram field | Attachment type | Notes |
+|---|---|---|
+| `photo[]` | `image` | Telegram-compressed; largest size selected |
+| `document` with `image/*` MIME | `image` | Sent as original file (no compression) |
+| `document` with any other MIME | `file` | PDFs, ZIPs, Office files, etc. |
+
 ## End-to-end flow
 
 1. **Inbound update** — the Telegram adapter receives a message update
-   containing `photo` (compressed) or `document` with an `image/*` MIME.
+   containing `photo` (compressed) or a `document` of any MIME type.
 2. **Target resolution** — the adapter walks `pipeline.routes` to find the
    first rule matching the inbound channel, reads `target.recipientId`,
    and looks up `agents[recipientId].media`. If no `media` is configured,
-   a warning is logged and the message is delivered without the image.
+   a warning is logged and the message is delivered without the attachment.
 3. **Download** — the adapter calls Telegram's `getFile` to resolve the
    server-side file path, then streams the file to
    `<download_path>/<uuid><ext>`. The filename is a generated UUID; the
-   extension is derived from the MIME type (`image/jpeg` → `.jpg`,
-   `image/png` → `.png`, …) or the original filename, with `.bin` as a
-   last-resort fallback.
+   extension is derived from the MIME type or the original filename, with
+   `.bin` as a last-resort fallback.
 4. **DB record** — a row is inserted into `attachments`:
 
    | Column            | Type    | Notes                                  |
@@ -58,16 +64,22 @@ Multiple agents can each have their own download path and retention.
    `InboundMessage.attachments` and `processInbound` copies it into
    `envelope.metadata.attachments` so it survives enqueue/dequeue.
 6. **Agent delivery** — the CC adapter's channel-notification formatter
-   appends one `[Image: <local_path>]` line per attachment after the
-   message body. Empty-caption messages become image-only notifications
-   consisting of just the `[Image: …]` line(s).
+   appends one line per attachment after the message body:
+   - Images: `[Image: <local_path>]`
+   - Files: `[File: <local_path> — <original_filename>]` (filename omitted if unavailable)
 
-Example channel notification the agent sees:
+Example channel notifications the agent sees:
 
 ```
 New message from 12345 via telegram at 2026-04-21T14:30 [id:...]:
 check this out
 [Image: /tmp/agentbus/claude/9a2c-....jpg]
+```
+
+```
+New message from 12345 via telegram at 2026-04-21T14:30 [id:...]:
+here is the document
+[File: /tmp/agentbus/claude/3f1a-....pdf — report.pdf]
 ```
 
 ## TTL sweep
@@ -89,11 +101,11 @@ The 10-minute cadence is not configurable in the current scope.
 
 | Situation                                    | Behavior                                                   |
 |----------------------------------------------|------------------------------------------------------------|
-| Image-bearing message, no matching route     | Warning logged; message still delivered without attachment |
+| Attachment-bearing message, no matching route | Warning logged; message still delivered without attachment |
 | Matched agent has no `media` block           | Warning logged; message still delivered without attachment |
 | Telegram `getFile` or download fails         | Error logged; message still delivered without attachment   |
 | `unlink` fails on sweep                      | Error logged; DB row still deleted on non-ENOENT only when the row-delete completes; next sweep will not re-try a missing file because the row is gone |
-| Document with non-image MIME (e.g. `video/*`) | Skipped — no download, no row, no attachment              |
+| Non-file types (video, audio, voice, sticker) | Skipped — no download, no row, no attachment              |
 
 ## Related code
 

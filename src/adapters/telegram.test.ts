@@ -317,7 +317,10 @@ describe('TelegramAdapter inbound image handling', () => {
     expect(attachments[0]!.mime_type).toBe('image/jpeg');
   });
 
-  it('skips download for documents with non-image MIME', async () => {
+  it('downloads a non-image document and attaches it as type "file"', async () => {
+    const bytes = new Uint8Array([0x25, 0x50, 0x44, 0x46]); // %PDF magic bytes
+    mockGetFileAndDownload('documents/abc.pdf', bytes);
+
     await (adapter as unknown as {
       processUpdate: (u: unknown) => Promise<boolean>;
     }).processUpdate({
@@ -327,23 +330,39 @@ describe('TelegramAdapter inbound image handling', () => {
         from: { id: 12345, first_name: 'Chris' },
         chat: { id: 555, type: 'private' },
         date: Math.floor(Date.now() / 1000),
-        caption: 'here is a video',
+        caption: 'here is a document',
         document: {
-          file_id: 'vid',
-          file_unique_id: 'uv',
-          file_name: 'clip.mp4',
-          mime_type: 'video/mp4',
+          file_id: 'doc1',
+          file_unique_id: 'ud1',
+          file_name: 'report.pdf',
+          mime_type: 'application/pdf',
         },
       },
     });
 
-    expect(fetchMock).not.toHaveBeenCalled();
-    const rows = db.prepare(`SELECT COUNT(*) AS n FROM attachments`).get() as { n: number };
-    expect(rows.n).toBe(0);
-    // Message with caption still went through the pipeline
+    // File was downloaded
+    const files = readdirSync(tmpDir);
+    expect(files).toHaveLength(1);
+    expect(files[0]).toMatch(/\.pdf$/);
+
+    // DB row was inserted
+    const row = db.prepare(`SELECT * FROM attachments`).get() as {
+      agent_id: string;
+      local_path: string;
+      mime_type: string;
+      original_filename: string;
+    };
+    expect(row.mime_type).toBe('application/pdf');
+    expect(row.original_filename).toBe('report.pdf');
+
+    // Envelope carries the attachment as type 'file'
     expect(processInboundCalls).toHaveLength(1);
     const env = processInboundCalls[0]!;
-    expect((env['metadata'] as Record<string, unknown>)['attachments']).toBeUndefined();
+    const metadata = env['metadata'] as Record<string, unknown>;
+    const attachments = metadata['attachments'] as Array<{ type: string; local_path: string; original_filename: string }>;
+    expect(attachments).toHaveLength(1);
+    expect(attachments[0]!.type).toBe('file');
+    expect(attachments[0]!.original_filename).toBe('report.pdf');
   });
 
   it('delivers the message without attachment when the download fails', async () => {

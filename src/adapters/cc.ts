@@ -85,12 +85,18 @@ export function formatMessagesForSampling(envelopes: MessageEnvelope[]): string 
     const env = envelopes[i]!;
     const body = env.payload.type === 'text' ? env.payload.body : `[${env.payload.type}]`;
     const ts = env.timestamp ? ` at ${fmtTs(env.timestamp, i === 0)}` : '';
-    // E17: append [Image: <local_path>] lines after the body so the agent can
-    // read or describe any attached images. Empty-body image-only messages
-    // become just the image line(s).
-    const attachments = extractImageAttachments(env.metadata);
-    const imageLines = attachments.map((a) => `[Image: ${a.local_path}]`).join('\n');
-    const bodyWithImages = body && imageLines ? `${body}\n${imageLines}` : body || imageLines;
+    // Append [Image: ...] and [File: ...] lines after the body so the agent can
+    // read any attached files. Empty-body attachment-only messages become just
+    // the attachment line(s).
+    const attachments = extractAttachments(env.metadata);
+    const attachmentLines = attachments
+      .map((a) => {
+        if (a.type === 'image') return `[Image: ${a.local_path}]`;
+        const label = a.original_filename ? ` — ${a.original_filename}` : '';
+        return `[File: ${a.local_path}${label}]`;
+      })
+      .join('\n');
+    const bodyWithImages = body && attachmentLines ? `${body}\n${attachmentLines}` : body || attachmentLines;
     parts.push(`New message from ${env.sender} via ${env.channel}${ts} [id:${env.id}]:\n${bodyWithImages}`);
   }
 
@@ -98,24 +104,24 @@ export function formatMessagesForSampling(envelopes: MessageEnvelope[]): string 
 }
 
 /**
- * Pull image attachments out of envelope.metadata. Tolerant of shape drift:
- * anything that is not an object with `type: "image"` and a string `local_path`
- * is ignored silently.
+ * Pull attachments out of envelope.metadata. Tolerant of shape drift: anything
+ * that is not an object with a known `type` and a string `local_path` is ignored.
  */
-function extractImageAttachments(
+function extractAttachments(
   metadata: Record<string, unknown> | undefined,
-): Array<{ local_path: string }> {
+): Array<{ type: 'image' | 'file'; local_path: string; original_filename?: string }> {
   const raw = metadata?.['attachments'];
   if (!Array.isArray(raw)) return [];
-  const out: Array<{ local_path: string }> = [];
+  const out: Array<{ type: 'image' | 'file'; local_path: string; original_filename?: string }> = [];
   for (const item of raw) {
-    if (
-      item &&
-      typeof item === 'object' &&
-      (item as { type?: unknown }).type === 'image' &&
-      typeof (item as { local_path?: unknown }).local_path === 'string'
-    ) {
-      out.push({ local_path: (item as { local_path: string }).local_path });
+    if (!item || typeof item !== 'object') continue;
+    const { type, local_path, original_filename } = item as Record<string, unknown>;
+    if ((type === 'image' || type === 'file') && typeof local_path === 'string') {
+      out.push({
+        type,
+        local_path,
+        ...(typeof original_filename === 'string' ? { original_filename } : {}),
+      });
     }
   }
   return out;

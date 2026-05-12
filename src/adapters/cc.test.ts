@@ -159,7 +159,7 @@ describe('formatMessagesForSampling', () => {
     expect(second).not.toContain('<memory');
   });
 
-  // ── E17: image attachments ───────────────────────────────────────────────────
+  // ── image attachments ────────────────────────────────────────────────────────
 
   it('appends a single [Image: path] line after the body', () => {
     const env = makeEnvelope({
@@ -199,9 +199,10 @@ describe('formatMessagesForSampling', () => {
   it('is unchanged when no attachments are present', () => {
     const result = formatMessagesForSampling([makeEnvelope()]);
     expect(result).not.toContain('[Image:');
+    expect(result).not.toContain('[File:');
   });
 
-  it('ignores non-image or malformed attachment entries', () => {
+  it('ignores unsupported types and malformed attachment entries', () => {
     const env = makeEnvelope({
       metadata: {
         attachments: [
@@ -215,5 +216,53 @@ describe('formatMessagesForSampling', () => {
     const result = formatMessagesForSampling([env]);
     expect(result).toContain('[Image: /tmp/ok.jpg]');
     expect(result).not.toContain('nope.mp4');
+  });
+
+  // ── file attachments ─────────────────────────────────────────────────────────
+
+  it('renders a file attachment as [File: path — filename]', () => {
+    const env = makeEnvelope({
+      metadata: {
+        attachments: [{ type: 'file', local_path: '/tmp/uuid.pdf', original_filename: 'report.pdf' }],
+      },
+    });
+    const result = formatMessagesForSampling([env]);
+    expect(result).toContain('[File: /tmp/uuid.pdf — report.pdf]');
+  });
+
+  it('renders a file attachment without original_filename as just [File: path]', () => {
+    const env = makeEnvelope({
+      metadata: {
+        attachments: [{ type: 'file', local_path: '/tmp/uuid.pdf' }],
+      },
+    });
+    const result = formatMessagesForSampling([env]);
+    expect(result).toContain('[File: /tmp/uuid.pdf]');
+    expect(result).not.toContain(' — ');
+  });
+
+  it('renders mixed image and file attachments in order', () => {
+    const env = makeEnvelope({
+      payload: { type: 'text', body: 'here' },
+      metadata: {
+        attachments: [
+          { type: 'image', local_path: '/tmp/photo.jpg' },
+          { type: 'file', local_path: '/tmp/uuid.pdf', original_filename: 'report.pdf' },
+        ],
+      },
+    });
+    const result = formatMessagesForSampling([env]);
+    expect(result).toContain('here\n[Image: /tmp/photo.jpg]\n[File: /tmp/uuid.pdf — report.pdf]');
+  });
+
+  it('renders a file-only message (empty body) as just the [File: ...] line', () => {
+    const env = makeEnvelope({
+      payload: { type: 'text', body: '' },
+      metadata: {
+        attachments: [{ type: 'file', local_path: '/tmp/uuid.pdf', original_filename: 'doc.pdf' }],
+      },
+    });
+    const result = formatMessagesForSampling([env]);
+    expect(result).toMatch(/\[id:msg-001\]:\n\[File: \/tmp\/uuid\.pdf — doc\.pdf\]$/);
   });
 });

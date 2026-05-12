@@ -12,7 +12,7 @@ Telegram Bot API  <──long-poll──>  TelegramAdapter (in bus-core)  <─�
 
 The adapter class implements `AdapterInstance` and provides:
 
-- **Inbound loop** — long-polls `getUpdates` from Telegram, submits messages directly to the pipeline via `processInbound()` (no HTTP hop). Photos and `image/*` documents are downloaded to the target agent's `media.download_path` — see [ATTACHMENTS.md](./ATTACHMENTS.md).
+- **Inbound loop** — long-polls `getUpdates` from Telegram, submits messages directly to the pipeline via `processInbound()` (no HTTP hop). Photos and documents of any MIME type are downloaded to the target agent's `media.download_path` — see [ATTACHMENTS.md](./ATTACHMENTS.md).
 - **`send(envelope)`** — called by the delivery worker to deliver outbound messages via Telegram's `sendMessage` API
 
 The adapter does not communicate with bus-core over HTTP. It receives infrastructure dependencies (config, pipeline, queue, db) via constructor injection.
@@ -124,7 +124,7 @@ There is no separate `allowed_sender_ids` config — the contacts map is the sou
 1. `getUpdates` returns new messages from Telegram
 2. For each `message` update:
    - Sender `from.id` is checked against the allowed-sender set (derived from contacts); unknown senders are silently dropped
-   - Body is taken from `message.text` or `message.caption`; non-text updates (stickers, etc.) are skipped
+   - Body is taken from `message.text` or `message.caption`; non-text, non-file updates (stickers, voice messages, etc.) are skipped
    - Message is submitted directly to `processInbound()` with:
      - `channel: "telegram"` (single-bot) or `channel: "telegram:{name}"` (named instance, e.g. `"telegram:peggy"`)
      - `sender: "{from.id}"` (raw Telegram user ID)

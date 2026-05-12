@@ -92,20 +92,22 @@ const MessageSubmitSchema = z.object({
  * would let callers bypass Stage 40 detection.
  */
 /**
- * An inbound attachment recorded by a platform adapter. Currently only images
- * are supported (E17). The `local_path` is an absolute filesystem path that
- * the agent can read; the TTL sweeper deletes the file on expiry.
+ * An inbound attachment recorded by a platform adapter. The `local_path` is
+ * an absolute filesystem path that the agent can read; the TTL sweeper deletes
+ * the file on expiry.
  */
 export interface Attachment {
-  type: 'image';
+  type: 'image' | 'file';
   local_path: string;
   mime_type?: string;
+  original_filename?: string;
 }
 
 const AttachmentSchema = z.object({
-  type: z.literal('image'),
+  type: z.enum(['image', 'file']),
   local_path: z.string().min(1),
   mime_type: z.string().optional(),
+  original_filename: z.string().optional(),
 });
 
 /**

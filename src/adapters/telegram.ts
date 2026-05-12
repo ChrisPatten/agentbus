@@ -541,20 +541,21 @@ export class TelegramAdapter implements AdapterInstance {
    *
    * We handle two shapes:
    *   - `photo[]`  — Telegram's compressed photo (pick the largest size)
-   *   - `document` — only when `mime_type` starts with "image/"
+   *   - `document` — any file; `kind` is 'image' for image/* MIME types, 'file' otherwise
    */
-  private extractImageSource(
+  private extractAttachmentSource(
     msg: TelegramMessage,
-  ): { file_id: string; mime_type?: string; original_filename?: string } | null {
+  ): { file_id: string; mime_type?: string; original_filename?: string; kind: 'image' | 'file' } | null {
     if (msg.photo && msg.photo.length > 0) {
       const largest = pickLargestPhoto(msg.photo as [TelegramPhotoSize, ...TelegramPhotoSize[]]);
-      return { file_id: largest.file_id, mime_type: 'image/jpeg' };
+      return { file_id: largest.file_id, mime_type: 'image/jpeg', kind: 'image' };
     }
-    if (msg.document && msg.document.mime_type?.startsWith('image/')) {
+    if (msg.document) {
       return {
         file_id: msg.document.file_id,
         mime_type: msg.document.mime_type,
         original_filename: msg.document.file_name,
+        kind: msg.document.mime_type?.startsWith('image/') ? 'image' : 'file',
       };
     }
     return null;
@@ -567,22 +568,23 @@ export class TelegramAdapter implements AdapterInstance {
    * failure (error logged). Never throws — the inbound message is always
    * delivered, with or without the attachment.
    */
-  private async maybeDownloadImage(source: {
+  private async maybeDownloadAttachment(source: {
     file_id: string;
     mime_type?: string;
     original_filename?: string;
+    kind: 'image' | 'file';
   }): Promise<Attachment[]> {
     const media = resolveMediaConfig(this.deps.config, this.id);
     if (!media) {
       console.warn(
-        `${this.tag} Received an image but no agent with media config is routed from channel "${this.id}" — skipping download`,
+        `${this.tag} Received an attachment but no agent with media config is routed from channel "${this.id}" — skipping download`,
       );
       return [];
     }
 
     let localPath: string | undefined;
     try {
-      localPath = await this.downloadImage(
+      localPath = await this.downloadFile(
         source.file_id,
         media.download_path,
         source.mime_type,
@@ -605,11 +607,12 @@ export class TelegramAdapter implements AdapterInstance {
           now + media.ttl_seconds * 1000,
         );
 
-      const att: Attachment = { type: 'image', local_path: localPath };
+      const att: Attachment = { type: source.kind, local_path: localPath };
       if (source.mime_type) att.mime_type = source.mime_type;
+      if (source.original_filename) att.original_filename = source.original_filename;
       return [att];
     } catch (err) {
-      console.error(`${this.tag} Image download failed: ${String(err)}`);
+      console.error(`${this.tag} Attachment download failed: ${String(err)}`);
       if (localPath) {
         try { unlinkSync(localPath); } catch {}
       }
@@ -622,7 +625,7 @@ export class TelegramAdapter implements AdapterInstance {
    * Returns the absolute local path on success. Caller is responsible for
    * catching failures and deciding whether to proceed without the attachment.
    */
-  private async downloadImage(
+  private async downloadFile(
     file_id: string,
     downloadDir: string,
     mime?: string,
@@ -671,6 +674,11 @@ export class TelegramAdapter implements AdapterInstance {
   // ── Inbound long-poll loop ────────────────────────────────────────────────
 
   private async processUpdate(update: TelegramUpdate): Promise<boolean> {
+    if (process.env.TELEGRAM_DEBUG_PAYLOADS) {
+      console.log(`${this.tag} [DEBUG] raw update ${update.update_id}:\n${JSON.stringify(update, null, 2)}`);
+      return true; // skip pipeline in debug mode so test messages don't reach agents
+    }
+
     const msg = update.message;
     if (!msg || !msg.from) return true; // skip non-message updates
 
@@ -681,23 +689,23 @@ export class TelegramAdapter implements AdapterInstance {
       return true;
     }
 
-    // Detect an inbound image (photo or image/* document). E17.
-    const imageSource = this.extractImageSource(msg);
+    // Detect an inbound image or file attachment.
+    const attachmentSource = this.extractAttachmentSource(msg);
 
     const body = msg.text ?? msg.caption ?? '';
-    if (!body && !imageSource) {
+    if (!body && !attachmentSource) {
       console.log(`${this.tag} Skipped non-text update ${update.update_id} from ${senderId}`);
       return true;
     }
 
-    const attachments = imageSource
-      ? await this.maybeDownloadImage(imageSource)
+    const attachments = attachmentSource
+      ? await this.maybeDownloadAttachment(attachmentSource)
       : undefined;
 
-    // If an image was detected but download failed or media isn't configured,
-    // use '[Image]' as a fallback body so the message still reaches the agent
-    // (covers caption-less photo updates where body would otherwise be empty).
-    const effectiveBody = body || (imageSource && (!attachments || attachments.length === 0) ? '[Image]' : '');
+    // If an attachment was detected but download failed or media isn't configured,
+    // use a fallback body so the message still reaches the agent.
+    const fallback = attachmentSource?.kind === 'file' ? '[File]' : '[Image]';
+    const effectiveBody = body || (attachmentSource && (!attachments || attachments.length === 0) ? fallback : '');
 
     try {
       const message: InboundMessage = {
