@@ -374,7 +374,7 @@ Excludes memories where `superseded_by IS NOT NULL` or `expires_at < now()`.
 
 ### `POST /api/v1/memories`
 
-Insert a memory manually. Supersedes any existing active memory for the same `(contact_id, category)` pair.
+Insert a memory manually. Supersedes any existing active memory for the same `(contact_id, category, channel)` tuple.
 
 **Request body:**
 ```json
@@ -384,11 +384,15 @@ Insert a memory manually. Supersedes any existing active memory for the same `(c
   "category": "preference",
   "confidence": 0.9,
   "source": "manual",
-  "expires_at": "2026-12-31T00:00:00Z"
+  "expires_at": "2026-12-31T00:00:00Z",
+  "channel": "telegram"
 }
 ```
 
-`category`, `confidence`, `source`, and `expires_at` are optional.
+`category`, `confidence`, `source`, `expires_at`, and `channel` are optional.
+
+If `channel` is omitted the memory is **global** — visible on every channel when context is
+injected. Provide `channel` to scope the memory to a specific agent/channel.
 
 **Response (201):**
 ```json

@@ -2,6 +2,11 @@
 
 Feature ideas and future work that hasn't been scoped into an epic yet. Promote entries here to a new epic file when prioritized.
 
+## Open Issues
+
+### Telegram file/attachment handling is inconsistent
+Screenshots and non-photo file types are handled inconsistently. Captions attached to a file at send time in Telegram also appear to be lost or not delivered to the agent. Needs audit of all Telegram attachment types (photo, document, video, audio, voice, sticker) against the inbound pipeline to identify gaps.
+
 ## Ideas
 
 ### Tools component: script-backed MCP tools + macOS TCC permissions carrier
@@ -16,6 +21,9 @@ Research Google's A2A protocol and assess fit for AgentBus: what it offers (agen
 Named `adapters.telegram` map with per-bot tokens and isolated channels; legacy flat config still works. See commit `6b9415a`.
 
 <!-- Add ideas below. Format: short title, one-line description, optional notes. -->
+
+### Relay Claude Code permission prompts to user
+When Claude Code surfaces a permission prompt (tool approval request), relay it to the user via the appropriate channel so they can approve or deny without being at the terminal. See https://code.claude.com/docs/en/channels-reference#relay-permission-prompts
 
 ### Inbound emoji reactions: deliver user reactions to agents
 When a user reacts to a message (e.g. Telegram `message_reaction_updated` update), surface it to the agent as an inbound event. Requires a new `InboundMessage` payload type (e.g. `{ type: 'reaction'; emoji: string; target_message_id: string }`), Telegram adapter subscription to `message_reaction_updated` updates, and pipeline/CC adapter handling so the agent can see and respond to reactions.

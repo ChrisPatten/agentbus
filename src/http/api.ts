@@ -411,6 +411,13 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     });
   }
 
+  server.addHook('onRequest', async (req) => {
+    const skip = req.url === '/api/v1/health' || req.url.startsWith('/api/v1/messages/pending');
+    if (!skip) {
+      console.log(`[http] ${req.method} ${req.url} from ${req.ip}`);
+    }
+  });
+
   // GET /api/v1/health
   server.get('/api/v1/health', async (_req, _reply) => {
     const counts = queue.counts();
@@ -838,6 +845,7 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     confidence: z.number().min(0).max(1).default(0.9),
     source: z.string().default('manual'),
     expires_at: z.string().optional(),
+    channel: z.string().optional(),
   });
 
   server.post<{ Body: unknown }>('/api/v1/memories', async (req, reply) => {
@@ -854,12 +862,12 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       return reply.status(503).send({ ok: false, error: 'Memory system not yet initialized' });
     }
 
-    const { contact_id, content, category, confidence, source, expires_at } = parsed.data;
+    const { contact_id, content, category, confidence, source, expires_at, channel } = parsed.data;
     const now = new Date().toISOString();
     const newId = randomUUID();
 
     // Supersede + insert atomically to prevent two concurrent requests from both
-    // believing they are the sole active memory for a given (contact_id, category).
+    // believing they are the sole active memory for a given (contact_id, category, channel).
     let supersededId: string | undefined;
     db.transaction(() => {
       const existing = db
@@ -867,9 +875,10 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
           `SELECT id FROM memories
            WHERE contact_id = ? AND category = ? AND superseded_by IS NULL
              AND (expires_at IS NULL OR expires_at > ?)
+             AND (channel = ? OR channel IS NULL)
            ORDER BY created_at DESC LIMIT 1`,
         )
-        .get(contact_id, category, now) as { id: string } | undefined;
+        .get(contact_id, category, now, channel ?? null) as { id: string } | undefined;
 
       if (existing) {
         db.prepare(`UPDATE memories SET superseded_by = ? WHERE id = ?`).run(newId, existing.id);
@@ -878,9 +887,9 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
 
       db.prepare(
         `INSERT INTO memories
-           (id, session_id, contact_id, category, content, confidence, source, created_at, expires_at, superseded_by)
-         VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL)`,
-      ).run(newId, contact_id, category, content, confidence, source, now, expires_at ?? null);
+           (id, session_id, contact_id, category, content, confidence, source, created_at, expires_at, superseded_by, channel)
+         VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
+      ).run(newId, contact_id, category, content, confidence, source, now, expires_at ?? null, channel ?? null);
     })();
 
     return reply.status(201).send({
@@ -1101,9 +1110,13 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
   server.post<{ Body: unknown }>('/api/v1/inbound', async (req, reply) => {
     const parsed = InboundSchema.safeParse(req.body);
     if (!parsed.success) {
+      console.log(`[http:inbound] rejected — validation failed: ${parsed.error.message}`);
       return reply.status(400).send({ ok: false, error: parsed.error.message });
     }
-    return processInbound(parsed.data, {
+    const { channel, sender, payload } = parsed.data;
+    const preview = payload.body.length > 60 ? `${payload.body.slice(0, 60)}…` : payload.body;
+    console.log(`[http:inbound] channel=${channel} sender=${sender} body="${preview}"`);
+    const result = await processInbound(parsed.data, {
       queue,
       pipeline,
       config,
@@ -1112,6 +1125,12 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       commandRegistry: deps.commandRegistry,
       pauseSet: deps.pauseSet,
     });
+    if (result.queued) {
+      console.log(`[http:inbound] queued id=${result.id} enqueued_count=${result.enqueued_count}`);
+    } else {
+      console.log(`[http:inbound] not queued reason=${result.reason}`);
+    }
+    return result;
   });
 
   return server;

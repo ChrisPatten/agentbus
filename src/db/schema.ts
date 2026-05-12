@@ -44,6 +44,11 @@ function loadMigrations(): Migration[] {
       description: 'Attachments table',
       sql: readFileSync(join(migrationsDir, '006_attachments.sql'), 'utf-8'),
     },
+    {
+      version: 7,
+      description: 'Memory channel scoping',
+      sql: readFileSync(join(migrationsDir, '007_memory_channel_scope.sql'), 'utf-8'),
+    },
   ];
 }
 

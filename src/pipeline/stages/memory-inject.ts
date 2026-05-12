@@ -4,13 +4,11 @@
  * E9: Automatic context injection on the first message of a new session.
  *
  * When Stage 80 creates a brand-new session (ctx.sessionCreated === true) and
- * the sender is a known contact, this stage:
- *   1. Fetches all active memories for that contact (ordered by confidence).
- *   2. Fetches recent session summaries within config.memory.context_window_hours.
- *   3. Formats them into a structured <memory> block.
- *   4. Attaches the result to envelope.metadata.memory_context.
+ * the sender is a known contact, this stage fetches recent session summaries
+ * for the contact on the same channel and formats them into a <memory> block
+ * attached to envelope.metadata.memory_context.
  *
- * If both queries return nothing, the metadata key is not set and the message
+ * If the query returns nothing, the metadata key is not set and the message
  * flows through unchanged. Adapters check for metadata.memory_context and
  * prepend it to their notification text.
  *
@@ -22,12 +20,6 @@ import type { PipelineStage } from '../types.js';
 
 /** Hard cap on the formatted context string to keep payloads reasonable. */
 const MAX_INJECT_CHARS = 4000;
-
-interface MemoryQueryRow {
-  category: string;
-  content: string;
-  confidence: number;
-}
 
 interface SummaryQueryRow {
   summary: string;
@@ -79,22 +71,11 @@ function extractSummaryText(summaryJson: string): string {
  */
 function buildContextBlock(
   contactId: string,
-  memories: MemoryQueryRow[],
   summaries: SummaryQueryRow[],
 ): string {
   const lines: string[] = [`<memory contact="${escapeXml(contactId)}">`];
 
-  if (memories.length > 0) {
-    lines.push('## Known facts');
-    for (const m of memories) {
-      lines.push(
-        `- [${escapeXml(m.category)}] ${escapeXml(m.content)} (confidence: ${m.confidence.toFixed(2)})`,
-      );
-    }
-  }
-
   if (summaries.length > 0) {
-    if (memories.length > 0) lines.push('');
     lines.push('## Recent conversations');
     for (const s of summaries) {
       const text = extractSummaryText(s.summary);
@@ -124,62 +105,38 @@ export function createMemoryInject(db: Database.Database, config: AppConfig): Pi
     const contactId = ctx.contact.id;
     const now = new Date().toISOString();
 
-    // 1. Fetch active memories (all time — memories manage their own lifecycle)
-    const memories = db
-      .prepare(
-        `SELECT category, content, confidence FROM memories
-         WHERE contact_id = ? AND superseded_by IS NULL
-           AND (expires_at IS NULL OR expires_at > ?)
-         ORDER BY confidence DESC, created_at DESC
-         LIMIT 20`,
-      )
-      .all(contactId, now) as MemoryQueryRow[];
+    const channel = ctx.envelope.channel;
 
-    // 2. Fetch recent session summaries within context_window_hours
+    // Fetch recent session summaries within context_window_hours, same channel.
     const windowMs = config.memory.context_window_hours * 3_600_000;
     const cutoff = new Date(Date.now() - windowMs).toISOString();
 
     const summaries = db
       .prepare(
         `SELECT summary, started_at, ended_at, channel FROM session_summaries
-         WHERE contact_id = ? AND created_at > ?
+         WHERE contact_id = ? AND created_at > ? AND channel = ?
          ORDER BY ended_at DESC
          LIMIT 5`,
       )
-      .all(contactId, cutoff) as SummaryQueryRow[];
+      .all(contactId, cutoff, channel) as SummaryQueryRow[];
 
-    // Nothing to inject
-    if (memories.length === 0 && summaries.length === 0) {
+    if (summaries.length === 0) {
       return ctx;
     }
 
-    // 3. Format context block (all user content XML-escaped)
-    let context = buildContextBlock(contactId, memories, summaries);
+    // Format context block (all user content XML-escaped)
+    let context = buildContextBlock(contactId, summaries);
 
-    // 4. Apply character cap — trim summaries first, then memories
+    // Apply character cap — trim summaries one by one until it fits
     if (context.length > MAX_INJECT_CHARS) {
       let trimmed = false;
-
-      // Remove summaries one by one until it fits
-      for (let summaryCount = summaries.length - 1; summaryCount >= 0; summaryCount--) {
-        context = buildContextBlock(contactId, memories, summaries.slice(0, summaryCount));
+      for (let count = summaries.length - 1; count >= 0; count--) {
+        context = buildContextBlock(contactId, summaries.slice(0, count));
         if (context.length <= MAX_INJECT_CHARS) {
           trimmed = true;
           break;
         }
       }
-
-      // If still too long after removing all summaries, trim memories by count
-      if (context.length > MAX_INJECT_CHARS) {
-        for (let memCount = memories.length - 1; memCount >= 0; memCount--) {
-          context = buildContextBlock(contactId, memories.slice(0, memCount), []);
-          if (context.length <= MAX_INJECT_CHARS) {
-            trimmed = true;
-            break;
-          }
-        }
-      }
-
       if (trimmed) {
         console.warn(
           `[memory-inject] context trimmed to ${context.length} chars (limit: ${MAX_INJECT_CHARS}) for contact ${contactId}`,

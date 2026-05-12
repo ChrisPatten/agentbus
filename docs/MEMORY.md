@@ -219,10 +219,20 @@ into the envelope so the agent starts each conversation with continuity.
 
 | Source | Query | Time scope |
 |--------|-------|-----------|
-| **Memories** | All active memories for the contact, ordered by confidence | All time (no cutoff — memories have their own lifecycle) |
-| **Session summaries** | Recent session summaries for the contact | `context_window_hours` (default 48h) |
+| **Memories** | Active memories for the contact scoped to the current channel (plus any NULL-channel global memories) | All time (no cutoff — memories have their own lifecycle) |
+| **Session summaries** | Recent session summaries for the contact on the same channel | `context_window_hours` (default 48h) |
 
 Nothing is injected if both queries return empty results.
+
+### Channel scoping
+
+Memories are scoped to the channel on which they were created. A contact may interact with
+multiple agents via different channels (e.g. `telegram` and `claude-code`); each agent only
+sees memories from its own channel, preventing cross-agent contamination.
+
+Memories created via the `POST /api/v1/memories` API with no `channel` field are **global** —
+they are visible on all channels. Use this for facts that apply regardless of which agent is
+talking to the contact.
 
 ### Format
 

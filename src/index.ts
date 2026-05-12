@@ -17,7 +17,8 @@
  *   8. Register SIGTERM/SIGINT handlers for graceful shutdown
  */
 import { mkdirSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { resolve, join } from 'node:path';
+import { spawn } from 'node:child_process';
 import { loadConfig } from './config/loader.js';
 import { getTelegramInstances } from './config/schema.js';
 import { getDb, closeDb } from './db/client.js';
@@ -73,6 +74,31 @@ const { registry: commandRegistry, pauseSet } = createCommandSystem({
   queue,
   db,
   config,
+});
+
+// ── Custom commands ───────────────────────────────────────────────────────────
+
+commandRegistry.register({
+  name: 'torrent',
+  description: 'Download a magnet link to iCloud Books',
+  usage: '/torrent <magnet-link>',
+  scope: 'bus',
+  handler: async (args) => {
+    const magnet = args[0];
+    if (!magnet || !magnet.startsWith('magnet:')) {
+      return { body: 'Usage: /torrent <magnet-link>\nMagnet link must start with "magnet:"' };
+    }
+    const script = join(
+      process.env['HOME'] ?? '/Users/chrispatten',
+      'workspace/peggy-claude-code/scripts/torrent_to_books.sh',
+    );
+    const child = spawn('/bin/bash', [script, magnet], {
+      detached: true,
+      stdio: 'ignore',
+    });
+    child.unref();
+    return { body: `Download started. File will appear in iCloud Books when complete.` };
+  },
 });
 
 const pipeline = new PipelineEngine();

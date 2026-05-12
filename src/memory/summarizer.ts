@@ -285,21 +285,29 @@ export class Summarizer {
     return this.summarize(sessionId);
   }
 
-  /** Insert a memory with supersession of the previous memory for the same (contact_id, category). */
+  /** Insert a memory with supersession of the previous memory for the same (contact_id, category, channel). */
   private insertMemory(mem: MemoryExtraction, sessionId: string): void {
     const now = new Date().toISOString();
     const newId = randomUUID();
 
-    // Supersede existing active memory for same (contact_id, category)
+    const session = this.db
+      .prepare(`SELECT channel FROM sessions WHERE id = ?`)
+      .get(sessionId) as { channel: string } | undefined;
+    const channel = session?.channel ?? null;
+
+    // Supersede existing active memory for same (contact_id, category, channel).
+    // Also supersede NULL-channel memories (pre-migration global entries) so they
+    // are replaced by the properly-scoped version.
     const existing = this.db
       .prepare(
         `SELECT id FROM memories
          WHERE contact_id = ? AND category = ? AND superseded_by IS NULL
            AND (expires_at IS NULL OR expires_at > ?)
+           AND (channel = ? OR channel IS NULL)
          ORDER BY created_at DESC
          LIMIT 1`,
       )
-      .get(mem.contact_id, mem.category, now) as { id: string } | undefined;
+      .get(mem.contact_id, mem.category, now, channel) as { id: string } | undefined;
 
     if (existing) {
       this.db
@@ -310,8 +318,8 @@ export class Summarizer {
     this.db
       .prepare(
         `INSERT INTO memories
-           (id, session_id, contact_id, category, content, confidence, source, created_at, expires_at, superseded_by)
-         VALUES (?, ?, ?, ?, ?, ?, 'summarizer', ?, ?, NULL)`,
+           (id, session_id, contact_id, category, content, confidence, source, created_at, expires_at, superseded_by, channel)
+         VALUES (?, ?, ?, ?, ?, ?, 'summarizer', ?, ?, NULL, ?)`,
       )
       .run(
         newId,
@@ -322,6 +330,7 @@ export class Summarizer {
         mem.confidence,
         now,
         mem.expires_at ?? null,
+        channel,
       );
   }
 }
