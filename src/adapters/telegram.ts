@@ -454,7 +454,7 @@ export class TelegramAdapter implements AdapterInstance {
       return;
     }
 
-    await this.callTelegram('sendReaction', {
+    await this.callTelegram('setMessageReaction', {
       chat_id: chatId,
       message_id: messageId,
       reaction: [{ type: 'emoji', emoji: normalized }],
@@ -707,7 +707,7 @@ export class TelegramAdapter implements AdapterInstance {
         metadata: {
           telegram_chat_id: msg.chat.id,
           telegram_message_id: msg.message_id,
-          // Encodes both IDs so react() can call sendReaction without a separate lookup
+          // Encodes both IDs so react() can call setMessageReaction without a separate lookup
           platform_message_id: `${msg.chat.id}:${msg.message_id}`,
         },
         ...(attachments && attachments.length > 0 ? { attachments } : {}),
