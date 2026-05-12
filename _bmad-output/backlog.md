@@ -2,11 +2,6 @@
 
 Feature ideas and future work that hasn't been scoped into an epic yet. Promote entries here to a new epic file when prioritized.
 
-## Open Issues
-
-### Telegram file/attachment handling is inconsistent
-Screenshots and non-photo file types are handled inconsistently. Captions attached to a file at send time in Telegram also appear to be lost or not delivered to the agent. Needs audit of all Telegram attachment types (photo, document, video, audio, voice, sticker) against the inbound pipeline to identify gaps.
-
 ## Ideas
 
 ### Tools component: script-backed MCP tools + macOS TCC permissions carrier
@@ -16,6 +11,9 @@ User writes a script (any language) that optionally accepts parameters and retur
 
 ### Evaluate A2A (Agent-to-Agent) protocol adoption
 Research Google's A2A protocol and assess fit for AgentBus: what it offers (agent discovery, task delegation, streaming responses), where it overlaps with current MCP+bus design, and whether to adopt it as a transport/protocol layer, expose an A2A-compatible endpoint, or skip it. Output should be a short spike doc in `_bmad-output/planning-artifacts/`.
+
+### ~~Telegram file/attachment handling is inconsistent~~ → fixed 2026-05-12
+All Telegram document types now download and deliver to agents as `file` attachments (rendered as `[File: path — filename]`). Screenshots arrive as photos and were already handled. Video/audio/voice/sticker remain out of scope. See commit `cbb816b`.
 
 ### ~~Multi-bot support: run multiple Telegram bots from a single AgentBus instance~~ → implemented 2026-04-16
 Named `adapters.telegram` map with per-bot tokens and isolated channels; legacy flat config still works. See commit `6b9415a`.

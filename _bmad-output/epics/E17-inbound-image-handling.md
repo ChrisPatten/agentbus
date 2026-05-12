@@ -15,6 +15,8 @@ When a user sends an image via Telegram, the bus currently drops it silently. E1
 
 Scope is intentionally narrow: inbound images only, Telegram source, CC adapter delivery. Outbound image sending, non-image attachments (video/audio/document), and BlueBubbles are out of scope.
 
+**Post-ship extension (2026-05-12, commit `cbb816b`):** Document support added — all Telegram `document` types (not just `image/*`) are now downloaded and delivered as `type: 'file'` attachments, rendered as `[File: <path> — <filename>]`. The `Attachment` interface was extended with `type: 'image' | 'file'` and `original_filename`. S17.3 and S17.4 acceptance criteria below reflect original scope only.
+
 ---
 
 ## Entry Criteria
