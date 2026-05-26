@@ -50,9 +50,12 @@ export function createDedup(db: Database.Database, windowMs = 30000): PipelineSt
 
   return async (ctx) => {
     const e = ctx.envelope;
-    const body = e.payload.body;
+    const contentKey =
+      e.payload.type === 'reaction'
+        ? `${e.payload.emoji}:${e.payload.target_message_id}`
+        : e.payload.body;
     const bucket = Math.floor(Date.now() / windowMs);
-    const raw = `${e.sender}${body}${bucket}`;
+    const raw = `${e.sender}${contentKey}${bucket}`;
     const dedupKey = createHash('sha256').update(raw).digest('hex');
 
     const now = Date.now();

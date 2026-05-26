@@ -3,15 +3,17 @@
  *
  * Background task that runs on a configurable interval. Each tick:
  *   1. Closes sessions that have been idle past the inactivity threshold.
- *   2. Triggers Summarizer.summarize() for each newly-closed session (async,
+ *   2. Processes sessions closed mid-conversation by Stage 80 (ended_at set,
+ *      status still 'active') — fires the on_session_close hook and triggers
+ *      summarization for those that meet the min-messages threshold.
+ *   3. Triggers Summarizer.summarize() for each newly-closed session (async,
  *      fire-and-forget so one slow API call does not block subsequent ticks).
- *   3. Retries sessions that previously failed summarization (up to 3 times).
- *   4. Hard-deletes memories expired more than 30 days ago.
+ *   4. Retries sessions that previously failed summarization (up to 3 times).
+ *   5. Hard-deletes memories expired more than 30 days ago.
  *
- * The tracker does NOT set session.ended_at itself for sessions closed mid-
- * conversation (that is done by Stage 80 when a new message arrives after the
- * threshold). It handles the complementary case: sessions that go idle without
- * any subsequent message — they would never close otherwise.
+ * Stage 80 (transcript-log) sets ended_at when a new message arrives after the
+ * idle threshold, but does not fire the hook or update status. This tracker
+ * picks those up on its next tick via processMidFlightClosedSessions().
  */
 import { exec, type ExecOptionsWithStringEncoding } from 'node:child_process';
 import type Database from 'better-sqlite3';
@@ -68,6 +70,12 @@ export class SessionTracker {
     }
 
     try {
+      this.processMidFlightClosedSessions();
+    } catch (err) {
+      console.error('[session-tracker] Error processing mid-flight closed sessions:', err);
+    }
+
+    try {
       this.retryFailedSessions();
     } catch (err) {
       console.error('[session-tracker] Error retrying failed sessions:', err);
@@ -93,14 +101,15 @@ export class SessionTracker {
     const thresholdMs = this.config.memory.session_idle_threshold_ms;
     const cutoff = new Date(Date.now() - thresholdMs).toISOString();
 
-    const idleSessions = (
-      this.db
-        .prepare(
-          `SELECT * FROM sessions
-           WHERE ended_at IS NULL AND status = 'active' AND last_activity < ?`,
-        )
-        .all(cutoff) as SessionRow[]
-    ).filter((s) => s.message_count >= this.minMessagesForChannel(s.channel));
+    // All idle sessions are closed regardless of message_count to prevent
+    // accumulation. Hook and summarization only fire for those meeting the
+    // per-channel minimum.
+    const idleSessions = this.db
+      .prepare(
+        `SELECT * FROM sessions
+         WHERE ended_at IS NULL AND status = 'active' AND last_activity < ?`,
+      )
+      .all(cutoff) as SessionRow[];
 
     if (idleSessions.length === 0) return;
 
@@ -111,15 +120,86 @@ export class SessionTracker {
 
     for (const session of idleSessions) {
       closeSession.run(now, session.id);
+      const meetsThreshold = session.message_count >= this.minMessagesForChannel(session.channel);
       console.log(
         `[session-tracker] Closed idle session ${session.id.slice(0, 8)} ` +
-          `(${session.channel}/${session.contact_id}, ${session.message_count} msgs)`,
+          `(${session.channel}/${session.contact_id}, ${session.message_count} msgs)` +
+          (meetsThreshold ? '' : ' — below min_messages, skipping hook+summarize'),
       );
+      if (!meetsThreshold) continue;
       this.runOnSessionCloseHook(session);
       // Fire-and-forget — summarizer handles retries and error marking internally.
       // The outer .catch() is a last-resort guard: if summarize() itself throws
       // unexpectedly (e.g. DB failure inside its own error handler), we still
       // need to move the session out of 'summarize_pending' so it is not orphaned.
+      this.summarizer.summarize(session.id).catch((err) => {
+        console.error(
+          `[session-tracker] Unhandled error summarizing ${session.id.slice(0, 8)}:`,
+          err,
+        );
+        try {
+          this.db
+            .prepare(
+              `UPDATE sessions
+               SET status = 'summarize_failed', summary_attempts = summary_attempts + 1
+               WHERE id = ?`,
+            )
+            .run(session.id);
+        } catch (dbErr) {
+          console.error(
+            `[session-tracker] Failed to mark session ${session.id.slice(0, 8)} as failed:`,
+            dbErr,
+          );
+        }
+      });
+    }
+  }
+
+  /**
+   * Process sessions that Stage 80 closed mid-conversation (ended_at set by
+   * transcript-log when a new message arrives after the idle gap, but status
+   * left as 'active' and hook never called). Fires the on_session_close hook
+   * and promotes them to 'summarize_pending' so the summarizer picks them up.
+   *
+   * Only processes sessions whose ended_at falls within the last 2× the idle
+   * threshold — older orphans are silently promoted to suppress accumulated
+   * backlog without flooding the hook on startup.
+   */
+  private processMidFlightClosedSessions(): void {
+    const thresholdMs = this.config.memory.session_idle_threshold_ms;
+    const recentCutoff = new Date(Date.now() - thresholdMs * 2).toISOString();
+
+    // Silently drain any pre-existing orphans older than the recency window
+    // so they don't accumulate and flood the hook on every restart.
+    this.db
+      .prepare(
+        `UPDATE sessions SET status = 'summarize_pending'
+         WHERE ended_at IS NOT NULL AND status = 'active' AND ended_at < ?`,
+      )
+      .run(recentCutoff);
+
+    const orphans = (
+      this.db
+        .prepare(
+          `SELECT * FROM sessions
+           WHERE ended_at IS NOT NULL AND status = 'active' AND ended_at >= ?`,
+        )
+        .all(recentCutoff) as SessionRow[]
+    ).filter((s) => s.message_count >= this.minMessagesForChannel(s.channel));
+
+    if (orphans.length === 0) return;
+
+    const promote = this.db.prepare(
+      `UPDATE sessions SET status = 'summarize_pending' WHERE id = ?`,
+    );
+
+    for (const session of orphans) {
+      promote.run(session.id);
+      console.log(
+        `[session-tracker] Processing mid-flight closed session ${session.id.slice(0, 8)} ` +
+          `(${session.channel}/${session.contact_id}, ${session.message_count} msgs)`,
+      );
+      this.runOnSessionCloseHook(session);
       this.summarizer.summarize(session.id).catch((err) => {
         console.error(
           `[session-tracker] Unhandled error summarizing ${session.id.slice(0, 8)}:`,

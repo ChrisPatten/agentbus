@@ -202,7 +202,7 @@ describe('processInbound — slash command dispatch', () => {
     const pending = queue.dequeue('agent:claude', undefined, 1);
     expect(pending).toHaveLength(1);
     expect(pending[0]!.envelope.payload.type).toBe('text');
-    expect(pending[0]!.envelope.payload.body).toBe('/summarize');
+    expect((pending[0]!.envelope.payload as { body: string }).body).toBe('/summarize');
     expect(pending[0]!.envelope.metadata['slash_command']).toEqual({ command: 'summarize', args_raw: '' });
   });
 

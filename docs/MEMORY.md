@@ -126,6 +126,11 @@ Minimum number of messages a session must contain before it is eligible for
 idle-expiration. Sessions below the threshold are left open even after
 `session_idle_threshold_ms` has elapsed. Default is `0` (no guard).
 
+Note: `message_count` starts at `1` when a session is created (the opening
+message counts). Setting `session_close_min_messages: 1` therefore makes every
+session — including single-message interactions like scheduled briefs — eligible
+for idle-expiration and the `on_session_close` hook.
+
 Accepts the same two forms as `on_session_close`:
 
 **Global** — applies to all channels:

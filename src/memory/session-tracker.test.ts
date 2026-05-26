@@ -141,35 +141,39 @@ describe('SessionTracker.tick()', () => {
     expect(session.status).toBe('summarized');
   });
 
-  it('does NOT close idle sessions below the global min-message threshold', () => {
+  it('closes idle sessions below the global min-message threshold but skips hook+summarize', () => {
     const config = {
       ...stubConfig,
       memory: { ...stubConfig.memory, session_close_min_messages: 2 },
     } as unknown as AppConfig;
     const t = new SessionTracker({ db, config, summarizer });
 
-    // 0-message session, idle past threshold — should be skipped
-    const skipped = insertSession(db, { lastActivityOffset: 20 * 60 * 1000, messageCount: 0 });
-    // 2-message session, idle past threshold — should be closed
-    const closed = insertSession(db, { lastActivityOffset: 20 * 60 * 1000, messageCount: 2 });
+    // 0-message session, idle past threshold — closed but not summarized
+    const below = insertSession(db, { lastActivityOffset: 20 * 60 * 1000, messageCount: 0 });
+    // 2-message session, idle past threshold — closed and summarized
+    const meets = insertSession(db, { lastActivityOffset: 20 * 60 * 1000, messageCount: 2 });
 
     t.tick();
 
-    const s = db.prepare('SELECT ended_at, status FROM sessions WHERE id = ?').get(skipped) as {
+    const b = db.prepare('SELECT ended_at, status FROM sessions WHERE id = ?').get(below) as {
       ended_at: string | null;
       status: string;
     };
-    const c = db.prepare('SELECT ended_at, status FROM sessions WHERE id = ?').get(closed) as {
+    const m = db.prepare('SELECT ended_at, status FROM sessions WHERE id = ?').get(meets) as {
       ended_at: string | null;
       status: string;
     };
-    expect(s.ended_at).toBeNull();
-    expect(s.status).toBe('active');
-    expect(c.ended_at).not.toBeNull();
-    expect(c.status).toBe('summarize_pending');
+    // Both are closed — but only the one meeting the threshold triggers summarization
+    expect(b.ended_at).not.toBeNull();
+    expect(b.status).toBe('summarize_pending');
+    expect(m.ended_at).not.toBeNull();
+    expect(m.status).toBe('summarize_pending');
+    // Summarizer called only for the session meeting the threshold
+    expect(vi.mocked(summarizer.summarize)).toHaveBeenCalledWith(meets);
+    expect(vi.mocked(summarizer.summarize)).not.toHaveBeenCalledWith(below);
   });
 
-  it('applies per-channel min-message threshold correctly', () => {
+  it('applies per-channel min-message threshold: closes all idle, summarizes only those that qualify', () => {
     const config = {
       ...stubConfig,
       memory: {
@@ -179,14 +183,14 @@ describe('SessionTracker.tick()', () => {
     } as unknown as AppConfig;
     const t = new SessionTracker({ db, config, summarizer });
 
-    // telegram with 1 message — below channel threshold of 3, should be skipped
-    const tgSkipped = insertSession(db, {
+    // telegram with 1 message — below channel threshold of 3, closed but not summarized
+    const tgBelow = insertSession(db, {
       channel: 'telegram',
       lastActivityOffset: 20 * 60 * 1000,
       messageCount: 1,
     });
-    // claude-code with 1 message — channel threshold is 0, should be closed
-    const ccClosed = insertSession(db, {
+    // claude-code with 1 message — channel threshold is 0, closed and summarized
+    const ccMeets = insertSession(db, {
       channel: 'claude-code',
       lastActivityOffset: 20 * 60 * 1000,
       messageCount: 1,
@@ -194,14 +198,16 @@ describe('SessionTracker.tick()', () => {
 
     t.tick();
 
-    const tg = db.prepare('SELECT ended_at FROM sessions WHERE id = ?').get(tgSkipped) as {
+    const tg = db.prepare('SELECT ended_at FROM sessions WHERE id = ?').get(tgBelow) as {
       ended_at: string | null;
     };
-    const cc = db.prepare('SELECT ended_at FROM sessions WHERE id = ?').get(ccClosed) as {
+    const cc = db.prepare('SELECT ended_at FROM sessions WHERE id = ?').get(ccMeets) as {
       ended_at: string | null;
     };
-    expect(tg.ended_at).toBeNull();
+    expect(tg.ended_at).not.toBeNull();
     expect(cc.ended_at).not.toBeNull();
+    expect(vi.mocked(summarizer.summarize)).toHaveBeenCalledWith(ccMeets);
+    expect(vi.mocked(summarizer.summarize)).not.toHaveBeenCalledWith(tgBelow);
   });
 
   it('defaults to 0 (no guard) when session_close_min_messages is unset', () => {

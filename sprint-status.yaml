@@ -228,4 +228,28 @@ epics:
       S17.4: complete  # CC adapter formatMessagesForSampling appends [Image: ...] lines
       S17.5: complete  # AttachmentSweeper (src/media/attachment-sweeper.ts) + index.ts lifecycle
       S17.6: complete  # docs/ATTACHMENTS.md + config.yaml.example + TELEGRAM_ADAPTER.md pointer
-last_updated: 2026-04-21  # E17 complete
+  E19:
+    status: backlog
+    notes: >
+      Headless Claude Code adapter. Replaces long-lived tmux-based Claude Code
+      sessions with per-request `claude -p` invocations. In-process adapter
+      (same pattern as telegram.ts) that polls the bus, serializes per-contact,
+      spawns `claude -p --output-format stream-json` for each message batch, and
+      routes the result text directly as an outbound envelope — Claude does not
+      call reply/send_message. Session continuity via --resume <claude_session_id>
+      stored in sessions.claude_session_id (migration 008); one session per contact;
+      new AgentBus session = new Claude session. Reactions still fire mid-stream
+      via react_to_message tool call. MCP tools provided via --mcp-config pointing
+      to cc.ts with AGENTBUS_TOOLS_ONLY=true (skips polling, serves tools only).
+      System prompt is a config-driven template with {{contact_id}}, {{channel}},
+      {{date}}, {{memories}}, {{session_summary}}, {{agent_id}} variables;
+      replaces E9 memory_context envelope injection for this adapter path.
+      See docs/CC_HEADLESS_ADAPTER.md for full design.
+    stories:
+      S19.1: pending  # Migration 008 — ADD COLUMN claude_session_id TEXT to sessions
+      S19.2: pending  # AGENTBUS_TOOLS_ONLY mode in cc.ts (skip poll loop, tools only)
+      S19.3: pending  # Config schema — cc-headless adapter block + system_prompt template
+      S19.4: pending  # System prompt renderer — {{variable}} interpolation (memories, summary, etc.)
+      S19.5: pending  # cc-headless.ts — poll, per-contact queue, spawn, stream-json capture, deliver
+      S19.6: pending  # Docs — docs/CC_HEADLESS_ADAPTER.md (already written) + CC_ADAPTER.md pointer
+last_updated: 2026-05-26  # E19 added to backlog

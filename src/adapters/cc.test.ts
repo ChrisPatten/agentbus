@@ -265,4 +265,23 @@ describe('formatMessagesForSampling', () => {
     const result = formatMessagesForSampling([env]);
     expect(result).toMatch(/\[id:msg-001\]:\n\[File: \/tmp\/uuid\.pdf — doc\.pdf\]$/);
   });
+
+  // ── reaction payloads ────────────────────────────────────────────────────────
+
+  it('renders a reaction addition as [reacted <emoji> to message <id>]', () => {
+    const env = makeEnvelope({
+      payload: { type: 'reaction', emoji: '👍', removed: false, target_message_id: '555:42' },
+    });
+    const result = formatMessagesForSampling([env]);
+    expect(result).toContain('[reacted 👍 to message 555:42]');
+    expect(result).not.toContain('undefined');
+  });
+
+  it('renders a reaction removal as [removed reaction <emoji> to message <id>]', () => {
+    const env = makeEnvelope({
+      payload: { type: 'reaction', emoji: '❤', removed: true, target_message_id: '555:42' },
+    });
+    const result = formatMessagesForSampling([env]);
+    expect(result).toContain('[removed reaction ❤ to message 555:42]');
+  });
 });

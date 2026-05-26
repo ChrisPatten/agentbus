@@ -8,6 +8,7 @@ import type { PipelineStage } from '../types.js';
  * slash_command variant. Never aborts — commands continue for transcript logging.
  */
 export const slashCommandDetect: PipelineStage = async (ctx) => {
+  if (ctx.envelope.payload.type !== 'text') return ctx;
   const body = ctx.envelope.payload.body;
   if (!body.startsWith('/')) return ctx;
 

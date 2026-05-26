@@ -35,13 +35,15 @@ export function createPriorityScore(config: AppConfig): PipelineStage {
       score += w.vip_sender_bonus;
     }
 
-    // Urgency keyword bonus
-    const body = e.payload.body.toLowerCase();
-    const hasUrgencyKeyword = config.pipeline.urgency_keywords.some((kw) =>
-      body.includes(kw.toLowerCase()),
-    );
-    if (hasUrgencyKeyword) {
-      score += w.urgency_keyword_bonus;
+    // Urgency keyword bonus (text only — reactions have no body to scan)
+    if (e.payload.type === 'text' || e.payload.type === 'slash_command') {
+      const body = e.payload.body.toLowerCase();
+      const hasUrgencyKeyword = config.pipeline.urgency_keywords.some((kw) =>
+        body.includes(kw.toLowerCase()),
+      );
+      if (hasUrgencyKeyword) {
+        score += w.urgency_keyword_bonus;
+      }
     }
 
     // Topic bonus: any non-general topic gets a boost — the assumption is that

@@ -393,3 +393,162 @@ describe('TelegramAdapter inbound image handling', () => {
     expect((env['metadata'] as Record<string, unknown>)['attachments']).toBeUndefined();
   });
 });
+
+// ── TelegramAdapter inbound reaction handling ────────────────────────────────
+
+describe('TelegramAdapter inbound reaction handling', () => {
+  let db: Database.Database;
+  let tmpDir: string;
+  let adapter: TelegramAdapter;
+  let processInboundCalls: Array<Record<string, unknown>>;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'agentbus-reactions-'));
+    db = new Database(':memory:');
+    runMigrations(db);
+
+    const config = makeTestConfig(tmpDir);
+    processInboundCalls = [];
+
+    const pipeline = {
+      process: async (ctx: { envelope: Record<string, unknown> }) => {
+        processInboundCalls.push(ctx.envelope);
+        return null;
+      },
+    } as unknown as PipelineEngine;
+
+    const queue = {} as unknown as MessageQueue;
+
+    adapter = new TelegramAdapter({
+      config,
+      queue,
+      pipeline,
+      db,
+      instanceConfig: { token: 'test:token', poll_timeout: 30 },
+    });
+  });
+
+  afterEach(() => {
+    db.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('delivers an emoji reaction addition to the pipeline', async () => {
+    await (adapter as unknown as {
+      processUpdate: (u: unknown) => Promise<boolean>;
+    }).processUpdate({
+      update_id: 10,
+      message_reaction: {
+        chat: { id: 555, type: 'private' },
+        message_id: 42,
+        user: { id: 12345, first_name: 'Chris' },
+        date: Math.floor(Date.now() / 1000),
+        old_reaction: [],
+        new_reaction: [{ type: 'emoji', emoji: '👍' }],
+      },
+    });
+
+    expect(processInboundCalls).toHaveLength(1);
+    const env = processInboundCalls[0]!;
+    const payload = env['payload'] as { type: string; emoji: string; removed: boolean; target_message_id: string };
+    expect(payload.type).toBe('reaction');
+    expect(payload.emoji).toBe('👍');
+    expect(payload.removed).toBe(false);
+    expect(payload.target_message_id).toBe('555:42');
+    expect((env['metadata'] as Record<string, unknown>)['telegram_chat_id']).toBe(555);
+  });
+
+  it('delivers a reaction removal to the pipeline', async () => {
+    await (adapter as unknown as {
+      processUpdate: (u: unknown) => Promise<boolean>;
+    }).processUpdate({
+      update_id: 11,
+      message_reaction: {
+        chat: { id: 555, type: 'private' },
+        message_id: 42,
+        user: { id: 12345, first_name: 'Chris' },
+        date: Math.floor(Date.now() / 1000),
+        old_reaction: [{ type: 'emoji', emoji: '❤' }],
+        new_reaction: [],
+      },
+    });
+
+    expect(processInboundCalls).toHaveLength(1);
+    const payload = processInboundCalls[0]!['payload'] as { emoji: string; removed: boolean };
+    expect(payload.emoji).toBe('❤');
+    expect(payload.removed).toBe(true);
+  });
+
+  it('picks the added emoji when user switches reaction', async () => {
+    await (adapter as unknown as {
+      processUpdate: (u: unknown) => Promise<boolean>;
+    }).processUpdate({
+      update_id: 12,
+      message_reaction: {
+        chat: { id: 555, type: 'private' },
+        message_id: 42,
+        user: { id: 12345, first_name: 'Chris' },
+        date: Math.floor(Date.now() / 1000),
+        old_reaction: [{ type: 'emoji', emoji: '👍' }],
+        new_reaction: [{ type: 'emoji', emoji: '🔥' }],
+      },
+    });
+
+    const payload = processInboundCalls[0]!['payload'] as { emoji: string; removed: boolean };
+    expect(payload.emoji).toBe('🔥');
+    expect(payload.removed).toBe(false);
+  });
+
+  it('skips reactions from unknown senders', async () => {
+    await (adapter as unknown as {
+      processUpdate: (u: unknown) => Promise<boolean>;
+    }).processUpdate({
+      update_id: 13,
+      message_reaction: {
+        chat: { id: 555, type: 'private' },
+        message_id: 42,
+        user: { id: 99999, first_name: 'Stranger' },
+        date: Math.floor(Date.now() / 1000),
+        old_reaction: [],
+        new_reaction: [{ type: 'emoji', emoji: '👍' }],
+      },
+    });
+
+    expect(processInboundCalls).toHaveLength(0);
+  });
+
+  it('skips anonymous reactions (no user field)', async () => {
+    await (adapter as unknown as {
+      processUpdate: (u: unknown) => Promise<boolean>;
+    }).processUpdate({
+      update_id: 14,
+      message_reaction: {
+        chat: { id: 555, type: 'private' },
+        message_id: 42,
+        date: Math.floor(Date.now() / 1000),
+        old_reaction: [],
+        new_reaction: [{ type: 'emoji', emoji: '👍' }],
+      },
+    });
+
+    expect(processInboundCalls).toHaveLength(0);
+  });
+
+  it('skips custom-emoji-only reaction changes', async () => {
+    await (adapter as unknown as {
+      processUpdate: (u: unknown) => Promise<boolean>;
+    }).processUpdate({
+      update_id: 15,
+      message_reaction: {
+        chat: { id: 555, type: 'private' },
+        message_id: 42,
+        user: { id: 12345, first_name: 'Chris' },
+        date: Math.floor(Date.now() / 1000),
+        old_reaction: [],
+        new_reaction: [{ type: 'custom_emoji', custom_emoji_id: 'abc123' }],
+      },
+    });
+
+    expect(processInboundCalls).toHaveLength(0);
+  });
+});

@@ -83,7 +83,15 @@ export function formatMessagesForSampling(envelopes: MessageEnvelope[]): string 
 
   for (let i = 0; i < envelopes.length; i++) {
     const env = envelopes[i]!;
-    const body = env.payload.type === 'text' ? env.payload.body : `[${env.payload.type}]`;
+    let body: string;
+    if (env.payload.type === 'text') {
+      body = env.payload.body;
+    } else if (env.payload.type === 'reaction') {
+      const verb = env.payload.removed ? 'removed reaction' : 'reacted';
+      body = `[${verb} ${env.payload.emoji} to message ${env.payload.target_message_id}]`;
+    } else {
+      body = `[${(env.payload as { type: string }).type}]`;
+    }
     const ts = env.timestamp ? ` at ${fmtTs(env.timestamp, i === 0)}` : '';
     // Append [Image: ...] and [File: ...] lines after the body so the agent can
     // read any attached files. Empty-body attachment-only messages become just

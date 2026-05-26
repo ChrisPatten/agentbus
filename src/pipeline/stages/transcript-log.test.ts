@@ -156,7 +156,7 @@ describe('transcript-log stage', () => {
     await stage(ctx2);
 
     const session = db.prepare('SELECT message_count FROM sessions WHERE conversation_id = ?').get(cid) as { message_count: number } | undefined;
-    expect(session!.message_count).toBe(1); // incremented once (first message creates, second extends)
+    expect(session!.message_count).toBe(2); // first message starts at 1, second extends to 2
   });
 
   it('never returns null', async () => {

@@ -102,9 +102,25 @@ interface TelegramMessage {
   document?: TelegramDocument;
 }
 
+interface TelegramReactionType {
+  type: 'emoji' | 'custom_emoji';
+  emoji?: string;
+  custom_emoji_id?: string;
+}
+
+interface TelegramMessageReactionUpdated {
+  chat: TelegramChat;
+  message_id: number;
+  user?: TelegramUser;
+  date: number;
+  old_reaction: TelegramReactionType[];
+  new_reaction: TelegramReactionType[];
+}
+
 interface TelegramUpdate {
   update_id: number;
   message?: TelegramMessage;
+  message_reaction?: TelegramMessageReactionUpdated;
 }
 
 interface TelegramApiResponse<T> {
@@ -673,10 +689,67 @@ export class TelegramAdapter implements AdapterInstance {
 
   // ── Inbound long-poll loop ────────────────────────────────────────────────
 
+  private async processReactionUpdate(reaction: TelegramMessageReactionUpdated): Promise<boolean> {
+    const userId = reaction.user?.id;
+    if (!userId) return true; // anonymous admin reactions — skip
+
+    const senderId = String(userId);
+    if (!this.allowedSenderIds.has(senderId)) {
+      console.log(`${this.tag} Dropped reaction from unknown sender ${senderId}`);
+      return true;
+    }
+
+    // Compute net emoji: prefer newly added, fall back to removed.
+    const oldEmojis = reaction.old_reaction
+      .filter((r) => r.type === 'emoji' && r.emoji)
+      .map((r) => r.emoji!);
+    const newEmojis = reaction.new_reaction
+      .filter((r) => r.type === 'emoji' && r.emoji)
+      .map((r) => r.emoji!);
+
+    const added = newEmojis.filter((e) => !oldEmojis.includes(e));
+    const removed = oldEmojis.filter((e) => !newEmojis.includes(e));
+
+    // Skip custom-emoji-only changes and no-op updates.
+    const emoji = added[0] ?? removed[0];
+    if (!emoji) return true;
+
+    const isRemoved = added.length === 0;
+
+    try {
+      const message: InboundMessage = {
+        channel: this.id,
+        sender: senderId,
+        payload: {
+          type: 'reaction',
+          emoji,
+          removed: isRemoved,
+          target_message_id: `${reaction.chat.id}:${reaction.message_id}`,
+        },
+        metadata: {
+          telegram_chat_id: reaction.chat.id,
+          telegram_message_id: reaction.message_id,
+          platform_message_id: `${reaction.chat.id}:${reaction.message_id}`,
+        },
+      };
+
+      await processInbound(message, this.deps);
+      this.lastActivity = new Date().toISOString();
+      return true;
+    } catch (err) {
+      console.error(`${this.tag} Failed to process reaction from ${senderId}: ${String(err)}`);
+      return false;
+    }
+  }
+
   private async processUpdate(update: TelegramUpdate): Promise<boolean> {
     if (process.env.TELEGRAM_DEBUG_PAYLOADS) {
       console.log(`${this.tag} [DEBUG] raw update ${update.update_id}:\n${JSON.stringify(update, null, 2)}`);
       return true; // skip pipeline in debug mode so test messages don't reach agents
+    }
+
+    if (update.message_reaction) {
+      return this.processReactionUpdate(update.message_reaction);
     }
 
     const msg = update.message;
@@ -738,7 +811,7 @@ export class TelegramAdapter implements AdapterInstance {
         const updates = await this.callTelegram<TelegramUpdate[]>('getUpdates', {
           offset: this.offset,
           timeout: this.pollTimeout,
-          allowed_updates: ['message'],
+          allowed_updates: ['message', 'message_reaction'],
         });
 
         for (const update of updates) {

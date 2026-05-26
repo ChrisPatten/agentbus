@@ -131,13 +131,24 @@ const InboundSchemaObject = z.object({
   recipient: z.string().optional(),
   reply_to: z.string().nullable().optional(),
   priority: z.enum(['normal', 'high', 'urgent']).optional(),
-  payload: z.object({ type: z.literal('text'), body: z.string() }),
+  payload: z.discriminatedUnion('type', [
+    z.object({ type: z.literal('text'), body: z.string() }),
+    z.object({
+      type: z.literal('reaction'),
+      emoji: z.string().min(1),
+      removed: z.boolean(),
+      target_message_id: z.string().min(1),
+    }),
+  ]),
   metadata: z.record(z.string(), z.unknown()).optional(),
   attachments: z.array(AttachmentSchema).optional(),
 });
 
 const InboundSchema = InboundSchemaObject.refine(
-  (m) => m.payload.body.length > 0 || (m.attachments && m.attachments.length > 0),
+  (m) =>
+    m.payload.type === 'reaction' ||
+    m.payload.body.length > 0 ||
+    (m.attachments && m.attachments.length > 0),
   { message: 'payload.body must be non-empty unless attachments are provided' },
 );
 
@@ -152,7 +163,9 @@ export interface InboundMessage {
   recipient?: string;
   reply_to?: string | null;
   priority?: 'normal' | 'high' | 'urgent';
-  payload: { type: 'text'; body: string };
+  payload:
+    | { type: 'text'; body: string }
+    | { type: 'reaction'; emoji: string; removed: boolean; target_message_id: string };
   metadata?: Record<string, unknown>;
   attachments?: Attachment[];
 }
@@ -190,12 +203,14 @@ export async function processInbound(
 ): Promise<InboundResult | InboundAbort> {
   // Validate payload for in-process callers that bypass Zod (e.g. TelegramAdapter).
   // The HTTP route validates via InboundSchema, but processInbound is also called
-  // directly. Reject non-text payloads to prevent bypassing Stage 40 detection.
-  // An empty body is allowed only when attachments are present (E17 image-only messages).
-  if (message.payload.type !== 'text') {
-    return { ok: true, queued: false, reason: 'invalid_payload' };
-  }
-  if (!message.payload.body && !(message.attachments && message.attachments.length > 0)) {
+  // directly. Reject unknown payload types. Stage 40 (slash-command) only fires on
+  // text payloads; reactions are passed through as-is. An empty text body is allowed
+  // only when attachments are present (E17 image-only messages).
+  if (message.payload.type === 'text') {
+    if (!message.payload.body && !(message.attachments && message.attachments.length > 0)) {
+      return { ok: true, queued: false, reason: 'invalid_payload' };
+    }
+  } else if (message.payload.type !== 'reaction') {
     return { ok: true, queued: false, reason: 'invalid_payload' };
   }
 
@@ -1116,7 +1131,10 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       return reply.status(400).send({ ok: false, error: parsed.error.message });
     }
     const { channel, sender, payload } = parsed.data;
-    const preview = payload.body.length > 60 ? `${payload.body.slice(0, 60)}…` : payload.body;
+    const rawBody = payload.type === 'reaction'
+      ? `[reaction:${payload.removed ? 'removed' : 'added'} ${payload.emoji}]`
+      : payload.body;
+    const preview = rawBody.length > 60 ? `${rawBody.slice(0, 60)}…` : rawBody;
     console.log(`[http:inbound] channel=${channel} sender=${sender} body="${preview}"`);
     const result = await processInbound(parsed.data, {
       queue,

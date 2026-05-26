@@ -20,11 +20,14 @@ Named `adapters.telegram` map with per-bot tokens and isolated channels; legacy 
 
 <!-- Add ideas below. Format: short title, one-line description, optional notes. -->
 
+### ~~Headless Claude Code adapter (per-request `claude -p`)~~ → promoted to E19 (backlog 2026-05-26)
+See `docs/CC_HEADLESS_ADAPTER.md` and E19 in `sprint-status.yaml`.
+
 ### Relay Claude Code permission prompts to user
 When Claude Code surfaces a permission prompt (tool approval request), relay it to the user via the appropriate channel so they can approve or deny without being at the terminal. See https://code.claude.com/docs/en/channels-reference#relay-permission-prompts
 
-### Inbound emoji reactions: deliver user reactions to agents
-When a user reacts to a message (e.g. Telegram `message_reaction_updated` update), surface it to the agent as an inbound event. Requires a new `InboundMessage` payload type (e.g. `{ type: 'reaction'; emoji: string; target_message_id: string }`), Telegram adapter subscription to `message_reaction_updated` updates, and pipeline/CC adapter handling so the agent can see and respond to reactions.
+### ~~Inbound emoji reactions: deliver user reactions to agents~~ → complete 2026-05-12
+Telegram adapter subscribes to `message_reaction_updated`; net emoji diff (added > removed) delivered as `{ type: 'reaction'; emoji; removed; target_message_id }` payload. CC adapter renders as `[reacted 👍 to message 555:42]`. Custom-emoji-only and anonymous-admin reactions are skipped. See commit message for details.
 
 ### ~~CC adapter: include message timestamp in agent delivery~~ → complete 2026-04-16
 `formatMessagesForSampling` now appends ` at <ISO timestamp>` to each message header when `envelope.timestamp` is present.

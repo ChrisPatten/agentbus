@@ -35,9 +35,12 @@ export const normalize: PipelineStage = async (ctx) => {
 
   if (!e.channel) throw new Error('Missing required field: channel');
   if (!e.sender) throw new Error('Missing required field: sender');
-  // Explicit null/type/length check: !payload?.body would silently pass a
-  // non-string or treat '0' as missing; this form is unambiguous.
-  if (e.payload == null || typeof e.payload.body !== 'string' || e.payload.body.length === 0) {
+  // For text payloads: require a non-empty body. Reaction payloads carry their
+  // content in emoji/target_message_id fields instead of body, so they skip this check.
+  if (e.payload == null) {
+    throw new Error('Missing required field: payload');
+  }
+  if (e.payload.type === 'text' && e.payload.body.length === 0) {
     throw new Error('Missing required field: payload.body');
   }
 

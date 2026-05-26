@@ -36,4 +36,5 @@ export interface MessageEnvelope {
 /** The message payload — discriminated union on `type` */
 export type MessagePayload =
   | { type: 'text'; body: string }
-  | { type: 'slash_command'; body: string; command: string; args_raw: string };
+  | { type: 'slash_command'; body: string; command: string; args_raw: string }
+  | { type: 'reaction'; emoji: string; removed: boolean; target_message_id: string };

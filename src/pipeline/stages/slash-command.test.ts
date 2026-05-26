@@ -99,7 +99,7 @@ describe('slash-command stage', () => {
     const body = '/remind buy milk tomorrow';
     const ctx = makeCtx({ payload: { type: 'text', body } });
     const result = await slashCommandDetect(ctx);
-    expect(result!.envelope.payload.body).toBe(body);
+    expect((result!.envelope.payload as { body: string }).body).toBe(body);
   });
 
   it('never returns null (does not abort pipeline)', async () => {

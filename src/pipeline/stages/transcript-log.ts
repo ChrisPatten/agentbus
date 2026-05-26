@@ -60,11 +60,11 @@ export function createTranscriptLog(db: Database.Database, config: AppConfig): P
     let sessionId: string;
 
     if (!activeSession) {
-      // No active session — create one
+      // No active session — create one, counting this first message
       sessionId = randomUUID();
       db.prepare(
-        `INSERT INTO sessions (id, conversation_id, channel, contact_id, started_at, last_activity)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO sessions (id, conversation_id, channel, contact_id, started_at, last_activity, message_count)
+         VALUES (?, ?, ?, ?, ?, ?, 1)`,
       ).run(sessionId, conversationId, e.channel, contactId, now, now);
       ctx.sessionCreated = true;
     } else {
@@ -72,12 +72,12 @@ export function createTranscriptLog(db: Database.Database, config: AppConfig): P
       const gapMs = Date.now() - lastActivity;
 
       if (gapMs > idleThresholdMs) {
-        // Gap exceeded threshold — end old session, start new
+        // Gap exceeded threshold — end old session, start new, counting this first message
         db.prepare(`UPDATE sessions SET ended_at = ? WHERE id = ?`).run(now, activeSession.id);
         sessionId = randomUUID();
         db.prepare(
-          `INSERT INTO sessions (id, conversation_id, channel, contact_id, started_at, last_activity)
-           VALUES (?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO sessions (id, conversation_id, channel, contact_id, started_at, last_activity, message_count)
+           VALUES (?, ?, ?, ?, ?, ?, 1)`,
         ).run(sessionId, conversationId, e.channel, contactId, now, now);
         ctx.sessionCreated = true;
       } else {
@@ -111,7 +111,9 @@ export function createTranscriptLog(db: Database.Database, config: AppConfig): P
       e.channel,
       contactId,
       'inbound',
-      e.payload.body,
+      e.payload.type === 'reaction'
+        ? `[reaction:${e.payload.removed ? 'removed' : 'added'} ${e.payload.emoji} → ${e.payload.target_message_id}]`
+        : e.payload.body,
       JSON.stringify(e.metadata),
     );
 

@@ -30,22 +30,25 @@ export function createTopicClassify(config: AppConfig): PipelineStage {
       return ctx;
     }
 
-    const body = e.payload.body.toLowerCase();
+    // Reactions carry no body to classify; fall through to default 'general'.
+    if (e.payload.type === 'text' || e.payload.type === 'slash_command') {
+      const body = e.payload.body.toLowerCase();
 
-    for (const rule of compiledRules) {
-      if (rule.keywords) {
-        const matched = rule.keywords.some((kw) => body.includes(kw.toLowerCase()));
-        if (matched) {
-          e.topic = rule.topic;
-          ctx.topics = [rule.topic];
-          return ctx;
+      for (const rule of compiledRules) {
+        if (rule.keywords) {
+          const matched = rule.keywords.some((kw) => body.includes(kw.toLowerCase()));
+          if (matched) {
+            e.topic = rule.topic;
+            ctx.topics = [rule.topic];
+            return ctx;
+          }
         }
-      }
-      if (rule.pattern) {
-        if (rule.pattern.test(e.payload.body)) {
-          e.topic = rule.topic;
-          ctx.topics = [rule.topic];
-          return ctx;
+        if (rule.pattern) {
+          if (rule.pattern.test(e.payload.body)) {
+            e.topic = rule.topic;
+            ctx.topics = [rule.topic];
+            return ctx;
+          }
         }
       }
     }

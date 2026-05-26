@@ -121,7 +121,7 @@ There is no separate `allowed_sender_ids` config — the contacts map is the sou
 
 ## Inbound Flow
 
-1. `getUpdates` returns new messages from Telegram
+1. `getUpdates` subscribes to `message` and `message_reaction_updated` updates from Telegram
 2. For each `message` update:
    - Sender `from.id` is checked against the allowed-sender set (derived from contacts); unknown senders are silently dropped
    - Body is taken from `message.text` or `message.caption`; non-text, non-file updates (stickers, voice messages, etc.) are skipped
@@ -129,8 +129,20 @@ There is no separate `allowed_sender_ids` config — the contacts map is the sou
      - `channel: "telegram"` (single-bot) or `channel: "telegram:{name}"` (named instance, e.g. `"telegram:peggy"`)
      - `sender: "{from.id}"` (raw Telegram user ID)
      - `metadata.telegram_chat_id`, `metadata.telegram_message_id`, and `metadata.platform_message_id` (encoded as `"{chat_id}:{message_id}"` for use by `react()`)
-3. The inbound pipeline's contact-resolve stage maps the raw user ID to `contact:{id}`
-4. Route-resolve routes the message to the CC adapter
+3. For each `message_reaction_updated` update:
+   - Anonymous admin reactions (no `user` field) are silently skipped
+   - Sender is checked against the allowed-sender set; unknown senders are dropped
+   - The net emoji change is computed: added emojis (in `new_reaction` but not `old_reaction`) take precedence over removed ones; custom-emoji-only changes are dropped
+   - A `reaction` payload is submitted to `processInbound()`:
+     - `payload.type: "reaction"`, `payload.emoji: "<emoji>"`, `payload.removed: false/true`
+     - `payload.target_message_id`: `"{chat_id}:{message_id}"` of the reacted-to message
+     - Same metadata fields as regular messages (`telegram_chat_id`, `telegram_message_id`, `platform_message_id`)
+4. The inbound pipeline's contact-resolve stage maps the raw user ID to `contact:{id}`
+5. Route-resolve routes the message to the CC adapter
+
+The CC adapter renders reaction payloads as:
+- Added: `[reacted 👍 to message {chat_id}:{msg_id}]`
+- Removed: `[removed reaction 👍 to message {chat_id}:{msg_id}]`
 
 **Offset management:** The Telegram update offset is only advanced after a successful pipeline submission. If processing fails, the offset stays at the failed update, causing Telegram to redeliver on the next poll.
 
