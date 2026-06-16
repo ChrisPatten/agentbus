@@ -42,6 +42,7 @@ import type { PipelineContext } from '../pipeline/types.js';
 import type Database from 'better-sqlite3';
 import type { CommandRegistry, SlashCommandContext } from '../commands/registry.js';
 import { createSafeDatabase } from '../db/safe-database.js';
+import { VERSION } from '../version.js';
 
 export interface HttpServerDeps {
   queue: MessageQueue;
@@ -454,7 +455,7 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     return {
       ok: true,
       status: allHealthy ? 'healthy' : 'degraded',
-      version: '0.1.0',
+      version: VERSION,
       adapters,
       queue: {
         pending: counts['pending'] ?? 0,
