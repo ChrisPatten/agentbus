@@ -37,6 +37,7 @@ import { createRouteResolve } from './pipeline/stages/route-resolve.js';
 import { createTranscriptLog } from './pipeline/stages/transcript-log.js';
 import { createMemoryInject } from './pipeline/stages/memory-inject.js';
 import { TelegramAdapter } from './adapters/telegram.js';
+import { startHeadless, stopHeadless } from './adapters/cc-headless.js';
 import { DeliveryWorker } from './core/delivery.js';
 import { createCommandSystem } from './commands/index.js';
 import { Summarizer } from './memory/summarizer.js';
@@ -186,6 +187,7 @@ function shutdown() {
   sessionTracker.stop();
   attachmentSweeper.stop();
   deliveryWorker.stop();
+  if (config.adapters['cc-headless']) stopHeadless();
   clearInterval(maintenanceTimer);
   const stops = registry.list().map((a) => a.stop().catch(() => {}));
   Promise.allSettled(stops).finally(() => {
@@ -213,6 +215,11 @@ sessionTracker.start();
 attachmentSweeper.start();
 scheduler.loadConfig();
 if (config.scheduler.enabled) scheduler.start();
+
+// Start cc-headless adapter if configured
+if (config.adapters['cc-headless']) {
+  startHeadless(db);
+}
 
 // Push command manifests to adapters that support native command registration
 // (e.g. Telegram's setMyCommands for autocomplete). Non-fatal on failure.

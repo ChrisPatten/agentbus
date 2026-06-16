@@ -20,6 +20,9 @@ Named `adapters.telegram` map with per-bot tokens and isolated channels; legacy 
 
 <!-- Add ideas below. Format: short title, one-line description, optional notes. -->
 
+### get_transcript MCP tool: fetch full session transcript by ID
+Agent can already search transcripts (FTS5) and list/get sessions, but cannot retrieve the full ordered message history for a specific session. Add a `get_transcript` MCP tool backed by a new `GET /api/v1/sessions/:id/transcript` endpoint that returns all transcript rows for a session in chronological order. Enables the agent to pull full conversation context when a memory reference or `list_sessions` result points to a relevant prior session.
+
 ### ~~Headless Claude Code adapter (per-request `claude -p`)~~ → promoted to E19 (backlog 2026-05-26)
 See `docs/CC_HEADLESS_ADAPTER.md` and E19 in `sprint-status.yaml`.
 

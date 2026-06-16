@@ -9,15 +9,20 @@
  *
  * IMPORTANT: All logging uses console.error() (stderr).
  * console.log() writes to stdout, which is reserved for the MCP protocol stream.
+ *
+ * AGENTBUS_TOOLS_ONLY=true — skip the polling loop and serve only the headless
+ * tool subset (no reply/send_message/get_adapter_status). Used by cc-headless.ts
+ * to provide MCP tools to `claude -p` subprocesses via --mcp-config.
  */
 import { resolve } from 'node:path';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { loadConfig } from '../config/loader.js';
 import { createMcpServer } from '../mcp/server.js';
-import { registerAllTools, type HealthState } from '../mcp/tools/index.js';
+import { registerAllTools, registerHeadlessTools, type HealthState } from '../mcp/tools/index.js';
 import type { MessageEnvelope } from '../types/envelope.js';
 
 const AGENT_ID = process.env['AGENTBUS_AGENT_ID'] ?? 'claude';
+const TOOLS_ONLY = process.env['AGENTBUS_TOOLS_ONLY'] === 'true';
 const DEGRADED_THRESHOLD = 3;
 const DISCONNECTED_THRESHOLD = 10;
 const BACKOFF_INTERVAL_MS = 5000;
@@ -43,7 +48,11 @@ const messageBuffer: MessageEnvelope[] = [];
 // ── MCP server ────────────────────────────────────────────────────────────────
 
 const mcpServer = createMcpServer();
-registerAllTools(mcpServer, busBaseUrl, healthState);
+if (TOOLS_ONLY) {
+  registerHeadlessTools(mcpServer, busBaseUrl);
+} else {
+  registerAllTools(mcpServer, busBaseUrl, healthState);
+}
 
 // ── Message formatting ────────────────────────────────────────────────────────
 
@@ -70,12 +79,19 @@ function fmtTs(iso: string, full: boolean): string {
   return full ? `${get('year')}-${get('month')}-${get('day')}T${time}` : time;
 }
 
-export function formatMessagesForSampling(envelopes: MessageEnvelope[]): string {
+export function formatMessagesForSampling(
+  envelopes: MessageEnvelope[],
+  opts?: { includeMemoryContext?: boolean },
+): string {
   const parts: string[] = [];
 
+  // The cc-headless adapter injects memories/summary via the system prompt and
+  // passes includeMemoryContext:false so the Stage-85 <memory> block is not also
+  // prepended to the user message (which would be a double injection).
+  const includeMemoryContext = opts?.includeMemoryContext ?? true;
   const firstMeta = envelopes[0]?.metadata;
   const memoryContext = firstMeta?.memory_context;
-  if (typeof memoryContext === 'string' && memoryContext.length > 0) {
+  if (includeMemoryContext && typeof memoryContext === 'string' && memoryContext.length > 0) {
     parts.push(memoryContext);
     // Clear after consuming so a retry call doesn't prepend the block twice.
     delete firstMeta!['memory_context'];
@@ -285,8 +301,11 @@ process.on('SIGINT', () => {
 const transport = new StdioServerTransport();
 await mcpServer.connect(transport);
 
-console.error(
-  `[agentbus] claude-code adapter ready — polling ${busBaseUrl} for agent:${AGENT_ID} every ${pollIntervalMs}ms`
-);
-
-void poll();
+if (TOOLS_ONLY) {
+  console.error(`[agentbus] cc adapter ready (tools-only mode) — serving headless tool subset`);
+} else {
+  console.error(
+    `[agentbus] claude-code adapter ready — polling ${busBaseUrl} for agent:${AGENT_ID} every ${pollIntervalMs}ms`
+  );
+  void poll();
+}

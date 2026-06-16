@@ -1,6 +1,8 @@
-# Headless Claude Code Adapter (E19)
+# Headless Claude Code Adapter (E19, refined in E19.1)
 
-Design document for the per-request Claude Code adapter that replaces long-lived tmux sessions with on-demand `claude -p` invocations.
+Reference for the per-request Claude Code adapter that replaces long-lived tmux sessions with on-demand `claude -p` invocations.
+
+> **E19.1 changes (this revision):** the agent now delivers via the `reply`/`send_message` tools (with a stdout fallback) instead of the adapter routing raw stdout; the double memory injection on new sessions is fixed; a typing indicator is sent while `claude -p` runs; spawn/parse failures deliver a configurable `error_reply` instead of silence; and `claude -p` runs in a configurable `working_dir` so the agent's own `CLAUDE.md` (and its `@import`s / `@path` references) auto-load into context. See the relevant sections below.
 
 ## Motivation
 
@@ -52,7 +54,9 @@ claude -p "<formatted_prompt>" \
   [--resume <claude_session_id>]
 ```
 
-Temp files are written immediately before spawn and deleted after the result is captured.
+Temp files are written immediately before spawn and deleted after the result is captured. The process is spawned with `cwd` set to `working_dir` (see [Context loading](#context-loading-claudemd--file-references)).
+
+`--system-prompt-file` **replaces** the default system prompt (the chat persona does not inherit Claude Code's coding-agent default). This does **not** suppress `CLAUDE.md` auto-loading — `CLAUDE.md` is injected as separate project context. (`--bare` would disable that and is intentionally not used.)
 
 ### MCP config file
 
@@ -76,10 +80,12 @@ Temp files are written immediately before spawn and deleted after the result is 
 
 ## Tools Available to Claude
 
-Claude has access to all tools **except `reply` and `send_message`**. Response delivery is the adapter's job — Claude generates text, the adapter routes it.
+Claude has access to all tools **except `get_adapter_status`**. The agent delivers user-facing messages with `reply`/`send_message` (see [Response Delivery](#response-delivery)); `registerHeadlessTools` in `src/mcp/tools/index.ts` defines the set.
 
 | Tool | Available | Notes |
 |------|-----------|-------|
+| `reply` | ✓ | Agent's primary delivery path — interim updates + final answer |
+| `send_message` | ✓ | Proactive / cross-channel sends |
 | `react_to_message` | ✓ | Proactive emoji ack before long work — fires mid-stream |
 | `recall_memory` | ✓ | |
 | `log_memory` | ✓ | |
@@ -90,8 +96,6 @@ Claude has access to all tools **except `reply` and `send_message`**. Response d
 | `schedule_message` | ✓ | |
 | `list_schedules` | ✓ | |
 | `cancel_schedule` | ✓ | |
-| `reply` | ✗ | Adapter owns delivery |
-| `send_message` | ✗ | Adapter owns delivery |
 | `get_adapter_status` | ✗ | Not meaningful in per-request context |
 
 ### Reaction behavior
@@ -100,7 +104,11 @@ Reactions work exactly as in the persistent adapter. `react_to_message` is a too
 
 ## Response Delivery
 
-The adapter captures the `result` field from the final `stream-json` event and POSTs it directly to the bus as an outbound envelope:
+The agent **owns delivery** via the `reply`/`send_message` tools. This lets it reason privately, send interim "working on it" updates, send multiple messages, and (in future) vary replies per channel — none of which is possible when raw stdout becomes the message.
+
+The adapter reads the `stream-json` output and watches `assistant` turns for `tool_use` blocks named `mcp__agentbus__reply` or `mcp__agentbus__send_message`. Each such call POSTs its own outbound envelope through the bus as the call executes (interim updates arrive immediately).
+
+**Stdout fallback:** if the agent finishes having called **no** delivery tool, the adapter falls back to POSTing the final `result` text as one outbound envelope — so a system prompt that forgets to mention the reply tool still gets a response to the user (no silence):
 
 ```
 POST /api/v1/messages
@@ -109,12 +117,22 @@ POST /api/v1/messages
   topic: <original topic>,
   sender: "agent:claude",
   recipient: <original sender>,
-  reply_to: <last inbound message id>,
-  payload: { type: "text", body: <result text> }
+  reply_to: <inbound message id>,
+  payload: { type: "text", body: <result text | error_reply> }
 }
 ```
 
-Claude is not instructed to send replies. The system prompt says nothing about reply mechanics. One response per invocation.
+> **System prompt requirement:** the `system_prompt` template **must** instruct the agent to send its answer via the `reply` tool (the inbound message text carries `[id:<id>]` for this). The stdout fallback exists only for the "agent emitted prose but called no delivery tool" case — if the agent calls `reply` for an interim update and then puts the final answer only in stdout, that final stdout is **not** delivered (a delivery tool was seen). Always deliver the final answer via the tool.
+
+## Typing Indicator
+
+When a batch starts processing — before the (cold-start) `claude -p` spawn — the adapter fires a fire-and-forget `POST /api/v1/adapters/<channel>/typing` with `{ contact_id }`, mirroring the persistent adapter. The endpoint no-ops for channels without typing capability; on Telegram the indicator is kept alive on the adapter's 4s loop and cleared when the reply is sent. This covers the visible latency of spawning a fresh `claude` process.
+
+## Failure Handling
+
+If the `claude -p` invocation errors, exits non-zero with no result, or yields no result text — **and** the agent delivered nothing via a tool — the adapter POSTs the configured `error_reply` to the contact instead of leaving them with silence. The underlying error is still logged to stderr. If the agent already delivered via a tool, the error is logged but no extra message is sent.
+
+Config key: `adapters.cc-headless.error_reply` (default: `"Sorry — I hit an error processing that. Please try again."`).
 
 ## System Prompt
 
@@ -133,7 +151,18 @@ Available variables:
 | `{{session_summary}}` | Most recent session summary for this contact, or empty string |
 | `{{agent_id}}` | e.g. `agent:claude` |
 
-This replaces the E9 `memory_context` injection into envelope metadata. The headless adapter injects context directly into the system prompt instead.
+This replaces the E9 `memory_context` injection into envelope metadata. The headless adapter injects context directly into the system prompt instead. Because of this, the user-message formatter is called with `includeMemoryContext: false` so the Stage-85 `<memory>` block is **not** also prepended to the user message — otherwise a new session would inject memory twice, in two formats.
+
+After `{{variable}}` interpolation, the rendered template is run through `@path` expansion (`expandFileReferences` in `prompt-renderer.ts`): any `@<path>` token is replaced with the contents of that file, resolved relative to `working_dir`. Unresolvable tokens are left verbatim so typos are visible. This expansion runs **only** on the operator-authored template — never on inbound user messages — to avoid arbitrary file reads from user input.
+
+## Context loading (CLAUDE.md / @ file references)
+
+The headless adapter mirrors Claude Code's normal context loading:
+
+- **`CLAUDE.md` auto-loading** — `claude -p` (without `--bare`) loads the `CLAUDE.md` hierarchy (project + parents + `~/.claude`) and expands its `@import`s at launch. The adapter spawns with `cwd` = `working_dir`, so set `working_dir` to the **agent's** home directory and put the agent's persona/context in a `CLAUDE.md` there. (Default `working_dir` is the bus-core cwd, i.e. the agentbus repo — usually not what you want for a chat persona.)
+- **`@path` in the system prompt** — the `system_prompt` template may reference files with `@relative/path`, expanded against `working_dir` (see above). Use this to pull operator-controlled files into the persona without editing the template inline.
+
+Config key: `adapters.cc-headless.working_dir` (default: bus-core process cwd).
 
 ## Per-Contact Serialization
 
@@ -156,27 +185,40 @@ adapters:
   cc-headless:
     agent_id: claude          # Which agent to dequeue for
     poll_interval_ms: 1000
+    claude_bin: claude        # Path to claude binary (default: "claude")
+    working_dir: /home/agent  # cwd for claude -p → which CLAUDE.md loads (default: bus cwd)
+    error_reply: "Sorry — I hit an error processing that. Please try again."
     system_prompt: |
-      You are a helpful assistant...
-      Contact: {{contact_id}} on {{channel}}
-      Date: {{date}}
+      You are a helpful assistant for {{contact_id}} on {{channel}}.
+      Today is {{date}}.
+
+      Deliver every user-facing message by calling the `reply` tool with the
+      message id shown as [id:<id>]. Use it for quick "working on it" updates and
+      for your final answer. Do not put your answer only in plain text.
+
+      @persona.md
 
       {{memories}}
 
       {{session_summary}}
-    claude_bin: claude         # Path to claude binary (default: "claude")
 ```
 
-## What Needs Building
+| Key | Default | Purpose |
+|-----|---------|---------|
+| `agent_id` | `claude` | Which `agent:<id>` queue to dequeue |
+| `poll_interval_ms` | `1000` | Bus poll cadence |
+| `system_prompt` | *(required)* | Persona template — `{{vars}}` + `@path` references |
+| `claude_bin` | `claude` | Path to the `claude` binary |
+| `working_dir` | bus cwd | `cwd` for `claude -p`; selects the `CLAUDE.md` hierarchy and `@path` base |
+| `error_reply` | see above | Message delivered to the user on invocation failure |
 
-| # | Work item |
-|---|-----------|
-| 1 | **Migration 008** — `ADD COLUMN claude_session_id TEXT` to sessions table |
-| 2 | **`AGENTBUS_TOOLS_ONLY` mode in `cc.ts`** — skip polling loop, serve tools only |
-| 3 | **`cc-headless.ts`** — in-process adapter: poll, serialize, spawn, capture, deliver |
-| 4 | **Config schema** — add `cc-headless` adapter config with `system_prompt` template |
-| 5 | **System prompt rendering** — template interpolation (memories, session summary, etc.) |
-| 6 | **docs update** — this file + CC_ADAPTER.md note pointing here |
+## Cross-contact isolation (design tradeoff)
+
+Each contact gets an **isolated** Claude conversation (`--resume` is keyed to that contact's AgentBus session). Unlike the persistent MCP adapter — where one Claude context window sees every contact's messages interleaved and can choose what to share between trusted users — the headless agent **cannot reference another contact's conversation**. Continuity for a contact comes from injected memories/summary, not from cross-contact context.
+
+This is an accepted tradeoff, not a bug. Pick the adapter accordingly:
+- **Headless** — stronger per-user isolation; good for multi-tenant / privacy-sensitive use.
+- **Persistent MCP (`cc.ts`)** — shared context; good when one operator wants the agent to reason across all their conversations.
 
 ## What Does NOT Change
 

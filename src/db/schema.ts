@@ -49,6 +49,11 @@ function loadMigrations(): Migration[] {
       description: 'Memory channel scoping',
       sql: readFileSync(join(migrationsDir, '007_memory_channel_scope.sql'), 'utf-8'),
     },
+    {
+      version: 8,
+      description: 'Session claude_session_id column',
+      sql: readFileSync(join(migrationsDir, '008_session_claude_id.sql'), 'utf-8'),
+    },
   ];
 }
 

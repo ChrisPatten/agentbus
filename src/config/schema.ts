@@ -72,10 +72,37 @@ const ClaudeCodeAdapterSchema = z.object({
   plugin: z.string().optional(),
 });
 
+/**
+ * Headless Claude Code adapter — spawns `claude -p` per message batch instead
+ * of running a persistent MCP session. Compatible with in-process bus-core.
+ */
+const CcHeadlessAdapterSchema = z.object({
+  agent_id: z.string().default('claude'),
+  poll_interval_ms: z.number().int().positive().default(1000),
+  system_prompt: z.string(),
+  claude_bin: z.string().default('claude'),
+  /**
+   * Working directory for the spawned `claude -p` process. Determines which
+   * CLAUDE.md hierarchy is auto-loaded into context (project + parents +
+   * ~/.claude) and the base for `@path` expansion in the system prompt.
+   * Defaults to the bus-core process cwd.
+   */
+  working_dir: z.string().optional(),
+  /**
+   * Message delivered to the user when a `claude -p` invocation fails or
+   * returns no result and the agent delivered nothing via the reply tool.
+   * Prevents the user from getting pure silence on failure.
+   */
+  error_reply: z
+    .string()
+    .default('Sorry — I hit an error processing that. Please try again.'),
+});
+
 const AdaptersConfigSchema = z.object({
   telegram: z.union([TelegramAdapterSchema, z.record(z.string(), TelegramAdapterSchema)]).optional(),
   bluebubbles: BlueBubblesAdapterSchema.optional(),
   'claude-code': ClaudeCodeAdapterSchema.optional(),
+  'cc-headless': CcHeadlessAdapterSchema.optional(),
 });
 
 const MemoryConfigSchema = z.object({

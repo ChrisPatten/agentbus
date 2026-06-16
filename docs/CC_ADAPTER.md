@@ -139,3 +139,7 @@ AGENTBUS_CONFIG=/path/to/config.yaml npx tsx src/adapters/cc.ts
 ```
 
 In production, Claude Code launches this automatically via the `.mcp.json` server definition.
+
+## Alternative: Headless Adapter
+
+For deployments that don't want a persistent Claude Code session, see **[CC_HEADLESS_ADAPTER.md](CC_HEADLESS_ADAPTER.md)** — an in-process adapter that spawns `claude -p` per message batch with session continuity via `--resume`.

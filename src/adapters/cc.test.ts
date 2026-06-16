@@ -159,6 +159,16 @@ describe('formatMessagesForSampling', () => {
     expect(second).not.toContain('<memory');
   });
 
+  it('omits memory_context when includeMemoryContext is false (headless path)', () => {
+    const context = '<memory contact="alice">\n## Known facts\n- [fact] Likes hiking\n</memory>';
+    const env = makeEnvelope({ metadata: { memory_context: context } });
+    const result = formatMessagesForSampling([env], { includeMemoryContext: false });
+    expect(result.startsWith('New message')).toBe(true);
+    expect(result).not.toContain('<memory');
+    // metadata is left intact (not consumed) so other consumers still see it
+    expect(env.metadata?.['memory_context']).toBe(context);
+  });
+
   // ── image attachments ────────────────────────────────────────────────────────
 
   it('appends a single [Image: path] line after the body', () => {

@@ -54,6 +54,24 @@ export function registerAllTools(
   registerScheduleTools(server, busBaseUrl);
 }
 
+/**
+ * Register the subset of tools available to the cc-headless adapter.
+ *
+ * Includes reply + send_message: the headless adapter watches the claude
+ * stream-json for these tool calls and lets the agent own delivery (interim
+ * "working on it" updates, the final answer, per-channel sends). Excludes
+ * get_adapter_status (no persistent health state in a per-request invocation).
+ */
+export function registerHeadlessTools(server: McpServer, busBaseUrl: string): void {
+  registerReplyTool(server, busBaseUrl);
+  registerChannelTools(server, busBaseUrl);
+  registerMessagingTools(server, busBaseUrl);
+  registerMemoryTools(server, busBaseUrl);
+  registerSessionTools(server, busBaseUrl);
+  registerReactionTools(server, busBaseUrl);
+  registerScheduleTools(server, busBaseUrl);
+}
+
 // ── Core tools (E2) ───────────────────────────────────────────────────────────
 
 function registerCoreTools(
@@ -61,6 +79,29 @@ function registerCoreTools(
   busBaseUrl: string,
   healthState: HealthState,
 ): void {
+  registerReplyTool(server, busBaseUrl);
+
+  // ── get_adapter_status ────────────────────────────────────────────────────
+
+  server.registerTool(
+    'get_adapter_status',
+    {
+      description: 'Return the current health status of the AgentBus claude-code adapter.',
+    },
+    () => {
+      return toolSuccess({
+        status: healthState.status,
+        bus_reachable: healthState.busReachable,
+        last_poll_at: healthState.lastPollAt,
+        consecutive_failures: healthState.consecutiveFailures,
+      });
+    }
+  );
+}
+
+// ── reply tool (shared by full + headless tool sets) ────────────────────────────
+
+function registerReplyTool(server: McpServer, busBaseUrl: string): void {
   // ── reply ────────────────────────────────────────────────────────────────
 
   server.registerTool(
@@ -111,23 +152,6 @@ function registerCoreTools(
       } catch (err) {
         return toolError(`Failed to send reply: ${String(err)}`);
       }
-    }
-  );
-
-  // ── get_adapter_status ────────────────────────────────────────────────────
-
-  server.registerTool(
-    'get_adapter_status',
-    {
-      description: 'Return the current health status of the AgentBus claude-code adapter.',
-    },
-    () => {
-      return toolSuccess({
-        status: healthState.status,
-        bus_reachable: healthState.busReachable,
-        last_poll_at: healthState.lastPollAt,
-        consecutive_failures: healthState.consecutiveFailures,
-      });
     }
   );
 }

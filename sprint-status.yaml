@@ -5,7 +5,7 @@ bmad_status:
   planning: complete
   architecture: complete
   implementation: in-progress
-current_epic: E9
+current_epic: E19
 epics:
   E1:
     status: complete
@@ -229,27 +229,54 @@ epics:
       S17.5: complete  # AttachmentSweeper (src/media/attachment-sweeper.ts) + index.ts lifecycle
       S17.6: complete  # docs/ATTACHMENTS.md + config.yaml.example + TELEGRAM_ADAPTER.md pointer
   E19:
-    status: backlog
+    status: complete
+    completed: 2026-05-26
     notes: >
-      Headless Claude Code adapter. Replaces long-lived tmux-based Claude Code
-      sessions with per-request `claude -p` invocations. In-process adapter
-      (same pattern as telegram.ts) that polls the bus, serializes per-contact,
-      spawns `claude -p --output-format stream-json` for each message batch, and
-      routes the result text directly as an outbound envelope — Claude does not
-      call reply/send_message. Session continuity via --resume <claude_session_id>
-      stored in sessions.claude_session_id (migration 008); one session per contact;
-      new AgentBus session = new Claude session. Reactions still fire mid-stream
-      via react_to_message tool call. MCP tools provided via --mcp-config pointing
-      to cc.ts with AGENTBUS_TOOLS_ONLY=true (skips polling, serves tools only).
-      System prompt is a config-driven template with {{contact_id}}, {{channel}},
-      {{date}}, {{memories}}, {{session_summary}}, {{agent_id}} variables;
-      replaces E9 memory_context envelope injection for this adapter path.
-      See docs/CC_HEADLESS_ADAPTER.md for full design.
+      Headless Claude Code adapter. In-process adapter (cc-headless.ts) that
+      polls the bus HTTP API, serializes per-contact via promise chaining,
+      spawns `claude -p --output-format stream-json` per message batch, and
+      POSTs the result text as an outbound envelope. Session continuity via
+      --resume <claude_session_id> stored in sessions.claude_session_id
+      (migration 008). AGENTBUS_TOOLS_ONLY=true mode added to cc.ts so it
+      can serve as the MCP subprocess without starting the polling loop.
+      System prompt uses {{variable}} template interpolation via
+      prompt-renderer.ts; memories and last session summary injected directly
+      into the system prompt (replaces E9 envelope metadata injection for this
+      path). registerHeadlessTools() excludes reply/send_message/get_adapter_status.
+      Adapter auto-starts from index.ts when cc-headless config block is present.
     stories:
-      S19.1: pending  # Migration 008 — ADD COLUMN claude_session_id TEXT to sessions
-      S19.2: pending  # AGENTBUS_TOOLS_ONLY mode in cc.ts (skip poll loop, tools only)
-      S19.3: pending  # Config schema — cc-headless adapter block + system_prompt template
-      S19.4: pending  # System prompt renderer — {{variable}} interpolation (memories, summary, etc.)
-      S19.5: pending  # cc-headless.ts — poll, per-contact queue, spawn, stream-json capture, deliver
-      S19.6: pending  # Docs — docs/CC_HEADLESS_ADAPTER.md (already written) + CC_ADAPTER.md pointer
-last_updated: 2026-05-26  # E19 added to backlog
+      S19.1: complete  # Migration 008 — ADD COLUMN claude_session_id TEXT to sessions
+      S19.2: complete  # AGENTBUS_TOOLS_ONLY mode in cc.ts + registerHeadlessTools()
+      S19.3: complete  # Config schema — CcHeadlessAdapterSchema in schema.ts
+      S19.4: complete  # System prompt renderer (src/adapters/prompt-renderer.ts)
+      S19.5: complete  # cc-headless.ts + index.ts wiring
+      S19.6: complete  # CC_ADAPTER.md pointer to CC_HEADLESS_ADAPTER.md
+  E19.1:
+    status: complete
+    completed: 2026-06-16
+    notes: >
+      Headless adapter refinements. (1) Reply control: registerHeadlessTools now
+      exposes reply + send_message (registerReplyTool split out of
+      registerCoreTools so headless gets reply without get_adapter_status); the
+      adapter watches stream-json assistant turns for mcp__agentbus__reply /
+      send_message tool_use and lets the agent own delivery (interim updates +
+      final answer), falling back to stdout result text only when no delivery
+      tool was called. (2) Double memory fix: formatMessagesForSampling takes
+      includeMemoryContext; cc-headless passes false so the Stage-85 <memory>
+      block is not also prepended to the user message. (3) Typing indicator:
+      POST /api/v1/adapters/:channel/typing at batch start. (4) Silent-failure
+      fix: error_reply config delivered to the user on spawn/parse failure when
+      nothing was delivered via tool. (5) Context loading: working_dir config
+      sets claude -p cwd so the agent's CLAUDE.md (+ @imports) auto-loads;
+      expandFileReferences adds @path inclusion to the system_prompt template
+      (operator-controlled only). Cross-contact isolation documented as an
+      accepted tradeoff (not fixed).
+    stories:
+      S19.1.1: complete  # Split registerReplyTool; reply+send_message in headless set
+      S19.1.2: complete  # formatMessagesForSampling includeMemoryContext opt-out
+      S19.1.3: complete  # stream-json tool-delivery detection + stdout fallback
+      S19.1.4: complete  # Typing indicator POST on batch start
+      S19.1.5: complete  # error_reply config + failure delivery
+      S19.1.6: complete  # working_dir cwd + @path expansion (prompt-renderer)
+      S19.1.7: complete  # Tests (cc.test, prompt-renderer.test) + docs update
+last_updated: 2026-06-16  # E19.1 complete
