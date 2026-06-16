@@ -44,7 +44,11 @@ This project uses Semantic Versioning. `package.json` `version` is the single so
 - **PATCH** — backward-compatible bug fixes only
 - Pre-1.0.0: a minor bump may carry breaking changes — say so explicitly.
 
-**Always confirm the proposed version with the user before incrementing.** Only after they approve: move the `[Unreleased]` items under a dated `## [x.y.z]` heading (update the compare links), then run `npm run release:patch|minor|major` (test-gated; bumps `package.json`, commits, tags). Never increment the version without explicit approval.
+**Always confirm the proposed version with the user before incrementing.** Never bump `package.json` or create a tag without explicit approval.
+
+Once approved, the release is split across the merge so the tag lands on `main`:
+1. **In the feature branch (pre-merge):** move the `[Unreleased]` items under a dated `## [x.y.z]` heading and update the compare links in `CHANGELOG.md`. Commit this with the rest of the branch. **Do not** run `npm version` here — tagging the branch strands the tag on a commit that a squash-merge discards.
+2. **On `main` (post-merge):** run `npm run release:patch|minor|major` (test-gated; bumps `package.json`, commits, tags `vX.Y.Z`), then `git push --tags`. This points the tag at a commit that is part of `main`'s history.
 
 ## Sprint status
 
