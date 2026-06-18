@@ -10,6 +10,8 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-18
+
 ### Added
 - Journaling memory model (E20): the agent's own files (`MEMORY.md` + daily
   journal) are the source of truth. The headless adapter assembles `MEMORY.md`
@@ -84,6 +86,7 @@ Baseline release. Core bus, pipeline, adapters, memory, scheduling.
 - Built-in slash commands + plugin command registry. (E6)
 - Scheduled messages (cron + one-shot) via background scheduler. (E18)
 
-[Unreleased]: https://github.com/ChrisPatten/agentbus/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/ChrisPatten/agentbus/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/ChrisPatten/agentbus/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ChrisPatten/agentbus/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/ChrisPatten/agentbus/releases/tag/v0.1.0
