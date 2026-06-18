@@ -10,6 +10,34 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+### Added
+- Journaling memory model (E20): the agent's own files (`MEMORY.md` + daily
+  journal) are the source of truth. The headless adapter assembles `MEMORY.md`
+  and the configured `journal_lookback_days` of daily files into every turn's
+  context (`assembleMemoryContext`, `src/adapters/memory-context.ts`), replacing
+  the DB memory/summary injection. New `adapters.cc-headless.memory` config block.
+- Long-lived headless sessions (E20): headless conversations are never
+  force-closed on idle (`ended_at` stays `NULL`) and resume is keyed on
+  `conversation_id`, so the same `claude_session_id` continues across pauses.
+  Scoped to headless sessions via the `claude_session_id IS NOT NULL`
+  discriminator; the MCP `cc.ts` path is unaffected. Context growth is bounded by
+  Claude Code auto-compaction.
+- Journaling on pause (E20): when a conversation goes idle past a per-channel
+  threshold, the bus fires a silent `--resume` journaling turn that asks the
+  agent to update its memory files and delivers nothing to the user
+  (`SessionTracker.dispatchJournaling` + the adapter's `runJournalingTurn`). New
+  `adapters.cc-headless.journaling` config block; migration 009 adds
+  `sessions.last_journaled_at`. See `docs/MEMORY_MODEL.md`.
+
+### Changed
+- The session idle threshold is now a **journaling** trigger for headless
+  sessions, not session teardown. (E20)
+- Structured memory extraction is **off by default** (`memory.structured_extraction`,
+  default `false`): the summarizer writes neither `memories` nor
+  `session_summaries` unless re-enabled. The tables/migrations are left dormant
+  and `recall_memory`/`log_memory` are marked legacy (not removed) so MCP-adapter
+  deployments are unaffected. (E20)
+
 ## [0.2.0] - 2026-06-16
 
 ### Added

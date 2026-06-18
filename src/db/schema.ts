@@ -54,6 +54,11 @@ function loadMigrations(): Migration[] {
       description: 'Session claude_session_id column',
       sql: readFileSync(join(migrationsDir, '008_session_claude_id.sql'), 'utf-8'),
     },
+    {
+      version: 9,
+      description: 'Session last_journaled_at column',
+      sql: readFileSync(join(migrationsDir, '009_session_last_journaled.sql'), 'utf-8'),
+    },
   ];
 }
 

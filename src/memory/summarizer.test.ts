@@ -33,6 +33,9 @@ const stubConfig: AppConfig = {
     context_window_hours: 48,
     claude_api_model: 'claude-sonnet-4-6',
     summary_max_tokens: 512,
+    // Legacy structured extraction — these tests are the E20 regression guard
+    // that summarization still works when an MCP deployment opts back in.
+    structured_extraction: true,
   },
   pipeline: {
     dedup_window_ms: 30000,
@@ -284,5 +287,43 @@ describe('Summarizer.retrySummarize()', () => {
       .all(sessionId) as { id: string }[];
     expect(summaries).toHaveLength(1);
     expect(summaries[0]!.id).not.toBe('partial-sum');
+  });
+});
+
+describe('Summarizer.summarize() — structured_extraction disabled (E20)', () => {
+  let db: Database.Database;
+  let summarizer: Summarizer;
+  const offConfig = {
+    ...stubConfig,
+    memory: { ...stubConfig.memory, structured_extraction: false },
+  } as AppConfig;
+
+  beforeEach(() => {
+    process.env['ANTHROPIC_API_KEY'] = 'test-key';
+    db = makeDb();
+    mockCreate.mockReset();
+    summarizer = new Summarizer({ db, config: offConfig });
+  });
+
+  it('writes no memories/session_summaries and skips the API, marking the session summarized', async () => {
+    const sessionId = insertSession(db);
+    insertTranscripts(db, sessionId, 3);
+
+    const result = await summarizer.summarize(sessionId);
+    expect(result).toBe(true);
+    expect(mockCreate).not.toHaveBeenCalled();
+
+    const summaries = db
+      .prepare('SELECT * FROM session_summaries WHERE session_id = ?')
+      .all(sessionId);
+    expect(summaries).toHaveLength(0);
+
+    const memories = db.prepare('SELECT * FROM memories').all();
+    expect(memories).toHaveLength(0);
+
+    const session = db.prepare('SELECT status FROM sessions WHERE id = ?').get(sessionId) as {
+      status: string;
+    };
+    expect(session.status).toBe('summarized');
   });
 });

@@ -19,7 +19,12 @@ import type { PipelineStage } from '../types.js';
  *   - No active session → INSERT a new session row.
  *   - Active session, gap ≤ session_idle_threshold_ms → extend (UPDATE
  *     last_activity + increment message_count).
- *   - Active session, gap > threshold → end old (set ended_at), INSERT new.
+ *   - Active session, gap > threshold:
+ *       · headless-managed session (claude_session_id IS NOT NULL) → extend.
+ *         E20 headless sessions are long-lived and never torn down on idle;
+ *         the same claude_session_id resumes across pauses. Journaling (not
+ *         teardown) captures durable knowledge while paused.
+ *       · otherwise (MCP cc.ts path) → end old (set ended_at), INSERT new.
  *
  * After session resolution:
  *   - Upserts conversation_registry (sets last_seen on every message).
@@ -50,12 +55,14 @@ export function createTranscriptLog(db: Database.Database, config: AppConfig): P
     // Find active session for this conversation
     const activeSession = db
       .prepare(
-        `SELECT id, last_activity FROM sessions
+        `SELECT id, last_activity, claude_session_id FROM sessions
          WHERE conversation_id = ? AND ended_at IS NULL
          ORDER BY started_at DESC
          LIMIT 1`,
       )
-      .get(conversationId) as { id: string; last_activity: string } | undefined;
+      .get(conversationId) as
+      | { id: string; last_activity: string; claude_session_id: string | null }
+      | undefined;
 
     let sessionId: string;
 
@@ -71,8 +78,13 @@ export function createTranscriptLog(db: Database.Database, config: AppConfig): P
       const lastActivity = new Date(activeSession.last_activity).getTime();
       const gapMs = Date.now() - lastActivity;
 
-      if (gapMs > idleThresholdMs) {
-        // Gap exceeded threshold — end old session, start new, counting this first message
+      // Headless-managed sessions (claude_session_id set by cc-headless only)
+      // are long-lived: a gap never tears them down, it just extends them.
+      const isHeadless = activeSession.claude_session_id !== null;
+
+      if (gapMs > idleThresholdMs && !isHeadless) {
+        // Gap exceeded threshold (legacy MCP path) — end old session, start new,
+        // counting this first message.
         db.prepare(`UPDATE sessions SET ended_at = ? WHERE id = ?`).run(now, activeSession.id);
         sessionId = randomUUID();
         db.prepare(
@@ -81,7 +93,8 @@ export function createTranscriptLog(db: Database.Database, config: AppConfig): P
         ).run(sessionId, conversationId, e.channel, contactId, now, now);
         ctx.sessionCreated = true;
       } else {
-        // Extend existing session
+        // Extend existing session (gap within threshold, or a long-lived
+        // headless session resuming after a pause).
         sessionId = activeSession.id;
         db.prepare(
           `UPDATE sessions SET last_activity = ?, message_count = message_count + 1 WHERE id = ?`,

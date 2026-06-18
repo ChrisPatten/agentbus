@@ -96,6 +96,54 @@ const CcHeadlessAdapterSchema = z.object({
   error_reply: z
     .string()
     .default('Sorry — I hit an error processing that. Please try again.'),
+  /**
+   * E20 — memory file assembly. The agent's own files are the source of truth;
+   * the bus front-loads them into each turn's context. All paths are resolved
+   * relative to `working_dir`. Missing files are skipped silently.
+   */
+  memory: z
+    .object({
+      /** Memory directory, relative to working_dir. */
+      dir: z.string().default('memory'),
+      /** Index file always loaded into every turn (relative to `dir`). */
+      index_file: z.string().default('MEMORY.md'),
+      /** Subdirectory holding daily journal files `YYYY-MM-DD.md` (relative to `dir`). */
+      daily_subdir: z.string().default('daily'),
+      /** How many days of daily journal to load (today + previous N-1). 0 → index only. */
+      journal_lookback_days: z.number().int().nonnegative().default(3),
+    })
+    .prefault({}),
+  /**
+   * E20 — journaling on pause. When a conversation goes idle past the
+   * per-channel threshold, the bus fires a silent `--resume` turn telling the
+   * agent to update its memory files. Nothing is delivered to the user.
+   */
+  journaling: z
+    .object({
+      enabled: z.boolean().default(true),
+      /**
+       * Per-channel idle gap (ms) that marks a conversation "paused" → journal.
+       * Two forms (mirrors `memory.session_close_min_messages`):
+       *   - number: applies to every channel
+       *   - record: per-channel ms with a required `default` key
+       */
+      threshold_ms: z
+        .union([
+          z.number().int().positive(),
+          z.object({ default: z.number().int().positive() }).catchall(z.number().int().positive()),
+        ])
+        .default({ default: 1_800_000 }),
+      /** Prompt sent on the silent journaling turn. */
+      prompt: z
+        .string()
+        .default(
+          'Our conversation has paused. Review it and update your memory files ' +
+            "(today's daily journal, MEMORY.md, and any relevant topic files) with " +
+            'anything durable worth remembering. Do NOT message the user — this is ' +
+            'an internal journaling turn, not a reply.',
+        ),
+    })
+    .prefault({}),
 });
 
 const AdaptersConfigSchema = z.object({
@@ -164,6 +212,14 @@ const MemoryConfigSchema = z.object({
    *     - telegram:pokeclaude
    */
   memory_inject_exclude: z.array(z.string()).default([]),
+  /**
+   * E20 — when false (default), the summarizer's structured-extraction content
+   * path is disabled: the bus writes neither the `memories` nor the
+   * `session_summaries` table, and the agent's own files are the single source
+   * of truth. Set true to restore legacy behavior for MCP-adapter deployments
+   * that still rely on the structured store.
+   */
+  structured_extraction: z.boolean().default(false),
 });
 
 /**
@@ -391,4 +447,21 @@ export function getTelegramInstances(config: AppConfig): TelegramInstanceConfig[
   }
 
   return instances;
+}
+
+/** Resolved config for the headless Claude Code adapter. */
+export type CcHeadlessAdapterConfig = NonNullable<AppConfig['adapters']['cc-headless']>;
+
+/**
+ * Resolve the per-channel journaling threshold (ms) from a `threshold_ms`
+ * config value. Mirrors `SessionTracker.minMessagesForChannel`:
+ *   - flat number: applies to every channel
+ *   - record: channel-specific value, falling back to the required `default`
+ */
+export function journalingThresholdForChannel(
+  threshold: number | Record<string, number>,
+  channel: string,
+): number {
+  if (typeof threshold === 'number') return threshold;
+  return threshold[channel] ?? threshold['default'];
 }

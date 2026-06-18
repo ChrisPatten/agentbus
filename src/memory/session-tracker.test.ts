@@ -53,16 +53,20 @@ function insertSession(
     endedAt?: string | null;
     summaryAttempts?: number;
     messageCount?: number;
+    conversationId?: string;
+    claudeSessionId?: string | null;
+    lastJournaledAt?: string | null;
   } = {},
 ) {
   const id = opts.id ?? 'sess-' + Math.random().toString(36).slice(2);
   const lastActivity = new Date(Date.now() - (opts.lastActivityOffset ?? 0)).toISOString();
   const now = new Date().toISOString();
   db.prepare(
-    `INSERT INTO sessions (id, conversation_id, channel, contact_id, started_at, last_activity, ended_at, message_count, status, summary_attempts)
-     VALUES (?, 'conv-1', ?, 'contact:chris', ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO sessions (id, conversation_id, channel, contact_id, started_at, last_activity, ended_at, message_count, status, summary_attempts, claude_session_id, last_journaled_at)
+     VALUES (?, ?, ?, 'contact:chris', ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     id,
+    opts.conversationId ?? 'conv-1',
     opts.channel ?? 'telegram',
     now,
     lastActivity,
@@ -70,6 +74,8 @@ function insertSession(
     opts.messageCount ?? 1,
     opts.status ?? 'active',
     opts.summaryAttempts ?? 0,
+    opts.claudeSessionId ?? null,
+    opts.lastJournaledAt ?? null,
   );
   return id;
 }
@@ -107,6 +113,24 @@ describe('SessionTracker.tick()', () => {
     await new Promise((r) => setTimeout(r, 10));
 
     expect(summarizer.summarize).toHaveBeenCalledWith(sessionId);
+  });
+
+  it('does NOT close idle headless sessions (claude_session_id set) — they are long-lived', () => {
+    // Idle 20 min (past 15-min threshold) but headless-managed → must stay open.
+    const sessionId = insertSession(db, {
+      lastActivityOffset: 20 * 60 * 1000,
+      claudeSessionId: 'cc-xyz',
+    });
+
+    tracker.tick();
+
+    const session = db.prepare('SELECT ended_at, status FROM sessions WHERE id = ?').get(sessionId) as {
+      ended_at: string | null;
+      status: string;
+    };
+    expect(session.ended_at).toBeNull();
+    expect(session.status).toBe('active');
+    expect(summarizer.summarize).not.toHaveBeenCalledWith(sessionId);
   });
 
   it('does NOT close sessions within the idle threshold', () => {
@@ -281,6 +305,183 @@ describe('SessionTracker.tick()', () => {
     expect(ids).not.toContain('mem-old');
     expect(ids).toContain('mem-recent');
     expect(ids).toContain('mem-active');
+  });
+});
+
+describe('SessionTracker.dispatchJournaling() (E20)', () => {
+  let db: Database.Database;
+  let summarizer: Summarizer;
+  let runner: ReturnType<typeof vi.fn>;
+
+  function journalingConfig(
+    threshold_ms: number | Record<string, number>,
+    enabled = true,
+  ): AppConfig {
+    return {
+      ...stubConfig,
+      adapters: {
+        'cc-headless': {
+          agent_id: 'claude',
+          poll_interval_ms: 1000,
+          system_prompt: 'x',
+          claude_bin: 'claude',
+          error_reply: 'err',
+          memory: { dir: 'memory', index_file: 'MEMORY.md', daily_subdir: 'daily', journal_lookback_days: 3 },
+          journaling: { enabled, threshold_ms, prompt: 'journal please' },
+        },
+      },
+    } as unknown as AppConfig;
+  }
+
+  function makeTracker(config: AppConfig): SessionTracker {
+    const t = new SessionTracker({ db, config, summarizer });
+    t.setJournalingRunner(runner as unknown as (c: string) => Promise<{ skipped?: boolean }>);
+    return t;
+  }
+
+  const flush = () => new Promise((r) => setTimeout(r, 15));
+
+  beforeEach(() => {
+    db = makeDb();
+    summarizer = makeMockSummarizer();
+    runner = vi.fn().mockResolvedValue({});
+  });
+
+  it('dispatches once for an idle, never-journaled headless session and stamps last_journaled_at', async () => {
+    const id = insertSession(db, { lastActivityOffset: 20 * 60 * 1000, claudeSessionId: 'cc-1' });
+    const tracker = makeTracker(journalingConfig(900000));
+
+    tracker.tick();
+    await flush();
+
+    expect(runner).toHaveBeenCalledTimes(1);
+    expect(runner).toHaveBeenCalledWith('conv-1');
+    const row = db.prepare('SELECT last_journaled_at, ended_at FROM sessions WHERE id = ?').get(id) as {
+      last_journaled_at: string | null;
+      ended_at: string | null;
+    };
+    expect(row.last_journaled_at).not.toBeNull();
+    expect(row.ended_at).toBeNull(); // never closed
+  });
+
+  it('does not re-dispatch on the next tick after journaling (idle but already journaled)', async () => {
+    insertSession(db, { lastActivityOffset: 20 * 60 * 1000, claudeSessionId: 'cc-1' });
+    const tracker = makeTracker(journalingConfig(900000));
+
+    tracker.tick();
+    await flush();
+    tracker.tick();
+    await flush();
+
+    expect(runner).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-arms when activity occurred after the last journaling', async () => {
+    // last_journaled_at older than last_activity → new activity since journaling.
+    insertSession(db, {
+      lastActivityOffset: 20 * 60 * 1000,
+      claudeSessionId: 'cc-1',
+      lastJournaledAt: new Date(Date.now() - 40 * 60 * 1000).toISOString(),
+    });
+    const tracker = makeTracker(journalingConfig(900000));
+
+    tracker.tick();
+    await flush();
+
+    expect(runner).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not dispatch when journaled more recently than last activity', async () => {
+    insertSession(db, {
+      lastActivityOffset: 20 * 60 * 1000,
+      claudeSessionId: 'cc-1',
+      lastJournaledAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+    });
+    const tracker = makeTracker(journalingConfig(900000));
+
+    tracker.tick();
+    await flush();
+
+    expect(runner).not.toHaveBeenCalled();
+  });
+
+  it('never dispatches when journaling is disabled', async () => {
+    insertSession(db, { lastActivityOffset: 20 * 60 * 1000, claudeSessionId: 'cc-1' });
+    const tracker = makeTracker(journalingConfig(900000, false));
+
+    tracker.tick();
+    await flush();
+
+    expect(runner).not.toHaveBeenCalled();
+  });
+
+  it('ignores sessions without a claude_session_id', async () => {
+    insertSession(db, { lastActivityOffset: 20 * 60 * 1000, claudeSessionId: null });
+    const tracker = makeTracker(journalingConfig(900000));
+
+    tracker.tick();
+    await flush();
+
+    expect(runner).not.toHaveBeenCalled();
+  });
+
+  it('honors the per-channel threshold', async () => {
+    insertSession(db, {
+      id: 'tg',
+      channel: 'telegram',
+      conversationId: 'conv-tg',
+      lastActivityOffset: 20 * 60 * 1000,
+      claudeSessionId: 'cc-tg',
+    });
+    insertSession(db, {
+      id: 'em',
+      channel: 'email',
+      conversationId: 'conv-em',
+      lastActivityOffset: 20 * 60 * 1000,
+      claudeSessionId: 'cc-em',
+    });
+    const tracker = makeTracker(
+      journalingConfig({ telegram: 900000, email: 86_400_000, default: 900000 }),
+    );
+
+    tracker.tick();
+    await flush();
+
+    // telegram idle 20 min > 15-min threshold → dispatched; email under 24 h → not.
+    expect(runner).toHaveBeenCalledTimes(1);
+    expect(runner).toHaveBeenCalledWith('conv-tg');
+  });
+
+  it('stamps last_journaled_at when the runner skips (nothing to journal)', async () => {
+    const id = insertSession(db, { lastActivityOffset: 20 * 60 * 1000, claudeSessionId: 'cc-1' });
+    runner.mockResolvedValue({ skipped: true });
+    const tracker = makeTracker(journalingConfig(900000));
+
+    tracker.tick();
+    await flush();
+
+    const row = db.prepare('SELECT last_journaled_at FROM sessions WHERE id = ?').get(id) as {
+      last_journaled_at: string | null;
+    };
+    expect(row.last_journaled_at).not.toBeNull();
+  });
+
+  it('leaves last_journaled_at unchanged on failure and retries up to the attempt cap', async () => {
+    const id = insertSession(db, { lastActivityOffset: 20 * 60 * 1000, claudeSessionId: 'cc-1' });
+    runner.mockRejectedValue(new Error('spawn failed'));
+    const tracker = makeTracker(journalingConfig(900000));
+
+    // 3 ticks → 3 attempts (the cap); a 4th tick backs off.
+    for (let i = 0; i < 4; i++) {
+      tracker.tick();
+      await flush();
+    }
+
+    expect(runner).toHaveBeenCalledTimes(3);
+    const row = db.prepare('SELECT last_journaled_at FROM sessions WHERE id = ?').get(id) as {
+      last_journaled_at: string | null;
+    };
+    expect(row.last_journaled_at).toBeNull();
   });
 });
 

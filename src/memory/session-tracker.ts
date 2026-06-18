@@ -18,19 +18,29 @@
 import { exec, type ExecOptionsWithStringEncoding } from 'node:child_process';
 import type Database from 'better-sqlite3';
 import type { AppConfig } from '../config/schema.js';
+import { journalingThresholdForChannel } from '../config/schema.js';
 import type { Summarizer } from './summarizer.js';
 import type { SessionRow } from './types.js';
+
+/** Drives a silent journaling turn for a paused conversation (cc-headless). */
+export type JournalingRunner = (conversationId: string) => Promise<{ skipped?: boolean }>;
 
 /** Days after expiry before a memory is hard-deleted. */
 const HARD_DELETE_AFTER_DAYS = 30;
 /** Max summarization attempts before giving up. */
 const MAX_SUMMARY_ATTEMPTS = 3;
+/** Max consecutive journaling failures per conversation before backing off (re-armed by new activity). */
+const MAX_JOURNALING_ATTEMPTS = 3;
 
 export class SessionTracker {
   private db: Database.Database;
   private config: AppConfig;
   private summarizer: Summarizer;
   private timer: ReturnType<typeof setInterval> | null = null;
+  /** Injected by index.ts when the headless adapter is running. */
+  private journalingRunner: JournalingRunner | null = null;
+  /** conversation_id → { lastActivity seen, consecutive failures }. Re-armed when last_activity advances. */
+  private journalingAttempts = new Map<string, { lastActivity: string; count: number }>();
 
   constructor(deps: {
     db: Database.Database;
@@ -40,6 +50,11 @@ export class SessionTracker {
     this.db = deps.db;
     this.config = deps.config;
     this.summarizer = deps.summarizer;
+  }
+
+  /** Provide the journaling runner (cc-headless). Without it, journaling dispatch is a no-op. */
+  setJournalingRunner(runner: JournalingRunner): void {
+    this.journalingRunner = runner;
   }
 
   /** Start the background tick loop. Runs one immediate tick before the interval. */
@@ -86,6 +101,74 @@ export class SessionTracker {
     } catch (err) {
       console.error('[session-tracker] Error sweeping expired memories:', err);
     }
+
+    try {
+      this.dispatchJournaling();
+    } catch (err) {
+      console.error('[session-tracker] Error dispatching journaling:', err);
+    }
+  }
+
+  /**
+   * E20 — fire a silent journaling turn for each headless conversation that has
+   * paused (idle past the per-channel journaling threshold) and has not been
+   * journaled since its last activity. One journaling turn per pause; new
+   * activity advances last_activity past last_journaled_at and re-arms it.
+   *
+   * No-op when journaling is disabled, no runner is wired, or cc-headless is not
+   * configured. Never sets ended_at — sessions stay long-lived.
+   */
+  private dispatchJournaling(): void {
+    const headless = this.config.adapters['cc-headless'];
+    if (!headless || !headless.journaling.enabled || !this.journalingRunner) return;
+    const runner = this.journalingRunner;
+    const threshold = headless.journaling.threshold_ms;
+
+    const now = Date.now();
+    const nowIso = new Date(now).toISOString();
+
+    // Candidate sessions: headless-managed (claude_session_id set), still open,
+    // not journaled since their last activity.
+    const candidates = this.db
+      .prepare(
+        `SELECT * FROM sessions
+         WHERE ended_at IS NULL AND claude_session_id IS NOT NULL
+           AND (last_journaled_at IS NULL OR last_journaled_at < last_activity)`,
+      )
+      .all() as SessionRow[];
+
+    for (const session of candidates) {
+      const thresholdMs = journalingThresholdForChannel(threshold, session.channel);
+      const idleMs = now - new Date(session.last_activity).getTime();
+      if (idleMs < thresholdMs) continue;
+
+      // Reset the failure counter when new activity has occurred since last seen.
+      let rec = this.journalingAttempts.get(session.conversation_id);
+      if (!rec || rec.lastActivity !== session.last_activity) {
+        rec = { lastActivity: session.last_activity, count: 0 };
+        this.journalingAttempts.set(session.conversation_id, rec);
+      }
+      if (rec.count >= MAX_JOURNALING_ATTEMPTS) continue;
+
+      // Fire-and-forget. Stamp last_journaled_at on success (or skip); on failure
+      // leave it unchanged so a later tick retries, bounded by the attempt cap.
+      runner(session.conversation_id)
+        .then(() => {
+          this.journalingAttempts.delete(session.conversation_id);
+          this.db
+            .prepare(`UPDATE sessions SET last_journaled_at = ? WHERE id = ?`)
+            .run(nowIso, session.id);
+        })
+        .catch((err: unknown) => {
+          const current = this.journalingAttempts.get(session.conversation_id);
+          if (current) current.count += 1;
+          console.error(
+            `[session-tracker] Journaling turn failed for ${session.conversation_id.slice(0, 8)} ` +
+              `(attempt ${current?.count ?? 1}):`,
+            err,
+          );
+        });
+    }
   }
 
   /** Resolve the minimum message count required before a session can be closed, for a given channel. */
@@ -104,10 +187,16 @@ export class SessionTracker {
     // All idle sessions are closed regardless of message_count to prevent
     // accumulation. Hook and summarization only fire for those meeting the
     // per-channel minimum.
+    //
+    // E20: headless-managed sessions (claude_session_id set by cc-headless) are
+    // long-lived and never force-closed on idle — the journaling dispatcher
+    // captures their knowledge on pause instead. Only the legacy MCP path
+    // (claude_session_id IS NULL) is torn down here.
     const idleSessions = this.db
       .prepare(
         `SELECT * FROM sessions
-         WHERE ended_at IS NULL AND status = 'active' AND last_activity < ?`,
+         WHERE ended_at IS NULL AND status = 'active' AND last_activity < ?
+           AND claude_session_id IS NULL`,
       )
       .all(cutoff) as SessionRow[];
 

@@ -206,4 +206,47 @@ describe('transcript-log stage', () => {
     const result = await stage(ctx2);
     expect(result!.sessionCreated).toBe(false);
   });
+
+  // ── E20: long-lived headless sessions (scoped via claude_session_id) ──────────
+
+  it('extends a headless session across an idle gap (never torn down)', async () => {
+    const db = makeDb();
+    const config: AppConfig = { ...stubConfig, memory: { ...stubConfig.memory, session_idle_threshold_ms: 1 } };
+    const stage = createTranscriptLog(db, config);
+    const cid = convId('chris', 'telegram', 'general');
+
+    // First message creates a session; mark it headless-managed (claude_session_id set).
+    const ctx1 = makeCtx({}, db, cid);
+    const r1 = await stage(ctx1);
+    const sessionId1 = r1!.sessionId!;
+    db.prepare(`UPDATE sessions SET claude_session_id = 'cc-abc' WHERE id = ?`).run(sessionId1);
+
+    // Wait to exceed the 1ms idle threshold.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    // Second message after the gap → same session, still open, claude_session_id intact.
+    const ctx2 = makeCtx({ id: 'msg-2' }, db, cid);
+    const r2 = await stage(ctx2);
+    expect(r2!.sessionId).toBe(sessionId1);
+    expect(r2!.sessionCreated).toBe(false);
+
+    const session = db
+      .prepare('SELECT ended_at, claude_session_id, message_count FROM sessions WHERE id = ?')
+      .get(sessionId1) as { ended_at: string | null; claude_session_id: string; message_count: number };
+    expect(session.ended_at).toBeNull();
+    expect(session.claude_session_id).toBe('cc-abc');
+    expect(session.message_count).toBe(2);
+  });
+
+  it('keeps distinct conversation_ids on separate sessions', async () => {
+    const db = makeDb();
+    const stage = createTranscriptLog(db, stubConfig);
+
+    const cidA = convId('chris', 'telegram', 'general');
+    const cidB = convId('chris', 'email', 'general');
+    const rA = await stage(makeCtx({ channel: 'telegram' }, db, cidA));
+    const rB = await stage(makeCtx({ id: 'msg-2', channel: 'email' }, db, cidB));
+
+    expect(rA!.sessionId).not.toBe(rB!.sessionId);
+  });
 });

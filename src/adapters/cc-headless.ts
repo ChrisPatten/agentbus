@@ -18,13 +18,14 @@
 import { writeFileSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import type Database from 'better-sqlite3';
 import { loadConfig } from '../config/loader.js';
 import { renderSystemPrompt, expandFileReferences, type PromptContext } from './prompt-renderer.js';
+import { assembleMemoryContext, formatLocalDate } from './memory-context.js';
 import type { MessageEnvelope } from '../types/envelope.js';
 import { formatMessagesForSampling } from './cc.js';
 
@@ -56,78 +57,49 @@ function enqueue(contactId: string, task: () => Promise<void>): void {
 interface SessionRow {
   id: string;
   claude_session_id: string | null;
+  contact_id: string;
+  channel: string;
 }
 
-interface MemoryRow {
-  category: string;
-  content: string;
-}
-
-interface SummaryRow {
-  summary: string;
-  started_at: string;
-  ended_at: string;
-}
-
-function getActiveSession(db: Database.Database, contactId: string, channel: string): SessionRow | null {
+/**
+ * E20: look up the active session by conversation_id. Long-lived headless
+ * sessions are keyed on conversation_id so each email thread resumes its own
+ * session and a long-lived Telegram conversation resumes the same one. Sessions
+ * are never force-closed on idle (ended_at stays NULL), so no status filter.
+ */
+function getActiveSession(db: Database.Database, conversationId: string): SessionRow | null {
   return db
     .prepare(
-      `SELECT id, claude_session_id FROM sessions
-       WHERE contact_id = ? AND channel = ? AND ended_at IS NULL AND status = 'active'
+      `SELECT id, claude_session_id, contact_id, channel FROM sessions
+       WHERE conversation_id = ? AND ended_at IS NULL
        ORDER BY started_at DESC LIMIT 1`,
     )
-    .get(contactId, channel) as SessionRow | null;
+    .get(conversationId) as SessionRow | null;
 }
 
 function storeClaudeSessionId(db: Database.Database, sessionId: string, claudeId: string): void {
   db.prepare(`UPDATE sessions SET claude_session_id = ? WHERE id = ?`).run(claudeId, sessionId);
 }
 
-function getMemories(db: Database.Database, contactId: string, channel: string): MemoryRow[] {
-  return db
+/**
+ * Resolve the conversation_id for a batch from the first message's transcript
+ * row — the authoritative value Stage 70 computed. Falls back to deriving it
+ * (sha256 of sorted [contact_id, channel, topic]) on the rare chance the
+ * transcript row is missing (Stage 80 is critical:false).
+ */
+function resolveConversationId(db: Database.Database, env: MessageEnvelope): string {
+  const row = db
     .prepare(
-      `SELECT category, content FROM memories
-       WHERE contact_id = ? AND (channel = ? OR channel IS NULL)
-         AND superseded_by IS NULL
-         AND (expires_at IS NULL OR expires_at > datetime('now'))
-       ORDER BY created_at DESC LIMIT 20`,
+      `SELECT conversation_id FROM transcripts WHERE message_id = ? ORDER BY created_at ASC LIMIT 1`,
     )
-    .all(contactId, channel) as MemoryRow[];
+    .get(env.id) as { conversation_id: string } | undefined;
+  if (row) return row.conversation_id;
+
+  const contactId = env.sender.startsWith('contact:') ? env.sender.slice('contact:'.length) : env.sender;
+  const parts = [contactId, env.channel, env.topic].sort();
+  return createHash('sha256').update(parts.join(':')).digest('hex');
 }
 
-function getLastSummary(db: Database.Database, contactId: string, channel: string): SummaryRow | null {
-  return db
-    .prepare(
-      `SELECT ss.summary, ss.started_at, ss.ended_at
-       FROM session_summaries ss
-       JOIN sessions s ON s.id = ss.session_id
-       WHERE s.contact_id = ? AND ss.channel = ?
-       ORDER BY ss.created_at DESC LIMIT 1`,
-    )
-    .get(contactId, channel) as SummaryRow | null;
-}
-
-// ── Prompt context builders ───────────────────────────────────────────────────
-
-function formatMemories(rows: MemoryRow[]): string {
-  if (rows.length === 0) return '';
-  const lines = rows.map((r) => `- [${r.category}] ${r.content}`);
-  return `## Memories\n${lines.join('\n')}`;
-}
-
-function formatSummary(row: SummaryRow | null): string {
-  if (!row) return '';
-  let text: string;
-  try {
-    const parsed = JSON.parse(row.summary) as { summary?: string };
-    text = parsed.summary ?? row.summary;
-  } catch {
-    text = row.summary;
-  }
-  const d = (iso: string) =>
-    new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
-  return `## Last conversation (${d(row.started_at)} – ${d(row.ended_at)})\n${text}`;
-}
 
 // ── Temp file helpers ─────────────────────────────────────────────────────────
 
@@ -287,6 +259,75 @@ async function deliverResponse(
   }
 }
 
+// ── Turn runner (shared by normal + journaling turns) ──────────────────────────
+
+/** Build the stdio MCP config that exposes the headless tool subset to claude -p. */
+function buildMcpConfig(): unknown {
+  return {
+    mcpServers: {
+      agentbus: {
+        type: 'stdio',
+        command: 'npx',
+        args: ['tsx', resolve(process.cwd(), 'src/adapters/cc.js')],
+        env: {
+          AGENTBUS_TOOLS_ONLY: 'true',
+          AGENTBUS_CONFIG: configPath,
+        },
+      },
+    },
+  };
+}
+
+/**
+ * Render the system prompt, write temp files, invoke claude -p, and persist any
+ * new claude_session_id. Shared by normal turns (processBatch) and silent
+ * journaling turns (runJournalingTurn). The memory context block is assembled
+ * fresh from the agent's files on every call.
+ */
+async function runClaudeTurn(opts: {
+  db: Database.Database;
+  session: SessionRow | null;
+  contactId: string;
+  channel: string;
+  prompt: string;
+  resumeId: string | null;
+}): Promise<SpawnResult> {
+  const now = new Date();
+  const ctx: PromptContext = {
+    contact_id: opts.contactId,
+    channel: opts.channel,
+    date: formatLocalDate(now),
+    memories: assembleMemoryContext(WORKING_DIR, headlessCfg!.memory, now),
+    // E20: structured DB summaries are retired; files are the source of truth.
+    session_summary: '',
+    agent_id: AGENT_ID,
+  };
+
+  // Render {{vars}} then expand @path file references (trusted operator config).
+  const systemPromptText = expandFileReferences(
+    renderSystemPrompt(headlessCfg!.system_prompt, ctx),
+    WORKING_DIR,
+  );
+
+  const spPath = writeTmp(systemPromptText, '.txt');
+  const mcpPath = writeTmp(JSON.stringify(buildMcpConfig()), '.json');
+
+  try {
+    const result = await invokeClause(opts.prompt, spPath, mcpPath, opts.resumeId);
+    // Persist the claude_session_id so subsequent turns --resume the same one.
+    if (result.claudeSessionId && opts.session) {
+      try {
+        storeClaudeSessionId(opts.db, opts.session.id, result.claudeSessionId);
+      } catch (err) {
+        console.error(`[cc-headless] Failed to store claude_session_id for ${opts.session.id}:`, err);
+      }
+    }
+    return result;
+  } finally {
+    cleanTmp(spPath, mcpPath);
+  }
+}
+
 // ── Batch processor ───────────────────────────────────────────────────────────
 
 async function processBatch(
@@ -300,87 +341,84 @@ async function processBatch(
   // Show activity on the source channel while the (cold-start) claude -p runs.
   startTyping(channel, contactId);
 
-  // Look up active session for --resume
-  const session = getActiveSession(db, contactId, channel);
+  // E20: key resume on conversation_id (per-thread sessions, long-lived).
+  const conversationId = resolveConversationId(db, first);
+  const session = getActiveSession(db, conversationId);
   const resumeId = session?.claude_session_id ?? null;
 
-  // Build system prompt context
-  const memories = getMemories(db, contactId, channel);
-  const lastSummary = getLastSummary(db, contactId, channel);
-
-  const ctx: PromptContext = {
-    contact_id: contactId,
-    channel,
-    date: new Date().toISOString().slice(0, 10),
-    memories: formatMemories(memories),
-    session_summary: formatSummary(lastSummary),
-    agent_id: AGENT_ID,
-  };
-
-  // Render {{vars}} then expand @path file references (trusted operator config).
-  const systemPromptText = expandFileReferences(
-    renderSystemPrompt(headlessCfg!.system_prompt, ctx),
-    WORKING_DIR,
-  );
-  // Memories/summary are injected via the system prompt above, so suppress the
-  // Stage-85 <memory> block in the user message to avoid double injection.
+  // Memory is injected via the system prompt (assembleMemoryContext), so suppress
+  // the Stage-85 <memory> block in the user message to avoid double injection.
   const prompt = formatMessagesForSampling(envelopes, { includeMemoryContext: false });
 
-  // Write temp files
-  const spPath = writeTmp(systemPromptText, '.txt');
-  const mcpConfig = {
-    mcpServers: {
-      agentbus: {
-        type: 'stdio',
-        command: 'npx',
-        args: ['tsx', resolve(process.cwd(), 'src/adapters/cc.js')],
-        env: {
-          AGENTBUS_TOOLS_ONLY: 'true',
-          AGENTBUS_CONFIG: configPath,
-        },
-      },
-    },
-  };
-  const mcpPath = writeTmp(JSON.stringify(mcpConfig), '.json');
+  const { resultText, deliveredViaTool, error } = await runClaudeTurn({
+    db,
+    session,
+    contactId,
+    channel,
+    prompt,
+    resumeId,
+  });
 
-  try {
-    const { claudeSessionId, resultText, deliveredViaTool, error } = await invokeClause(
-      prompt,
-      spPath,
-      mcpPath,
-      resumeId,
-    );
-
-    // Store claude_session_id on the active session
-    if (claudeSessionId && session) {
-      try {
-        storeClaudeSessionId(db, session.id, claudeSessionId);
-      } catch (err) {
-        console.error(`[cc-headless] Failed to store claude_session_id for ${session.id}:`, err);
-      }
+  // The agent owns delivery via the reply/send_message tools. Only the adapter
+  // steps in when the agent delivered nothing through a tool:
+  //   - on failure / no result → send the configured error_reply (no silence)
+  //   - otherwise → fall back to delivering the stdout result text
+  if (deliveredViaTool) {
+    if (error) {
+      console.error(`[cc-headless] claude reported an error for ${contactId} after delivering via tool: ${error}`);
     }
-
-    // The agent owns delivery via the reply/send_message tools. Only the adapter
-    // steps in when the agent delivered nothing through a tool:
-    //   - on failure / no result → send the configured error_reply (no silence)
-    //   - otherwise → fall back to delivering the stdout result text
-    if (deliveredViaTool) {
-      if (error) {
-        console.error(`[cc-headless] claude reported an error for ${contactId} after delivering via tool: ${error}`);
-      }
-      return;
-    }
-
-    if (error || !resultText) {
-      console.error(`[cc-headless] claude invocation failed for ${contactId}: ${error ?? 'no result'}`);
-      await deliverResponse(first, headlessCfg!.error_reply);
-      return;
-    }
-
-    await deliverResponse(first, resultText);
-  } finally {
-    cleanTmp(spPath, mcpPath);
+    return;
   }
+
+  if (error || !resultText) {
+    console.error(`[cc-headless] claude invocation failed for ${contactId}: ${error ?? 'no result'}`);
+    await deliverResponse(first, headlessCfg!.error_reply);
+    return;
+  }
+
+  await deliverResponse(first, resultText);
+}
+
+// ── Silent journaling turn (E20) ────────────────────────────────────────────────
+
+/**
+ * Fire a silent `--resume` journaling turn for a paused conversation: the agent
+ * reviews the conversation and updates its own memory files. Nothing is
+ * delivered to the user (no deliverResponse, no stdout fallback, no typing
+ * indicator). Serialized through the same per-contact queue as normal turns so
+ * a journaling turn never races a live reply on the same claude_session_id.
+ *
+ * Resolves `{ skipped: true }` when the session has no claude_session_id yet
+ * (the agent never spoke — nothing to journal); the dispatcher stamps it
+ * journaled anyway. Rejects on invocation error so the dispatcher leaves
+ * last_journaled_at unchanged and retries on a later tick.
+ */
+function runJournalingTurn(conversationId: string, db: Database.Database): Promise<{ skipped?: boolean }> {
+  const session = getActiveSession(db, conversationId);
+  if (!session || !session.claude_session_id) {
+    return Promise.resolve({ skipped: true });
+  }
+
+  const queueKey = `contact:${session.contact_id}`;
+  return new Promise((resolveP, rejectP) => {
+    enqueue(queueKey, async () => {
+      const result = await runClaudeTurn({
+        db,
+        session,
+        contactId: session.contact_id,
+        channel: session.channel,
+        prompt: headlessCfg!.journaling.prompt,
+        resumeId: session.claude_session_id,
+      });
+      // Silent: never deliver. Any reply/send_message the agent chose to call
+      // already went through the MCP tool — the adapter posts nothing here.
+      if (result.error) {
+        rejectP(new Error(result.error));
+        return;
+      }
+      resolveP({});
+    });
+  });
 }
 
 // ── Poll loop ─────────────────────────────────────────────────────────────────
@@ -444,14 +482,26 @@ async function poll(db: Database.Database): Promise<void> {
 
 // ── Lifecycle (standalone mode) ───────────────────────────────────────────────
 
+/** Handle returned by startHeadless for the bus to drive journaling turns. */
+export interface HeadlessHandle {
+  /**
+   * Fire a silent journaling turn for the given conversation. Resolves with
+   * `{ skipped: true }` when there is nothing to journal; rejects on error.
+   */
+  runJournalingTurn(conversationId: string): Promise<{ skipped?: boolean }>;
+}
+
 /**
  * Start the headless adapter as a standalone process.
  * When running in-process via index.ts, call startHeadless() instead.
+ *
+ * Returns a HeadlessHandle the SessionTracker uses to dispatch journaling
+ * turns, or null when no cc-headless config is present.
  */
-export function startHeadless(db: Database.Database): void {
+export function startHeadless(db: Database.Database): HeadlessHandle | null {
   if (!headlessCfg) {
     console.warn('[cc-headless] No cc-headless adapter config found — skipping');
-    return;
+    return null;
   }
   AGENT_ID = `agent:${headlessCfg.agent_id}`;
   POLL_INTERVAL_MS = headlessCfg.poll_interval_ms;
@@ -460,6 +510,9 @@ export function startHeadless(db: Database.Database): void {
   busBaseUrl = `http://127.0.0.1:${config.bus.http_port}`;
   console.log(`[cc-headless] Starting — polling ${busBaseUrl} for ${AGENT_ID} every ${POLL_INTERVAL_MS}ms`);
   void poll(db);
+  return {
+    runJournalingTurn: (conversationId: string) => runJournalingTurn(conversationId, db),
+  };
 }
 
 export function stopHeadless(): void {

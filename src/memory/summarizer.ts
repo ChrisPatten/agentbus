@@ -117,6 +117,16 @@ export class Summarizer {
 
   /** Summarize a completed session. Returns true on success. */
   async summarize(sessionId: string): Promise<boolean> {
+    // E20: the structured content store (memories / session_summaries) is dormant
+    // by default — the agent's own files are the source of truth. When disabled,
+    // write neither table and skip the Claude API call entirely; just mark the
+    // session done so it is not retried. Operators that still rely on the
+    // structured store for MCP-adapter deployments set memory.structured_extraction.
+    if (!this.config.memory.structured_extraction) {
+      this.db.prepare(`UPDATE sessions SET status = 'summarized' WHERE id = ?`).run(sessionId);
+      return true;
+    }
+
     if (this.disabled) return false;
 
     const session = this.db
