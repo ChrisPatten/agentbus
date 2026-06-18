@@ -137,6 +137,7 @@ async function invokeClause(
   const args = [
     '-p', prompt,
     '--output-format', 'stream-json',
+    '--verbose', // required by the CLI when --print is combined with --output-format=stream-json
     '--allowedTools', 'all',
     '--mcp-config', mcpConfigPath,
     '--system-prompt-file', systemPromptPath,
@@ -147,7 +148,15 @@ async function invokeClause(
 
   return new Promise((resolve) => {
     // cwd drives which CLAUDE.md hierarchy claude -p auto-loads into context.
-    const child = spawn(CLAUDE_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'], cwd: WORKING_DIR });
+    // CLAUDE_CODE_DISABLE_AUTO_MEMORY: the adapter already injects the agent's
+    // memory files via {{memories}} in the system prompt, so the CLI's native
+    // auto-memory feature would load MEMORY.md a second time. Disable it here so
+    // every headless agent avoids the double-load without per-agent config.
+    const child = spawn(CLAUDE_BIN, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      cwd: WORKING_DIR,
+      env: { ...process.env, CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' },
+    });
 
     let claudeSessionId: string | null = null;
     let resultText: string | null = null;
@@ -421,6 +430,38 @@ function runJournalingTurn(conversationId: string, db: Database.Database): Promi
   });
 }
 
+/**
+ * Fire a silent background journaling turn for an explicit claude session id,
+ * independent of the DB session row. Used by the `/clear` command: the bus has
+ * already set `ended_at` on the session (so the next message starts fresh), but
+ * the underlying claude session still exists on disk and can be resumed for one
+ * final memory pass. Serialized through the same per-contact queue so it never
+ * races a live turn. Failures are logged, not surfaced — journaling is silent.
+ */
+function journalResumeId(
+  db: Database.Database,
+  opts: { claudeSessionId: string; contactId: string; channel: string },
+): void {
+  const queueKey = `contact:${opts.contactId}`;
+  enqueue(queueKey, async () => {
+    try {
+      const result = await runClaudeTurn({
+        db,
+        session: null, // session already closed; nothing to persist back
+        contactId: opts.contactId,
+        channel: opts.channel,
+        prompt: headlessCfg!.journaling.prompt,
+        resumeId: opts.claudeSessionId,
+      });
+      if (result.error) {
+        console.error(`[cc-headless] /clear journaling failed for ${opts.contactId}: ${result.error}`);
+      }
+    } catch (err) {
+      console.error(`[cc-headless] /clear journaling threw for ${opts.contactId}:`, err);
+    }
+  });
+}
+
 // ── Poll loop ─────────────────────────────────────────────────────────────────
 
 let pollTimer: ReturnType<typeof setTimeout> | null = null;
@@ -489,6 +530,11 @@ export interface HeadlessHandle {
    * `{ skipped: true }` when there is nothing to journal; rejects on error.
    */
   runJournalingTurn(conversationId: string): Promise<{ skipped?: boolean }>;
+  /**
+   * Fire a silent background journaling turn for an explicit claude session id
+   * whose DB session row has already been closed (used by `/clear`).
+   */
+  journalResumeId(opts: { claudeSessionId: string; contactId: string; channel: string }): void;
 }
 
 /**
@@ -512,6 +558,7 @@ export function startHeadless(db: Database.Database): HeadlessHandle | null {
   void poll(db);
   return {
     runJournalingTurn: (conversationId: string) => runJournalingTurn(conversationId, db),
+    journalResumeId: (opts) => journalResumeId(db, opts),
   };
 }
 

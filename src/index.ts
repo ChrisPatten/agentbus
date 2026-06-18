@@ -70,7 +70,7 @@ if (process.argv.includes('--rebuild-fts')) {
 const queue = new MessageQueue(db);
 const registry = new AdapterRegistry();
 
-const { registry: commandRegistry, pauseSet } = createCommandSystem({
+const { registry: commandRegistry, pauseSet, headlessControl } = createCommandSystem({
   adapterRegistry: registry,
   queue,
   db,
@@ -216,7 +216,11 @@ deliveryWorker.start();
 // journaling runner is wired in before the tracker's first tick (E20).
 if (config.adapters['cc-headless']) {
   const headless = startHeadless(db);
-  if (headless) sessionTracker.setJournalingRunner(headless.runJournalingTurn);
+  if (headless) {
+    sessionTracker.setJournalingRunner(headless.runJournalingTurn);
+    // Let /clear reach the headless journaling hook (command system built earlier).
+    headlessControl.journalResumeId = headless.journalResumeId;
+  }
 }
 
 sessionTracker.start();

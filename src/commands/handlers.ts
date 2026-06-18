@@ -15,12 +15,28 @@ import type { CommandRegistry } from './registry.js';
 import type { AdapterRegistry } from '../core/registry.js';
 import type { MessageQueue } from '../core/queue.js';
 
+/**
+ * Mutable holder for the headless adapter's control hooks. Populated by
+ * index.ts after startHeadless(); `undefined` hooks mean the headless adapter
+ * is not running (e.g. an MCP-only deployment), so commands degrade gracefully.
+ */
+export interface HeadlessControl {
+  /**
+   * Fire a silent background journaling turn for a claude session whose DB row
+   * has already been closed. Used by /clear to journal the old session after
+   * starting a fresh one.
+   */
+  journalResumeId?: (opts: { claudeSessionId: string; contactId: string; channel: string }) => void;
+}
+
 export interface HandlerDeps {
   adapterRegistry: AdapterRegistry;
   queue: MessageQueue;
   pauseSet: Set<string>;
   /** Raw DB handle for built-in commands that need write access */
   db: Database.Database;
+  /** Late-bound headless adapter hooks (see HeadlessControl). */
+  headlessControl?: HeadlessControl;
 }
 
 // ── /status ──────────────────────────────────────────────────────────────────
@@ -539,6 +555,58 @@ async function scheduleHandler(
   };
 }
 
+// ── /clear ────────────────────────────────────────────────────────────────────
+
+/**
+ * Start a fresh headless session for the sender on this channel. Closes the
+ * current active session immediately (so the next message spawns a fresh
+ * `claude -p` with no `--resume`), then journals the now-closed session in the
+ * background — the agent reviews the conversation one last time and updates its
+ * memory files. The close is atomic; journaling runs against the captured
+ * `claude_session_id`, which persists on disk independent of the DB `ended_at`.
+ */
+async function clearHandler(
+  _args: string[],
+  ctx: SlashCommandContext,
+  deps: HandlerDeps,
+): Promise<CommandResponse> {
+  const contactId = ctx.sender.startsWith('contact:')
+    ? ctx.sender.slice('contact:'.length)
+    : ctx.sender;
+
+  const session = deps.db
+    .prepare(
+      `SELECT id, claude_session_id FROM sessions
+       WHERE contact_id = ? AND channel = ? AND ended_at IS NULL
+         AND claude_session_id IS NOT NULL
+       ORDER BY last_activity DESC LIMIT 1`,
+    )
+    .get(contactId, ctx.channel) as { id: string; claude_session_id: string } | undefined;
+
+  if (!session) {
+    return { body: 'No active session to clear — your next message already starts fresh.' };
+  }
+
+  // Close immediately so the next inbound message starts a brand-new session.
+  deps.db
+    .prepare(`UPDATE sessions SET ended_at = ? WHERE id = ?`)
+    .run(new Date().toISOString(), session.id);
+
+  // Journal the now-closed session in the background, if the headless adapter is
+  // running. The claude session is resumable on disk regardless of the DB flag.
+  const journal = deps.headlessControl?.journalResumeId;
+  if (journal) {
+    journal({ claudeSessionId: session.claude_session_id, contactId, channel: ctx.channel });
+    return {
+      body: 'Context cleared — your next message starts a fresh session. Journaling the previous session in the background.',
+    };
+  }
+
+  return {
+    body: 'Context cleared — your next message starts a fresh session. (Headless adapter not running; previous session closed without a memory pass.)',
+  };
+}
+
 // ── Factory ───────────────────────────────────────────────────────────────────
 
 /**
@@ -616,6 +684,13 @@ export function createBuiltinCommands(deps: HandlerDeps): CommandDefinition[] {
       usage: '/schedule [list | cancel <id>]',
       scope: 'bus',
       handler: (args, ctx) => scheduleHandler(args, ctx, deps),
+    },
+    {
+      name: 'clear',
+      description: 'Start a fresh session; journal the previous one in the background',
+      usage: '/clear',
+      scope: 'bus',
+      handler: (args, ctx) => clearHandler(args, ctx, deps),
     },
   ];
 }

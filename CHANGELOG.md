@@ -10,6 +10,34 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-18
+
+### Added
+- `/clear` slash command: start a fresh headless session on demand. Closes the
+  sender's active session on the originating channel immediately (the next
+  message spawns a fresh `claude -p` with no `--resume`), then journals the
+  now-closed session in the background by resuming its `claude_session_id` so the
+  agent updates its memory files one last time. Channel-scoped and degrades
+  gracefully when the headless adapter isn't running. New
+  `HeadlessHandle.journalResumeId` hook, exposed to commands via a late-bound
+  `headlessControl` holder. See `docs/SLASH_COMMANDS.md`.
+
+### Fixed
+- Telegram slash-command autocomplete now reflects the live command registry.
+  The adapter registered commands only in the `default` scope, so a stale
+  `all_private_chats` set (e.g. `/start, /help, /status` left by BotFather)
+  permanently shadowed it in 1:1 chats and new commands never appeared.
+  `registerCommands` now writes both the `default` and `all_private_chats` scopes
+  and confirms against the private-chat scope on startup.
+- Headless adapter (`cc-headless`) now passes `--verbose` alongside
+  `--output-format stream-json`, which the Claude CLI requires in `--print`
+  mode. Without it every invocation failed fast with `When using --print,
+  --output-format=stream-json requires --verbose` and the agent never replied.
+- Headless adapter now spawns `claude -p` with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`,
+  so the CLI's native auto-memory no longer loads `MEMORY.md` a second time on top
+  of the adapter's own `{{memories}}` injection. Eliminates a duplicate
+  per-turn memory block (token waste + confusion) for every headless agent.
+
 ## [0.3.0] - 2026-06-18
 
 ### Added
@@ -86,7 +114,8 @@ Baseline release. Core bus, pipeline, adapters, memory, scheduling.
 - Built-in slash commands + plugin command registry. (E6)
 - Scheduled messages (cron + one-shot) via background scheduler. (E18)
 
-[Unreleased]: https://github.com/ChrisPatten/agentbus/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/ChrisPatten/agentbus/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/ChrisPatten/agentbus/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/ChrisPatten/agentbus/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ChrisPatten/agentbus/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/ChrisPatten/agentbus/releases/tag/v0.1.0

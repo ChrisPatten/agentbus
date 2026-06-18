@@ -24,7 +24,7 @@ bus-core
   └── cc-headless adapter (in-process)
         ├── polls HTTP API for pending messages
         ├── per-contact serialization queue
-        ├── spawns: claude -p <prompt> --output-format stream-json --resume <id> --mcp-config ... --system-prompt-file ...
+        ├── spawns: claude -p <prompt> --output-format stream-json --verbose --resume <id> --mcp-config ... --system-prompt-file ...
         │     └── MCP subprocess: cc.ts (AGENTBUS_TOOLS_ONLY=true)
         │           └── tools: react_to_message, recall_memory, log_memory, ...
         └── captures result text → POSTs outbound envelope to bus
@@ -51,15 +51,20 @@ Continuity comes from two places: the resumed Claude session (recent conversatio
 ```
 claude -p "<formatted_prompt>" \
   --output-format stream-json \
+  --verbose \
   --allowedTools all \
   --mcp-config /tmp/agentbus-mcp-<uuid>.json \
   --system-prompt-file /tmp/agentbus-sp-<uuid>.txt \
   [--resume <claude_session_id>]
 ```
 
+`--verbose` is required by the Claude CLI whenever `--print`/`-p` is combined with `--output-format stream-json`; without it the invocation fails fast with `When using --print, --output-format=stream-json requires --verbose`. It does not change the emitted JSONL event stream the adapter parses.
+
 Temp files are written immediately before spawn and deleted after the result is captured. The process is spawned with `cwd` set to `working_dir` (see [Context loading](#context-loading-claudemd--file-references)).
 
 `--system-prompt-file` **replaces** the default system prompt (the chat persona does not inherit Claude Code's coding-agent default). This does **not** suppress `CLAUDE.md` auto-loading — `CLAUDE.md` is injected as separate project context. (`--bare` would disable that and is intentionally not used.)
+
+The child is spawned with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`. The adapter already assembles the agent's memory files into the system prompt via `{{memories}}` (see [Context assembly](#context-assembly-memory-files-e20)), so the CLI's native auto-memory feature — which independently loads `MEMORY.md` from the per-project memory directory — would inject the same file a second time. Disabling it at the spawn keeps memory injection under the adapter's control for every headless agent without per-agent settings. (Equivalent to `autoMemoryEnabled: false` in settings, scoped to these invocations only.)
 
 ### MCP config file
 
@@ -188,6 +193,8 @@ When a conversation goes idle past a per-channel threshold, the bus fires a **si
 - **The journaling turn adds to the transcript.** The silent `--resume` turn appends an assistant turn, so the next user turn sees both the prior conversation and the journaling exchange. Auto-compaction absorbs the minor token cost.
 
 Set `journaling.enabled: false` to disable it entirely (the dispatcher becomes a no-op).
+
+**Manual reset (`/clear`).** Pause-triggered journaling is automatic, but you can also force a fresh context window with the [`/clear`](./SLASH_COMMANDS.md#clear) slash command. It closes the active session for your contact on that channel immediately (next message starts fresh, no `--resume`), then fires the same silent journaling turn in the background — except it resumes the captured `claude_session_id` directly (via `HeadlessHandle.journalResumeId`), since the DB session row is already closed. Uses `journaling.prompt`, so disabling journaling does not disable `/clear`'s close; it just skips the memory pass.
 
 ## Per-Contact Serialization
 
