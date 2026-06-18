@@ -756,4 +756,108 @@ describe('command handlers', () => {
       expect(result.body).toContain('Usage');
     });
   });
+
+  describe('/clear', () => {
+    function insertSession(
+      db: Database.Database,
+      opts: { id: string; channel?: string; claudeSessionId?: string | null; endedAt?: string | null } ,
+    ) {
+      const now = new Date().toISOString();
+      db.prepare(
+        `INSERT INTO sessions (id, conversation_id, channel, contact_id, started_at, last_activity, ended_at, claude_session_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        opts.id,
+        `conv-${opts.id}`,
+        opts.channel ?? 'telegram',
+        'chris',
+        now,
+        now,
+        opts.endedAt ?? null,
+        opts.claudeSessionId === undefined ? 'claude-abc' : opts.claudeSessionId,
+      );
+    }
+
+    it('closes the active session and journals it in the background', async () => {
+      const db = makeDb();
+      insertSession(db, { id: 'sess-1' });
+      const journalResumeId = vi.fn();
+      const deps = { ...makeDeps({ db }), headlessControl: { journalResumeId } };
+      const commands = createBuiltinCommands(deps as never);
+      const clear = commands.find((c) => c.name === 'clear')!;
+
+      const result = await clear.handler([], makeCtx(db));
+
+      expect(result.body).toContain('fresh session');
+      const row = db.prepare(`SELECT ended_at FROM sessions WHERE id = 'sess-1'`).get() as {
+        ended_at: string | null;
+      };
+      expect(row.ended_at).not.toBeNull();
+      expect(journalResumeId).toHaveBeenCalledWith({
+        claudeSessionId: 'claude-abc',
+        contactId: 'chris',
+        channel: 'telegram',
+      });
+    });
+
+    it('reports nothing to clear when there is no active session', async () => {
+      const db = makeDb();
+      const journalResumeId = vi.fn();
+      const deps = { ...makeDeps({ db }), headlessControl: { journalResumeId } };
+      const commands = createBuiltinCommands(deps as never);
+      const clear = commands.find((c) => c.name === 'clear')!;
+
+      const result = await clear.handler([], makeCtx(db));
+
+      expect(result.body).toContain('No active session');
+      expect(journalResumeId).not.toHaveBeenCalled();
+    });
+
+    it('does not touch a session on a different channel', async () => {
+      const db = makeDb();
+      insertSession(db, { id: 'sess-sys', channel: 'system:peggy' });
+      const journalResumeId = vi.fn();
+      const deps = { ...makeDeps({ db }), headlessControl: { journalResumeId } };
+      const commands = createBuiltinCommands(deps as never);
+      const clear = commands.find((c) => c.name === 'clear')!;
+
+      // makeCtx defaults to channel 'telegram'
+      const result = await clear.handler([], makeCtx(db));
+
+      expect(result.body).toContain('No active session');
+      const row = db.prepare(`SELECT ended_at FROM sessions WHERE id = 'sess-sys'`).get() as {
+        ended_at: string | null;
+      };
+      expect(row.ended_at).toBeNull();
+      expect(journalResumeId).not.toHaveBeenCalled();
+    });
+
+    it('ignores a session with no claude_session_id (never spoke)', async () => {
+      const db = makeDb();
+      insertSession(db, { id: 'sess-nul', claudeSessionId: null });
+      const deps = { ...makeDeps({ db }), headlessControl: { journalResumeId: vi.fn() } };
+      const commands = createBuiltinCommands(deps as never);
+      const clear = commands.find((c) => c.name === 'clear')!;
+
+      const result = await clear.handler([], makeCtx(db));
+
+      expect(result.body).toContain('No active session');
+    });
+
+    it('still closes the session when the headless adapter is not running', async () => {
+      const db = makeDb();
+      insertSession(db, { id: 'sess-2' });
+      const deps = makeDeps({ db }); // no headlessControl
+      const commands = createBuiltinCommands(deps);
+      const clear = commands.find((c) => c.name === 'clear')!;
+
+      const result = await clear.handler([], makeCtx(db));
+
+      expect(result.body).toContain('Headless adapter not running');
+      const row = db.prepare(`SELECT ended_at FROM sessions WHERE id = 'sess-2'`).get() as {
+        ended_at: string | null;
+      };
+      expect(row.ended_at).not.toBeNull();
+    });
+  });
 });

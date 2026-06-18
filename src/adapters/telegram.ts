@@ -891,11 +891,25 @@ export class TelegramAdapter implements AdapterInstance {
     }
 
     try {
+      // Telegram resolves a chat's command menu by scope precedence:
+      //   chat (specific) > all_private_chats > all_group_chats > default.
+      // Writing only the default scope is not enough: a stale `all_private_chats`
+      // set (e.g. left behind by BotFather, which is what most bots show) shadows
+      // it permanently in 1:1 chats, so new commands never appear in autocomplete.
+      // Set both scopes so the private-chat menu always reflects the live list.
       await this.callTelegram('setMyCommands', { commands });
+      await this.callTelegram('setMyCommands', {
+        commands,
+        scope: { type: 'all_private_chats' },
+      });
       await this.callTelegram('setChatMenuButton', { menu_button: { type: 'commands' } });
-      const stored = await this.callTelegram<Array<{ command: string }>>('getMyCommands', {});
+      // Confirm against the all_private_chats scope — the one the client actually
+      // reads in a 1:1 chat — so the log reflects what the user will see.
+      const stored = await this.callTelegram<Array<{ command: string }>>('getMyCommands', {
+        scope: { type: 'all_private_chats' },
+      });
       console.log(
-        `${this.tag} Registered ${commands.length} slash commands — Telegram confirms: ${stored.map((c) => c.command).join(', ')}`,
+        `${this.tag} Registered ${commands.length} slash commands (default + all_private_chats) — Telegram confirms for private chats: ${stored.map((c) => c.command).join(', ')}`,
       );
     } catch (err) {
       console.error(`${this.tag} Failed to register slash commands: ${String(err)}`);

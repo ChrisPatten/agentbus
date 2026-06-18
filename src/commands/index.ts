@@ -30,6 +30,8 @@ export type {
 export { createSafeDatabase } from '../db/safe-database.js';
 export type { SafeDatabase } from '../db/safe-database.js';
 
+export type { HeadlessControl } from './handlers.js';
+
 export interface CommandSystemDeps {
   adapterRegistry: AdapterRegistry;
   queue: MessageQueue;
@@ -41,6 +43,13 @@ export interface CommandSystem {
   registry: CommandRegistry;
   /** Set of adapter IDs currently paused — mutated by /pause and /resume */
   pauseSet: Set<string>;
+  /**
+   * Mutable holder for the headless adapter's control hooks. The command system
+   * is built before the headless adapter starts, so `/clear` reaches the
+   * journaling hook through this holder, which index.ts populates after
+   * startHeadless().
+   */
+  headlessControl: import('./handlers.js').HeadlessControl;
 }
 
 /**
@@ -60,11 +69,14 @@ export function createCommandSystem(deps: CommandSystemDeps): CommandSystem {
     console.log(`[commands] Adapter "${row.adapter_id}" is paused (by ${row.paused_by} — persisted from previous run)`);
   }
 
+  const headlessControl: import('./handlers.js').HeadlessControl = {};
+
   const builtins = createBuiltinCommands({
     adapterRegistry: deps.adapterRegistry,
     queue: deps.queue,
     pauseSet,
     db: deps.db,
+    headlessControl,
   });
 
   for (const cmd of builtins) {
@@ -82,5 +94,5 @@ export function createCommandSystem(deps: CommandSystemDeps): CommandSystem {
     handler: createHelpHandler(registry),
   });
 
-  return { registry, pauseSet };
+  return { registry, pauseSet, headlessControl };
 }

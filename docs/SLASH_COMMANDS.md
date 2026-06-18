@@ -16,6 +16,7 @@ Slash commands let you operate AgentBus from any connected channel without SSH a
 | `/cancel` | Cancel active replay playback | `/cancel` |
 | `/forget <contact_id>` | Expire all memory records for a contact | `/forget chris` |
 | `/retry_summary <session_id>` | Re-queue summarization for a failed session | `/retry_summary aaaabbbb` |
+| `/clear` | Start a fresh session; journal the previous one in the background | `/clear` |
 
 ### `/status`
 
@@ -140,6 +141,25 @@ If the session is not in `summarize_failed` status:
 
 See [MEMORY.md](./MEMORY.md) for troubleshooting summarization failures.
 
+### `/clear`
+
+The `/clear` equivalent for headless (`cc-headless`) agents: start a fresh context window. It closes your current active session **on the channel you send it from**, so your next message spawns a brand-new `claude -p` with no `--resume`. The close is immediate — there is no window where a follow-up re-attaches to the old session.
+
+The previous session is **not discarded**: after closing it, the bus fires a silent background journaling turn (resuming the old `claude_session_id`) so the agent reviews the conversation one last time and updates its memory files before the context is left behind. Nothing is delivered to the user from that turn. Because journaling resumes the underlying claude session by id and writes to the agent's memory *files*, it works correctly even though the DB session row is already closed.
+
+```
+/clear
+-> Context cleared -- your next message starts a fresh session. Journaling the previous session in the background.
+```
+
+Scope and edge cases:
+
+- **Channel-scoped.** `/clear` only closes the active session for your contact on the originating channel. A Telegram `/clear` leaves a `system:peggy` (scheduler) session untouched, and vice versa.
+- **Nothing to clear.** If you have no active session with a live `claude_session_id` on that channel, it replies `No active session to clear` and does nothing.
+- **Headless not running.** On an MCP-only deployment the session is still closed, but there is no background memory pass (the reply says so).
+
+This command is most useful for headless agents (see [CC_HEADLESS_ADAPTER.md](./CC_HEADLESS_ADAPTER.md)); the journaling step is a no-op pass-through when the headless adapter isn't running.
+
 ---
 
 ## How Command Dispatch Works
@@ -191,3 +211,5 @@ The registry throws if a command name is already taken, preventing accidental ov
 ## Adapter Autocomplete
 
 At startup, bus-core calls `registerCommands()` on each adapter that declares `capabilities.registerCommands: true`. The Telegram adapter uses Telegram's `setMyCommands` API, which displays commands as autocomplete suggestions in the chat input. BlueBubbles (E4) will no-op gracefully when it's implemented.
+
+**Telegram command scopes.** Telegram picks a chat's command menu by scope precedence (`chat` > `all_private_chats` > `all_group_chats` > `default`). The adapter writes the list to **both** the `default` and `all_private_chats` scopes — writing only `default` lets a stale `all_private_chats` set (often `/start, /help, /status` from BotFather) permanently shadow the live list in 1:1 chats. See [TELEGRAM_ADAPTER.md](./TELEGRAM_ADAPTER.md#slash-commands).

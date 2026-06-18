@@ -182,7 +182,9 @@ At startup, the adapter calls `setMyCommands` to register a menu of slash comman
 | `/status` | Check AgentBus status |
 | `/help` | Show available commands |
 
-This causes Telegram to display autocomplete suggestions when users type `/` in the bot chat.
+This causes Telegram to display autocomplete suggestions when users type `/` in the bot chat. The full bus-scope command list comes from the `CommandRegistry`, not the abbreviated table above.
+
+**Command scopes.** Telegram resolves a chat's command menu by scope precedence — `chat` (a specific chat) > `all_private_chats` > `all_group_chats` > `default`. The adapter writes the command list to **both** the `default` scope and the `all_private_chats` scope. Writing only `default` is a known footgun: a stale `all_private_chats` set (commonly left behind by BotFather, e.g. `/start`, `/help`, `/status`) **shadows** the default list in 1:1 chats, so newly registered commands never appear in autocomplete. Setting `all_private_chats` explicitly on every startup keeps the private-chat menu in sync with the live registry. The startup log confirms the list Telegram returns for the `all_private_chats` scope — i.e. what you will actually see.
 
 ---
 
