@@ -64,7 +64,8 @@ export function registerMemoryTools(server: McpServer, busBaseUrl: string): void
     'recall_memory',
     {
       description:
-        'Search the memory store for facts about contacts and past conversations. Returns active memories matching the query, ordered by confidence.',
+        'Search the memory store for facts about contacts and past conversations. Returns active memories matching the query, ordered by confidence. ' +
+        'LEGACY: in the file-memory model (E20) the structured store is dormant — read your own MEMORY.md and daily journal files instead. Retained for MCP-adapter deployments with memory.structured_extraction enabled.',
       inputSchema: {
         query: z.string().min(1).describe('Full-text search query'),
         contact_id: z.string().optional().describe('Filter memories for a specific contact'),
@@ -119,7 +120,8 @@ export function registerMemoryTools(server: McpServer, busBaseUrl: string): void
     'log_memory',
     {
       description:
-        'Explicitly record a fact about a contact to the memory store. Supersedes an existing memory for the same contact and category.',
+        'Explicitly record a fact about a contact to the memory store. Supersedes an existing memory for the same contact and category. ' +
+        'LEGACY: in the file-memory model (E20) the structured store is dormant — write durable facts to your own MEMORY.md / daily journal files instead. Retained for MCP-adapter deployments with memory.structured_extraction enabled.',
       inputSchema: {
         contact_id: z.string().min(1).describe('Contact this memory is about'),
         content: z.string().min(1).describe('The fact or memory to record'),

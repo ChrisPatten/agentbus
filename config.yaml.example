@@ -20,6 +20,39 @@ adapters:
     webhook_port: 3002
   claude-code:
     poll_interval_ms: 1000
+  # Headless Claude Code adapter (E19/E20) — spawns `claude -p` per message
+  # batch instead of a persistent MCP session. See docs/CC_HEADLESS_ADAPTER.md
+  # and docs/MEMORY_MODEL.md. Uncomment to use instead of (or alongside) claude-code.
+  # cc-headless:
+  #   agent_id: claude
+  #   poll_interval_ms: 1000
+  #   claude_bin: claude
+  #   working_dir: /home/agent      # cwd for claude -p → selects the CLAUDE.md hierarchy
+  #   error_reply: "Sorry — I hit an error processing that. Please try again."
+  #   system_prompt: |
+  #     You are a helpful assistant for {{contact_id}} on {{channel}}.
+  #     Today is {{date}}.
+  #     Deliver every user-facing message by calling the `reply` tool ([id:<id>]).
+  #     @persona.md
+  #     {{memories}}
+  #   # E20: assemble the agent's own memory files into each turn (relative to working_dir)
+  #   memory:
+  #     dir: memory
+  #     index_file: MEMORY.md
+  #     daily_subdir: daily
+  #     journal_lookback_days: 3    # today + previous 2 days (0 = index only)
+  #   # E20: silent journaling turn when a conversation pauses (messages no one)
+  #   journaling:
+  #     enabled: true
+  #     threshold_ms:               # per-channel idle gap before journaling
+  #       telegram: 1800000         # 30 min
+  #       email: 86400000           # 24 h
+  #       default: 1800000
+  #     prompt: |
+  #       Our conversation has paused. Review it and update your memory files
+  #       (today's daily journal, MEMORY.md, and any relevant topic files) with
+  #       anything durable worth remembering. Do NOT message the user — this is
+  #       an internal journaling turn, not a reply.
 
 contacts:
   alice:
@@ -43,6 +76,10 @@ memory:
   session_idle_threshold_ms: 1800000
   context_window_hours: 48
   claude_api_model: claude-opus-4-6
+  # E20: the structured memory store (memories / session_summaries) is dormant by
+  # default — the agent's own files are the source of truth (see docs/MEMORY_MODEL.md).
+  # Set true to restore legacy summarizer extraction for MCP-adapter deployments.
+  structured_extraction: false
 
 # Per-agent settings, keyed by recipient id (e.g. "agent:claude").
 # See docs/ATTACHMENTS.md for the full inbound-image flow.

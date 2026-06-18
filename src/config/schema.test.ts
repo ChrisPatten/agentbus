@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { AppConfigSchema, getTelegramInstances } from './schema.js';
+import { AppConfigSchema, getTelegramInstances, journalingThresholdForChannel } from './schema.js';
 import type { AppConfig } from './schema.js';
 
 function makeConfig(telegram: AppConfig['adapters']['telegram']): AppConfig {
@@ -198,5 +198,93 @@ describe('AppConfigSchema — agents (E17)', () => {
         },
       }),
     ).toThrow();
+  });
+});
+
+describe('AppConfigSchema — cc-headless memory + journaling (E20)', () => {
+  const base = {
+    bus: { db_path: ':memory:' },
+    adapters: {},
+    memory: {},
+  };
+
+  function parseHeadless(overrides: Record<string, unknown> = {}) {
+    const parsed = AppConfigSchema.parse({
+      ...base,
+      adapters: {
+        'cc-headless': { system_prompt: 'You are an assistant.', ...overrides },
+      },
+    });
+    return parsed.adapters['cc-headless']!;
+  }
+
+  it('memory + journaling defaults parse', () => {
+    const h = parseHeadless();
+    expect(h.memory).toEqual({
+      dir: 'memory',
+      index_file: 'MEMORY.md',
+      daily_subdir: 'daily',
+      journal_lookback_days: 3,
+    });
+    expect(h.journaling.enabled).toBe(true);
+    expect(h.journaling.threshold_ms).toEqual({ default: 1_800_000 });
+    expect(h.journaling.prompt).toMatch(/journaling turn/);
+  });
+
+  it('accepts a flat-number threshold_ms', () => {
+    const h = parseHeadless({ journaling: { threshold_ms: 60_000 } });
+    expect(h.journaling.threshold_ms).toBe(60_000);
+  });
+
+  it('accepts a per-channel threshold_ms record with default', () => {
+    const h = parseHeadless({
+      journaling: { threshold_ms: { telegram: 1_800_000, email: 86_400_000, default: 1_800_000 } },
+    });
+    expect(h.journaling.threshold_ms).toEqual({
+      telegram: 1_800_000,
+      email: 86_400_000,
+      default: 1_800_000,
+    });
+  });
+
+  it('rejects a per-channel threshold_ms without a default key', () => {
+    expect(() => parseHeadless({ journaling: { threshold_ms: { telegram: 1_800_000 } } })).toThrow();
+  });
+
+  it('rejects a negative / zero threshold_ms', () => {
+    expect(() => parseHeadless({ journaling: { threshold_ms: -1 } })).toThrow();
+    expect(() => parseHeadless({ journaling: { threshold_ms: 0 } })).toThrow();
+  });
+
+  it('rejects a negative journal_lookback_days', () => {
+    expect(() => parseHeadless({ memory: { journal_lookback_days: -1 } })).toThrow();
+  });
+
+  it('allows journal_lookback_days of 0', () => {
+    const h = parseHeadless({ memory: { journal_lookback_days: 0 } });
+    expect(h.memory.journal_lookback_days).toBe(0);
+  });
+
+  it('defaults memory.structured_extraction to false', () => {
+    const parsed = AppConfigSchema.parse(base);
+    expect(parsed.memory.structured_extraction).toBe(false);
+  });
+});
+
+describe('journalingThresholdForChannel (E20)', () => {
+  it('flat number applies to any channel', () => {
+    expect(journalingThresholdForChannel(60_000, 'telegram')).toBe(60_000);
+    expect(journalingThresholdForChannel(60_000, 'email')).toBe(60_000);
+  });
+
+  it('record resolves the channel-specific value', () => {
+    const t = { telegram: 1_800_000, email: 86_400_000, default: 900_000 };
+    expect(journalingThresholdForChannel(t, 'telegram')).toBe(1_800_000);
+    expect(journalingThresholdForChannel(t, 'email')).toBe(86_400_000);
+  });
+
+  it('record falls back to default for an unlisted channel', () => {
+    const t = { telegram: 1_800_000, default: 900_000 };
+    expect(journalingThresholdForChannel(t, 'sms')).toBe(900_000);
   });
 });

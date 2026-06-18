@@ -211,15 +211,18 @@ for (const adapter of registry.list()) {
   await adapter.start();
 }
 deliveryWorker.start();
+
+// Start cc-headless adapter (if configured) before the session tracker so its
+// journaling runner is wired in before the tracker's first tick (E20).
+if (config.adapters['cc-headless']) {
+  const headless = startHeadless(db);
+  if (headless) sessionTracker.setJournalingRunner(headless.runJournalingTurn);
+}
+
 sessionTracker.start();
 attachmentSweeper.start();
 scheduler.loadConfig();
 if (config.scheduler.enabled) scheduler.start();
-
-// Start cc-headless adapter if configured
-if (config.adapters['cc-headless']) {
-  startHeadless(db);
-}
 
 // Push command manifests to adapters that support native command registration
 // (e.g. Telegram's setMyCommands for autocomplete). Non-fatal on failure.

@@ -21,7 +21,7 @@ export interface SummaryResult {
   memories: MemoryExtraction[];
 }
 
-/** Row shape from the sessions table (post-migration 008). */
+/** Row shape from the sessions table (post-migration 009). */
 export interface SessionRow {
   id: string;
   conversation_id: string;
@@ -35,6 +35,8 @@ export interface SessionRow {
   summary_attempts: number;
   /** claude -p session ID stored by cc-headless for --resume continuity (migration 008) */
   claude_session_id: string | null;
+  /** ISO timestamp of the last journaling turn for this session (E20, migration 009). */
+  last_journaled_at: string | null;
 }
 
 /** Row shape from the transcripts table. */

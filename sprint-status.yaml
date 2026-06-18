@@ -5,7 +5,7 @@ bmad_status:
   planning: complete
   architecture: complete
   implementation: in-progress
-current_epic: E19
+current_epic: E20
 epics:
   E1:
     status: complete
@@ -279,4 +279,35 @@ epics:
       S19.1.5: complete  # error_reply config + failure delivery
       S19.1.6: complete  # working_dir cwd + @path expansion (prompt-renderer)
       S19.1.7: complete  # Tests (cc.test, prompt-renderer.test) + docs update
-last_updated: 2026-06-16  # E19.1 complete
+  E20:
+    status: complete
+    completed: 2026-06-18
+    notes: >
+      Journaling memory model & long-lived sessions. The agent's own files
+      (MEMORY.md + daily journal) are the source of truth; the bus orchestrates
+      rather than stores. (1) Long-lived headless sessions: idle no longer tears
+      them down (transcript-log Stage 80 + SessionTracker.closeIdleSessions guard
+      on claude_session_id IS NOT NULL), resume keyed on conversation_id
+      (resolved from the transcripts row). MCP cc.ts path unaffected. (2) Context
+      assembly: assembleMemoryContext (src/adapters/memory-context.ts) reads
+      MEMORY.md + journal_lookback_days of daily files into {{memories}} every
+      turn, replacing the DB memory/summary injection; {{session_summary}} now
+      empty. (3) Journaling on pause: SessionTracker.dispatchJournaling fires the
+      adapter's runJournalingTurn (silent, no-deliver, no typing) for sessions
+      idle past per-channel journaling.threshold_ms and not journaled since last
+      activity; migration 009 adds sessions.last_journaled_at; in-memory attempt
+      cap, re-armed by new activity. Wired via startHeadless handle +
+      sessionTracker.setJournalingRunner in index.ts. (4) Structured extraction
+      gated off by default (memory.structured_extraction); summarizer writes
+      neither table when off; recall_memory/log_memory marked legacy (not
+      removed); tables/migrations left dormant. Docs: MEMORY_MODEL.md (new),
+      CC_HEADLESS_ADAPTER.md, config.yaml.example, CHANGELOG.
+    stories:
+      S20.1: complete  # Config schema: memory + journaling + journalingThresholdForChannel
+      S20.2: complete  # Long-lived sessions (transcript-log, session-tracker, cc-headless resume key)
+      S20.3: complete  # assembleMemoryContext from files (memory-context.ts)
+      S20.4: complete  # Journaling dispatcher + migration 009 last_journaled_at
+      S20.5: complete  # Silent journaling turn (runJournalingTurn, no-deliver)
+      S20.6: complete  # structured_extraction gate + legacy memory-tool notes
+      S20.7: complete  # Docs (MEMORY_MODEL.md, CC_HEADLESS_ADAPTER.md, config.example, CHANGELOG)
+last_updated: 2026-06-18  # E20 complete

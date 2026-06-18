@@ -1,8 +1,10 @@
-# Headless Claude Code Adapter (E19, refined in E19.1)
+# Headless Claude Code Adapter (E19, refined in E19.1, E20)
 
 Reference for the per-request Claude Code adapter that replaces long-lived tmux sessions with on-demand `claude -p` invocations.
 
-> **E19.1 changes (this revision):** the agent now delivers via the `reply`/`send_message` tools (with a stdout fallback) instead of the adapter routing raw stdout; the double memory injection on new sessions is fixed; a typing indicator is sent while `claude -p` runs; spawn/parse failures deliver a configurable `error_reply` instead of silence; and `claude -p` runs in a configurable `working_dir` so the agent's own `CLAUDE.md` (and its `@import`s / `@path` references) auto-load into context. See the relevant sections below.
+> **E19.1 changes:** the agent now delivers via the `reply`/`send_message` tools (with a stdout fallback) instead of the adapter routing raw stdout; the double memory injection on new sessions is fixed; a typing indicator is sent while `claude -p` runs; spawn/parse failures deliver a configurable `error_reply` instead of silence; and `claude -p` runs in a configurable `working_dir` so the agent's own `CLAUDE.md` (and its `@import`s / `@path` references) auto-load into context.
+
+> **E20 changes (this revision):** headless sessions are now **long-lived** — idle never tears them down, and resume is keyed on `conversation_id`. Context is assembled from the agent's **own memory files** (`MEMORY.md` + recent daily journals) instead of the DB memory/summary store, which is now dormant. When a conversation pauses, the bus fires a **silent journaling turn** that asks the agent to update its files (it messages nobody). See [Long-lived sessions](#session-continuity-long-lived-sessions-e20), [Context assembly](#context-assembly-memory-files-e20), and [Journaling on pause](#journaling-on-pause-e20). The conceptual model lives in [MEMORY_MODEL.md](./MEMORY_MODEL.md).
 
 ## Motivation
 
@@ -28,20 +30,21 @@ bus-core
         └── captures result text → POSTs outbound envelope to bus
 ```
 
-## Session Continuity
+## Session Continuity (long-lived sessions, E20)
 
-Sessions are tracked one-per-contact using the existing AgentBus session system with one new field:
+Sessions store the Claude session ID for `--resume`:
 
 **Migration 008**: `ALTER TABLE sessions ADD COLUMN claude_session_id TEXT`
 
-This column stores the Claude session ID returned by `claude -p` (present in the `stream-json` init and result events). On subsequent messages from the same contact while the AgentBus session is still active, the adapter passes `--resume <claude_session_id>` to continue the Claude conversation in context.
+This column stores the Claude session ID returned by `claude -p` (present in the `stream-json` init and result events). On subsequent turns the adapter passes `--resume <claude_session_id>` to continue the Claude conversation in context.
 
-**Session lifecycle:**
-- New AgentBus session → no `--resume` flag → Claude starts fresh
-- Active AgentBus session with `claude_session_id` → `--resume <id>` passed
-- AgentBus session closes (idle timeout → summarizer) → `claude_session_id` is abandoned; next contact message starts a new session
+**Resume is keyed on `conversation_id`.** The adapter resolves the batch's `conversation_id` from the first message's transcript row (`SELECT conversation_id FROM transcripts WHERE message_id = ?` — the authoritative value Stage 70 computed, falling back to deriving `sha256(sorted([contact_id, channel, topic]))` if the row is missing) and looks up the open session for that conversation. So each email thread resumes its own session, and a long-lived Telegram conversation resumes the same one.
 
-Continuity *across* AgentBus sessions comes from injected memories in the system prompt (same as E9), not from Claude session resumption.
+**Sessions are long-lived — idle never tears them down.** The `claude_session_id` column is set **only** by this adapter, so it also marks a session as headless-managed. Stage 80 (`transcript-log`) and the `SessionTracker` both treat `claude_session_id IS NOT NULL` as long-lived: a gap past the idle threshold **extends** the session (same `claude_session_id`, `ended_at` stays `NULL`) instead of closing it. The legacy MCP path (`claude_session_id IS NULL`, e.g. the `cc.ts` adapter) is unaffected and still tears down on idle and fires `on_session_close`.
+
+With teardown gone, nothing in AgentBus bounds a long-lived `--resume` transcript — **Claude Code's auto-compaction** (`autoCompactEnabled`, on by default in `-p` mode) does. If an operator sets `DISABLE_AUTO_COMPACT=1`, a never-idle conversation will eventually overflow its context window; leave auto-compaction on.
+
+Continuity comes from two places: the resumed Claude session (recent conversation, in context) and the agent's own memory files (durable knowledge, re-assembled every turn — see below).
 
 ## `claude -p` Invocation
 
@@ -87,8 +90,8 @@ Claude has access to all tools **except `get_adapter_status`**. The agent delive
 | `reply` | ✓ | Agent's primary delivery path — interim updates + final answer |
 | `send_message` | ✓ | Proactive / cross-channel sends |
 | `react_to_message` | ✓ | Proactive emoji ack before long work — fires mid-stream |
-| `recall_memory` | ✓ | |
-| `log_memory` | ✓ | |
+| `recall_memory` | ✓ | Legacy — structured store is dormant (E20); read your own files instead |
+| `log_memory` | ✓ | Legacy — write durable facts to your own files instead (E20) |
 | `search_transcripts` | ✓ | |
 | `get_session` | ✓ | |
 | `list_sessions` | ✓ | |
@@ -146,12 +149,12 @@ Available variables:
 |----------|-------|
 | `{{contact_id}}` | e.g. `contact:alice` |
 | `{{channel}}` | e.g. `telegram` |
-| `{{date}}` | Current date (ISO) |
-| `{{memories}}` | Formatted recalled memories for this contact, or empty string |
-| `{{session_summary}}` | Most recent session summary for this contact, or empty string |
+| `{{date}}` | Current local date (`YYYY-MM-DD`) |
+| `{{memories}}` | **Assembled memory file block** (E20): `MEMORY.md` + recent daily journals — see below |
+| `{{session_summary}}` | **Deprecated (E20)** — always empty; the DB summary store is dormant |
 | `{{agent_id}}` | e.g. `agent:claude` |
 
-This replaces the E9 `memory_context` injection into envelope metadata. The headless adapter injects context directly into the system prompt instead. Because of this, the user-message formatter is called with `includeMemoryContext: false` so the Stage-85 `<memory>` block is **not** also prepended to the user message — otherwise a new session would inject memory twice, in two formats.
+The headless adapter injects context directly into the system prompt (not via the E9 `memory_context` envelope metadata). The user-message formatter is called with `includeMemoryContext: false` so the Stage-85 `<memory>` block is **not** also prepended to the user message.
 
 After `{{variable}}` interpolation, the rendered template is run through `@path` expansion (`expandFileReferences` in `prompt-renderer.ts`): any `@<path>` token is replaced with the contents of that file, resolved relative to `working_dir`. Unresolvable tokens are left verbatim so typos are visible. This expansion runs **only** on the operator-authored template — never on inbound user messages — to avoid arbitrary file reads from user input.
 
@@ -163,6 +166,28 @@ The headless adapter mirrors Claude Code's normal context loading:
 - **`@path` in the system prompt** — the `system_prompt` template may reference files with `@relative/path`, expanded against `working_dir` (see above). Use this to pull operator-controlled files into the persona without editing the template inline.
 
 Config key: `adapters.cc-headless.working_dir` (default: bus-core process cwd).
+
+## Context assembly (memory files, E20)
+
+The `{{memories}}` template variable is filled by **`assembleMemoryContext`** (`src/adapters/memory-context.ts`), which reads the agent's own files — the source of truth for durable knowledge — fresh on every turn:
+
+1. `<working_dir>/<memory.dir>/<memory.index_file>` (e.g. `memory/MEMORY.md`) — the always-loaded index.
+2. The daily journal files for today and the previous `journal_lookback_days - 1` days, at `<working_dir>/<memory.dir>/<memory.daily_subdir>/YYYY-MM-DD.md` (newest first).
+
+Each file is wrapped in a `=== <relative path> ===` boundary marker. Missing files (or a missing memory directory) are skipped silently — an agent with no journal yet still works. `journal_lookback_days: 0` loads the index only. Daily file names use the **local** date, consistent with how the agent names them.
+
+Because the block is rebuilt every turn, an in-session journaling update (below) is reflected on the very next turn. This **replaces** the E8/E9 DB memory/summary injection (`recall_memory`/`session_summaries`), which is dormant — see [MEMORY_MODEL.md](./MEMORY_MODEL.md).
+
+## Journaling on pause (E20)
+
+When a conversation goes idle past a per-channel threshold, the bus fires a **silent journaling turn**: the agent reviews the conversation and updates its own memory files. **Nothing is delivered to the user** — no reply, no typing indicator. The conversation is not ended; the same `claude_session_id` keeps resuming.
+
+- **Dispatcher** — `SessionTracker.dispatchJournaling()` runs on the tracker tick. It selects open, headless-managed sessions (`claude_session_id IS NOT NULL`) whose `last_activity` is older than `journaling.threshold_ms` for their channel and that have not been journaled since (`last_journaled_at IS NULL OR last_journaled_at < last_activity`). One journaling turn per pause; new activity advances `last_activity` past `last_journaled_at` and re-arms it. Migration 009 adds `last_journaled_at`.
+- **Turn** — the adapter's `runJournalingTurn(conversationId)` looks up the session's `claude_session_id` and spawns `claude -p <journaling.prompt> --resume <id>` with the same `working_dir`, MCP config, and assembled memory context as a normal turn — but in **no-deliver mode**: `deliverResponse` is never called and the stdout fallback is bypassed. It is serialized through the same per-contact queue so it never races a live reply. A session with no `claude_session_id` yet (the agent never spoke) is skipped and stamped as journaled.
+- **Failure / cadence** — a failed journaling turn leaves `last_journaled_at` unchanged so a later tick retries, bounded by a small in-memory attempt cap (re-armed by new activity). Journaling is **pause-triggered, not periodic**: a never-idle conversation does not journal until it pauses.
+- **The journaling turn adds to the transcript.** The silent `--resume` turn appends an assistant turn, so the next user turn sees both the prior conversation and the journaling exchange. Auto-compaction absorbs the minor token cost.
+
+Set `journaling.enabled: false` to disable it entirely (the dispatcher becomes a no-op).
 
 ## Per-Contact Serialization
 
@@ -199,8 +224,26 @@ adapters:
       @persona.md
 
       {{memories}}
-
-      {{session_summary}}
+    # ── E20: memory file assembly (paths relative to working_dir) ──────────────
+    memory:
+      dir: memory               # memory directory
+      index_file: MEMORY.md     # always loaded into every turn
+      daily_subdir: daily       # daily/YYYY-MM-DD.md
+      journal_lookback_days: 3  # today + previous 2 days of journal (0 = index only)
+    # ── E20: journaling on pause ───────────────────────────────────────────────
+    journaling:
+      enabled: true
+      # Per-channel idle gap (ms) that marks a conversation "paused" → journal.
+      # number | { <channel>: number, default: number }
+      threshold_ms:
+        telegram: 1800000       # 30 min
+        email: 86400000         # 24 h
+        default: 1800000
+      prompt: |
+        Our conversation has paused. Review it and update your memory files
+        (today's daily journal, MEMORY.md, and any relevant topic files) with
+        anything durable worth remembering. Do NOT message the user — this is
+        an internal journaling turn, not a reply.
 ```
 
 | Key | Default | Purpose |
@@ -211,6 +254,13 @@ adapters:
 | `claude_bin` | `claude` | Path to the `claude` binary |
 | `working_dir` | bus cwd | `cwd` for `claude -p`; selects the `CLAUDE.md` hierarchy and `@path` base |
 | `error_reply` | see above | Message delivered to the user on invocation failure |
+| `memory.dir` | `memory` | Memory directory (relative to `working_dir`) |
+| `memory.index_file` | `MEMORY.md` | Index file loaded into every turn |
+| `memory.daily_subdir` | `daily` | Subdir of daily journal files `YYYY-MM-DD.md` |
+| `memory.journal_lookback_days` | `3` | Days of daily journal to load (today + previous N-1) |
+| `journaling.enabled` | `true` | Master switch for journaling-on-pause |
+| `journaling.threshold_ms` | `{ default: 1800000 }` | Per-channel idle gap before a paused conversation journals |
+| `journaling.prompt` | see schema | Prompt sent on the silent journaling turn |
 
 ## Cross-contact isolation (design tradeoff)
 
@@ -223,6 +273,7 @@ This is an accepted tradeoff, not a bug. Pick the adapter accordingly:
 ## What Does NOT Change
 
 - Telegram adapter is unchanged
-- Bus-core pipeline, session tracking, summarizer are unchanged
-- Existing `cc.ts` MCP adapter continues to work for users who prefer persistent sessions
-- All existing MCP tools are unchanged (only availability to this adapter is restricted)
+- The existing `cc.ts` MCP adapter (`claude_session_id IS NULL`) is unaffected: idle teardown, `on_session_close`, and — with `memory.structured_extraction: true` — the summarizer all behave as before
+- All existing MCP tools remain registered (the structured memory tools are marked legacy, not removed)
+
+> **E20 bus-side changes (scoped to headless sessions):** Stage 80 and the `SessionTracker` no longer tear down headless sessions on idle, and the summarizer's structured extraction is off by default (`memory.structured_extraction`). These are gated on `claude_session_id IS NOT NULL` so the MCP path is untouched.
