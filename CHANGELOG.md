@@ -41,6 +41,17 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
   `metadata.email_subject`) sets the subject line, defaulting to "Message from your
   assistant". Registered automatically whenever an email adapter is configured. See
   `docs/MCP_TOOLS.md`.
+- **Rich-text email (E21).** Outbound mail is now sent `multipart/alternative`: the
+  agent's Markdown is rendered to a styled HTML part (`src/adapters/email-render.ts`,
+  via `markdown-it`) with the original Markdown kept as the plain-text fallback. GFM
+  **tables** render with bordered cells, a shaded header, zebra rows, and a
+  horizontal-scroll wrapper for mobile; headings, lists, blockquotes, links, inline
+  code, and fenced code blocks are all styled. Renders consistently across browser,
+  desktop, and mobile clients via fully inlined styles (clients strip `<style>`),
+  with a `<style>` block only for dark-mode and mobile media queries, a responsive
+  viewport, `color-scheme` hints, and `x-apple-disable-message-reformatting`. Raw
+  HTML in the agent's text is escaped (`html: false`) — no injection surface. See
+  `docs/EMAIL_ADAPTER.md`.
 
 ### Changed
 - `topic-classify` now preserves reserved `thread:`-prefixed topics verbatim, and

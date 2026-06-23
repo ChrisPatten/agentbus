@@ -128,6 +128,10 @@ recipient. The adapter re-checks the allowlist on send as defense in depth.
 **Subject.** `subject` is optional and sets the email's subject line; it defaults to
 *Message from your assistant*.
 
+**Markdown.** `body` is Markdown — it renders as formatted HTML (headings, tables,
+lists, links, code blocks), with the raw Markdown kept as the plain-text fallback.
+Plain prose works too. See [EMAIL_ADAPTER.md](EMAIL_ADAPTER.md#rich-text-rendering).
+
 **Input:**
 ```json
 {

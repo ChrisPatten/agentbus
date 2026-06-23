@@ -238,6 +238,43 @@ content the sender typed, not the whole thread it already has in session.
 
 ---
 
+## Rich-text rendering
+
+Outbound mail is sent **`multipart/alternative`**: the agent writes **Markdown**,
+which `src/adapters/email-render.ts` (`renderEmail`) renders to a styled HTML part,
+with the original Markdown kept as the plain-text alternative (clients that prefer
+`text/plain` get a clean, readable fallback for free).
+
+What renders:
+
+- **Tables** (GFM) — bordered cells, a shaded/bold header row, zebra-striped body
+  rows, wrapped in a horizontally-scrollable box so wide tables don't blow out a
+  phone screen.
+- Headings, paragraphs, ordered/unordered lists, blockquotes, horizontal rules.
+- **Inline code** and fenced **code blocks** (monospace, shaded, scrollable).
+- Links (auto-linked too), opened with `target=_blank` + `rel=noopener noreferrer`.
+
+How it renders well everywhere:
+
+- **Inline styles on every element.** Most clients (notably Gmail) strip
+  `<head>`/`<style>`, so all visual styling lives on the element's `style` attribute.
+- A small `<style>` block carries the two things that can only be media queries:
+  **dark mode** (`prefers-color-scheme: dark`) and **mobile** padding
+  (`max-width: 600px`). Clients that drop it still get the correct light-mode layout.
+- Responsive `<meta viewport>`, `color-scheme` hints, system font stacks, a
+  centered max-width card, and `x-apple-disable-message-reformatting` (so Apple Mail
+  doesn't auto-rescale).
+
+**Safety.** The renderer runs markdown-it with `html: false`, so any raw HTML in the
+agent's text is **escaped**, not rendered — there is no HTML-injection surface and no
+sanitizer dependency is needed.
+
+The agent only needs to know it *may* use Markdown — that's a system-prompt note
+(e.g. *"email supports Markdown: headings, tables, lists, and code blocks render as
+formatted text"*). No flag toggles it; plain prose still renders fine.
+
+---
+
 ## Routing
 
 Route the email channel to whichever agent should answer (typically the headless
@@ -280,9 +317,11 @@ adapters:
 
 ## Limitations
 
-- **Plain text only.** Outbound replies are sent as `text`; inbound HTML-only mail
-  falls back to a placeholder body when no text part is present. Attachments are
-  not yet downloaded (unlike Telegram — see [ATTACHMENTS.md](./ATTACHMENTS.md)).
+- **Outbound is rich text (Markdown → HTML); inbound is text only.** Outbound mail
+  is sent `multipart/alternative` with an HTML part (see *Rich-text rendering*).
+  Inbound HTML-only mail falls back to a placeholder body when no text part is
+  present, and attachments are not yet downloaded (unlike Telegram — see
+  [ATTACHMENTS.md](./ATTACHMENTS.md)).
 - **Trust the receiving server.** The anti-spoof check relies on the mailbox
   server's `Authentication-Results` header.
 - **One mailbox per instance.** Watching multiple folders requires multiple

@@ -242,6 +242,28 @@ don't want a (meaningless) typing indicator fired for email channels.
 
 ---
 
+### S21.8 — Rich-text (Markdown → HTML) outbound (follow-up)
+
+**User story:** As the user, I want the agent's emails formatted as rich text —
+tables, lists, headings, code — rendered well on browser, desktop, and mobile.
+
+**Acceptance criteria:**
+1. Outbound mail is `multipart/alternative`: agent Markdown → styled HTML part, raw
+   Markdown as the text fallback (`src/adapters/email-render.ts`, `markdown-it`).
+2. GFM tables render with bordered cells, shaded/bold header, zebra body rows, and a
+   horizontal-scroll wrapper for mobile; headings/lists/blockquotes/links/inline
+   code/fenced code are styled.
+3. Cross-client rendering: fully inlined element styles, with a `<style>` block only
+   for dark-mode + mobile media queries; responsive viewport + `color-scheme` +
+   `x-apple-disable-message-reformatting`.
+4. Raw HTML in the agent body is escaped (`html: false`); no sanitizer needed.
+5. Tests green; `tsc --noEmit` clean; `docs/EMAIL_ADAPTER.md` + `docs/MCP_TOOLS.md`
+   + CHANGELOG updated.
+
+**Complexity:** S
+
+---
+
 ## Notes
 
 - **Why a thread topic, not a new conversation_id formula.** Reusing the existing

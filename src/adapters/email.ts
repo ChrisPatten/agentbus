@@ -45,6 +45,7 @@ import {
   isSenderAuthenticated,
   dkimAuthenticated,
 } from './email-thread.js';
+import { renderEmail } from './email-render.js';
 
 const BACKOFF_INITIAL_MS = 2000;
 const BACKOFF_MAX_MS = 60_000;
@@ -234,12 +235,17 @@ export class EmailAdapter implements AdapterInstance {
       };
     }
 
+    // Render the agent's Markdown to rich-text HTML, sent multipart/alternative
+    // with the original Markdown as the plain-text fallback.
+    const { html, text } = renderEmail(envelope.payload.body);
+
     try {
       const info = await this.transport.sendMail({
         from: this.from,
         to,
         subject,
-        text: envelope.payload.body,
+        text,
+        html,
         inReplyTo,
         references,
       });

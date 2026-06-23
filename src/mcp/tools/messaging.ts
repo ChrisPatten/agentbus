@@ -149,7 +149,13 @@ export function registerEmailTool(
         'primary allowlisted address; pass `to` to target a different allowlisted ' +
         'address. Any recipient not on the allowlist is rejected.',
       inputSchema: {
-        body: z.string().min(1).describe('Email body text'),
+        body: z
+          .string()
+          .min(1)
+          .describe(
+            'Email body. Markdown is supported and rendered as formatted HTML ' +
+              '(headings, tables, lists, links, code blocks); plain prose is fine too.',
+          ),
         to: z
           .string()
           .optional()
