@@ -10,6 +10,8 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-23
+
 ### Added
 - **Email channel (E21).** New in-process `email` adapter
   (`src/adapters/email.ts`) that receives mail over IMAP IDLE (push) and sends
@@ -186,7 +188,8 @@ Baseline release. Core bus, pipeline, adapters, memory, scheduling.
 - Built-in slash commands + plugin command registry. (E6)
 - Scheduled messages (cron + one-shot) via background scheduler. (E18)
 
-[Unreleased]: https://github.com/ChrisPatten/agentbus/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/ChrisPatten/agentbus/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/ChrisPatten/agentbus/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/ChrisPatten/agentbus/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/ChrisPatten/agentbus/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ChrisPatten/agentbus/compare/v0.1.0...v0.2.0
