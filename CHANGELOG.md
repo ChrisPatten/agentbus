@@ -62,6 +62,18 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
   adapters skip the `/typing` call for `email`/`email:*` channels (the email adapter
   reports `typing: false`, so the server already no-ops — this avoids the wasted
   round-trip).
+- Inbound body handling now distinguishes replies from forwards
+  (`selectInboundBody`): a threaded reply (has `In-Reply-To`/`References`) still has
+  its quoted history stripped (the session holds those turns), but a new thread — a
+  first-contact email or a **forward** — keeps its full body. Forwards are tagged
+  `metadata.email_is_forward`.
+
+### Fixed
+- Forwarded emails no longer lose their content. The previous unconditional
+  quoted-reply stripping cut at the forwarded `From:`/header block and discarded the
+  forwarded payload; forwards (and any new thread) now keep the full body. HTML-only
+  mail is read via `mailparser`'s text down-conversion, so forwarded HTML messages
+  carry usable content instead of the `[Email with no text body]` placeholder.
 
 ## [0.4.0] - 2026-06-18
 

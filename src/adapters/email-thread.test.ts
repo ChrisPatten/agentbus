@@ -8,6 +8,7 @@ import {
   replySubject,
   buildReferencesChain,
   stripQuotedReply,
+  selectInboundBody,
   isSenderAuthenticated,
   dkimAuthenticated,
 } from './email-thread.js';
@@ -126,6 +127,41 @@ describe('stripQuotedReply', () => {
   });
   it('leaves an unquoted body intact', () => {
     expect(stripQuotedReply('Just a plain message.')).toBe('Just a plain message.');
+  });
+});
+
+describe('selectInboundBody', () => {
+  const forward = [
+    'Hey, can you look at this?',
+    '',
+    '---------- Forwarded message ---------',
+    'From: Carol <carol@corp.com>',
+    'Subject: Q3 plan',
+    '',
+    'Team, the Q3 plan: launch in August, budget $50k.',
+  ].join('\n');
+
+  it('a threaded reply strips the quoted history (session already holds it)', () => {
+    const reply = 'Sounds good!\n\nOn Mon, Jun 1 Chris <c@h> wrote:\n> the original question';
+    expect(selectInboundBody(reply, true)).toBe('Sounds good!');
+  });
+
+  it('a forward (new thread) keeps the full forwarded content', () => {
+    const body = selectInboundBody(forward, false);
+    expect(body).toContain('Forwarded message');
+    expect(body).toContain('From: Carol');
+    expect(body).toContain('Team, the Q3 plan: launch in August, budget $50k.');
+  });
+
+  it('regression: stripping a forward would have destroyed its payload', () => {
+    // The old behaviour cut at the forwarded `From:` header, losing the content.
+    expect(stripQuotedReply(forward)).not.toContain('launch in August');
+    // selectInboundBody preserves it by not stripping new threads.
+    expect(selectInboundBody(forward, false)).toContain('launch in August');
+  });
+
+  it('trims surrounding whitespace for a new thread', () => {
+    expect(selectInboundBody('  hello world  \n', false)).toBe('hello world');
   });
 });
 

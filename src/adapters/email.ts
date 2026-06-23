@@ -41,7 +41,7 @@ import {
   baseSubject,
   replySubject,
   buildReferencesChain,
-  stripQuotedReply,
+  selectInboundBody,
   isSenderAuthenticated,
   dkimAuthenticated,
 } from './email-thread.js';
@@ -446,7 +446,13 @@ export class EmailAdapter implements AdapterInstance {
       contactAddress: fromAddr,
     });
 
-    const body = stripQuotedReply(parsed.text ?? '');
+    // Strip quoted history only for a threaded reply (its earlier turns already
+    // live in the session). A new thread — a fresh email or a forward — keeps its
+    // full body so the agent sees the forwarded content. mailparser populates
+    // parsed.text from HTML when there's no text/plain part, so HTML-only mail
+    // (common for forwards) still carries readable content.
+    const isThreadedReply = inReplyTo !== '' || references.length > 0;
+    const body = selectInboundBody(parsed.text ?? '', isThreadedReply);
     const effectiveBody = body || `[Email with no text body] Subject: ${subject}`;
 
     const message: InboundMessage = {
@@ -458,6 +464,7 @@ export class EmailAdapter implements AdapterInstance {
         email_message_id: messageId,
         email_subject: subject,
         email_from: fromAddr,
+        email_is_forward: !isThreadedReply && /^\s*(fwd?|fw):/i.test(subject),
         platform_message_id: messageId,
       },
     };

@@ -232,9 +232,27 @@ Match your length and formality to the channel:
 
 The adapter imposes no length cap and never splits outbound mail.
 
-Inbound mail has its quoted reply history conservatively stripped (the
-`On … wrote:` / `>` / `-----Original Message-----` tail) so the agent sees the new
-content the sender typed, not the whole thread it already has in session.
+### Inbound body: replies vs. forwards
+
+What the agent receives as the message body depends on whether the mail continues an
+existing thread (`selectInboundBody`):
+
+- **A threaded reply** (has `In-Reply-To`/`References`) has its quoted history
+  conservatively stripped (the `On … wrote:` / `>` / `-----Original Message-----`
+  tail). Those earlier turns already live in the thread's long-lived session, so
+  re-feeding the quoted chain every message would just burn context. **So no — the
+  agent does not get the full quoted chain on each reply; it gets only the new text.**
+- **A new thread** — a first-contact email or a **forward** — keeps its **full
+  body**. A forward is a fresh compose with no `References` (→ a new thread → a new
+  session), and its forwarded block *is* the content the user wants the agent to
+  read, so stripping would lose it. Forwards are also tagged `metadata.email_is_forward`.
+
+**HTML mail (e.g. forwarded newsletters).** `mailparser` down-converts an HTML-only
+message to readable plain text (headings flattened, `link → text [url]`), so the
+agent receives usable content. The `[Email with no text body]` placeholder only
+appears when a message truly has neither a text nor an HTML part (e.g. attachment
+only). The agent reads the **text** rendering, not the original HTML markup — fine
+for reasoning over the content, though visual table structure is flattened to text.
 
 ---
 
@@ -317,11 +335,12 @@ adapters:
 
 ## Limitations
 
-- **Outbound is rich text (Markdown → HTML); inbound is text only.** Outbound mail
+- **Outbound is rich text (Markdown → HTML); inbound is read as text.** Outbound mail
   is sent `multipart/alternative` with an HTML part (see *Rich-text rendering*).
-  Inbound HTML-only mail falls back to a placeholder body when no text part is
-  present, and attachments are not yet downloaded (unlike Telegram — see
-  [ATTACHMENTS.md](./ATTACHMENTS.md)).
+  Inbound HTML mail is down-converted to text by `mailparser`, so the agent reads the
+  text rendering (visual structure like tables is flattened); a placeholder body
+  appears only when a message has no text *and* no HTML part. Attachments are not yet
+  downloaded (unlike Telegram — see [ATTACHMENTS.md](./ATTACHMENTS.md)).
 - **Trust the receiving server.** The anti-spoof check relies on the mailbox
   server's `Authentication-Results` header.
 - **One mailbox per instance.** Watching multiple folders requires multiple

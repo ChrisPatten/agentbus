@@ -104,6 +104,23 @@ export function stripQuotedReply(body: string): string {
 }
 
 /**
+ * Choose the inbound body text to hand the agent.
+ *
+ * For a **threaded reply** (the message has In-Reply-To/References, so it continues
+ * an existing conversation) we strip the quoted history: those earlier turns already
+ * live in the thread's long-lived session, so re-feeding the quoted chain every
+ * message just burns context.
+ *
+ * For a **new thread** — a first-contact email or a **forward** — we keep the full
+ * body. A forward is a fresh compose with no References, and its quoted/forwarded
+ * block is the actual content the user wants the agent to read; there is no prior
+ * session to dedupe against, so stripping would only lose information.
+ */
+export function selectInboundBody(text: string, isThreadedReply: boolean): string {
+  return isThreadedReply ? stripQuotedReply(text) : text.trim();
+}
+
+/**
  * Decide whether verified DKIM results authenticate the sender: at least one
  * signature must verify (`pass`) AND be aligned with the From domain. mailauth
  * computes alignment itself and reports it in `status.aligned` — note its value
