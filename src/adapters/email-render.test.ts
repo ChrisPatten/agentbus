@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { renderEmail, htmlToPlainText } from './email-render.js';
+import { renderEmail, htmlToPlainText, resolveInboundText } from './email-render.js';
 
 describe('renderEmail', () => {
   it('returns the original markdown as the plain-text part', () => {
@@ -92,5 +92,48 @@ describe('htmlToPlainText', () => {
 
   it('drops images', () => {
     expect(htmlToPlainText('<p>before</p><img src="http://x/y.png" alt="logo"><p>after</p>')).not.toContain('logo');
+  });
+});
+
+describe('resolveInboundText', () => {
+  // The Apple-Mail forward shape: text/plain holds the note + forward headers but an
+  // EMPTY forwarded body; the real payload is only in the HTML part.
+  const fwdText = 'Can you pull the total?\n\nBegin forwarded message:\nFrom: Store\nSubject: Receipt\n';
+  const fwdHtml =
+    '<div>Can you pull the total?</div><blockquote>Begin forwarded message:<br>' +
+    '<h2>Receipt</h2><p>Total: $120 for Boots.</p></blockquote>';
+
+  it('prefers the HTML payload for a forward (preferHtml=true)', () => {
+    const out = resolveInboundText({ text: fwdText, html: fwdHtml, preferHtml: true });
+    expect(out).toContain('Can you pull the total?');
+    expect(out).toContain('Total: $120 for Boots.'); // recovered from HTML, missing in text
+  });
+
+  it('regression: using the text part alone loses the forwarded payload', () => {
+    // What the old code did — text part only — drops the receipt.
+    expect(fwdText).not.toContain('$120');
+    expect(resolveInboundText({ text: fwdText, html: fwdHtml, preferHtml: true })).toContain('$120');
+  });
+
+  it('uses the text part for a threaded reply (preferHtml=false)', () => {
+    const out = resolveInboundText({
+      text: 'My reply.\n\nOn Mon Chris wrote:\n> earlier',
+      html: '<p>My reply.</p><blockquote>earlier</blockquote>',
+      preferHtml: false,
+    });
+    expect(out).toBe('My reply.\n\nOn Mon Chris wrote:\n> earlier');
+  });
+
+  it('falls back to HTML for a reply whose text part is blank', () => {
+    const out = resolveInboundText({ text: '\n  \n', html: '<p>Only in HTML.</p>', preferHtml: false });
+    expect(out).toContain('Only in HTML.');
+  });
+
+  it('keeps the text part when there is no HTML', () => {
+    expect(resolveInboundText({ text: 'plain only', html: false, preferHtml: true })).toBe('plain only');
+  });
+
+  it('keeps the text part when the HTML converts to nothing', () => {
+    expect(resolveInboundText({ text: 'real text', html: '<img src="x">', preferHtml: true })).toBe('real text');
   });
 });

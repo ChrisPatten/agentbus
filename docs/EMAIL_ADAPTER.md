@@ -234,34 +234,38 @@ The adapter imposes no length cap and never splits outbound mail.
 
 ### Inbound body: replies vs. forwards
 
-What the agent receives as the message body depends on whether the mail continues an
-existing thread (`selectInboundBody`):
+What the agent receives as the message body depends on whether the mail is a
+**threaded reply** or a **forward / new thread**.
 
-- **A threaded reply** (has `In-Reply-To`/`References`) has its quoted history
-  conservatively stripped (the `On … wrote:` / `>` / `-----Original Message-----`
-  tail). Those earlier turns already live in the thread's long-lived session, so
-  re-feeding the quoted chain every message would just burn context. **So no — the
-  agent does not get the full quoted chain on each reply; it gets only the new text.**
-- **A new thread** — a first-contact email or a **forward** — keeps its **full
-  body**. A forward is a fresh compose with no `References` (→ a new thread → a new
-  session), and its forwarded block *is* the content the user wants the agent to
-  read, so stripping would lose it. Forwards are also tagged `metadata.email_is_forward`.
+**Classification.** A message is treated as a forward when its subject is `Fwd:`/`Fw:`
+or its body carries a forwarded-message marker (`Begin forwarded message:` /
+`---------- Forwarded message ----------`). This overrides any `References` a
+forwarding client might carry, so a forward is never mistaken for a reply. Otherwise,
+a message with `In-Reply-To`/`References` is a threaded reply; anything else is a new
+thread. Forwards are tagged `metadata.email_is_forward`.
 
-**HTML mail (e.g. forwarded newsletters).** The body is resolved to text in two steps:
+**Body text (`resolveInboundText` → `selectInboundBody`).**
 
-1. Use `mailparser`'s `text` part when present. (For a message with *only* an HTML
-   part, mailparser derives the text itself.)
-2. **Fall back to converting the HTML ourselves** (`htmlToPlainText`, via
-   `html-to-text`) when the text part is empty. This matters because clients
-   forwarding an HTML email commonly emit an **empty** `text/plain` part alongside
-   the real HTML — which *stops* mailparser from deriving text from the HTML, so
-   without this fallback the agent would get nothing. Links become `text [url]`,
-   images are dropped, and tables render as aligned text.
+- **Threaded reply** — uses the `text/plain` part and **strips the quoted history**
+  (the `On … wrote:` / `>` / `-----Original Message-----` tail). Those earlier turns
+  already live in the thread's long-lived session, so re-feeding the quoted chain
+  every message would just burn context. **So no — the agent does not get the full
+  quoted chain on each reply; it gets only the new text.** (If a reply's text part is
+  blank, the HTML is converted as a fallback.)
+- **Forward / new thread** — **prefers the HTML conversion** (`htmlToPlainText`, via
+  `html-to-text`) and keeps the **full body**. This is essential for forwards: a
+  client forwarding an HTML email commonly emits a `text/plain` part that contains
+  the user's note + the forward header block but an **empty forwarded body**, while
+  the real payload lives only in the HTML. Reading the text part alone would deliver
+  the note and `Begin forwarded message:` marker with nothing after it. In the HTML
+  conversion, links become `text [url]`, images are dropped, and tables render as
+  aligned text.
 
-The `[Email with no text body]` placeholder now appears only when a message has
-neither a usable text part nor an HTML part (e.g. attachment-only). The agent reads
-the **text** rendering, not the original HTML markup — fine for reasoning over the
-content, though visual table structure is flattened to aligned text.
+(For a message with *only* an HTML part, mailparser derives the text itself, so that
+path works too.) The `[Email with no text body]` placeholder now appears only when a
+message has neither a usable text part nor an HTML part (e.g. attachment-only). The
+agent reads the **text** rendering, not the original HTML markup — fine for reasoning
+over the content, though visual table structure is flattened to aligned text.
 
 ---
 

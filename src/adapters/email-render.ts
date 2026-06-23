@@ -207,10 +207,8 @@ export function renderEmail(markdown: string): RenderedEmail {
 }
 
 /**
- * Convert an inbound HTML email body to readable plain text. Used only as a
- * fallback when mailparser yields no usable text part (e.g. a forwarded HTML mail
- * whose empty text/plain part suppresses mailparser's own HTML→text conversion).
- * Links become `text [url]`, images are dropped, and tables render as aligned text.
+ * Convert an inbound HTML email body to readable plain text. Links become
+ * `text [url]`, images are dropped, and tables render as aligned text.
  */
 export function htmlToPlainText(html: string): string {
   return htmlToTextConvert(html, {
@@ -220,4 +218,32 @@ export function htmlToPlainText(html: string): string {
       { selector: 'table', format: 'dataTable' },
     ],
   }).trim();
+}
+
+/**
+ * Pick the inbound raw body text (before any quote-stripping) from a parsed
+ * message's text and HTML parts.
+ *
+ * - `preferHtml` (a new thread / forward): use the HTML conversion when an HTML part
+ *   is present. A client forwarding an HTML email commonly emits a text/plain part
+ *   that holds the note + forward header block but an **empty forwarded body**, while
+ *   the actual payload lives only in the HTML — so for forwards the HTML is the
+ *   source of truth, not just a blank-text fallback.
+ * - Otherwise (a threaded reply): use the text/plain part (so `stripQuotedReply` can
+ *   trim the quoted chain), converting HTML only when the text part is blank.
+ */
+export function resolveInboundText(opts: {
+  text: string;
+  html: string | false | null | undefined;
+  preferHtml: boolean;
+}): string {
+  const text = opts.text ?? '';
+  const html = typeof opts.html === 'string' ? opts.html : '';
+
+  if (opts.preferHtml && html) {
+    const converted = htmlToPlainText(html);
+    if (converted.trim()) return converted;
+  }
+  if (!text.trim() && html) return htmlToPlainText(html);
+  return text;
 }

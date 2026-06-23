@@ -45,7 +45,7 @@ import {
   isSenderAuthenticated,
   dkimAuthenticated,
 } from './email-thread.js';
-import { renderEmail, htmlToPlainText } from './email-render.js';
+import { renderEmail, resolveInboundText } from './email-render.js';
 
 const BACKOFF_INITIAL_MS = 2000;
 const BACKOFF_MAX_MS = 60_000;
@@ -446,19 +446,25 @@ export class EmailAdapter implements AdapterInstance {
       contactAddress: fromAddr,
     });
 
-    // Resolve the body text. mailparser derives text from HTML only when there's no
-    // text/plain part at all; a client forwarding an HTML email often emits an empty
-    // text/plain part, which suppresses that — so when the text part is blank, fall
-    // back to converting the HTML ourselves.
-    let rawText = parsed.text ?? '';
-    if (!rawText.trim() && parsed.html) {
-      rawText = htmlToPlainText(parsed.html);
-    }
+    // Classify reply vs. forward. A forward is detected by its `Fwd:` subject or a
+    // forwarded-message marker in the body — this also overrides any References a
+    // forwarding client might carry, so a forward is never mistaken for a reply.
+    const textPart = parsed.text ?? '';
+    const isForward =
+      /^\s*(fwd?|fw):/i.test(subject) ||
+      /(^|\n)\s*(begin forwarded message:|-{2,}\s*forwarded message\s*-{2,})/i.test(textPart);
+    const isThreadedReply = (inReplyTo !== '' || references.length > 0) && !isForward;
 
-    // Strip quoted history only for a threaded reply (its earlier turns already
-    // live in the session). A new thread — a fresh email or a forward — keeps its
-    // full body so the agent sees the forwarded content.
-    const isThreadedReply = inReplyTo !== '' || references.length > 0;
+    // Resolve the body text. For a forward / new thread, prefer the HTML conversion:
+    // forwarded HTML mail often has an empty (header-only) text/plain part while the
+    // payload lives only in the HTML. For a threaded reply, use the text/plain part
+    // so quoted history can be stripped (its earlier turns already live in the
+    // session); a new thread keeps its full body so the forwarded content survives.
+    const rawText = resolveInboundText({
+      text: textPart,
+      html: parsed.html,
+      preferHtml: !isThreadedReply,
+    });
     const body = selectInboundBody(rawText, isThreadedReply);
     const effectiveBody = body || `[Email with no text body] Subject: ${subject}`;
 
@@ -471,7 +477,7 @@ export class EmailAdapter implements AdapterInstance {
         email_message_id: messageId,
         email_subject: subject,
         email_from: fromAddr,
-        email_is_forward: !isThreadedReply && /^\s*(fwd?|fw):/i.test(subject),
+        email_is_forward: isForward,
         platform_message_id: messageId,
       },
     };

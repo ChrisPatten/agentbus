@@ -69,15 +69,18 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
   `metadata.email_is_forward`.
 
 ### Fixed
-- Forwarded emails no longer lose their content. Two bugs compounded here: (1) the
-  previous unconditional quoted-reply stripping cut at the forwarded `From:`/header
-  block and discarded the forwarded payload — forwards (and any new thread) now keep
-  the full body; and (2) a forwarded HTML email whose client emits an **empty**
-  `text/plain` part suppressed mailparser's HTML→text conversion, so the agent
-  received only the `[Email with no text body]` placeholder. The adapter now falls
-  back to converting the HTML itself (`htmlToPlainText`, via `html-to-text`) whenever
-  the text part is blank, so forwarded HTML mail (including the user's cover note and
-  tables) reaches the agent as readable text.
+- Forwarded emails no longer lose their content. The inbound body is now resolved by
+  classifying the message (`resolveInboundText` + `selectInboundBody`): a forward
+  (detected by a `Fwd:` subject or a forwarded-message marker, which also overrides
+  any `References` a forwarding client adds) **prefers the HTML conversion** and keeps
+  the full body, while a threaded reply uses the text part and strips its quoted
+  history. This fixes three compounding bugs: (1) unconditional quote-stripping cut at
+  the forwarded `From:`/header block and discarded the payload; (2) a forwarded
+  HTML-only mail with an empty `text/plain` part yielded only the
+  `[Email with no text body]` placeholder; and (3) an inline HTML forward (Apple
+  Mail) whose `text/plain` part held the note + `Begin forwarded message:` headers but
+  an **empty forwarded body** delivered the note and marker with nothing after it —
+  the forwarded payload (including tables) now comes through via the HTML conversion.
 
 ## [0.4.0] - 2026-06-18
 
