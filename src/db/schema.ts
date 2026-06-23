@@ -59,6 +59,11 @@ function loadMigrations(): Migration[] {
       description: 'Session last_journaled_at column',
       sql: readFileSync(join(migrationsDir, '009_session_last_journaled.sql'), 'utf-8'),
     },
+    {
+      version: 10,
+      description: 'Email threads table',
+      sql: readFileSync(join(migrationsDir, '010_email_threads.sql'), 'utf-8'),
+    },
   ];
 }
 

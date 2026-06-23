@@ -1,12 +1,14 @@
 import type { AppConfig } from '../../config/schema.js';
-import type { PipelineStage } from '../types.js';
+import { isThreadTopic, type PipelineStage } from '../types.js';
 
 /**
  * Stage 50 — Topic Classify
  *
- * If envelope.topic is already set to a recognized non-'general' value, keeps it.
- * Otherwise applies config.pipeline.topic_rules in order — first keyword or regex
- * match wins. Falls back to 'general'. Sets ctx.topics from the resolved topic.
+ * If envelope.topic encodes a per-thread identity (thread:<hash>, e.g. an email
+ * thread), it is preserved verbatim so per-thread sessions survive. Otherwise if
+ * envelope.topic is already a recognized non-'general' value, keeps it. Otherwise
+ * applies config.pipeline.topic_rules in order — first keyword or regex match
+ * wins. Falls back to 'general'. Sets ctx.topics from the resolved topic.
  * Never aborts the pipeline.
  *
  * Regexes are compiled once at construction time (not per-message) to avoid
@@ -23,6 +25,13 @@ export function createTopicClassify(config: AppConfig): PipelineStage {
 
   return async (ctx) => {
     const e = ctx.envelope;
+
+    // Per-thread topic (thread:<hash>) — preserve so each thread keeps its own
+    // conversation_id. These are set by adapters (e.g. email), not config.topics.
+    if (e.topic && isThreadTopic(e.topic)) {
+      ctx.topics = [e.topic];
+      return ctx;
+    }
 
     // If already set to a non-default known topic, preserve it
     if (e.topic && e.topic !== 'general' && config.topics.includes(e.topic)) {

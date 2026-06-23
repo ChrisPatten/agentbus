@@ -124,6 +124,15 @@ describe('priority-score stage', () => {
     expect(result!.priorityScore).toBe(40); // topic_bonus
   });
 
+  it('does NOT apply the topic bonus for a per-thread topic (thread:<hash>)', async () => {
+    const stage = createPriorityScore(makeConfig());
+    const ctx = makeCtx({ topic: 'thread:abc123def456', payload: { type: 'text', body: 'hello' } });
+    const result = await stage(ctx);
+    // A thread topic is a routing key, not a classification → no bonus.
+    expect(result!.priorityScore).toBe(0);
+    expect(result!.envelope.priority).toBe('normal');
+  });
+
   it('stacks all bonuses and maps to urgent when >= 70', async () => {
     const config = makeConfig({ vip_contacts: ['chris'] });
     const stage = createPriorityScore(config);

@@ -20,6 +20,9 @@ Named `adapters.telegram` map with per-bot tokens and isolated channels; legacy 
 
 <!-- Add ideas below. Format: short title, one-line description, optional notes. -->
 
+### Email: strip token-heavy noise from forwarded/inbound bodies
+Forwarded emails (especially HTML newsletters and receipts) carry a lot of content that costs tokens but adds no signal once converted to text: very long tracking/click-through URLs, `data:` URIs (inline base64 images/fonts), unsubscribe/preference footers, repeated whitespace, and link soup. The inbound path (`resolveInboundText` / `htmlToPlainText` in `src/adapters/email-render.ts`, plus `selectInboundBody`) currently passes the converted text through largely intact. Add a configurable cleanup pass that: truncates or drops long query-string tracking URLs (keep the host/path, strip `?utm_*`/long opaque tokens), removes `data:` URLs entirely, collapses excessive blank lines, and optionally trims known boilerplate footers (unsubscribe blocks). Keep it conservative (never drop the user's note or core forwarded content) and measure token savings on a few real forwards. Consider a per-adapter `inbound_cleanup` config toggle and a max-body-size guard.
+
 ### get_transcript MCP tool: fetch full session transcript by ID
 Agent can already search transcripts (FTS5) and list/get sessions, but cannot retrieve the full ordered message history for a specific session. Add a `get_transcript` MCP tool backed by a new `GET /api/v1/sessions/:id/transcript` endpoint that returns all transcript rows for a session in chronological order. Enables the agent to pull full conversation context when a memory reference or `list_sessions` result points to a relevant prior session.
 

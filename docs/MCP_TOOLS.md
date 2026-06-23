@@ -14,6 +14,7 @@ All tools are registered via `registerAllTools()` in `src/mcp/tools/index.ts`.
 | `get_adapter_status` | E2 | Inspect CC adapter health |
 | `list_channels` | S7.1 | Discover available channels and adapter capabilities |
 | `send_message` | S7.2 | Send a message to any contact on any channel |
+| `send_email` | E21 | Start a new email thread to an allowlisted address |
 | `recall_memory` | S7.3/E8 | Search the memory store for facts about contacts |
 | `log_memory` | S7.3/E8 | Record a fact explicitly |
 | `search_transcripts` | S7.3 | Full-text search across conversation transcripts |
@@ -104,6 +105,50 @@ Priority values: `low`, `normal`, `high`. `low` maps to `normal` in the envelope
 **Output:**
 ```json
 { "success": true, "message_id": "uuid", "queued_at": "2026-04-12T10:00:00.000Z" }
+```
+
+---
+
+### `send_email`
+
+Start a **new** email thread to the user (as opposed to `reply`, which threads into a
+message the agent received). Use it to reach out proactively over email.
+
+The tool is registered only when an email adapter is configured (see
+[EMAIL_ADAPTER.md](EMAIL_ADAPTER.md)). It sends on the first configured email channel
+(`email`, or `email:<name>` for a named instance).
+
+**Recipient allowlist.** `to` is optional and defaults to the **first** allowlisted
+address — the addresses under `contacts[*].platforms.email.address`, in config order.
+An explicit `to` is accepted only if it is on that allowlist (matched
+case-insensitively); any other address is rejected and **nothing is sent**. This is the
+same allowlist the inbound adapter enforces, so the agent can never email an arbitrary
+recipient. The adapter re-checks the allowlist on send as defense in depth.
+
+**Subject.** `subject` is optional and sets the email's subject line; it defaults to
+*Message from your assistant*.
+
+**Markdown.** `body` is Markdown — it renders as formatted HTML (headings, tables,
+lists, links, code blocks), with the raw Markdown kept as the plain-text fallback.
+Plain prose works too. See [EMAIL_ADAPTER.md](EMAIL_ADAPTER.md#rich-text-rendering).
+
+**Input:**
+```json
+{
+  "body": "Your message text",
+  "to": "chris@example.com",
+  "subject": "Weekly status"
+}
+```
+
+**Output:**
+```json
+{ "success": true, "message_id": "uuid", "to": "chris@example.com" }
+```
+
+**Rejected recipient:**
+```json
+{ "error": "Refusing to send: \"evil@attacker.com\" is not on the email allowlist. Allowed addresses: chris@example.com" }
 ```
 
 ---

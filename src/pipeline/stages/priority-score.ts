@@ -1,5 +1,5 @@
 import type { AppConfig } from '../../config/schema.js';
-import type { PipelineStage } from '../types.js';
+import { isThreadTopic, type PipelineStage } from '../types.js';
 
 /**
  * Stage 60 — Priority Score
@@ -48,8 +48,9 @@ export function createPriorityScore(config: AppConfig): PipelineStage {
 
     // Topic bonus: any non-general topic gets a boost — the assumption is that
     // classified messages (code, health, personal, etc.) are more relevant than
-    // unclassified 'general' traffic.
-    if (e.topic && e.topic !== 'general') {
+    // unclassified 'general' traffic. A per-thread topic (thread:<hash>) is just
+    // a routing key, not a classification, so it earns no bonus.
+    if (e.topic && e.topic !== 'general' && !isThreadTopic(e.topic)) {
       score += w.topic_bonus;
     }
 

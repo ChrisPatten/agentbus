@@ -29,6 +29,16 @@ const ContactPlatformsSchema = z.object({
       handle: z.string(),
     })
     .optional(),
+  email: z
+    .object({
+      /**
+       * The contact's email address(es). Forms the inbound allowlist: only mail
+       * from these addresses (case-insensitive) resolves to this contact. A
+       * string or a list of strings.
+       */
+      address: z.union([z.string(), z.array(z.string()).min(1)]),
+    })
+    .optional(),
 });
 
 /** A named contact that can send messages to the bus. */
@@ -63,6 +73,47 @@ const TelegramAdapterSchema = z.object({
 const BlueBubblesAdapterSchema = z.object({
   server_url: z.string().url(),
   webhook_port: z.number().int().min(1).max(65535),
+  plugin: z.string().optional(),
+});
+
+/**
+ * Email adapter — receives mail over IMAP IDLE and sends replies over SMTP.
+ * Defaults target iCloud (imap.mail.me.com / smtp.mail.me.com); set host/port to
+ * use any provider. iCloud requires an app-specific password, not the Apple ID
+ * password. SMTP credentials default to the IMAP ones (same mailbox account).
+ */
+const EmailAdapterSchema = z.object({
+  imap: z.object({
+    host: z.string().default('imap.mail.me.com'),
+    port: z.number().int().min(1).max(65535).default(993),
+    user: z.string(),
+    password: z.string(),
+    /** Mailbox/folder to watch for new mail. */
+    mailbox: z.string().default('INBOX'),
+    /** Implicit TLS (true for port 993). Set false only for STARTTLS servers. */
+    secure: z.boolean().default(true),
+  }),
+  smtp: z
+    .object({
+      host: z.string().default('smtp.mail.me.com'),
+      port: z.number().int().min(1).max(65535).default(587),
+      /** SMTP auth user; defaults to imap.user. */
+      user: z.string().optional(),
+      /** SMTP auth password; defaults to imap.password. */
+      password: z.string().optional(),
+      /** From header for outbound mail; defaults to imap.user. */
+      from: z.string().optional(),
+      /** Implicit TLS (true for port 465). 587 uses STARTTLS (secure=false). */
+      secure: z.boolean().default(false),
+    })
+    .prefault({}),
+  /**
+   * When true (default), inbound mail must pass an Authentication-Results
+   * (SPF/DKIM/DMARC) check for its From domain, defeating a spoofed From on an
+   * allowlisted address. Disable only for trusted relays that don't stamp the
+   * header.
+   */
+  require_auth: z.boolean().default(true),
   plugin: z.string().optional(),
 });
 
@@ -148,6 +199,7 @@ const CcHeadlessAdapterSchema = z.object({
 
 const AdaptersConfigSchema = z.object({
   telegram: z.union([TelegramAdapterSchema, z.record(z.string(), TelegramAdapterSchema)]).optional(),
+  email: z.union([EmailAdapterSchema, z.record(z.string(), EmailAdapterSchema)]).optional(),
   bluebubbles: BlueBubblesAdapterSchema.optional(),
   'claude-code': ClaudeCodeAdapterSchema.optional(),
   'cc-headless': CcHeadlessAdapterSchema.optional(),
@@ -444,6 +496,59 @@ export function getTelegramInstances(config: AppConfig): TelegramInstanceConfig[
     }
     seen.add(cfg.token);
     instances.push({ name, token: cfg.token, poll_timeout: cfg.poll_timeout, plugin: cfg.plugin });
+  }
+
+  return instances;
+}
+
+/** Validated config for a single email adapter (one mailbox). */
+export type EmailAdapterConfig = z.infer<typeof EmailAdapterSchema>;
+
+/** Normalised config for a single email account instance. */
+export interface EmailInstanceConfig extends EmailAdapterConfig {
+  /** Account name used as the adapter id suffix, or null for the single-account form. */
+  name: string | null;
+}
+
+/**
+ * Normalises `config.adapters.email` into a flat list of instances.
+ *
+ * Accepts both forms, mirroring getTelegramInstances():
+ *   - Single account: `{ imap, smtp, ... }` → one instance with name=null (id "email")
+ *   - Named record: `{ peggy: { imap, ... }, work: { imap, ... } }` → one per key
+ *     (ids "email:peggy", "email:work")
+ *
+ * Throws on an invalid instance name or a duplicate IMAP account across instances.
+ */
+export function getEmailInstances(config: AppConfig): EmailInstanceConfig[] {
+  const email = config.adapters.email;
+  if (!email) return [];
+
+  // Discriminate: the single-account form has the `imap` block at the top level.
+  if ('imap' in email && typeof (email as { imap?: unknown }).imap === 'object') {
+    return [{ name: null, ...(email as EmailAdapterConfig) }];
+  }
+
+  const record = email as Record<string, EmailAdapterConfig>;
+  const seen = new Set<string>();
+  const instances: EmailInstanceConfig[] = [];
+
+  const VALID_INSTANCE_NAME_RE = /^[a-z0-9_-]+$/;
+
+  for (const [name, cfg] of Object.entries(record)) {
+    if (!VALID_INSTANCE_NAME_RE.test(name)) {
+      throw new Error(
+        `Invalid email instance name "${name}" — only lowercase letters, digits, hyphens, and underscores are allowed`,
+      );
+    }
+    const accountKey = `${cfg.imap.host}:${cfg.imap.user.toLowerCase()}`;
+    if (seen.has(accountKey)) {
+      throw new Error(
+        `Duplicate email account "${cfg.imap.user}" on "${cfg.imap.host}" for instance "${name}" — each mailbox must be unique`,
+      );
+    }
+    seen.add(accountKey);
+    instances.push({ name, ...cfg });
   }
 
   return instances;
