@@ -88,6 +88,19 @@ describe('topic-classify stage', () => {
     expect(result!.envelope.topic).toBe('general');
   });
 
+  it('preserves a per-thread topic (thread:<hash>) even though it is not in config.topics', async () => {
+    const config = makeConfig({ topic_rules: [{ topic: 'code', keywords: ['bug'] }] });
+    const stage = createTopicClassify(config);
+    const ctx = makeCtx(
+      { topic: 'thread:abc123def456', payload: { type: 'text', body: 'I found a bug' } },
+      config,
+    );
+    const result = await stage(ctx);
+    // Thread topic wins over keyword rules so the email thread keeps its session.
+    expect(result!.envelope.topic).toBe('thread:abc123def456');
+    expect(result!.topics).toEqual(['thread:abc123def456']);
+  });
+
   it('matches topic by keyword', async () => {
     const config = makeConfig({
       topic_rules: [{ topic: 'code', keywords: ['bug', 'python', 'typescript'] }],

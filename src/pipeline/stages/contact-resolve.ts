@@ -18,6 +18,7 @@ export function createContactResolve(config: AppConfig): PipelineStage {
   const byTelegramUserId = new Map<string, ContactEntry>();
   const byTelegramUsername = new Map<string, ContactEntry>();
   const byBlueBubblesHandle = new Map<string, ContactEntry>();
+  const byEmailAddress = new Map<string, ContactEntry>();
 
   for (const contact of Object.values(config.contacts)) {
     byId.set(contact.id, contact);
@@ -29,6 +30,12 @@ export function createContactResolve(config: AppConfig): PipelineStage {
     }
     if (contact.platforms.bluebubbles) {
       byBlueBubblesHandle.set(contact.platforms.bluebubbles.handle, contact);
+    }
+    if (contact.platforms.email) {
+      const addrs = contact.platforms.email.address;
+      for (const a of Array.isArray(addrs) ? addrs : [addrs]) {
+        byEmailAddress.set(a.toLowerCase(), contact);
+      }
     }
   }
 
@@ -54,6 +61,8 @@ export function createContactResolve(config: AppConfig): PipelineStage {
     let found: ContactEntry | undefined;
     if (e.channel === 'telegram' || e.channel.startsWith('telegram:')) {
       found = byTelegramUserId.get(e.sender) ?? byTelegramUsername.get(e.sender);
+    } else if (e.channel === 'email' || e.channel.startsWith('email:')) {
+      found = byEmailAddress.get(e.sender.toLowerCase());
     } else if (e.channel === 'bluebubbles') {
       found = byBlueBubblesHandle.get(e.sender);
     }

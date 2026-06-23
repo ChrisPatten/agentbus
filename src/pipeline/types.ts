@@ -2,6 +2,20 @@ import type Database from 'better-sqlite3';
 import type { MessageEnvelope } from '../types/envelope.js';
 import type { AppConfig } from '../config/schema.js';
 
+/**
+ * Reserved topic prefix that encodes a per-thread identity (e.g. an email
+ * thread). A topic like `thread:<hash>` makes route-resolve compute a distinct
+ * conversation_id per thread without the topic having to be a configured label.
+ * topic-classify preserves these verbatim; priority-score does not treat them as
+ * a classified non-general topic for the topic_bonus.
+ */
+export const THREAD_TOPIC_PREFIX = 'thread:';
+
+/** True when a topic encodes a per-thread identity (see THREAD_TOPIC_PREFIX). */
+export function isThreadTopic(topic: string): boolean {
+  return topic.startsWith(THREAD_TOPIC_PREFIX);
+}
+
 /** Resolved contact info attached during contact-resolve stage */
 export interface ResolvedContact {
   id: string;

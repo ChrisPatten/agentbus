@@ -232,8 +232,10 @@ async function invokeClause(
 /**
  * Tell the source adapter to start its typing indicator while claude -p runs.
  * Fire-and-forget — no-ops server-side for channels without typing capability.
+ * Email channels have no typing indicator, so skip the call entirely.
  */
 function startTyping(channel: string, contactId: string): void {
+  if (channel === 'email' || channel.startsWith('email:')) return;
   fetch(`${busBaseUrl}/api/v1/adapters/${channel}/typing`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

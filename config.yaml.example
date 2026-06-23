@@ -15,6 +15,29 @@ adapters:
   #     token: ${TELEGRAM_BOT_TOKEN_PEGGY}
   #   jarvis:
   #     token: ${TELEGRAM_BOT_TOKEN_JARVIS}
+  #
+  # Email adapter (E21) — IMAP IDLE inbound + SMTP outbound. Each email thread
+  # becomes its own long-lived session. Defaults target iCloud; set host/port for
+  # any provider. iCloud needs an app-specific password. See docs/EMAIL_ADAPTER.md.
+  #
+  # Single-account form (adapter id "email", channel "email"):
+  # email:
+  #   imap:
+  #     host: imap.mail.me.com      # iCloud default
+  #     user: peggy@icloud.com
+  #     password: ${ICLOUD_APP_PW}  # app-specific password, NOT the Apple ID password
+  #     mailbox: INBOX
+  #   smtp:
+  #     host: smtp.mail.me.com      # iCloud default
+  #     from: Peggy <peggy@icloud.com>   # defaults to imap.user
+  #   require_auth: true            # drop SPF/DKIM/DMARC failures (anti-spoofing)
+  #
+  # Multi-account form (adapter ids "email:peggy", "email:work"):
+  # email:
+  #   peggy:
+  #     imap: { user: peggy@icloud.com, password: ${ICLOUD_APP_PW_PEGGY} }
+  #   work:
+  #     imap: { host: imap.fastmail.com, user: me@work.com, password: ${FASTMAIL_PW} }
   bluebubbles:
     server_url: http://localhost:1234
     webhook_port: 3002
@@ -33,6 +56,11 @@ adapters:
   #     You are a helpful assistant for {{contact_id}} on {{channel}}.
   #     Today is {{date}}.
   #     Deliver every user-facing message by calling the `reply` tool ([id:<id>]).
+  #     Match your length and formality to the channel:
+  #       - telegram*: reply briefly and conversationally (1–3 sentences).
+  #       - email*:    write a complete, well-structured reply — a greeting, your
+  #                    full reasoning in clear sections, and a sign-off. Take the
+  #                    space email affords; this is not a chat message.
   #     @persona.md
   #     {{memories}}
   #   # E20: assemble the agent's own memory files into each turn (relative to working_dir)
@@ -64,6 +92,12 @@ contacts:
         username: alice_example
       bluebubbles:
         handle: "+15551234567"
+      # Email allowlist — only mail from these addresses (case-insensitive)
+      # resolves to this contact; anything else is dropped. String or list.
+      email:
+        address:
+          - alice@example.com
+          - alice@work.com
 
 topics:
   - general
@@ -111,3 +145,9 @@ pipeline:
     #   target:
     #     adapterId: claude-code
     #     recipientId: agent:jarvis
+    # Email routing — send mail to the (headless) agent so it can reply in-thread:
+    # - match:
+    #     channel: email
+    #   target:
+    #     adapterId: cc-headless
+    #     recipientId: agent:claude

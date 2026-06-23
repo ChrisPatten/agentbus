@@ -49,9 +49,9 @@ const messageBuffer: MessageEnvelope[] = [];
 
 const mcpServer = createMcpServer();
 if (TOOLS_ONLY) {
-  registerHeadlessTools(mcpServer, busBaseUrl);
+  registerHeadlessTools(mcpServer, busBaseUrl, config);
 } else {
-  registerAllTools(mcpServer, busBaseUrl, healthState);
+  registerAllTools(mcpServer, busBaseUrl, healthState, config);
 }
 
 // ── Message formatting ────────────────────────────────────────────────────────
@@ -237,7 +237,9 @@ async function poll(): Promise<void> {
 
       // Now that Claude Code has the messages, signal each source adapter to
       // start its typing indicator. Fire-and-forget — never blocks the poll loop.
+      // Email channels have no typing indicator, so skip them.
       for (const envelope of acked) {
+        if (envelope.channel === 'email' || envelope.channel.startsWith('email:')) continue;
         fetch(`${busBaseUrl}/api/v1/adapters/${envelope.channel}/typing`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },

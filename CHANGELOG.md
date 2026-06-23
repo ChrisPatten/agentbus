@@ -10,6 +10,48 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+### Added
+- **Email channel (E21).** New in-process `email` adapter
+  (`src/adapters/email.ts`) that receives mail over IMAP IDLE (push) and sends
+  replies over SMTP, with defaults tuned for iCloud. Each email **thread** maps to
+  its own long-lived session: a stable thread key (root of `References` /
+  `In-Reply-To` / own `Message-ID`) is hashed into a reserved `thread:<hash>`
+  topic, so the existing `conversation_id` machinery gives one session per thread
+  and branches a forward into a new one automatically. Replies thread correctly
+  (`In-Reply-To`/`References`/`Re:` subject/original `To`), backed by a new
+  `email_threads` table (migration 010). Two gates protect the inbox: a sender
+  **allowlist** (`contacts[*].platforms.email.address`, string or list) and an
+  **anti-spoofing check** (`require_auth`, default true) that trusts a passing
+  `Authentication-Results` header when present and otherwise verifies the
+  message's DKIM signature against DNS via `mailauth` — necessary because some
+  providers (e.g. iCloud, intra-provider) never stamp that header yet still
+  DKIM-sign the mail. Multiple mailboxes run as named instances (`email:peggy`, `email:work`), like
+  Telegram. "Longer, more thorough" email replies are a system-prompt concern
+  keyed on `{{channel}}` (no renderer change). See `docs/EMAIL_ADAPTER.md` and
+  `_bmad-output/epics/E21-email-channel.md`.
+- **`send_email` MCP tool (E21).** Lets the agent start a *new* email thread to the
+  user (vs. `reply`, which threads into a received message). Defaults the recipient
+  to the first allowlisted address (`contacts[*].platforms.email.address`, config
+  order) and accepts an explicit `to` only if it is on that allowlist — any other
+  address is rejected with nothing sent. The email adapter re-checks the allowlist
+  on send for a raw address as defense in depth, so the agent can never email an
+  arbitrary recipient. The message is routed to the owning `contact:<id>` (the
+  delivery worker only dispatches `contact:`-prefixed recipients) with the exact
+  address in `metadata.email_to`. An optional `subject` (carried in
+  `metadata.email_subject`) sets the subject line, defaulting to "Message from your
+  assistant". Registered automatically whenever an email adapter is configured. See
+  `docs/MCP_TOOLS.md`.
+
+### Changed
+- `topic-classify` now preserves reserved `thread:`-prefixed topics verbatim, and
+  `priority-score` excludes them from the non-general topic bonus
+  (`THREAD_TOPIC_PREFIX` in `src/pipeline/types.ts`). `contact-resolve` resolves
+  email senders to contacts via a case-insensitive address map.
+- No typing indicator for email channels: the headless and polling Claude Code
+  adapters skip the `/typing` call for `email`/`email:*` channels (the email adapter
+  reports `typing: false`, so the server already no-ops — this avoids the wasted
+  round-trip).
+
 ## [0.4.0] - 2026-06-18
 
 ### Added

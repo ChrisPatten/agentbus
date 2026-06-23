@@ -14,8 +14,9 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { MessageEnvelope } from '../../types/envelope.js';
 import { toolError, toolSuccess } from './helpers.js';
+import type { AppConfig } from '../../config/schema.js';
 import { registerChannelTools } from './channels.js';
-import { registerMessagingTools } from './messaging.js';
+import { registerMessagingTools, registerEmailTool, buildEmailToolConfig } from './messaging.js';
 import { registerMemoryTools } from './memory.js';
 import { registerSessionTools } from './sessions.js';
 import { registerReactionTools } from './reactions.js';
@@ -36,11 +37,14 @@ export interface HealthState {
  * @param server      - The MCP server instance
  * @param busBaseUrl  - Base URL of bus-core HTTP API (e.g. "http://127.0.0.1:4000")
  * @param healthState - Mutable health state shared with the polling loop
+ * @param config      - App config; when present and an email adapter is
+ *                      configured, the allowlist-gated `send_email` tool is added
  */
 export function registerAllTools(
   server: McpServer,
   busBaseUrl: string,
   healthState: HealthState,
+  config?: AppConfig,
 ): void {
   // E2 core tools
   registerCoreTools(server, busBaseUrl, healthState);
@@ -52,6 +56,18 @@ export function registerAllTools(
   registerSessionTools(server, busBaseUrl);
   registerReactionTools(server, busBaseUrl);
   registerScheduleTools(server, busBaseUrl);
+  maybeRegisterEmailTool(server, busBaseUrl, config);
+}
+
+/** Register the `send_email` tool when an email adapter + allowlist is configured. */
+function maybeRegisterEmailTool(
+  server: McpServer,
+  busBaseUrl: string,
+  config?: AppConfig,
+): void {
+  if (!config) return;
+  const emailCfg = buildEmailToolConfig(config);
+  if (emailCfg) registerEmailTool(server, busBaseUrl, emailCfg);
 }
 
 /**
@@ -62,7 +78,11 @@ export function registerAllTools(
  * "working on it" updates, the final answer, per-channel sends). Excludes
  * get_adapter_status (no persistent health state in a per-request invocation).
  */
-export function registerHeadlessTools(server: McpServer, busBaseUrl: string): void {
+export function registerHeadlessTools(
+  server: McpServer,
+  busBaseUrl: string,
+  config?: AppConfig,
+): void {
   registerReplyTool(server, busBaseUrl);
   registerChannelTools(server, busBaseUrl);
   registerMessagingTools(server, busBaseUrl);
@@ -70,6 +90,7 @@ export function registerHeadlessTools(server: McpServer, busBaseUrl: string): vo
   registerSessionTools(server, busBaseUrl);
   registerReactionTools(server, busBaseUrl);
   registerScheduleTools(server, busBaseUrl);
+  maybeRegisterEmailTool(server, busBaseUrl, config);
 }
 
 // ── Core tools (E2) ───────────────────────────────────────────────────────────

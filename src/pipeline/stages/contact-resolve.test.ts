@@ -147,4 +147,39 @@ describe('contact-resolve stage', () => {
     const result = await stage(ctx);
     expect(result!.envelope.sender).toBe('platform:telegram:peggy:999999');
   });
+
+  // ── Email channel ──────────────────────────────────────────────────────────
+
+  const emailConfig = makeConfig({
+    contacts: {
+      chris: {
+        id: 'chris',
+        displayName: 'Chris',
+        platforms: { email: { address: ['Chris@Example.com', 'chris@work.com'] } },
+      },
+    },
+  } as unknown as Partial<AppConfig>);
+
+  it('resolves a known email sender (case-insensitive) on the email channel', async () => {
+    const stage = createContactResolve(emailConfig);
+    const ctx = makeCtx({ channel: 'email', sender: 'chris@example.com' }, emailConfig);
+    const result = await stage(ctx);
+    expect(result!.envelope.sender).toBe('contact:chris');
+    expect(result!.contact?.id).toBe('chris');
+  });
+
+  it('resolves a secondary email address on a named-instance email channel', async () => {
+    const stage = createContactResolve(emailConfig);
+    const ctx = makeCtx({ channel: 'email:peggy', sender: 'chris@work.com' }, emailConfig);
+    const result = await stage(ctx);
+    expect(result!.envelope.sender).toBe('contact:chris');
+  });
+
+  it('reformats an unknown email sender to platform:channel:id', async () => {
+    const stage = createContactResolve(emailConfig);
+    const ctx = makeCtx({ channel: 'email:peggy', sender: 'stranger@spam.com' }, emailConfig);
+    const result = await stage(ctx);
+    expect(result!.contact).toBeNull();
+    expect(result!.envelope.sender).toBe('platform:email:peggy:stranger@spam.com');
+  });
 });

@@ -20,7 +20,7 @@ import { mkdirSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { loadConfig } from './config/loader.js';
-import { getTelegramInstances } from './config/schema.js';
+import { getTelegramInstances, getEmailInstances } from './config/schema.js';
 import { getDb, closeDb } from './db/client.js';
 import { runMigrations, rebuildFts } from './db/schema.js';
 import { MessageQueue } from './core/queue.js';
@@ -37,6 +37,7 @@ import { createRouteResolve } from './pipeline/stages/route-resolve.js';
 import { createTranscriptLog } from './pipeline/stages/transcript-log.js';
 import { createMemoryInject } from './pipeline/stages/memory-inject.js';
 import { TelegramAdapter } from './adapters/telegram.js';
+import { EmailAdapter } from './adapters/email.js';
 import { startHeadless, stopHeadless } from './adapters/cc-headless.js';
 import { DeliveryWorker } from './core/delivery.js';
 import { createCommandSystem } from './commands/index.js';
@@ -130,6 +131,15 @@ for (const inst of getTelegramInstances(config)) {
     instanceConfig: inst,
   });
   registry.register(telegram);
+}
+
+for (const inst of getEmailInstances(config)) {
+  const email = new EmailAdapter({
+    ...adapterDeps,
+    instanceName: inst.name ?? undefined,
+    instanceConfig: inst,
+  });
+  registry.register(email);
 }
 
 // ── Delivery worker ──────────────────────────────────────────────────────────

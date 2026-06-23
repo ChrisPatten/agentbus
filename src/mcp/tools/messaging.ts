@@ -7,6 +7,7 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { toolError, toolSuccess } from './helpers.js';
 import type { AdaptersResponse } from './types.js';
+import { getEmailInstances, type AppConfig } from '../../config/schema.js';
 
 export function registerMessagingTools(server: McpServer, busBaseUrl: string): void {
   server.registerTool(
@@ -78,5 +79,132 @@ export function registerMessagingTools(server: McpServer, busBaseUrl: string): v
         return toolError(`Failed to send message: ${String(err)}`);
       }
     }
+  );
+}
+
+/** Resolved configuration the `send_email` tool needs at registration time. */
+export interface EmailToolConfig {
+  /** The email channel id to send on (e.g. "email" or "email:peggy"). */
+  channel: string;
+  /** Ordered allowlist of email addresses; index 0 is the default recipient. */
+  allowlist: string[];
+  /** Lowercased address → owning contact id (for the `contact:` delivery recipient). */
+  addressToContact: Record<string, string>;
+}
+
+/**
+ * Derive the `send_email` tool's config from the app config: the first email
+ * adapter instance is the send channel, and the allowlist is every address under
+ * `contacts[*].platforms.email.address` (config order preserved, de-duplicated).
+ * Returns null when no email adapter or no allowlisted address is configured —
+ * in which case the tool is not registered.
+ */
+export function buildEmailToolConfig(config: AppConfig): EmailToolConfig | null {
+  const instances = getEmailInstances(config);
+  if (instances.length === 0) return null;
+  const first = instances[0]!;
+  const channel = first.name ? `email:${first.name}` : 'email';
+
+  const allowlist: string[] = [];
+  const addressToContact: Record<string, string> = {};
+  const seen = new Set<string>();
+  for (const contact of Object.values(config.contacts)) {
+    const email = contact.platforms.email;
+    if (!email) continue;
+    const addrs = Array.isArray(email.address) ? email.address : [email.address];
+    for (const a of addrs) {
+      const low = a.toLowerCase();
+      if (seen.has(low)) continue;
+      seen.add(low);
+      allowlist.push(a);
+      addressToContact[low] = contact.id;
+    }
+  }
+  if (allowlist.length === 0) return null;
+  return { channel, allowlist, addressToContact };
+}
+
+/**
+ * S(E21) — Outbound tool: send_email
+ *
+ * Lets the agent start a NEW email thread to the user (as opposed to `reply`,
+ * which threads into the message the agent received). Defaults the recipient to
+ * the first allowlisted address; an explicit `to` is allowed only if it is on
+ * the allowlist. This is the same allowlist the inbound adapter enforces, so the
+ * agent can never email an arbitrary address.
+ */
+export function registerEmailTool(
+  server: McpServer,
+  busBaseUrl: string,
+  emailCfg: EmailToolConfig,
+): void {
+  const defaultTo = emailCfg.allowlist[0]!;
+
+  server.registerTool(
+    'send_email',
+    {
+      description:
+        'Start a NEW email thread to the user over the email channel. Use this to ' +
+        'reach out proactively (not in reply to a received message). Defaults to the ' +
+        'primary allowlisted address; pass `to` to target a different allowlisted ' +
+        'address. Any recipient not on the allowlist is rejected.',
+      inputSchema: {
+        body: z.string().min(1).describe('Email body text'),
+        to: z
+          .string()
+          .optional()
+          .describe(
+            `Recipient email address. Must be on the allowlist (${emailCfg.allowlist.join(', ')}). ` +
+              `Defaults to ${defaultTo}.`,
+          ),
+        subject: z
+          .string()
+          .optional()
+          .describe('Subject line. Defaults to "Message from your assistant".'),
+      },
+    },
+    async ({ body, to, subject }) => {
+      const address = (to ?? defaultTo).trim();
+      const contactId = emailCfg.addressToContact[address.toLowerCase()];
+      if (!contactId) {
+        return toolError(
+          `Refusing to send: "${address}" is not on the email allowlist. ` +
+            `Allowed addresses: ${emailCfg.allowlist.join(', ')}`,
+        );
+      }
+
+      // The delivery worker only dispatches `contact:`-prefixed recipients, so
+      // route via the owning contact and carry the exact target address in
+      // metadata (email_to) for the adapter to send to precisely. An optional
+      // subject rides metadata.email_subject (the adapter falls back to a default).
+      const trimmedSubject = subject?.trim();
+      const metadata: Record<string, unknown> = { email_to: address };
+      if (trimmedSubject) metadata['email_subject'] = trimmedSubject;
+      const envelope = {
+        channel: emailCfg.channel,
+        topic: 'general',
+        sender: 'agent:claude',
+        recipient: `contact:${contactId}`,
+        reply_to: null,
+        priority: 'normal' as const,
+        payload: { type: 'text' as const, body },
+        metadata,
+      };
+
+      try {
+        const res = await fetch(`${busBaseUrl}/api/v1/messages`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(envelope),
+        });
+        const data = (await res.json()) as { ok: boolean; id?: string; error?: string };
+        if (!data.ok) {
+          return toolError(`Bus rejected email: ${data.error ?? 'unknown error'}`);
+        }
+        return toolSuccess({ success: true, message_id: data.id, to: address });
+      } catch (err) {
+        return toolError(`Failed to send email: ${String(err)}`);
+      }
+    },
   );
 }
