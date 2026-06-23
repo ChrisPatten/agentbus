@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { renderEmail } from './email-render.js';
+import { renderEmail, htmlToPlainText } from './email-render.js';
 
 describe('renderEmail', () => {
   it('returns the original markdown as the plain-text part', () => {
@@ -67,5 +67,30 @@ describe('renderEmail', () => {
   it('renders an horizontal rule', () => {
     const { html } = renderEmail('above\n\n---\n\nbelow');
     expect(html).toMatch(/<hr style="[^"]*border-top/);
+  });
+});
+
+describe('htmlToPlainText', () => {
+  it('extracts readable text from an HTML body (e.g. a forwarded HTML email)', () => {
+    const html =
+      '<html><body><p>My note before forwarding.</p><hr><h1>50% Off</h1>' +
+      '<p>Hello <b>there</b>, see <a href="http://x.com">this</a>.</p></body></html>';
+    const text = htmlToPlainText(html);
+    expect(text).toContain('My note before forwarding.');
+    expect(text).toContain('50% OFF');
+    expect(text).toContain('Hello there');
+    expect(text).toContain('http://x.com');
+    expect(text).not.toContain('<');
+  });
+
+  it('renders a table as aligned text', () => {
+    const text = htmlToPlainText('<table><tr><th>Name</th><th>Qty</th></tr><tr><td>Apples</td><td>3</td></tr></table>');
+    expect(text.toLowerCase()).toContain('name');
+    expect(text).toContain('Apples');
+    expect(text).toContain('3');
+  });
+
+  it('drops images', () => {
+    expect(htmlToPlainText('<p>before</p><img src="http://x/y.png" alt="logo"><p>after</p>')).not.toContain('logo');
   });
 });

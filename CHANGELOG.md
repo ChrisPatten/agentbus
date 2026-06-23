@@ -69,11 +69,15 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
   `metadata.email_is_forward`.
 
 ### Fixed
-- Forwarded emails no longer lose their content. The previous unconditional
-  quoted-reply stripping cut at the forwarded `From:`/header block and discarded the
-  forwarded payload; forwards (and any new thread) now keep the full body. HTML-only
-  mail is read via `mailparser`'s text down-conversion, so forwarded HTML messages
-  carry usable content instead of the `[Email with no text body]` placeholder.
+- Forwarded emails no longer lose their content. Two bugs compounded here: (1) the
+  previous unconditional quoted-reply stripping cut at the forwarded `From:`/header
+  block and discarded the forwarded payload — forwards (and any new thread) now keep
+  the full body; and (2) a forwarded HTML email whose client emits an **empty**
+  `text/plain` part suppressed mailparser's HTML→text conversion, so the agent
+  received only the `[Email with no text body]` placeholder. The adapter now falls
+  back to converting the HTML itself (`htmlToPlainText`, via `html-to-text`) whenever
+  the text part is blank, so forwarded HTML mail (including the user's cover note and
+  tables) reaches the agent as readable text.
 
 ## [0.4.0] - 2026-06-18
 

@@ -15,6 +15,7 @@
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
+    "@types/html-to-text": "^9.0.4",
     "@types/js-yaml": "^4.0.9",
     "@types/mailparser": "^3.4.6",
     "@types/markdown-it": "^14.1.2",
@@ -33,6 +34,7 @@
     "croner": "^10.0.1",
     "dotenv": "^17.4.1",
     "fastify": "^5.8.4",
+    "html-to-text": "^10.0.0",
     "imapflow": "^1.4.2",
     "js-yaml": "^4.1.1",
     "mailauth": "^4.13.3",

@@ -45,7 +45,7 @@ import {
   isSenderAuthenticated,
   dkimAuthenticated,
 } from './email-thread.js';
-import { renderEmail } from './email-render.js';
+import { renderEmail, htmlToPlainText } from './email-render.js';
 
 const BACKOFF_INITIAL_MS = 2000;
 const BACKOFF_MAX_MS = 60_000;
@@ -446,13 +446,20 @@ export class EmailAdapter implements AdapterInstance {
       contactAddress: fromAddr,
     });
 
+    // Resolve the body text. mailparser derives text from HTML only when there's no
+    // text/plain part at all; a client forwarding an HTML email often emits an empty
+    // text/plain part, which suppresses that — so when the text part is blank, fall
+    // back to converting the HTML ourselves.
+    let rawText = parsed.text ?? '';
+    if (!rawText.trim() && parsed.html) {
+      rawText = htmlToPlainText(parsed.html);
+    }
+
     // Strip quoted history only for a threaded reply (its earlier turns already
     // live in the session). A new thread — a fresh email or a forward — keeps its
-    // full body so the agent sees the forwarded content. mailparser populates
-    // parsed.text from HTML when there's no text/plain part, so HTML-only mail
-    // (common for forwards) still carries readable content.
+    // full body so the agent sees the forwarded content.
     const isThreadedReply = inReplyTo !== '' || references.length > 0;
-    const body = selectInboundBody(parsed.text ?? '', isThreadedReply);
+    const body = selectInboundBody(rawText, isThreadedReply);
     const effectiveBody = body || `[Email with no text body] Subject: ${subject}`;
 
     const message: InboundMessage = {

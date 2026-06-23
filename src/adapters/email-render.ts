@@ -1,19 +1,23 @@
 /**
- * Markdown → rich-text email rendering for the email adapter (E21).
+ * Email body rendering for the email adapter (E21) — both directions.
  *
- * The agent writes Markdown; we render it to a self-contained HTML document with
- * **inline** styles (most email clients strip `<head>`/`<style>`, so every visual
- * style must live on the element itself) plus a small `<style>` block for the few
- * things that can only be expressed as media queries (dark mode, mobile sizing).
- *
- * The original Markdown is returned as the plain-text alternative — Markdown is
- * already readable as text, so a client that prefers `text/plain` gets a clean
- * fallback for free (the email is sent `multipart/alternative`).
- *
+ * Outbound (`renderEmail`): the agent writes Markdown; we render it to a
+ * self-contained HTML document with **inline** styles (most email clients strip
+ * `<head>`/`<style>`, so every visual style must live on the element itself) plus a
+ * small `<style>` block for the few things that can only be expressed as media
+ * queries (dark mode, mobile sizing). The original Markdown is returned as the
+ * plain-text alternative — Markdown is already readable as text, so a client that
+ * prefers `text/plain` gets a clean fallback for free (sent `multipart/alternative`).
  * Safety: markdown-it runs with `html: false`, so any raw HTML in the agent's text
  * is escaped, not rendered — no injection surface.
+ *
+ * Inbound (`htmlToPlainText`): when a received message's text/plain part is empty
+ * (common when a client forwards an HTML email — it emits an empty text part that
+ * stops mailparser from deriving text from the HTML), we down-convert the HTML
+ * ourselves so the agent still gets readable content.
  */
 import MarkdownIt from 'markdown-it';
+import { convert as htmlToTextConvert } from 'html-to-text';
 
 /** Rendered output: a full HTML document and a plain-text fallback. */
 export interface RenderedEmail {
@@ -200,4 +204,20 @@ ${inner}
 export function renderEmail(markdown: string): RenderedEmail {
   const inner = getRenderer().render(markdown, {});
   return { html: wrapDocument(inner), text: markdown };
+}
+
+/**
+ * Convert an inbound HTML email body to readable plain text. Used only as a
+ * fallback when mailparser yields no usable text part (e.g. a forwarded HTML mail
+ * whose empty text/plain part suppresses mailparser's own HTML→text conversion).
+ * Links become `text [url]`, images are dropped, and tables render as aligned text.
+ */
+export function htmlToPlainText(html: string): string {
+  return htmlToTextConvert(html, {
+    wordwrap: false,
+    selectors: [
+      { selector: 'img', format: 'skip' },
+      { selector: 'table', format: 'dataTable' },
+    ],
+  }).trim();
 }

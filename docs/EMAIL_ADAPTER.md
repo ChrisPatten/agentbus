@@ -247,12 +247,21 @@ existing thread (`selectInboundBody`):
   session), and its forwarded block *is* the content the user wants the agent to
   read, so stripping would lose it. Forwards are also tagged `metadata.email_is_forward`.
 
-**HTML mail (e.g. forwarded newsletters).** `mailparser` down-converts an HTML-only
-message to readable plain text (headings flattened, `link → text [url]`), so the
-agent receives usable content. The `[Email with no text body]` placeholder only
-appears when a message truly has neither a text nor an HTML part (e.g. attachment
-only). The agent reads the **text** rendering, not the original HTML markup — fine
-for reasoning over the content, though visual table structure is flattened to text.
+**HTML mail (e.g. forwarded newsletters).** The body is resolved to text in two steps:
+
+1. Use `mailparser`'s `text` part when present. (For a message with *only* an HTML
+   part, mailparser derives the text itself.)
+2. **Fall back to converting the HTML ourselves** (`htmlToPlainText`, via
+   `html-to-text`) when the text part is empty. This matters because clients
+   forwarding an HTML email commonly emit an **empty** `text/plain` part alongside
+   the real HTML — which *stops* mailparser from deriving text from the HTML, so
+   without this fallback the agent would get nothing. Links become `text [url]`,
+   images are dropped, and tables render as aligned text.
+
+The `[Email with no text body]` placeholder now appears only when a message has
+neither a usable text part nor an HTML part (e.g. attachment-only). The agent reads
+the **text** rendering, not the original HTML markup — fine for reasoning over the
+content, though visual table structure is flattened to aligned text.
 
 ---
 
