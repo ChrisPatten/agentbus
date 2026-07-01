@@ -10,6 +10,8 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-01
+
 ### Added
 - **`model` config key for the `cc-headless` adapter.** `adapters.cc-headless.model`
   is passed as `--model` to `claude -p` when set, letting each headless agent
@@ -215,7 +217,8 @@ Baseline release. Core bus, pipeline, adapters, memory, scheduling.
 - Built-in slash commands + plugin command registry. (E6)
 - Scheduled messages (cron + one-shot) via background scheduler. (E18)
 
-[Unreleased]: https://github.com/ChrisPatten/agentbus/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/ChrisPatten/agentbus/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/ChrisPatten/agentbus/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/ChrisPatten/agentbus/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/ChrisPatten/agentbus/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/ChrisPatten/agentbus/compare/v0.3.0...v0.4.0
