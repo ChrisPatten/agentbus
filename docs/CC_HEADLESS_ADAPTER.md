@@ -55,8 +55,11 @@ claude -p "<formatted_prompt>" \
   --allowedTools all \
   --mcp-config /tmp/agentbus-mcp-<uuid>.json \
   --system-prompt-file /tmp/agentbus-sp-<uuid>.txt \
+  [--model <model>] \
   [--resume <claude_session_id>]
 ```
+
+`--model` is only passed when `adapters.cc-headless.model` is set. Without it, the invocation falls back to whatever the `claude` CLI resolves on its own — its built-in default, or a `"model"` key in `working_dir`'s `.claude/settings.json`. Setting `model` in `config.yaml` is the explicit, per-agent way to pin it.
 
 `--verbose` is required by the Claude CLI whenever `--print`/`-p` is combined with `--output-format stream-json`; without it the invocation fails fast with `When using --print, --output-format=stream-json requires --verbose`. It does not change the emitted JSONL event stream the adapter parses.
 
@@ -218,6 +221,7 @@ adapters:
     agent_id: claude          # Which agent to dequeue for
     poll_interval_ms: 1000
     claude_bin: claude        # Path to claude binary (default: "claude")
+    model: sonnet             # --model passed to claude -p (default: unset → CLI/settings.json default)
     working_dir: /home/agent  # cwd for claude -p → which CLAUDE.md loads (default: bus cwd)
     error_reply: "Sorry — I hit an error processing that. Please try again."
     system_prompt: |
@@ -259,6 +263,7 @@ adapters:
 | `poll_interval_ms` | `1000` | Bus poll cadence |
 | `system_prompt` | *(required)* | Persona template — `{{vars}}` + `@path` references |
 | `claude_bin` | `claude` | Path to the `claude` binary |
+| `model` | unset | `--model` passed to `claude -p` (e.g. `sonnet`, `opus`); unset defers to the CLI/`.claude/settings.json` default |
 | `working_dir` | bus cwd | `cwd` for `claude -p`; selects the `CLAUDE.md` hierarchy and `@path` base |
 | `error_reply` | see above | Message delivered to the user on invocation failure |
 | `memory.dir` | `memory` | Memory directory (relative to `working_dir`) |

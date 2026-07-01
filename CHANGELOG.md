@@ -10,6 +10,12 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+### Added
+- **`model` config key for the `cc-headless` adapter.** `adapters.cc-headless.model`
+  is passed as `--model` to `claude -p` when set, letting each headless agent
+  pin its model explicitly in `config.yaml` instead of relying on the CLI
+  default or a per-agent `.claude/settings.json`.
+
 ## [0.6.0] - 2026-07-01
 
 ### Added

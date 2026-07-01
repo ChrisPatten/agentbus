@@ -133,6 +133,12 @@ const CcHeadlessAdapterSchema = z.object({
   system_prompt: z.string(),
   claude_bin: z.string().default('claude'),
   /**
+   * Model passed as `--model` to `claude -p` (e.g. `sonnet`, `opus`,
+   * `claude-sonnet-4-6`). Omit to let the CLI resolve its own default
+   * (CLI default, or `working_dir`'s `.claude/settings.json`).
+   */
+  model: z.string().optional(),
+  /**
    * Working directory for the spawned `claude -p` process. Determines which
    * CLAUDE.md hierarchy is auto-loaded into context (project + parents +
    * ~/.claude) and the base for `@path` expansion in the system prompt.

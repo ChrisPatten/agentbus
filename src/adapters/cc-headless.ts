@@ -37,6 +37,7 @@ const headlessCfg = config.adapters['cc-headless'];
 let AGENT_ID: string;
 let POLL_INTERVAL_MS: number;
 let CLAUDE_BIN: string;
+let CLAUDE_MODEL: string | undefined;
 let WORKING_DIR: string;
 let busBaseUrl: string;
 
@@ -142,6 +143,9 @@ async function invokeClause(
     '--mcp-config', mcpConfigPath,
     '--system-prompt-file', systemPromptPath,
   ];
+  if (CLAUDE_MODEL) {
+    args.push('--model', CLAUDE_MODEL);
+  }
   if (resumeId) {
     args.push('--resume', resumeId);
   }
@@ -554,6 +558,7 @@ export function startHeadless(db: Database.Database): HeadlessHandle | null {
   AGENT_ID = `agent:${headlessCfg.agent_id}`;
   POLL_INTERVAL_MS = headlessCfg.poll_interval_ms;
   CLAUDE_BIN = headlessCfg.claude_bin;
+  CLAUDE_MODEL = headlessCfg.model;
   WORKING_DIR = headlessCfg.working_dir ?? process.cwd();
   busBaseUrl = `http://127.0.0.1:${config.bus.http_port}`;
   console.log(`[cc-headless] Starting — polling ${busBaseUrl} for ${AGENT_ID} every ${POLL_INTERVAL_MS}ms`);
