@@ -1,8 +1,16 @@
 # Attachments
 
-AgentBus supports **inbound images and documents** from Telegram, delivered to
-the Claude Code agent as file paths embedded in the channel notification text.
-Outbound attachments and non-file types (video, audio, stickers) are out of scope.
+AgentBus supports **inbound images and documents** from Telegram and Email,
+delivered to the Claude Code agent as file paths embedded in the channel
+notification text. Outbound attachments and non-file types (video, audio,
+stickers) are out of scope.
+
+Both adapters share the same machinery (`src/media/attachments.ts`): per-agent
+media config (`resolveMediaConfig`), safe extension derivation (`extensionFor`),
+the `attachments` table, and the TTL sweeper. The only difference is the source
+of the bytes — Telegram streams them from its Bot API, while Email already holds
+them in memory (`mailparser`'s `attachment.content`) and writes them with
+`persistAttachmentBuffer`.
 
 ## Config
 
@@ -82,6 +90,52 @@ here is the document
 [File: /tmp/agentbus/claude/3f1a-....pdf — report.pdf]
 ```
 
+## Email
+
+The email adapter applies the same flow on inbound mail, with two
+email-specific behaviors:
+
+- **No download step.** `mailparser` decodes each part into
+  `attachment.content` (a `Buffer`), so the adapter writes the bytes directly
+  via `persistAttachmentBuffer` — there is no equivalent of Telegram's
+  `getFile`/HTTP fetch.
+- **Real vs. inline attachments.**
+  - **Real attachments** (`Content-Disposition: attachment`) are surfaced to the
+    agent exactly like Telegram files/images — `[Image: …]` / `[File: … — name]`
+    lines in `metadata.attachments`.
+  - **Inline attachments** — HTML-embedded images such as signature logos
+    (`mailparser` `related: true`, or `Content-Disposition: inline`) — are
+    persisted (so the sweeper reclaims them) but kept **out** of the agent's
+    message body to avoid noise. Instead, each is surfaced in
+    `metadata.inline_attachments` as `{ id, type, mime_type?,
+    original_filename? }`, and the CC adapter renders a single hint line:
+
+    ```
+    [Inline image available logo.png — fetch with fetch_attachment(id="<uuid>")]
+    ```
+
+| Email part | Attachment type | Surfaced as |
+|---|---|---|
+| `Content-Disposition: attachment`, `image/*` MIME | `image` | `metadata.attachments` (rendered `[Image: …]`) |
+| `Content-Disposition: attachment`, other MIME | `file` | `metadata.attachments` (rendered `[File: …]`) |
+| Inline / `related` part (cid-referenced) | `image`/`file` | `metadata.inline_attachments` (hint only) |
+
+### Fetching inline attachments on demand
+
+The `fetch_attachment` MCP tool resolves an attachment `id` (from an inline-image
+hint) to its on-disk path so the agent can read it when it decides the image
+matters:
+
+- Tool input: `{ id: string }`.
+- It calls bus-core `GET /api/v1/attachments/:id`, which returns
+  `{ local_path, mime_type, original_filename }` or **404** if the id is unknown
+  or the attachment has already expired (TTL swept).
+
+Because inline files are written eagerly at parse time (the bytes only exist
+then — IMAP re-fetch is unreliable), unused inline images are reclaimed by the
+normal TTL sweep; the agent simply never learns their paths unless it calls the
+tool.
+
 ## TTL sweep
 
 The `AttachmentSweeper` runs once at bus startup and then every 10 minutes
@@ -109,9 +163,15 @@ The 10-minute cadence is not configurable in the current scope.
 
 ## Related code
 
-- `src/adapters/telegram.ts` — detection, `getFile`, download, DB insert.
+- `src/media/attachments.ts` — shared helpers: `extensionFor`,
+  `resolveMediaConfig`, `persistAttachmentBuffer`.
+- `src/adapters/telegram.ts` — detection, `getFile`, streaming download, DB insert.
+- `src/adapters/email.ts` — `persistAttachments`: real vs. inline split.
 - `src/http/api.ts` — `InboundMessage.attachments`, envelope metadata
-  injection, relaxed guard for empty-body-with-attachments.
-- `src/adapters/cc.ts` — `formatMessagesForSampling` appends `[Image: …]`.
+  injection, relaxed guard for empty-body-with-attachments, and
+  `GET /api/v1/attachments/:id`.
+- `src/mcp/tools/attachments.ts` — the `fetch_attachment` tool.
+- `src/adapters/cc.ts` — `formatMessagesForSampling` appends `[Image: …]` /
+  `[File: …]` and inline-image hint lines.
 - `src/media/attachment-sweeper.ts` — periodic cleanup.
 - `src/db/migrations/006_attachments.sql` — table + index.

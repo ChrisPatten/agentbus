@@ -120,7 +120,16 @@ export function formatMessagesForSampling(
         return `[File: ${a.local_path}${label}]`;
       })
       .join('\n');
-    const bodyWithImages = body && attachmentLines ? `${body}\n${attachmentLines}` : body || attachmentLines;
+    // Inline (HTML-embedded) email images are not downloaded into the body;
+    // surface a hint with the id so the agent can pull one in via fetch_attachment.
+    const inlineLines = extractInlineAttachments(env.metadata)
+      .map((a) => {
+        const name = a.original_filename ? ` ${a.original_filename}` : '';
+        return `[Inline image available${name} — fetch with fetch_attachment(id="${a.id}")]`;
+      })
+      .join('\n');
+    const extraLines = [attachmentLines, inlineLines].filter(Boolean).join('\n');
+    const bodyWithImages = body && extraLines ? `${body}\n${extraLines}` : body || extraLines;
     parts.push(`New message from ${env.sender} via ${env.channel}${ts} [id:${env.id}]:\n${bodyWithImages}`);
   }
 
@@ -144,6 +153,30 @@ function extractAttachments(
       out.push({
         type,
         local_path,
+        ...(typeof original_filename === 'string' ? { original_filename } : {}),
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * Pull inline-attachment references out of envelope.metadata.inline_attachments.
+ * These carry only an id (not a path) — the agent fetches them on demand via the
+ * fetch_attachment tool. Tolerant of shape drift, like extractAttachments.
+ */
+function extractInlineAttachments(
+  metadata: Record<string, unknown> | undefined,
+): Array<{ id: string; original_filename?: string }> {
+  const raw = metadata?.['inline_attachments'];
+  if (!Array.isArray(raw)) return [];
+  const out: Array<{ id: string; original_filename?: string }> = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const { id, original_filename } = item as Record<string, unknown>;
+    if (typeof id === 'string') {
+      out.push({
+        id,
         ...(typeof original_filename === 'string' ? { original_filename } : {}),
       });
     }

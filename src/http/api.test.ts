@@ -429,6 +429,48 @@ describe('GET /api/v1/sessions and GET /api/v1/sessions/:id', () => {
   });
 });
 
+describe('GET /api/v1/attachments/:id', () => {
+  let server: FastifyInstance;
+  let db: Database.Database;
+
+  beforeEach(async () => {
+    ({ server, db } = await makeServer());
+  });
+
+  afterEach(async () => {
+    await server.close();
+  });
+
+  function insertAttachment(id: string, expiresAt: number) {
+    const now = Date.now();
+    db.prepare(
+      `INSERT INTO attachments (id, agent_id, local_path, original_filename, mime_type, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run(id, 'agent:claude', '/tmp/logo.png', 'logo.png', 'image/png', now, expiresAt);
+  }
+
+  it('returns the attachment for a live row', async () => {
+    insertAttachment('att-1', Date.now() + 60_000);
+    const res = await server.inject({ method: 'GET', url: '/api/v1/attachments/att-1' });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { ok: boolean; attachment: { local_path: string; mime_type: string } };
+    expect(body.ok).toBe(true);
+    expect(body.attachment.local_path).toBe('/tmp/logo.png');
+    expect(body.attachment.mime_type).toBe('image/png');
+  });
+
+  it('returns 404 for an unknown id', async () => {
+    const res = await server.inject({ method: 'GET', url: '/api/v1/attachments/nope' });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it('returns 404 for an expired attachment', async () => {
+    insertAttachment('att-old', Date.now() - 1000);
+    const res = await server.inject({ method: 'GET', url: '/api/v1/attachments/att-old' });
+    expect(res.statusCode).toBe(404);
+  });
+});
+
 describe('POST /api/v1/messages/:id/react', () => {
   let server: FastifyInstance;
   let db: Database.Database;

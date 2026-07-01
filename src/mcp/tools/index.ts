@@ -21,6 +21,7 @@ import { registerMemoryTools } from './memory.js';
 import { registerSessionTools } from './sessions.js';
 import { registerReactionTools } from './reactions.js';
 import { registerScheduleTools } from './scheduling.js';
+import { registerAttachmentTools } from './attachments.js';
 
 export { toolError, toolSuccess };
 
@@ -56,6 +57,7 @@ export function registerAllTools(
   registerSessionTools(server, busBaseUrl);
   registerReactionTools(server, busBaseUrl);
   registerScheduleTools(server, busBaseUrl);
+  registerAttachmentTools(server, busBaseUrl);
   maybeRegisterEmailTool(server, busBaseUrl, config);
 }
 
@@ -90,6 +92,7 @@ export function registerHeadlessTools(
   registerSessionTools(server, busBaseUrl);
   registerReactionTools(server, busBaseUrl);
   registerScheduleTools(server, busBaseUrl);
+  registerAttachmentTools(server, busBaseUrl);
   maybeRegisterEmailTool(server, busBaseUrl, config);
 }
 

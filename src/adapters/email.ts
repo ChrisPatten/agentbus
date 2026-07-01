@@ -29,7 +29,8 @@ import type {
   AdapterRegistry,
 } from '../core/registry.js';
 import type { AppConfig, EmailInstanceConfig } from '../config/schema.js';
-import { processInbound, type InboundMessage } from '../http/api.js';
+import { processInbound, type InboundMessage, type Attachment } from '../http/api.js';
+import { resolveMediaConfig, persistAttachmentBuffer } from '../media/attachments.js';
 import type { MessageQueue } from '../core/queue.js';
 import type { PipelineEngine } from '../pipeline/engine.js';
 import type { CommandRegistry } from '../commands/registry.js';
@@ -63,6 +64,18 @@ export interface EmailAdapterDeps {
   instanceName?: string;
   /** Pre-resolved per-instance config from getEmailInstances(). */
   instanceConfig: EmailInstanceConfig;
+}
+
+/**
+ * Reference to an inline (HTML-embedded) attachment surfaced to the agent in
+ * `metadata.inline_attachments`. Only the id is needed to fetch it on demand
+ * via the `fetch_attachment` tool; the path is not exposed inline.
+ */
+interface InlineAttachmentRef {
+  id: string;
+  type: 'image' | 'file';
+  mime_type?: string;
+  original_filename?: string;
 }
 
 /** Persisted per-thread reply metadata (mirrors the email_threads table). */
@@ -468,6 +481,14 @@ export class EmailAdapter implements AdapterInstance {
     const body = selectInboundBody(rawText, isThreadedReply);
     const effectiveBody = body || `[Email with no text body] Subject: ${subject}`;
 
+    // File attachments (E22). mailparser decodes attachment bytes into
+    // `attachment.content`, so there is no network fetch (unlike Telegram).
+    // Real attachments are surfaced to the agent like Telegram files/images;
+    // inline (HTML-embedded, `related`) images — signature logos and the like —
+    // are persisted but kept out of the agent's context to avoid noise, and are
+    // retrievable on demand via the `fetch_attachment` MCP tool.
+    const { attachments, inlineAttachments } = this.persistAttachments(parsed.attachments);
+
     const message: InboundMessage = {
       channel: this.id,
       sender: fromAddr,
@@ -481,10 +502,71 @@ export class EmailAdapter implements AdapterInstance {
         platform_message_id: messageId,
       },
     };
+    if (attachments.length > 0) message.attachments = attachments;
+    if (inlineAttachments.length > 0) message.metadata!['inline_attachments'] = inlineAttachments;
 
     await processInbound(message, this.deps);
     this.lastActivity = new Date().toISOString();
     console.log(`${this.tag} Delivered mail from ${fromAddr} (thread ${topic})`);
+  }
+
+  /**
+   * Persist parsed email attachments to disk + the `attachments` table.
+   * Splits them into `attachments` (real attachments, surfaced to the agent)
+   * and `inlineAttachments` (HTML-embedded images, fetchable on demand).
+   *
+   * Never throws — a per-attachment failure is logged and skipped so the mail
+   * is always delivered. Returns empty lists when no agent with a media config
+   * is routed from this channel (a warning is logged).
+   */
+  private persistAttachments(parsedAttachments: ParsedMail['attachments']): {
+    attachments: Attachment[];
+    inlineAttachments: InlineAttachmentRef[];
+  } {
+    const attachments: Attachment[] = [];
+    const inlineAttachments: InlineAttachmentRef[] = [];
+    if (!parsedAttachments || parsedAttachments.length === 0) {
+      return { attachments, inlineAttachments };
+    }
+
+    const media = resolveMediaConfig(this.deps.config, this.id);
+    if (!media) {
+      console.warn(
+        `${this.tag} Received ${parsedAttachments.length} attachment(s) but no agent with media config is routed from channel "${this.id}" — skipping`,
+      );
+      return { attachments, inlineAttachments };
+    }
+
+    for (const att of parsedAttachments) {
+      if (!Buffer.isBuffer(att.content)) continue;
+      const mimeType = att.contentType || undefined;
+      const filename = att.filename || undefined;
+      const kind: 'image' | 'file' = mimeType?.startsWith('image/') ? 'image' : 'file';
+      try {
+        const { id, local_path } = persistAttachmentBuffer(this.deps.db, media, att.content, {
+          mime_type: mimeType,
+          original_filename: filename,
+        });
+        // mailparser sets `related: true` for parts inside multipart/related
+        // (HTML-embedded), and `contentDisposition: 'inline'` for cid parts.
+        const isInline = att.related === true || att.contentDisposition === 'inline';
+        if (isInline) {
+          const ref: InlineAttachmentRef = { id, type: kind };
+          if (mimeType) ref.mime_type = mimeType;
+          if (filename) ref.original_filename = filename;
+          inlineAttachments.push(ref);
+        } else {
+          const a: Attachment = { type: kind, local_path };
+          if (mimeType) a.mime_type = mimeType;
+          if (filename) a.original_filename = filename;
+          attachments.push(a);
+        }
+      } catch (err) {
+        console.error(`${this.tag} Attachment persist failed: ${String(err)}`);
+      }
+    }
+
+    return { attachments, inlineAttachments };
   }
 
   // ── Thread persistence ─────────────────────────────────────────────────────
