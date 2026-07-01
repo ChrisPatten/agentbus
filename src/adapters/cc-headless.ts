@@ -38,6 +38,7 @@ let AGENT_ID: string;
 let POLL_INTERVAL_MS: number;
 let CLAUDE_BIN: string;
 let CLAUDE_MODEL: string | undefined;
+let ERROR_PASSTHROUGH: boolean;
 let WORKING_DIR: string;
 let busBaseUrl: string;
 
@@ -274,6 +275,16 @@ async function deliverResponse(
   }
 }
 
+const ERROR_DETAIL_MAX_LENGTH = 500;
+
+/** Builds the failure message delivered to the user, appending the raw error detail when `error_passthrough` is enabled. */
+function buildErrorReply(detail: string): string {
+  if (!ERROR_PASSTHROUGH) return headlessCfg!.error_reply;
+  const truncated =
+    detail.length > ERROR_DETAIL_MAX_LENGTH ? `${detail.slice(0, ERROR_DETAIL_MAX_LENGTH)}…` : detail;
+  return `${headlessCfg!.error_reply}\n\nDetails: ${truncated}`;
+}
+
 // ── Turn runner (shared by normal + journaling turns) ──────────────────────────
 
 /** Build the stdio MCP config that exposes the headless tool subset to claude -p. */
@@ -386,8 +397,9 @@ async function processBatch(
   }
 
   if (error || !resultText) {
-    console.error(`[cc-headless] claude invocation failed for ${contactId}: ${error ?? 'no result'}`);
-    await deliverResponse(first, headlessCfg!.error_reply);
+    const detail = error ?? 'no result';
+    console.error(`[cc-headless] claude invocation failed for ${contactId}: ${detail}`);
+    await deliverResponse(first, buildErrorReply(detail));
     return;
   }
 
@@ -559,6 +571,7 @@ export function startHeadless(db: Database.Database): HeadlessHandle | null {
   POLL_INTERVAL_MS = headlessCfg.poll_interval_ms;
   CLAUDE_BIN = headlessCfg.claude_bin;
   CLAUDE_MODEL = headlessCfg.model;
+  ERROR_PASSTHROUGH = headlessCfg.error_passthrough;
   WORKING_DIR = headlessCfg.working_dir ?? process.cwd();
   busBaseUrl = `http://127.0.0.1:${config.bus.http_port}`;
   console.log(`[cc-headless] Starting — polling ${busBaseUrl} for ${AGENT_ID} every ${POLL_INTERVAL_MS}ms`);

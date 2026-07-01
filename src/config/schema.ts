@@ -154,6 +154,13 @@ const CcHeadlessAdapterSchema = z.object({
     .string()
     .default('Sorry — I hit an error processing that. Please try again.'),
   /**
+   * When true, appends the raw failure detail (exit code / stderr tail /
+   * "claude reported error: ...") to `error_reply` before delivering it to
+   * the user. Off by default — raw errors can include internal detail
+   * (stderr, file paths) not meant for end users.
+   */
+  error_passthrough: z.boolean().default(false),
+  /**
    * E20 — memory file assembly. The agent's own files are the source of truth;
    * the bus front-loads them into each turn's context. All paths are resolved
    * relative to `working_dir`. Missing files are skipped silently.

@@ -52,6 +52,7 @@ adapters:
   #   claude_bin: claude
   #   working_dir: /home/agent      # cwd for claude -p → selects the CLAUDE.md hierarchy
   #   error_reply: "Sorry — I hit an error processing that. Please try again."
+  #   error_passthrough: false      # append raw failure detail to error_reply
   #   system_prompt: |
   #     You are a helpful assistant for {{contact_id}} on {{channel}}.
   #     Today is {{date}}.

@@ -145,6 +145,8 @@ If the `claude -p` invocation errors, exits non-zero with no result, or yields n
 
 Config key: `adapters.cc-headless.error_reply` (default: `"Sorry — I hit an error processing that. Please try again."`).
 
+Set `adapters.cc-headless.error_passthrough: true` to append the raw failure detail (exit code, stderr tail, or `claude reported error: ...`) to `error_reply` before delivery, truncated to 500 characters. Off by default — raw errors can surface internal detail (stderr, file paths) not meant for end users — but useful while iterating on a new agent's config.
+
 ## System Prompt
 
 The system prompt is a **config-driven template** with interpolation variables. Written to a temp file per invocation.
@@ -224,6 +226,7 @@ adapters:
     model: sonnet             # --model passed to claude -p (default: unset → CLI/settings.json default)
     working_dir: /home/agent  # cwd for claude -p → which CLAUDE.md loads (default: bus cwd)
     error_reply: "Sorry — I hit an error processing that. Please try again."
+    error_passthrough: false # append raw failure detail to error_reply
     system_prompt: |
       You are a helpful assistant for {{contact_id}} on {{channel}}.
       Today is {{date}}.
@@ -266,6 +269,7 @@ adapters:
 | `model` | unset | `--model` passed to `claude -p` (e.g. `sonnet`, `opus`); unset defers to the CLI/`.claude/settings.json` default |
 | `working_dir` | bus cwd | `cwd` for `claude -p`; selects the `CLAUDE.md` hierarchy and `@path` base |
 | `error_reply` | see above | Message delivered to the user on invocation failure |
+| `error_passthrough` | `false` | Append the raw failure detail (truncated to 500 chars) to `error_reply` |
 | `memory.dir` | `memory` | Memory directory (relative to `working_dir`) |
 | `memory.index_file` | `MEMORY.md` | Index file loaded into every turn |
 | `memory.daily_subdir` | `daily` | Subdir of daily journal files `YYYY-MM-DD.md` |

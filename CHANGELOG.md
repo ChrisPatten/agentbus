@@ -15,6 +15,11 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
   is passed as `--model` to `claude -p` when set, letting each headless agent
   pin its model explicitly in `config.yaml` instead of relying on the CLI
   default or a per-agent `.claude/settings.json`.
+- **`error_passthrough` config key for the `cc-headless` adapter.**
+  `adapters.cc-headless.error_passthrough` (default `false`), when enabled,
+  appends the raw `claude -p` failure detail (exit code, stderr tail, or
+  `claude reported error: ...`, truncated to 500 chars) to `error_reply`
+  before delivering it to the user, instead of only logging it server-side.
 
 ## [0.6.0] - 2026-07-01
 
