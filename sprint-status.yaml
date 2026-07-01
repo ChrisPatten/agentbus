@@ -5,7 +5,7 @@ bmad_status:
   planning: complete
   architecture: complete
   implementation: in-progress
-current_epic: E20
+current_epic: E23
 epics:
   E1:
     status: complete
@@ -310,4 +310,29 @@ epics:
       S20.5: complete  # Silent journaling turn (runJournalingTurn, no-deliver)
       S20.6: complete  # structured_extraction gate + legacy memory-tool notes
       S20.7: complete  # Docs (MEMORY_MODEL.md, CC_HEADLESS_ADAPTER.md, config.example, CHANGELOG)
-last_updated: 2026-06-18  # E20 complete
+  E23:
+    status: in-progress
+    notes: >
+      Multi-instance cc-headless adapter. adapters.cc-headless now accepts
+      either the legacy single-object form or a named record (getCcHeadlessInstances
+      in schema.ts, mirroring getTelegramInstances/getEmailInstances). cc-headless.ts
+      refactored from module-level singleton state to a HeadlessInstance class so
+      N agents (e.g. peggy + pokeclaude) run concurrent, isolated poll loops in one
+      process. Migration 011 adds sessions.agent_id, set by transcript-log Stage 80
+      from the resolved cc-headless route target; SessionTracker.dispatchJournaling
+      and the /clear handler both route to the owning instance's runner via a
+      Map<agentId, ...>, falling back to the sole configured instance when
+      agent_id is NULL (pre-migration/single-instance sessions). index.ts wires
+      startHeadless's returned Map into both routing paths and stops every
+      instance on shutdown. S23.5 (migrating the live config.yaml to add
+      pokeclaude as a second instance and retiring its claude_pokeclaudebot tmux
+      session) is deliberately held back for explicit operator sign-off since it
+      touches the live personal deployment.
+    stories:
+      S23.1: complete  # Config schema: keyed cc-headless instances (getCcHeadlessInstances)
+      S23.2: complete  # Refactor cc-headless.ts to per-instance state (HeadlessInstance class)
+      S23.3: complete  # Route journaling and /clear to owning instance (migration 011, sessions.agent_id)
+      S23.4: complete  # index.ts wiring for N instances + startHeadless/stopHeadless multi-instance lifecycle tests
+      S23.5: pending   # Live config.yaml migration: pokeclaude as second instance, retire tmux session (needs operator sign-off)
+      S23.6: complete  # Docs (CC_HEADLESS_ADAPTER.md, config.yaml.example, CHANGELOG)
+last_updated: 2026-07-01  # E23 S23.1-S23.4/S23.6 complete; S23.5 pending operator sign-off

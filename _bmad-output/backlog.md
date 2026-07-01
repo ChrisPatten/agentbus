@@ -29,8 +29,8 @@ Agent can already search transcripts (FTS5) and list/get sessions, but cannot re
 ### ~~Headless Claude Code adapter (per-request `claude -p`)~~ → promoted to E19 (backlog 2026-05-26)
 See `docs/CC_HEADLESS_ADAPTER.md` and E19 in `sprint-status.yaml`.
 
-### Multi-agent `cc-headless`: run every agent headless in one bus-core process
-Today `adapters.cc-headless` is a single object with one `agent_id` and one poll loop (`startHeadless` called once in `src/index.ts`), so a single bus-core can only run one agent headless — multi-agent setups must keep the rest on the `claude-code` server adapter or spin up a second bus-core. Goal: make headless the path for *all* agents in a single process. Change `cc-headless` in `AdaptersConfigSchema` to accept a keyed record like `telegram` (`z.union([CcHeadlessAdapterSchema, z.record(string, CcHeadlessAdapterSchema)])`), with each entry carrying its own `agent_id`, `working_dir`, `system_prompt`, `memory`, and `journaling` config. Start one poll loop per entry, and ensure the journaling runner registration (`sessionTracker.setJournalingRunner`) and module-level state in `cc-headless.ts` (`AGENT_ID`, `WORKING_DIR`, etc.) become per-instance rather than singletons. Lets `peggy` + `pokeclaude` (and future agents) all run headless side by side, retiring the persistent server-mode sessions entirely.
+### ~~Multi-agent `cc-headless`: run every agent headless in one bus-core process~~ → promoted to E23 (backlog 2026-07-01)
+See `_bmad-output/epics/E23-multi-instance-cc-headless.md`.
 
 ### Slash command cleanup: retire replay + legacy DB-memory commands
 The built-in command set still carries surfaces tied to subsystems that E20 left dormant or that no longer earn their place. Prune them and tighten the registry:

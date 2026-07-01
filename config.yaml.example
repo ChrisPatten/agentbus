@@ -82,6 +82,25 @@ adapters:
   #       (today's daily journal, MEMORY.md, and any relevant topic files) with
   #       anything durable worth remembering. Do NOT message the user — this is
   #       an internal journaling turn, not a reply.
+  #
+  # Multi-instance form (E23) — named record, one entry per headless agent, same
+  # per-instance schema as above. Each gets its own poll loop, working_dir, and
+  # journaling config, fully isolated from the others. See docs/CC_HEADLESS_ADAPTER.md.
+  # cc-headless:
+  #   peggy:
+  #     agent_id: peggy
+  #     working_dir: /home/peggy
+  #     system_prompt: |
+  #       You are Peggy...
+  #     memory: { dir: memory, index_file: MEMORY.md, daily_subdir: daily, journal_lookback_days: 3 }
+  #     journaling: { enabled: true, threshold_ms: 1800000, prompt: "..." }
+  #   pokeclaude:
+  #     agent_id: pokeclaude
+  #     working_dir: /home/pokeclaude
+  #     system_prompt: |
+  #       You are pokeclaude...
+  #     memory: { dir: memory, index_file: MEMORY.md, daily_subdir: daily, journal_lookback_days: 3 }
+  #     journaling: { enabled: true, threshold_ms: 1800000, prompt: "..." }
 
 contacts:
   alice:

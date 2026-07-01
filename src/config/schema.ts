@@ -215,7 +215,7 @@ const AdaptersConfigSchema = z.object({
   email: z.union([EmailAdapterSchema, z.record(z.string(), EmailAdapterSchema)]).optional(),
   bluebubbles: BlueBubblesAdapterSchema.optional(),
   'claude-code': ClaudeCodeAdapterSchema.optional(),
-  'cc-headless': CcHeadlessAdapterSchema.optional(),
+  'cc-headless': z.union([CcHeadlessAdapterSchema, z.record(z.string(), CcHeadlessAdapterSchema)]).optional(),
 });
 
 const MemoryConfigSchema = z.object({
@@ -567,8 +567,58 @@ export function getEmailInstances(config: AppConfig): EmailInstanceConfig[] {
   return instances;
 }
 
-/** Resolved config for the headless Claude Code adapter. */
-export type CcHeadlessAdapterConfig = NonNullable<AppConfig['adapters']['cc-headless']>;
+/** Resolved config for a single headless Claude Code adapter instance. */
+export type CcHeadlessAdapterConfig = z.infer<typeof CcHeadlessAdapterSchema>;
+
+/** Normalised config for a single `cc-headless` agent instance. */
+export interface CcHeadlessInstanceConfig extends CcHeadlessAdapterConfig {
+  /** Instance name used as the adapter id suffix, or null for the legacy single-instance form. */
+  name: string | null;
+}
+
+/**
+ * Normalises `config.adapters['cc-headless']` into a flat list of instances.
+ *
+ * Accepts both forms, mirroring getTelegramInstances()/getEmailInstances():
+ *   - Legacy single-instance: `{ agent_id, system_prompt, ... }` → one instance with name=null
+ *   - Named record: `{ peggy: { agent_id, ... }, pokeclaude: { agent_id, ... } }` → one per key
+ *
+ * Throws on an invalid instance name or a duplicate `agent_id` across instances
+ * — `agent_id` is the key both the poll fetch and journaling routing scope on,
+ * so it must be unique.
+ */
+export function getCcHeadlessInstances(config: AppConfig): CcHeadlessInstanceConfig[] {
+  const headless = config.adapters['cc-headless'];
+  if (!headless) return [];
+
+  // Discriminate: the single-instance form has `system_prompt` (required) at the top level.
+  if (typeof (headless as { system_prompt?: unknown }).system_prompt === 'string') {
+    return [{ name: null, ...(headless as CcHeadlessAdapterConfig) }];
+  }
+
+  const record = headless as Record<string, CcHeadlessAdapterConfig>;
+  const seen = new Set<string>();
+  const instances: CcHeadlessInstanceConfig[] = [];
+
+  const VALID_INSTANCE_NAME_RE = /^[a-z0-9_-]+$/;
+
+  for (const [name, cfg] of Object.entries(record)) {
+    if (!VALID_INSTANCE_NAME_RE.test(name)) {
+      throw new Error(
+        `Invalid cc-headless instance name "${name}" — only lowercase letters, digits, hyphens, and underscores are allowed`,
+      );
+    }
+    if (seen.has(cfg.agent_id)) {
+      throw new Error(
+        `Duplicate cc-headless agent_id "${cfg.agent_id}" for instance "${name}" — each headless agent must have a unique agent_id`,
+      );
+    }
+    seen.add(cfg.agent_id);
+    instances.push({ name, ...cfg });
+  }
+
+  return instances;
+}
 
 /**
  * Resolve the per-channel journaling threshold (ms) from a `threshold_ms`

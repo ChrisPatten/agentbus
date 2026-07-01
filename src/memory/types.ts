@@ -37,6 +37,8 @@ export interface SessionRow {
   claude_session_id: string | null;
   /** ISO timestamp of the last journaling turn for this session (E20, migration 009). */
   last_journaled_at: string | null;
+  /** Owning cc-headless agent id (e.g. "agent:peggy"), or null (E23, migration 011). */
+  agent_id: string | null;
 }
 
 /** Row shape from the transcripts table. */

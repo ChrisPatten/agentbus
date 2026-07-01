@@ -69,7 +69,7 @@ export function createCommandSystem(deps: CommandSystemDeps): CommandSystem {
     console.log(`[commands] Adapter "${row.adapter_id}" is paused (by ${row.paused_by} — persisted from previous run)`);
   }
 
-  const headlessControl: import('./handlers.js').HeadlessControl = {};
+  const headlessControl: import('./handlers.js').HeadlessControl = { journalResumeId: new Map() };
 
   const builtins = createBuiltinCommands({
     adapterRegistry: deps.adapterRegistry,

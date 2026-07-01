@@ -64,6 +64,11 @@ function loadMigrations(): Migration[] {
       description: 'Email threads table',
       sql: readFileSync(join(migrationsDir, '010_email_threads.sql'), 'utf-8'),
     },
+    {
+      version: 11,
+      description: 'Session agent_id column',
+      sql: readFileSync(join(migrationsDir, '011_session_agent_id.sql'), 'utf-8'),
+    },
   ];
 }
 

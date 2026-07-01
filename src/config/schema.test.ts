@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { AppConfigSchema, getTelegramInstances, journalingThresholdForChannel } from './schema.js';
-import type { AppConfig } from './schema.js';
+import {
+  AppConfigSchema,
+  getTelegramInstances,
+  getCcHeadlessInstances,
+  journalingThresholdForChannel,
+} from './schema.js';
+import type { AppConfig, CcHeadlessAdapterConfig } from './schema.js';
 
 function makeConfig(telegram: AppConfig['adapters']['telegram']): AppConfig {
   return {
@@ -101,6 +106,77 @@ describe('getTelegramInstances', () => {
     } as AppConfig['adapters']['telegram']);
     const instances = getTelegramInstances(config);
     expect(instances[0]!.name).toBe('my-bot_2');
+  });
+});
+
+describe('getCcHeadlessInstances', () => {
+  function configWith(headless: unknown): AppConfig {
+    const base = makeConfig(undefined);
+    return { ...base, adapters: { ...base.adapters, 'cc-headless': headless } } as unknown as AppConfig;
+  }
+
+  it('returns empty array when cc-headless is not configured', () => {
+    expect(getCcHeadlessInstances(configWith(undefined))).toEqual([]);
+  });
+
+  it('legacy single-instance form returns one entry with name=null', () => {
+    const config = AppConfigSchema.parse({
+      bus: { db_path: ':memory:' },
+      adapters: { 'cc-headless': { agent_id: 'peggy', system_prompt: 'You are Peggy.' } },
+      memory: {},
+    });
+    const instances = getCcHeadlessInstances(config);
+    expect(instances).toHaveLength(1);
+    expect(instances[0]!.name).toBeNull();
+    expect(instances[0]!.agent_id).toBe('peggy');
+    expect(instances[0]!.system_prompt).toBe('You are Peggy.');
+  });
+
+  it('named-record form returns one entry per key with correct names', () => {
+    const config = AppConfigSchema.parse({
+      bus: { db_path: ':memory:' },
+      adapters: {
+        'cc-headless': {
+          peggy: { agent_id: 'peggy', system_prompt: 'You are Peggy.' },
+          pokeclaude: { agent_id: 'pokeclaude', system_prompt: 'You are pokeclaude.' },
+        },
+      },
+      memory: {},
+    });
+    const instances = getCcHeadlessInstances(config);
+    expect(instances).toHaveLength(2);
+    const peggy = instances.find((i) => i.name === 'peggy');
+    const pokeclaude = instances.find((i) => i.name === 'pokeclaude');
+    expect(peggy?.agent_id).toBe('peggy');
+    expect(pokeclaude?.agent_id).toBe('pokeclaude');
+  });
+
+  it('throws on duplicate agent_id across instances', () => {
+    const config = AppConfigSchema.parse({
+      bus: { db_path: ':memory:' },
+      adapters: {
+        'cc-headless': {
+          peggy: { agent_id: 'shared', system_prompt: 'A' },
+          pokeclaude: { agent_id: 'shared', system_prompt: 'B' },
+        },
+      },
+      memory: {},
+    });
+    expect(() => getCcHeadlessInstances(config)).toThrow(/Duplicate cc-headless agent_id/);
+    expect(() => getCcHeadlessInstances(config)).toThrow(/"pokeclaude"/);
+  });
+
+  it('throws on invalid instance name', () => {
+    const config = AppConfigSchema.parse({
+      bus: { db_path: ':memory:' },
+      adapters: {
+        'cc-headless': {
+          'My Agent': { agent_id: 'a', system_prompt: 'A' },
+        },
+      },
+      memory: {},
+    });
+    expect(() => getCcHeadlessInstances(config)).toThrow(/Invalid cc-headless instance name/);
   });
 });
 
@@ -215,7 +291,7 @@ describe('AppConfigSchema — cc-headless memory + journaling (E20)', () => {
         'cc-headless': { system_prompt: 'You are an assistant.', ...overrides },
       },
     });
-    return parsed.adapters['cc-headless']!;
+    return parsed.adapters['cc-headless'] as CcHeadlessAdapterConfig;
   }
 
   it('memory + journaling defaults parse', () => {

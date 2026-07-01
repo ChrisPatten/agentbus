@@ -18,7 +18,7 @@
 import { exec, type ExecOptionsWithStringEncoding } from 'node:child_process';
 import type Database from 'better-sqlite3';
 import type { AppConfig } from '../config/schema.js';
-import { journalingThresholdForChannel } from '../config/schema.js';
+import { getCcHeadlessInstances, journalingThresholdForChannel } from '../config/schema.js';
 import type { Summarizer } from './summarizer.js';
 import type { SessionRow } from './types.js';
 
@@ -37,8 +37,12 @@ export class SessionTracker {
   private config: AppConfig;
   private summarizer: Summarizer;
   private timer: ReturnType<typeof setInterval> | null = null;
-  /** Injected by index.ts when the headless adapter is running. */
-  private journalingRunner: JournalingRunner | null = null;
+  /**
+   * Injected by index.ts, one per running cc-headless instance, keyed by
+   * agent_id (e.g. "agent:peggy"). Without an entry for a session's agent_id,
+   * journaling dispatch for that session is a no-op (E23).
+   */
+  private journalingRunners = new Map<string, JournalingRunner>();
   /** conversation_id → { lastActivity seen, consecutive failures }. Re-armed when last_activity advances. */
   private journalingAttempts = new Map<string, { lastActivity: string; count: number }>();
 
@@ -52,9 +56,9 @@ export class SessionTracker {
     this.summarizer = deps.summarizer;
   }
 
-  /** Provide the journaling runner (cc-headless). Without it, journaling dispatch is a no-op. */
-  setJournalingRunner(runner: JournalingRunner): void {
-    this.journalingRunner = runner;
+  /** Register the journaling runner for one cc-headless instance, keyed by its agent_id (e.g. "agent:peggy"). */
+  registerJournalingRunner(agentId: string, runner: JournalingRunner): void {
+    this.journalingRunners.set(agentId, runner);
   }
 
   /** Start the background tick loop. Runs one immediate tick before the interval. */
@@ -110,19 +114,29 @@ export class SessionTracker {
   }
 
   /**
-   * E20 — fire a silent journaling turn for each headless conversation that has
-   * paused (idle past the per-channel journaling threshold) and has not been
-   * journaled since its last activity. One journaling turn per pause; new
-   * activity advances last_activity past last_journaled_at and re-arms it.
+   * E20/E23 — fire a silent journaling turn for each headless conversation that
+   * has paused (idle past the per-channel journaling threshold) and has not
+   * been journaled since its last activity. One journaling turn per pause;
+   * new activity advances last_activity past last_journaled_at and re-arms it.
    *
-   * No-op when journaling is disabled, no runner is wired, or cc-headless is not
-   * configured. Never sets ended_at — sessions stay long-lived.
+   * Each session is routed to the cc-headless instance that owns it
+   * (`sessions.agent_id`, migration 011) — its own `journaling` config and its
+   * own registered runner, never another agent's. Sessions with no agent_id
+   * (created before migration 011, or by a single-instance deployment) fall
+   * back to the sole configured instance when there is exactly one; with
+   * multiple instances configured there is no safe attribution, so they are
+   * skipped. A session whose agent_id has no matching configured instance
+   * (agent removed/renamed since the session started) is skipped, not thrown.
+   *
+   * No-op when no cc-headless instances are configured or no runner is
+   * registered. Never sets ended_at — sessions stay long-lived.
    */
   private dispatchJournaling(): void {
-    const headless = this.config.adapters['cc-headless'];
-    if (!headless || !headless.journaling.enabled || !this.journalingRunner) return;
-    const runner = this.journalingRunner;
-    const threshold = headless.journaling.threshold_ms;
+    const instances = getCcHeadlessInstances(this.config);
+    if (instances.length === 0 || this.journalingRunners.size === 0) return;
+
+    const instanceByAgentId = new Map(instances.map((i) => [`agent:${i.agent_id}`, i]));
+    const soleInstanceKey = instances.length === 1 ? `agent:${instances[0]!.agent_id}` : null;
 
     const now = Date.now();
     const nowIso = new Date(now).toISOString();
@@ -138,7 +152,13 @@ export class SessionTracker {
       .all() as SessionRow[];
 
     for (const session of candidates) {
-      const thresholdMs = journalingThresholdForChannel(threshold, session.channel);
+      const agentKey = session.agent_id ?? soleInstanceKey;
+      if (!agentKey) continue;
+      const instCfg = instanceByAgentId.get(agentKey);
+      const runner = this.journalingRunners.get(agentKey);
+      if (!instCfg || !instCfg.journaling.enabled || !runner) continue;
+
+      const thresholdMs = journalingThresholdForChannel(instCfg.journaling.threshold_ms, session.channel);
       const idleMs = now - new Date(session.last_activity).getTime();
       if (idleMs < thresholdMs) continue;
 

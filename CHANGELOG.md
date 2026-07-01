@@ -10,6 +10,21 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-07-01
+
+### Added
+- **Multi-instance `cc-headless` adapter (E23).** `adapters.cc-headless` now
+  accepts a named record — the same pattern already used by `adapters.telegram`
+  and `adapters.email` — so one bus-core process can run multiple headless
+  agents (e.g. `peggy` and `pokeclaude`) concurrently, each with its own
+  `agent_id`, poll loop, `working_dir`, and journaling config, fully isolated
+  from the others. The single-object config form still works unchanged.
+  New `sessions.agent_id` column (migration 011) records which instance owns
+  a session so journaling-on-pause and `/clear` route to the correct agent;
+  sessions with no `agent_id` (pre-migration, or single-instance deployments)
+  fall back to the sole configured instance. See
+  [docs/CC_HEADLESS_ADAPTER.md](docs/CC_HEADLESS_ADAPTER.md#multi-instance-deployments-e23).
+
 ## [0.7.0] - 2026-07-01
 
 ### Added
@@ -217,7 +232,8 @@ Baseline release. Core bus, pipeline, adapters, memory, scheduling.
 - Built-in slash commands + plugin command registry. (E6)
 - Scheduled messages (cron + one-shot) via background scheduler. (E18)
 
-[Unreleased]: https://github.com/ChrisPatten/agentbus/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/ChrisPatten/agentbus/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/ChrisPatten/agentbus/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/ChrisPatten/agentbus/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/ChrisPatten/agentbus/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/ChrisPatten/agentbus/compare/v0.4.0...v0.5.0

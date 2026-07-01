@@ -335,7 +335,7 @@ describe('SessionTracker.dispatchJournaling() (E20)', () => {
 
   function makeTracker(config: AppConfig): SessionTracker {
     const t = new SessionTracker({ db, config, summarizer });
-    t.setJournalingRunner(runner as unknown as (c: string) => Promise<{ skipped?: boolean }>);
+    t.registerJournalingRunner('agent:claude', runner as unknown as (c: string) => Promise<{ skipped?: boolean }>);
     return t;
   }
 
@@ -482,6 +482,101 @@ describe('SessionTracker.dispatchJournaling() (E20)', () => {
       last_journaled_at: string | null;
     };
     expect(row.last_journaled_at).toBeNull();
+  });
+
+  describe('multi-instance routing (E23)', () => {
+    function multiInstanceConfig(): AppConfig {
+      return {
+        ...stubConfig,
+        adapters: {
+          'cc-headless': {
+            peggy: {
+              agent_id: 'peggy',
+              poll_interval_ms: 1000,
+              system_prompt: 'x',
+              claude_bin: 'claude',
+              error_reply: 'err',
+              memory: { dir: 'memory', index_file: 'MEMORY.md', daily_subdir: 'daily', journal_lookback_days: 3 },
+              journaling: { enabled: true, threshold_ms: 900000, prompt: 'journal please' },
+            },
+            pokeclaude: {
+              agent_id: 'pokeclaude',
+              poll_interval_ms: 1000,
+              system_prompt: 'x',
+              claude_bin: 'claude',
+              error_reply: 'err',
+              memory: { dir: 'memory', index_file: 'MEMORY.md', daily_subdir: 'daily', journal_lookback_days: 3 },
+              journaling: { enabled: true, threshold_ms: 900000, prompt: 'journal please' },
+            },
+          },
+        },
+      } as unknown as AppConfig;
+    }
+
+    it('dispatches a session to its own agent runner, not the other agent\'s', async () => {
+      const peggyRunner = vi.fn().mockResolvedValue({});
+      const pokeclaudeRunner = vi.fn().mockResolvedValue({});
+      insertSession(db, {
+        id: 'sess-poke',
+        conversationId: 'conv-poke',
+        lastActivityOffset: 20 * 60 * 1000,
+        claudeSessionId: 'cc-poke',
+      });
+      db.prepare(`UPDATE sessions SET agent_id = 'agent:pokeclaude' WHERE id = 'sess-poke'`).run();
+
+      const tracker = new SessionTracker({ db, config: multiInstanceConfig(), summarizer });
+      tracker.registerJournalingRunner('agent:peggy', peggyRunner);
+      tracker.registerJournalingRunner('agent:pokeclaude', pokeclaudeRunner);
+
+      tracker.tick();
+      await flush();
+
+      expect(pokeclaudeRunner).toHaveBeenCalledWith('conv-poke');
+      expect(peggyRunner).not.toHaveBeenCalled();
+    });
+
+    it('skips a session whose agent_id has no matching configured instance', async () => {
+      const peggyRunner = vi.fn().mockResolvedValue({});
+      const pokeclaudeRunner = vi.fn().mockResolvedValue({});
+      insertSession(db, {
+        id: 'sess-orphan',
+        conversationId: 'conv-orphan',
+        lastActivityOffset: 20 * 60 * 1000,
+        claudeSessionId: 'cc-orphan',
+      });
+      db.prepare(`UPDATE sessions SET agent_id = 'agent:retired' WHERE id = 'sess-orphan'`).run();
+
+      const tracker = new SessionTracker({ db, config: multiInstanceConfig(), summarizer });
+      tracker.registerJournalingRunner('agent:peggy', peggyRunner);
+      tracker.registerJournalingRunner('agent:pokeclaude', pokeclaudeRunner);
+
+      expect(() => tracker.tick()).not.toThrow();
+      await flush();
+
+      expect(peggyRunner).not.toHaveBeenCalled();
+      expect(pokeclaudeRunner).not.toHaveBeenCalled();
+    });
+
+    it('skips a session with no agent_id when multiple instances are configured (no safe attribution)', async () => {
+      const peggyRunner = vi.fn().mockResolvedValue({});
+      const pokeclaudeRunner = vi.fn().mockResolvedValue({});
+      insertSession(db, {
+        id: 'sess-null',
+        conversationId: 'conv-null',
+        lastActivityOffset: 20 * 60 * 1000,
+        claudeSessionId: 'cc-null',
+      });
+
+      const tracker = new SessionTracker({ db, config: multiInstanceConfig(), summarizer });
+      tracker.registerJournalingRunner('agent:peggy', peggyRunner);
+      tracker.registerJournalingRunner('agent:pokeclaude', pokeclaudeRunner);
+
+      tracker.tick();
+      await flush();
+
+      expect(peggyRunner).not.toHaveBeenCalled();
+      expect(pokeclaudeRunner).not.toHaveBeenCalled();
+    });
   });
 });
 

@@ -760,12 +760,18 @@ describe('command handlers', () => {
   describe('/clear', () => {
     function insertSession(
       db: Database.Database,
-      opts: { id: string; channel?: string; claudeSessionId?: string | null; endedAt?: string | null } ,
+      opts: {
+        id: string;
+        channel?: string;
+        claudeSessionId?: string | null;
+        endedAt?: string | null;
+        agentId?: string | null;
+      },
     ) {
       const now = new Date().toISOString();
       db.prepare(
-        `INSERT INTO sessions (id, conversation_id, channel, contact_id, started_at, last_activity, ended_at, claude_session_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO sessions (id, conversation_id, channel, contact_id, started_at, last_activity, ended_at, claude_session_id, agent_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         opts.id,
         `conv-${opts.id}`,
@@ -775,6 +781,7 @@ describe('command handlers', () => {
         now,
         opts.endedAt ?? null,
         opts.claudeSessionId === undefined ? 'claude-abc' : opts.claudeSessionId,
+        opts.agentId ?? null,
       );
     }
 
@@ -782,7 +789,7 @@ describe('command handlers', () => {
       const db = makeDb();
       insertSession(db, { id: 'sess-1' });
       const journalResumeId = vi.fn();
-      const deps = { ...makeDeps({ db }), headlessControl: { journalResumeId } };
+      const deps = { ...makeDeps({ db }), headlessControl: { journalResumeId: new Map([['agent:peggy', journalResumeId]]) } };
       const commands = createBuiltinCommands(deps as never);
       const clear = commands.find((c) => c.name === 'clear')!;
 
@@ -803,7 +810,7 @@ describe('command handlers', () => {
     it('reports nothing to clear when there is no active session', async () => {
       const db = makeDb();
       const journalResumeId = vi.fn();
-      const deps = { ...makeDeps({ db }), headlessControl: { journalResumeId } };
+      const deps = { ...makeDeps({ db }), headlessControl: { journalResumeId: new Map([['agent:peggy', journalResumeId]]) } };
       const commands = createBuiltinCommands(deps as never);
       const clear = commands.find((c) => c.name === 'clear')!;
 
@@ -817,7 +824,7 @@ describe('command handlers', () => {
       const db = makeDb();
       insertSession(db, { id: 'sess-sys', channel: 'system:peggy' });
       const journalResumeId = vi.fn();
-      const deps = { ...makeDeps({ db }), headlessControl: { journalResumeId } };
+      const deps = { ...makeDeps({ db }), headlessControl: { journalResumeId: new Map([['agent:peggy', journalResumeId]]) } };
       const commands = createBuiltinCommands(deps as never);
       const clear = commands.find((c) => c.name === 'clear')!;
 
@@ -835,13 +842,64 @@ describe('command handlers', () => {
     it('ignores a session with no claude_session_id (never spoke)', async () => {
       const db = makeDb();
       insertSession(db, { id: 'sess-nul', claudeSessionId: null });
-      const deps = { ...makeDeps({ db }), headlessControl: { journalResumeId: vi.fn() } };
+      const deps = { ...makeDeps({ db }), headlessControl: { journalResumeId: new Map([['agent:peggy', vi.fn()]]) } };
       const commands = createBuiltinCommands(deps as never);
       const clear = commands.find((c) => c.name === 'clear')!;
 
       const result = await clear.handler([], makeCtx(db));
 
       expect(result.body).toContain('No active session');
+    });
+
+    it('routes to the owning agent when multiple headless instances are registered (E23)', async () => {
+      const db = makeDb();
+      insertSession(db, { id: 'sess-poke', claudeSessionId: 'claude-poke', agentId: 'agent:pokeclaude' });
+      const peggyJournal = vi.fn();
+      const pokeclaudeJournal = vi.fn();
+      const deps = {
+        ...makeDeps({ db }),
+        headlessControl: {
+          journalResumeId: new Map([
+            ['agent:peggy', peggyJournal],
+            ['agent:pokeclaude', pokeclaudeJournal],
+          ]),
+        },
+      };
+      const commands = createBuiltinCommands(deps as never);
+      const clear = commands.find((c) => c.name === 'clear')!;
+
+      await clear.handler([], makeCtx(db));
+
+      expect(pokeclaudeJournal).toHaveBeenCalledWith({
+        claudeSessionId: 'claude-poke',
+        contactId: 'chris',
+        channel: 'telegram',
+      });
+      expect(peggyJournal).not.toHaveBeenCalled();
+    });
+
+    it('skips journaling for an orphaned agent_id with multiple instances registered', async () => {
+      const db = makeDb();
+      insertSession(db, { id: 'sess-orphan', agentId: 'agent:retired' });
+      const peggyJournal = vi.fn();
+      const pokeclaudeJournal = vi.fn();
+      const deps = {
+        ...makeDeps({ db }),
+        headlessControl: {
+          journalResumeId: new Map([
+            ['agent:peggy', peggyJournal],
+            ['agent:pokeclaude', pokeclaudeJournal],
+          ]),
+        },
+      };
+      const commands = createBuiltinCommands(deps as never);
+      const clear = commands.find((c) => c.name === 'clear')!;
+
+      const result = await clear.handler([], makeCtx(db));
+
+      expect(result.body).toContain('fresh session');
+      expect(peggyJournal).not.toHaveBeenCalled();
+      expect(pokeclaudeJournal).not.toHaveBeenCalled();
     });
 
     it('still closes the session when the headless adapter is not running', async () => {
@@ -853,7 +911,7 @@ describe('command handlers', () => {
 
       const result = await clear.handler([], makeCtx(db));
 
-      expect(result.body).toContain('Headless adapter not running');
+      expect(result.body).toContain('No headless journaling agent available');
       const row = db.prepare(`SELECT ended_at FROM sessions WHERE id = 'sess-2'`).get() as {
         ended_at: string | null;
       };

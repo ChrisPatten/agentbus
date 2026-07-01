@@ -1,10 +1,12 @@
-# Headless Claude Code Adapter (E19, refined in E19.1, E20)
+# Headless Claude Code Adapter (E19, refined in E19.1, E20, E23)
 
 Reference for the per-request Claude Code adapter that replaces long-lived tmux sessions with on-demand `claude -p` invocations.
 
 > **E19.1 changes:** the agent now delivers via the `reply`/`send_message` tools (with a stdout fallback) instead of the adapter routing raw stdout; the double memory injection on new sessions is fixed; a typing indicator is sent while `claude -p` runs; spawn/parse failures deliver a configurable `error_reply` instead of silence; and `claude -p` runs in a configurable `working_dir` so the agent's own `CLAUDE.md` (and its `@import`s / `@path` references) auto-load into context.
 
-> **E20 changes (this revision):** headless sessions are now **long-lived** — idle never tears them down, and resume is keyed on `conversation_id`. Context is assembled from the agent's **own memory files** (`MEMORY.md` + recent daily journals) instead of the DB memory/summary store, which is now dormant. When a conversation pauses, the bus fires a **silent journaling turn** that asks the agent to update its files (it messages nobody). See [Long-lived sessions](#session-continuity-long-lived-sessions-e20), [Context assembly](#context-assembly-memory-files-e20), and [Journaling on pause](#journaling-on-pause-e20). The conceptual model lives in [MEMORY_MODEL.md](./MEMORY_MODEL.md).
+> **E20 changes:** headless sessions are now **long-lived** — idle never tears them down, and resume is keyed on `conversation_id`. Context is assembled from the agent's **own memory files** (`MEMORY.md` + recent daily journals) instead of the DB memory/summary store, which is now dormant. When a conversation pauses, the bus fires a **silent journaling turn** that asks the agent to update its files (it messages nobody). See [Long-lived sessions](#session-continuity-long-lived-sessions-e20), [Context assembly](#context-assembly-memory-files-e20), and [Journaling on pause](#journaling-on-pause-e20). The conceptual model lives in [MEMORY_MODEL.md](./MEMORY_MODEL.md).
+
+> **E23 changes (this revision):** `adapters.cc-headless` now accepts either the single-object form (unchanged) or a **named record** of instances (same pattern as `adapters.telegram`), so one bus-core process can run multiple headless agents concurrently — each with its own `agent_id`, poll loop, `working_dir`, and journaling config, fully isolated from the others. See [Multi-instance deployments](#multi-instance-deployments-e23).
 
 ## Motivation
 
@@ -277,6 +279,45 @@ adapters:
 | `journaling.enabled` | `true` | Master switch for journaling-on-pause |
 | `journaling.threshold_ms` | `{ default: 1800000 }` | Per-channel idle gap before a paused conversation journals |
 | `journaling.prompt` | see schema | Prompt sent on the silent journaling turn |
+
+## Multi-instance deployments (E23)
+
+`adapters.cc-headless` accepts either form:
+
+- **Single object** (as shown above) — exactly the pre-E23 shape, one implicit instance.
+- **Named record** — a map of instance name → the same per-instance schema, one entry per headless agent:
+
+```yaml
+adapters:
+  cc-headless:
+    peggy:
+      agent_id: peggy
+      working_dir: /home/peggy
+      system_prompt: |
+        You are Peggy...
+      memory: { dir: memory, index_file: MEMORY.md, daily_subdir: daily, journal_lookback_days: 3 }
+      journaling: { enabled: true, threshold_ms: 1800000, prompt: "..." }
+    pokeclaude:
+      agent_id: pokeclaude
+      working_dir: /home/pokeclaude
+      system_prompt: |
+        You are pokeclaude...
+      memory: { dir: memory, index_file: MEMORY.md, daily_subdir: daily, journal_lookback_days: 3 }
+      journaling: { enabled: true, threshold_ms: 1800000, prompt: "..." }
+```
+
+Instance names are keys in the record (`peggy`, `pokeclaude` above) and must match `^[a-z0-9_-]+$`. `agent_id` must be unique across instances — `getCcHeadlessInstances()` (`src/config/schema.ts`) throws on startup for a duplicate `agent_id` or an invalid instance name, and normalizes either config form into a flat list the rest of the bus consumes uniformly.
+
+**Runtime isolation.** Each instance is its own `HeadlessInstance` (`src/adapters/cc-headless.ts`) with private state — poll timer, per-contact serialization queue, working dir, config — so N agents run concurrently in one bus-core process without sharing mutable state. `startHeadless(db)` starts one poller per configured instance and returns a `Map<string, HeadlessHandle>` keyed by `agent:<agent_id>`; `stopHeadless()` stops all of them.
+
+**Session ownership.** Migration 011 adds `sessions.agent_id`, set by Stage 80 (`transcript-log`) from the route that created the session (e.g. `agent:peggy`). This is how journaling and `/clear` find the *owning* instance for a session rather than guessing:
+
+- `SessionTracker.dispatchJournaling()` looks up each idle session's `agent_id`, resolves the matching instance config + registered journaling runner, and dispatches only to that instance.
+- The `/clear` command routes the post-clear journaling turn the same way, via `HeadlessControl.journalResumeId` (now a `Map<agentId, fn>` instead of a single function).
+
+**Backward compatibility.** Sessions created before migration 011, or by a single-instance deployment, have `agent_id IS NULL`. Both routing paths fall back to the sole registered instance when there is exactly one `cc-headless` instance configured — so upgrading an existing single-agent deployment to E23 requires no data migration. If `agent_id` is `NULL` (or doesn't match any configured instance) **and** more than one instance is configured, that session is skipped rather than guessed at (journaling no-ops for it; `/clear` still closes the session but reports no journaling agent was available).
+
+**`claude-code` remains available.** The persistent tmux/MCP adapter (`cc.ts`) is unaffected by any of this and stays available for agents that haven't migrated to headless. It becomes fully optional once every configured agent runs headless — retiring it entirely is a separate, future cleanup, not part of this change.
 
 ## Cross-contact isolation (design tradeoff)
 

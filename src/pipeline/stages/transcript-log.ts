@@ -52,6 +52,12 @@ export function createTranscriptLog(db: Database.Database, config: AppConfig): P
     }
     const conversationId = ctx.conversationId;
 
+    // The cc-headless route target's recipientId (e.g. "agent:pokeclaude"), if
+    // this batch is headed to a headless agent — null otherwise (E23). Stamped
+    // on session creation so journaling dispatch/`/clear` can route to the
+    // owning agent's own runner and threshold_ms instead of a single global.
+    const agentId = ctx.routes.find((r) => r.adapterId === 'cc-headless')?.recipientId ?? null;
+
     // Find active session for this conversation
     const activeSession = db
       .prepare(
@@ -70,9 +76,9 @@ export function createTranscriptLog(db: Database.Database, config: AppConfig): P
       // No active session — create one, counting this first message
       sessionId = randomUUID();
       db.prepare(
-        `INSERT INTO sessions (id, conversation_id, channel, contact_id, started_at, last_activity, message_count)
-         VALUES (?, ?, ?, ?, ?, ?, 1)`,
-      ).run(sessionId, conversationId, e.channel, contactId, now, now);
+        `INSERT INTO sessions (id, conversation_id, channel, contact_id, started_at, last_activity, message_count, agent_id)
+         VALUES (?, ?, ?, ?, ?, ?, 1, ?)`,
+      ).run(sessionId, conversationId, e.channel, contactId, now, now, agentId);
       ctx.sessionCreated = true;
     } else {
       const lastActivity = new Date(activeSession.last_activity).getTime();
@@ -88,9 +94,9 @@ export function createTranscriptLog(db: Database.Database, config: AppConfig): P
         db.prepare(`UPDATE sessions SET ended_at = ? WHERE id = ?`).run(now, activeSession.id);
         sessionId = randomUUID();
         db.prepare(
-          `INSERT INTO sessions (id, conversation_id, channel, contact_id, started_at, last_activity, message_count)
-           VALUES (?, ?, ?, ?, ?, ?, 1)`,
-        ).run(sessionId, conversationId, e.channel, contactId, now, now);
+          `INSERT INTO sessions (id, conversation_id, channel, contact_id, started_at, last_activity, message_count, agent_id)
+           VALUES (?, ?, ?, ?, ?, ?, 1, ?)`,
+        ).run(sessionId, conversationId, e.channel, contactId, now, now, agentId);
         ctx.sessionCreated = true;
       } else {
         // Extend existing session (gap within threshold, or a long-lived

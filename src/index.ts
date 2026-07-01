@@ -197,7 +197,7 @@ function shutdown() {
   sessionTracker.stop();
   attachmentSweeper.stop();
   deliveryWorker.stop();
-  if (config.adapters['cc-headless']) stopHeadless();
+  stopHeadless();
   clearInterval(maintenanceTimer);
   const stops = registry.list().map((a) => a.stop().catch(() => {}));
   Promise.allSettled(stops).finally(() => {
@@ -222,15 +222,14 @@ for (const adapter of registry.list()) {
 }
 deliveryWorker.start();
 
-// Start cc-headless adapter (if configured) before the session tracker so its
-// journaling runner is wired in before the tracker's first tick (E20).
-if (config.adapters['cc-headless']) {
-  const headless = startHeadless(db);
-  if (headless) {
-    sessionTracker.setJournalingRunner(headless.runJournalingTurn);
-    // Let /clear reach the headless journaling hook (command system built earlier).
-    headlessControl.journalResumeId = headless.journalResumeId;
-  }
+// Start every configured cc-headless instance before the session tracker so
+// their journaling runners are wired in before the tracker's first tick
+// (E20). Each instance registers its own runner, keyed by agent_id, so a
+// multi-agent deployment (E23) journals each session with its owning agent.
+for (const [agentId, headless] of startHeadless(db)) {
+  sessionTracker.registerJournalingRunner(agentId, headless.runJournalingTurn);
+  // Let /clear reach the owning instance's journaling hook.
+  headlessControl.journalResumeId.set(agentId, headless.journalResumeId);
 }
 
 sessionTracker.start();
