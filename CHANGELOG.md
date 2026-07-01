@@ -10,6 +10,22 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-01
+
+### Added
+- **Inbound email attachments (E22).** The `email` adapter now downloads file
+  attachments from incoming mail, reaching parity with Telegram. Real
+  attachments (`Content-Disposition: attachment`) are surfaced to the agent as
+  `[Image: …]` / `[File: … — name]` lines; inline HTML-embedded images
+  (signature logos etc.) are persisted but kept out of the agent's context and
+  exposed via a new **`fetch_attachment`** MCP tool (backed by
+  `GET /api/v1/attachments/:id`) so the agent can pull one in on demand. Reuses
+  the existing per-agent `media` config, `attachments` table, and TTL sweeper.
+  The shared helpers (`extensionFor`, `resolveMediaConfig`, and a new
+  `persistAttachmentBuffer`) moved from `telegram.ts` to a shared
+  `src/media/attachments.ts` (re-exported from `telegram.ts` for compatibility).
+  Outbound email attachments remain out of scope.
+
 ## [0.5.0] - 2026-06-23
 
 ### Added
@@ -188,7 +204,8 @@ Baseline release. Core bus, pipeline, adapters, memory, scheduling.
 - Built-in slash commands + plugin command registry. (E6)
 - Scheduled messages (cron + one-shot) via background scheduler. (E18)
 
-[Unreleased]: https://github.com/ChrisPatten/agentbus/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/ChrisPatten/agentbus/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/ChrisPatten/agentbus/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/ChrisPatten/agentbus/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/ChrisPatten/agentbus/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/ChrisPatten/agentbus/compare/v0.2.0...v0.3.0

@@ -10,7 +10,7 @@
  * Outbound: bus-core's delivery worker calls send(envelope) directly.
  */
 import { createWriteStream, unlinkSync } from 'node:fs';
-import { join, extname } from 'node:path';
+import { join } from 'node:path';
 import { pipeline as streamPipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { randomUUID } from 'node:crypto';
@@ -29,6 +29,10 @@ import type { PipelineEngine } from '../pipeline/engine.js';
 import type { AdapterRegistry } from '../core/registry.js';
 import type { CommandRegistry } from '../commands/registry.js';
 import type Database from 'better-sqlite3';
+import { extensionFor, resolveMediaConfig } from '../media/attachments.js';
+
+// Re-exported from the shared media module for backwards-compatible imports.
+export { extensionFor, resolveMediaConfig };
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -184,19 +188,6 @@ export function splitMessage(text: string, maxLen: number = MAX_MESSAGE_LENGTH):
 
 // ── Image attachment helpers (E17) ───────────────────────────────────────────
 
-/** MIME → file-extension map for the image types Telegram commonly delivers. */
-const MIME_EXTENSION: Record<string, string> = {
-  'image/jpeg': '.jpg',
-  'image/jpg': '.jpg',
-  'image/png': '.png',
-  'image/webp': '.webp',
-  'image/gif': '.gif',
-  'image/heic': '.heic',
-  'image/heif': '.heif',
-  'image/bmp': '.bmp',
-  'image/svg+xml': '.svg',
-};
-
 /** Pick the highest-resolution entry from a Telegram photo array. */
 export function pickLargestPhoto(photos: [TelegramPhotoSize, ...TelegramPhotoSize[]]): TelegramPhotoSize {
   // Telegram conventionally returns photos in ascending size order; we still
@@ -208,39 +199,6 @@ export function pickLargestPhoto(photos: [TelegramPhotoSize, ...TelegramPhotoSiz
     if (thisSize > bestSize) best = p;
   }
   return best;
-}
-
-/** Derive a safe extension from MIME type or original filename; falls back to `.bin`. */
-export function extensionFor(mime?: string, filename?: string): string {
-  if (mime && MIME_EXTENSION[mime.toLowerCase()]) return MIME_EXTENSION[mime.toLowerCase()]!;
-  if (filename) {
-    const ext = extname(filename).toLowerCase();
-    if (/^\.[a-z0-9]{1,8}$/.test(ext)) return ext;
-  }
-  return '.bin';
-}
-
-/** Resolve the media config for the target agent of an inbound channel. */
-export function resolveMediaConfig(
-  config: AppConfig,
-  channel: string,
-): { agentId: string; download_path: string; ttl_seconds: number } | null {
-  for (const rule of config.pipeline.routes) {
-    const channelMatch = rule.match.channel === undefined || rule.match.channel === channel;
-    if (!channelMatch) continue;
-    const recipientId = rule.target.recipientId;
-    const agentCfg = config.agents[recipientId];
-    if (agentCfg?.media) {
-      return {
-        agentId: recipientId,
-        download_path: agentCfg.media.download_path,
-        ttl_seconds: agentCfg.media.ttl_seconds,
-      };
-    }
-    // First route matched but agent has no media config — treat as "not configured".
-    return null;
-  }
-  return null;
 }
 
 // ── TelegramAdapter class ────────────────────────────────────────────────────

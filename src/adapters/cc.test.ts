@@ -212,6 +212,30 @@ describe('formatMessagesForSampling', () => {
     expect(result).not.toContain('[File:');
   });
 
+  // ── inline attachments (email) ─────────────────────────────────────────────────
+
+  it('renders an inline-image hint with the fetch_attachment id', () => {
+    const env = makeEnvelope({
+      metadata: {
+        inline_attachments: [{ id: 'att-1', type: 'image', original_filename: 'logo.png' }],
+      },
+    });
+    const result = formatMessagesForSampling([env]);
+    expect(result).toContain(
+      'Hello!\n[Inline image available logo.png — fetch with fetch_attachment(id="att-1")]',
+    );
+  });
+
+  it('omits the filename in the hint when none is present, and ignores malformed entries', () => {
+    const env = makeEnvelope({
+      metadata: {
+        inline_attachments: [{ id: 'att-2' }, 'garbage', { type: 'image' }],
+      },
+    });
+    const result = formatMessagesForSampling([env]);
+    expect(result).toContain('[Inline image available — fetch with fetch_attachment(id="att-2")]');
+  });
+
   it('ignores unsupported types and malformed attachment entries', () => {
     const env = makeEnvelope({
       metadata: {

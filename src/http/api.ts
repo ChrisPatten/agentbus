@@ -730,6 +730,39 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     return { ok: true, session };
   });
 
+  // GET /api/v1/attachments/:id — resolve a stored attachment by id.
+  // Used by the fetch_attachment MCP tool to pull in inline email images on
+  // demand. Returns the on-disk path so the (co-located) agent can read it.
+  server.get<{ Params: { id: string } }>('/api/v1/attachments/:id', async (req, reply) => {
+    const { id } = req.params;
+    const row = db
+      .prepare(
+        `SELECT local_path, mime_type, original_filename, expires_at FROM attachments WHERE id = ?`,
+      )
+      .get(id) as
+      | {
+          local_path: string;
+          mime_type: string | null;
+          original_filename: string | null;
+          expires_at: number;
+        }
+      | undefined;
+
+    if (!row || row.expires_at <= Date.now()) {
+      return reply.status(404).send({ ok: false, error: `Attachment not found: ${id}` });
+    }
+
+    return {
+      ok: true,
+      attachment: {
+        id,
+        local_path: row.local_path,
+        mime_type: row.mime_type,
+        original_filename: row.original_filename,
+      },
+    };
+  });
+
   // POST /api/v1/messages/:id/react — send a reaction emoji to a message
   server.post<{ Params: { id: string }; Body: { emoji: string } }>(
     '/api/v1/messages/:id/react',

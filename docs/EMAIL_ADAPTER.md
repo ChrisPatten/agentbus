@@ -352,8 +352,9 @@ adapters:
   is sent `multipart/alternative` with an HTML part (see *Rich-text rendering*).
   Inbound HTML mail is down-converted to text by `mailparser`, so the agent reads the
   text rendering (visual structure like tables is flattened); a placeholder body
-  appears only when a message has no text *and* no HTML part. Attachments are not yet
-  downloaded (unlike Telegram — see [ATTACHMENTS.md](./ATTACHMENTS.md)).
+  appears only when a message has no text *and* no HTML part. Inbound file
+  attachments **are** downloaded (see [ATTACHMENTS.md](./ATTACHMENTS.md));
+  outbound attachments are out of scope.
 - **Trust the receiving server.** The anti-spoof check relies on the mailbox
   server's `Authentication-Results` header.
 - **One mailbox per instance.** Watching multiple folders requires multiple
