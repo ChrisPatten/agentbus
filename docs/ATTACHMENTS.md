@@ -170,6 +170,10 @@ The 10-minute cadence is not configurable in the current scope.
 - `src/http/api.ts` — `InboundMessage.attachments`, envelope metadata
   injection, relaxed guard for empty-body-with-attachments, and
   `GET /api/v1/attachments/:id`.
+- `src/pipeline/stages/normalize.ts` — Stage 10 also relaxes its empty-body
+  guard when `metadata.attachments` is non-empty; without this an image-only
+  message (no caption) is silently dropped before it reaches the queue, even
+  though the file itself downloaded successfully.
 - `src/mcp/tools/attachments.ts` — the `fetch_attachment` tool.
 - `src/adapters/cc.ts` — `formatMessagesForSampling` appends `[Image: …]` /
   `[File: …]` and inline-image hint lines.

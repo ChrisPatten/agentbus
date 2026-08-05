@@ -14,7 +14,9 @@ import type { PipelineStage } from '../types.js';
  *   - payload.body is checked with an explicit null/type/length guard rather
  *     than `!payload?.body` so that a body of `"0"` or `false` — valid in
  *     other contexts — would not be mistakenly rejected. An empty string is
- *     treated as missing because there is nothing to process.
+ *     treated as missing because there is nothing to process, unless
+ *     metadata.attachments is non-empty (E17 image/file-only messages, e.g.
+ *     a Telegram photo sent with no caption).
  *
  * Throws on any validation failure so the PipelineEngine catches the error
  * and aborts the pipeline (critical: true default).
@@ -40,7 +42,9 @@ export const normalize: PipelineStage = async (ctx) => {
   if (e.payload == null) {
     throw new Error('Missing required field: payload');
   }
-  if (e.payload.type === 'text' && e.payload.body.length === 0) {
+  const attachments = e.metadata?.['attachments'];
+  const hasAttachments = Array.isArray(attachments) && attachments.length > 0;
+  if (e.payload.type === 'text' && e.payload.body.length === 0 && !hasAttachments) {
     throw new Error('Missing required field: payload.body');
   }
 

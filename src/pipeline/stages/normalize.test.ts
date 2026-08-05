@@ -113,4 +113,14 @@ describe('normalize stage', () => {
     const ctx = makeCtx({ payload: { type: 'text', body: '' } });
     await expect(normalize(ctx)).rejects.toThrow('payload.body');
   });
+
+  it('allows empty payload body when attachments are present', async () => {
+    const ctx = makeCtx({
+      payload: { type: 'text', body: '' },
+      metadata: { attachments: [{ id: 'a1', path: '/tmp/a1.jpg' }] },
+    });
+    const result = await normalize(ctx);
+    expect(result).not.toBeNull();
+    expect(result!.envelope.payload).toEqual({ type: 'text', body: '' });
+  });
 });

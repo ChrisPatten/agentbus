@@ -10,6 +10,14 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+### Fixed
+- Image/file-only Telegram messages (no caption) were silently dropped before
+  reaching the agent's queue, even though the attachment downloaded
+  successfully — Stage 10 (`normalize`) rejected any empty `payload.body`
+  without checking `metadata.attachments`. The stage now allows an empty body
+  when attachments are present, matching the guard already in place in
+  `src/http/api.ts`. See [docs/ATTACHMENTS.md](docs/ATTACHMENTS.md).
+
 ## [0.7.1] - 2026-07-01
 
 ### Added
