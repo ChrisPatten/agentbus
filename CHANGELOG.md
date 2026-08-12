@@ -10,6 +10,8 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-12
+
 ### Added
 - **Pebble Ring webhook channel (E25).** New `POST /api/v1/webhooks/pebble`
   receive-only ingress for the Pebble Ring Index 01's voice-memo webhook
@@ -272,7 +274,8 @@ Baseline release. Core bus, pipeline, adapters, memory, scheduling.
 - Built-in slash commands + plugin command registry. (E6)
 - Scheduled messages (cron + one-shot) via background scheduler. (E18)
 
-[Unreleased]: https://github.com/ChrisPatten/agentbus/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/ChrisPatten/agentbus/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/ChrisPatten/agentbus/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/ChrisPatten/agentbus/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/ChrisPatten/agentbus/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/ChrisPatten/agentbus/compare/v0.5.0...v0.6.0
