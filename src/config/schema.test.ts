@@ -341,6 +341,55 @@ describe('AppConfigSchema — pebble (E25)', () => {
   });
 });
 
+describe('AppConfigSchema — pipeline.relays (E26)', () => {
+  const base = {
+    bus: { db_path: ':memory:' },
+    adapters: {},
+    memory: {},
+  };
+
+  it('defaults pipeline.relays to an empty array', () => {
+    const parsed = AppConfigSchema.parse(base);
+    expect(parsed.pipeline.relays).toEqual([]);
+  });
+
+  it('parses a relay rule and defaults target.template to {{body}}', () => {
+    const parsed = AppConfigSchema.parse({
+      ...base,
+      pipeline: {
+        relays: [{ match: { channel: 'pebble' }, target: { channel: 'telegram:peggy' } }],
+      },
+    });
+    expect(parsed.pipeline.relays).toEqual([
+      { match: { channel: 'pebble' }, target: { channel: 'telegram:peggy', template: '{{body}}' } },
+    ]);
+  });
+
+  it('parses an explicit template', () => {
+    const parsed = AppConfigSchema.parse({
+      ...base,
+      pipeline: {
+        relays: [
+          {
+            match: { channel: 'pebble', sender: 'contact:chris' },
+            target: { channel: 'telegram:peggy', template: 'Pebble ring voice note:\n{{body}}' },
+          },
+        ],
+      },
+    });
+    expect(parsed.pipeline.relays[0]?.target.template).toBe('Pebble ring voice note:\n{{body}}');
+  });
+
+  it('rejects a relay rule with no target.channel', () => {
+    expect(() =>
+      AppConfigSchema.parse({
+        ...base,
+        pipeline: { relays: [{ match: {}, target: {} }] },
+      }),
+    ).toThrow();
+  });
+});
+
 describe('AppConfigSchema — cc-headless memory + journaling (E20)', () => {
   const base = {
     bus: { db_path: ':memory:' },
