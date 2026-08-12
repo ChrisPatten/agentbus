@@ -163,6 +163,16 @@ Webhook receiver for BlueBubbles (and potentially other webhook-based sources). 
 
 ---
 
+### `POST /api/v1/webhooks/pebble` _(implemented — E25)_
+
+Receive-only webhook for the Pebble Ring voice-memo channel. Only registered
+when `adapters.pebble.enabled`. Auth is a per-contact `Authorization: Bearer
+<token>` header that also resolves the sender — see
+[docs/PEBBLE_ADAPTER.md](PEBBLE_ADAPTER.md) for the full contract, config
+shape, and error responses.
+
+---
+
 ## Health
 
 ### `GET /api/v1/health` _(pending — E12)_

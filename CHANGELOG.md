@@ -10,6 +10,15 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+### Added
+- **Pebble Ring webhook channel (E25).** New `POST /api/v1/webhooks/pebble`
+  receive-only ingress for the Pebble Ring Index 01's voice-memo webhook
+  (`multipart/form-data`: `transcription`, `recordedAt`, `client`). The
+  `Authorization: Bearer <token>` header doubles as sender identity —
+  resolved directly against `contacts[*].platforms.pebble.token` — with no
+  fallback for an unrecognized token (always a hard 401). See
+  [docs/PEBBLE_ADAPTER.md](docs/PEBBLE_ADAPTER.md).
+
 ### Fixed
 - Image/file-only Telegram messages (no caption) were silently dropped before
   reaching the agent's queue, even though the attachment downloaded

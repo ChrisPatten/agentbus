@@ -187,11 +187,14 @@ message that behaves like any other channel for dedup/logging/routing.
 1. Envelope: `channel: 'pebble'`, `sender: 'contact:<id>'` (from S25.3),
    `payload: { type: 'text', body: transcription }`, `metadata: {
    recordedAt, client, source: 'pebble' }`.
-2. Decide and document whether `envelope.timestamp` reflects `recordedAt`
-   (when spoken) or receipt time (when the webhook landed).
-   Recommendation: use `recordedAt` as `envelope.timestamp` — more accurate
-   for a memo recorded offline and synced later — with receipt time
-   additionally stored in `metadata.received_at`.
+2. `envelope.timestamp` is left unset at construction (verified during
+   implementation: `MessageQueue`'s `rowToQueuedMessage` unconditionally
+   overwrites `timestamp` with the DB row's enqueue time on every dequeue —
+   see `src/core/queue.ts` — so any value set earlier in the pipeline is
+   silently discarded before a message is ever delivered, for every channel,
+   not just pebble). `recordedAt` (when the memo was actually spoken) is
+   preserved durably in `metadata.recordedAt` instead, which survives
+   enqueue/dequeue unlike `timestamp`.
 3. Uses the existing `processInbound(message, deps)` — no new
    enqueue/pipeline-invocation path.
 4. Retried identical webhook POSTs (same `transcription` + `recordedAt` +
