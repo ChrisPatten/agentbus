@@ -43,6 +43,8 @@ CLAUDE_API_KEY=your-anthropic-api-key
 ```yaml
 bus:
   http_port: 3000
+  # host: 127.0.0.1        # default — loopback only. See "Exposing bus-core
+  #                         # to a reverse proxy" below before changing this.
   db_path: /Users/you/.agentbus/agentbus.db
   log_level: info
 
@@ -153,6 +155,37 @@ make restart
 ```
 
 Changes take effect on the next restart. No reload mechanism exists yet.
+
+---
+
+## Exposing bus-core to a reverse proxy
+
+By default `bus-core` binds `127.0.0.1` — reachable only from processes on
+this same machine (this is how the `claude-code` and `cc-headless` adapters
+talk to it). A webhook-based channel whose sender lives on another device
+(e.g. a Pebble Ring proxy, or any reverse proxy running on a different host)
+cannot reach a loopback-only port — the connection is refused at the OS
+level regardless of firewall rules.
+
+If your reverse proxy (nginx, Nginx Proxy Manager, Caddy, …) runs:
+
+- **On this same machine** (including a Docker Desktop for Mac container,
+  which can reach loopback-bound host ports via `host.docker.internal`) —
+  no change needed.
+- **On a different machine on your LAN** — set `bus.host: 0.0.0.0` in
+  `config.yaml` and `make restart`. This makes bus-core reachable from
+  anywhere on the LAN that can route to this machine's IP, on
+  `bus.http_port`. `127.0.0.1`-bound local callers keep working unchanged —
+  `0.0.0.0` still accepts loopback connections.
+
+**Before widening `bus.host`:** every HTTP route becomes reachable from the
+LAN, not just the one your proxy is meant to expose — most routes have no
+per-request auth of their own (a webhook channel like Pebble is the
+exception; it gates on its own bearer token). Set `bus.auth_token` as well
+if anything besides your intended proxy path could reach this port, and
+point the reverse proxy at only the specific path(s) you mean to expose
+(e.g. `/api/v1/webhooks/pebble`) rather than the whole host — most reverse
+proxies support per-path routing to different upstreams or access rules.
 
 ---
 

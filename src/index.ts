@@ -215,8 +215,8 @@ process.on('SIGINT', shutdown);
 
 // ── Start ────────────────────────────────────────────────────────────────────
 
-await httpServer.listen({ port: config.bus.http_port, host: '127.0.0.1' });
-console.log(`AgentBus bus-core ready — HTTP :${config.bus.http_port}`);
+await httpServer.listen({ port: config.bus.http_port, host: config.bus.host });
+console.log(`AgentBus bus-core ready — HTTP ${config.bus.host}:${config.bus.http_port}`);
 
 // Start platform adapters and delivery worker after HTTP server is listening
 for (const adapter of registry.list()) {

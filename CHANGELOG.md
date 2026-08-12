@@ -27,6 +27,14 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
   original message's pipeline run is aborted. Bounded to 3 hops to guard
   against a misconfigured relay cycle. See
   [docs/CHANNEL_RELAY.md](docs/CHANNEL_RELAY.md).
+- **`bus.host` config option.** bus-core's HTTP server bound `127.0.0.1`
+  unconditionally; a webhook channel whose sender lives on another device
+  (e.g. Pebble via a reverse proxy on a different LAN host) needs it
+  reachable from outside loopback. Defaults to `127.0.0.1` (unchanged
+  behavior); set to `0.0.0.0` to accept LAN connections — widening this
+  exposes every other HTTP route too, so set `bus.auth_token` alongside it
+  if anything besides your intended proxy path can reach the port. See
+  [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#exposing-bus-core-to-a-reverse-proxy).
 
 ### Fixed
 - Image/file-only Telegram messages (no caption) were silently dropped before

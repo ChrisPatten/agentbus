@@ -70,6 +70,15 @@ const ContactSchema = z.object({
  */
 const BusConfigSchema = z.object({
   http_port: z.number().int().min(1).max(65535).default(3000),
+  /**
+   * Interface the HTTP server binds to. Default '127.0.0.1' — loopback only,
+   * matching "Not exposed to the public internet" in docs/HTTP_API.md.
+   * Set to '0.0.0.0' to accept connections from other hosts on the LAN (e.g.
+   * a reverse proxy on a different machine for a webhook channel like
+   * Pebble). Widening this also exposes every other HTTP endpoint on the
+   * network; set auth_token too if anything beyond localhost can reach it.
+   */
+  host: z.string().default('127.0.0.1'),
   db_path: z.string(),
   log_level: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   /** If set, all API requests must include a matching X-Bus-Token header */

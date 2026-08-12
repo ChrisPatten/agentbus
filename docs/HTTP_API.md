@@ -1,8 +1,10 @@
 # AgentBus HTTP API
 
-Internal API served by bus-core on `localhost:${config.bus.http_port}` (default **3000**).
+Internal API served by bus-core on `${config.bus.host}:${config.bus.http_port}` (default **127.0.0.1:3000** — loopback only).
 
 **Not exposed to the public internet.** Agent connectors (Claude Code) communicate with bus-core through this API. Platform adapters (Telegram, BlueBubbles) run in-process with bus-core and use the pipeline/queue directly, but the HTTP API remains available for external callers and testing.
+
+**`bus.host`** — set to `0.0.0.0` to accept connections from other hosts on the LAN (e.g. a reverse proxy running on a different machine, needed for a webhook channel like [Pebble](PEBBLE_ADAPTER.md)). Widening this exposes every route below to anything that can reach the port, not just the routes with their own auth — set `bus.auth_token` too if you do this. `127.0.0.1`-bound callers on the same host (the `claude-code` and `cc-headless` adapters) keep working either way, since `0.0.0.0` still accepts loopback connections.
 
 **Implementation status:** Defined here for E12. Routes marked _(pending)_ are designed but not yet wired.
 

@@ -277,6 +277,24 @@ describe('AppConfigSchema — agents (E17)', () => {
   });
 });
 
+describe('AppConfigSchema — bus.host', () => {
+  const base = {
+    bus: { db_path: ':memory:' },
+    adapters: {},
+    memory: {},
+  };
+
+  it('defaults bus.host to 127.0.0.1 (loopback only)', () => {
+    const parsed = AppConfigSchema.parse(base);
+    expect(parsed.bus.host).toBe('127.0.0.1');
+  });
+
+  it('accepts an explicit host override', () => {
+    const parsed = AppConfigSchema.parse({ ...base, bus: { ...base.bus, host: '0.0.0.0' } });
+    expect(parsed.bus.host).toBe('0.0.0.0');
+  });
+});
+
 describe('AppConfigSchema — pebble (E25)', () => {
   const base = {
     bus: { db_path: ':memory:' },
