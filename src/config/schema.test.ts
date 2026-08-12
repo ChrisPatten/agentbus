@@ -277,6 +277,70 @@ describe('AppConfigSchema — agents (E17)', () => {
   });
 });
 
+describe('AppConfigSchema — pebble (E25)', () => {
+  const base = {
+    bus: { db_path: ':memory:' },
+    adapters: {},
+    memory: {},
+  };
+
+  it('defaults adapters.pebble.enabled to true and max_body_bytes to 65536 when the block is present', () => {
+    const parsed = AppConfigSchema.parse({ ...base, adapters: { pebble: {} } });
+    expect(parsed.adapters.pebble?.enabled).toBe(true);
+    expect(parsed.adapters.pebble?.max_body_bytes).toBe(65536);
+  });
+
+  it('allows adapters.pebble to be omitted entirely', () => {
+    const parsed = AppConfigSchema.parse(base);
+    expect(parsed.adapters.pebble).toBeUndefined();
+  });
+
+  it('parses a contact with a pebble token', () => {
+    const parsed = AppConfigSchema.parse({
+      ...base,
+      contacts: {
+        chris: { id: 'chris', displayName: 'Chris', platforms: { pebble: { token: 'tok-chris' } } },
+      },
+    });
+    expect(parsed.contacts['chris']?.platforms.pebble?.token).toBe('tok-chris');
+  });
+
+  it('rejects an empty pebble token', () => {
+    expect(() =>
+      AppConfigSchema.parse({
+        ...base,
+        contacts: {
+          chris: { id: 'chris', displayName: 'Chris', platforms: { pebble: { token: '' } } },
+        },
+      }),
+    ).toThrow();
+  });
+
+  it('rejects two contacts sharing the same pebble token', () => {
+    expect(() =>
+      AppConfigSchema.parse({
+        ...base,
+        contacts: {
+          chris: { id: 'chris', displayName: 'Chris', platforms: { pebble: { token: 'shared' } } },
+          alice: { id: 'alice', displayName: 'Alice', platforms: { pebble: { token: 'shared' } } },
+        },
+      }),
+    ).toThrow(/Duplicate pebble token/);
+  });
+
+  it('allows distinct contacts with distinct pebble tokens', () => {
+    const parsed = AppConfigSchema.parse({
+      ...base,
+      contacts: {
+        chris: { id: 'chris', displayName: 'Chris', platforms: { pebble: { token: 'tok-chris' } } },
+        alice: { id: 'alice', displayName: 'Alice', platforms: { pebble: { token: 'tok-alice' } } },
+      },
+    });
+    expect(parsed.contacts['chris']?.platforms.pebble?.token).toBe('tok-chris');
+    expect(parsed.contacts['alice']?.platforms.pebble?.token).toBe('tok-alice');
+  });
+});
+
 describe('AppConfigSchema — cc-headless memory + journaling (E20)', () => {
   const base = {
     bus: { db_path: ':memory:' },

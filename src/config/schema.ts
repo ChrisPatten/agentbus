@@ -39,6 +39,18 @@ const ContactPlatformsSchema = z.object({
       address: z.union([z.string(), z.array(z.string()).min(1)]),
     })
     .optional(),
+  pebble: z
+    .object({
+      /**
+       * Bearer token this contact's Pebble Ring proxy sends as
+       * `Authorization: Bearer <token>`. The token doubles as identity: a
+       * matching token resolves the inbound message's sender directly to
+       * this contact — there is no separate login step and no fallback
+       * identity for an unrecognized token (see E25 hard-reject decision).
+       */
+      token: z.string().min(1),
+    })
+    .optional(),
 });
 
 /** A named contact that can send messages to the bus. */
@@ -210,12 +222,23 @@ const CcHeadlessAdapterSchema = z.object({
     .prefault({}),
 });
 
+/**
+ * Pebble Ring webhook channel — receive-only HTTP ingress (no host/port/
+ * instance fields; there is nothing to poll or connect to). A pure toggle.
+ */
+const PebbleAdapterSchema = z.object({
+  enabled: z.boolean().default(true),
+  /** Multipart body-size guard for POST /api/v1/webhooks/pebble. Voice transcripts are short text. */
+  max_body_bytes: z.number().int().positive().default(65536),
+});
+
 const AdaptersConfigSchema = z.object({
   telegram: z.union([TelegramAdapterSchema, z.record(z.string(), TelegramAdapterSchema)]).optional(),
   email: z.union([EmailAdapterSchema, z.record(z.string(), EmailAdapterSchema)]).optional(),
   bluebubbles: BlueBubblesAdapterSchema.optional(),
   'claude-code': ClaudeCodeAdapterSchema.optional(),
   'cc-headless': z.union([CcHeadlessAdapterSchema, z.record(z.string(), CcHeadlessAdapterSchema)]).optional(),
+  pebble: PebbleAdapterSchema.optional(),
 });
 
 const MemoryConfigSchema = z.object({
@@ -426,6 +449,24 @@ export const AppConfigSchema = z.object({
           message: `Contact id "${contact.id}" must match its record key "${key}"`,
           path: [key, 'id'],
         });
+      }
+    }
+
+    // Pebble bearer tokens double as sender identity — a token shared by two
+    // contacts would make sender resolution ambiguous, so duplicates are rejected.
+    const byToken = new Map<string, string>();
+    for (const [key, contact] of Object.entries(contacts)) {
+      const token = contact.platforms.pebble?.token;
+      if (!token) continue;
+      const owner = byToken.get(token);
+      if (owner) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Duplicate pebble token — also used by contact "${owner}"`,
+          path: [key, 'platforms', 'pebble', 'token'],
+        });
+      } else {
+        byToken.set(token, key);
       }
     }
   }),
