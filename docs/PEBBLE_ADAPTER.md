@@ -76,8 +76,9 @@ pipeline:
 The route above delivers ring memos directly to an agent. To instead forward
 the memo into an existing conversation on another channel (e.g. prepend
 "Pebble ring voice note:" and land it in a Telegram chat), see
-`pipeline.relays` — a separate, general-purpose pipeline capability (tracked
-as its own epic) rather than something the pebble channel does itself.
+[docs/CHANNEL_RELAY.md](CHANNEL_RELAY.md) (`pipeline.relays`) — a separate,
+general-purpose pipeline capability rather than something the pebble channel
+does itself.
 
 If `adapters.pebble` is omitted, the route is not registered at all — a POST
 to `/api/v1/webhooks/pebble` returns Fastify's default 404.
@@ -187,6 +188,8 @@ ever delivered.
 ## Related
 
 - [docs/HTTP_API.md](HTTP_API.md) — full HTTP surface
+- [docs/CHANNEL_RELAY.md](CHANNEL_RELAY.md) — forward a pebble memo into an
+  existing conversation on another channel, with a rewritten body
 - [docs/EMAIL_ADAPTER.md](EMAIL_ADAPTER.md) — another channel that resolves
   sender identity via a per-contact allowlist, for comparison
 - `_bmad-output/epics/E25-pebble-webhook-channel.md` — epic scoping and design

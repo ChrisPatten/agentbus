@@ -18,6 +18,15 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
   resolved directly against `contacts[*].platforms.pebble.token` — with no
   fallback for an unrecognized token (always a hard 401). See
   [docs/PEBBLE_ADAPTER.md](docs/PEBBLE_ADAPTER.md).
+- **Channel relay: content-transform routing (E26).** New
+  `pipeline.relays[]` config and `channel-relay` pipeline stage (Stage 25):
+  a message matching a relay rule is re-submitted as a brand-new inbound
+  message on a different channel, with its body rendered through a
+  `{{body}}`/`{{sender}}`/`{{channel}}` template, sender preserved. Runs the
+  full pipeline again on the new channel (dedup, routing, delivery); the
+  original message's pipeline run is aborted. Bounded to 3 hops to guard
+  against a misconfigured relay cycle. See
+  [docs/CHANNEL_RELAY.md](docs/CHANNEL_RELAY.md).
 
 ### Fixed
 - Image/file-only Telegram messages (no caption) were silently dropped before
