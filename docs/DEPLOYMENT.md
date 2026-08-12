@@ -112,11 +112,18 @@ Makefile targets cover the common cases:
 
 | Command | What it does |
 |---------|-------------|
-| `make start` | Start (or restart) all processes, save process list |
-| `make stop` | Stop and remove all processes from pm2 |
-| `make restart` | Restart all processes (use after config changes) |
-| `make status` | Overview of all process states |
-| `make logs` | Tail all process logs |
+| `make start` | Start (or restart) `bus-core`, save process list |
+| `make stop` | Stop and remove `bus-core` from pm2 |
+| `make restart` | Restart `bus-core` (use after config changes) |
+| `make status` | Detailed status for `bus-core` |
+| `make logs` | Tail the `bus-core` process log |
+
+`status` and `restart` use `pm2 describe bus-core`, which scopes to this
+process — the pm2 daemon is shared across every project on the machine, so
+plain `pm2 status`/`pm2 list` would show unrelated processes too. Note that
+`pm2 describe` also prints a "Divergent env variables from local env" table
+when your shell env differs from the process env; this can include secrets
+(e.g. API keys) in plaintext in your terminal.
 
 For lower-level pm2 operations, use `./node_modules/.bin/pm2` directly:
 

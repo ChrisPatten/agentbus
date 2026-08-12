@@ -26,6 +26,12 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
   without checking `metadata.attachments`. The stage now allows an empty body
   when attachments are present, matching the guard already in place in
   `src/http/api.ts`. See [docs/ATTACHMENTS.md](docs/ATTACHMENTS.md).
+- `make logs`, `make status`, and `make restart` now scope to the `bus-core`
+  pm2 process (via `pm2 logs bus-core` / `pm2 describe bus-core`) instead of
+  operating against the whole shared pm2 daemon, which previously mixed in
+  processes and logs from unrelated projects. Note `pm2 describe` can print
+  secrets from divergent shell env vars to the terminal — see
+  [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#daily-operations).
 
 ## [0.7.1] - 2026-07-01
 

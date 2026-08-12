@@ -40,12 +40,13 @@ stop:
 
 ## Restart the server with pm2
 restart:
-	AGENTBUS_CONFIG=$(AGENTBUS_CONFIG) $(PM2) startOrRestart ecosystem.config.cjs
+	AGENTBUS_CONFIG=$(AGENTBUS_CONFIG) $(PM2) startOrRestart ecosystem.config.cjs > /dev/null
+	$(PM2) describe bus-core
 
 ## Get the status of pm2
 status:
-	$(PM2) status
+	$(PM2) describe bus-core
 
 ## Tail the logs with pm2
 logs:
-	$(PM2) logs
+	$(PM2) logs bus-core
