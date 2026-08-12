@@ -29,6 +29,7 @@ import { createHttpServer } from './http/api.js';
 import { PipelineEngine } from './pipeline/engine.js';
 import { normalize } from './pipeline/stages/normalize.js';
 import { createContactResolve } from './pipeline/stages/contact-resolve.js';
+import { createChannelRelay } from './pipeline/stages/channel-relay.js';
 import { createDedup } from './pipeline/stages/dedup.js';
 import { slashCommandDetect } from './pipeline/stages/slash-command.js';
 import { createTopicClassify } from './pipeline/stages/topic-classify.js';
@@ -106,6 +107,7 @@ commandRegistry.register({
 const pipeline = new PipelineEngine();
 pipeline.use({ slot: 10, name: 'normalize',        stage: normalize });
 pipeline.use({ slot: 20, name: 'contact-resolve',  stage: createContactResolve(config) });
+pipeline.use({ slot: 25, name: 'channel-relay',    stage: createChannelRelay(config, { queue, pipeline, config, db, registry, commandRegistry, pauseSet }) });
 pipeline.use({ slot: 30, name: 'dedup',            stage: createDedup(db, config.pipeline.dedup_window_ms) });
 pipeline.use({ slot: 40, name: 'slash-command',    stage: slashCommandDetect });
 pipeline.use({ slot: 50, name: 'topic-classify',   stage: createTopicClassify(config) });
