@@ -105,6 +105,7 @@ describe('resolveMediaConfig', () => {
         routes: [
           { match: { channel: 'telegram' }, target: { adapterId: 'cc', recipientId: 'agent:claude' } },
         ],
+        relays: [],
       },
     });
     expect(resolveMediaConfig(config, 'telegram')).toBeNull();
@@ -127,6 +128,7 @@ describe('resolveMediaConfig', () => {
         routes: [
           { match: { channel: 'telegram' }, target: { adapterId: 'cc', recipientId: 'agent:claude' } },
         ],
+        relays: [],
       },
     });
     const resolved = resolveMediaConfig(config, 'telegram');
@@ -148,6 +150,7 @@ describe('resolveMediaConfig', () => {
         urgency_keywords: [],
         vip_contacts: [],
         routes: [{ match: {}, target: { adapterId: 'cc', recipientId: 'agent:claude' } }],
+        relays: [],
       },
     });
     expect(resolveMediaConfig(config, 'telegram:peggy')?.agentId).toBe('agent:claude');

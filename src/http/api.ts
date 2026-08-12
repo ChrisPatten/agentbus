@@ -10,12 +10,24 @@
  * POST /api/v1/messages                  — Direct enqueue (MCP reply tool).
  * GET  /api/v1/messages/:id              — Fetch a single message by ID.
  * POST /api/v1/inbound                   — Inbound pipeline entry point.
+ * POST /api/v1/webhooks/pebble           — Pebble Ring voice-memo webhook (E25).
+ *                                          Only registered when adapters.pebble.enabled.
  *
  * Authentication
  * ──────────────
  * When config.bus.auth_token is set, an `onRequest` hook rejects any request
  * that does not include a matching `X-Bus-Token` header with HTTP 401.
  * The health endpoint is exempt so uptime monitors do not need credentials.
+ * If both config.bus.auth_token and adapters.pebble are configured, the
+ * pebble webhook requires *both* the shared X-Bus-Token header (this hook)
+ * and its own per-contact Bearer token (see below) — layered, not either/or.
+ *
+ * Pebble webhook (POST /api/v1/webhooks/pebble)
+ * ────────────────────────────────────────────────
+ * The `Authorization: Bearer <token>` header IS the sender's identity, not a
+ * shared secret: it is looked up against contacts[*].platforms.pebble.token
+ * and resolves straight to `contact:<id>`. An unrecognized/missing token is
+ * always a hard 401 — there is no anonymous fallback identity.
  *
  * Inbound pipeline (POST /api/v1/inbound)
  * ────────────────────────────────────────
@@ -31,6 +43,7 @@
  */
 import Fastify from 'fastify';
 import type { FastifyInstance } from 'fastify';
+import multipart from '@fastify/multipart';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { MessageQueue } from '../core/queue.js';
@@ -411,6 +424,11 @@ export async function processInbound(
 export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyInstance> {
   const { queue, registry, pipeline, config, db } = deps;
   const server = Fastify({ logger: false });
+
+  // Pebble webhook fields are plain text (transcription/recordedAt/client) — no
+  // file uploads are expected, so files:0 rejects any file part with a 413
+  // (FST_FILES_LIMIT) rather than silently accepting binary attachments.
+  await server.register(multipart, { limits: { files: 0 } });
 
   // Auth middleware: runs before every route handler.
   // Health is exempt so monitoring probes work without credentials.
@@ -1186,6 +1204,119 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     }
     return result;
   });
+
+  // POST /api/v1/webhooks/pebble — Pebble Ring voice-memo ingestion (E25).
+  //
+  // The bearer token IS the sender's identity: it is looked up directly
+  // against contacts[*].platforms.pebble.token and resolves `sender` straight
+  // to the canonical `contact:<id>` form. There is no fallback identity for
+  // an unrecognized token — auth failure is always a hard 401, never a
+  // platform:pebble:<token> passthrough (unlike Telegram/email's unknown-sender
+  // handling in contact-resolve.ts).
+  if (config.adapters.pebble?.enabled) {
+    const pebbleConfig = config.adapters.pebble;
+    const contactIdByToken = new Map<string, string>();
+    for (const contact of Object.values(config.contacts)) {
+      const token = contact.platforms.pebble?.token;
+      if (token) contactIdByToken.set(token, contact.id);
+    }
+
+    server.post('/api/v1/webhooks/pebble', async (req, reply) => {
+      // Body-size guard before the multipart parser does any work.
+      const contentLength = Number(req.headers['content-length'] ?? 0);
+      if (contentLength > pebbleConfig.max_body_bytes) {
+        return reply.status(413).send({ ok: false, error: 'Request body too large' });
+      }
+
+      const authHeader = req.headers['authorization'];
+      const token =
+        typeof authHeader === 'string' && authHeader.startsWith('Bearer ')
+          ? authHeader.slice('Bearer '.length)
+          : undefined;
+      const contactId = token ? contactIdByToken.get(token) : undefined;
+      if (!contactId) {
+        console.log('[http:pebble] rejected — missing or unrecognized bearer token');
+        return reply.status(401).send({ ok: false, error: 'Unauthorized' });
+      }
+
+      if (!req.isMultipart()) {
+        return reply.status(400).send({ ok: false, error: 'Content-Type must be multipart/form-data' });
+      }
+
+      const fields: Record<string, string> = {};
+      try {
+        for await (const part of req.parts()) {
+          if (part.type === 'field') {
+            fields[part.fieldname] = String(part.value ?? '');
+          }
+        }
+      } catch (err) {
+        const statusCode = (err as { statusCode?: number }).statusCode ?? 400;
+        console.log(`[http:pebble] rejected — multipart parse error: ${(err as Error).message}`);
+        return reply.status(statusCode).send({ ok: false, error: 'Malformed multipart body' });
+      }
+
+      const transcription = fields['transcription'];
+      if (!transcription || transcription.trim() === '') {
+        return reply
+          .status(400)
+          .send({ ok: false, error: 'transcription field is required and must be non-empty' });
+      }
+
+      // Assumed unix epoch SECONDS. Not verified against a live device payload —
+      // if the ring's proxy actually sends milliseconds, drop the *1000 below.
+      const recordedAtRaw = fields['recordedAt'];
+      const recordedAtSeconds = recordedAtRaw ? Number(recordedAtRaw) : NaN;
+      if (!recordedAtRaw || !Number.isFinite(recordedAtSeconds)) {
+        return reply
+          .status(400)
+          .send({ ok: false, error: 'recordedAt field is required and must be a unix epoch number' });
+      }
+
+      const client = fields['client'];
+      if (client !== 'ring') {
+        console.log(`[http:pebble] warning — unexpected client field "${client}"`);
+      }
+
+      const preview = transcription.length > 60 ? `${transcription.slice(0, 60)}…` : transcription;
+      console.log(`[http:pebble] sender=contact:${contactId} body="${preview}"`);
+
+      // envelope.timestamp is intentionally left unset: MessageQueue.dequeue()
+      // always overwrites it with the DB row's enqueue time (see queue.ts
+      // rowToQueuedMessage), so any value set here would be silently discarded
+      // before reaching a delivered message — this is true for every channel,
+      // not pebble-specific. recordedAt (when the memo was actually spoken) is
+      // preserved durably in metadata instead, which survives enqueue/dequeue.
+      const result = await processInbound(
+        {
+          channel: 'pebble',
+          sender: `contact:${contactId}`,
+          payload: { type: 'text', body: transcription },
+          metadata: {
+            recordedAt: recordedAtSeconds,
+            client,
+            source: 'pebble',
+          },
+        },
+        {
+          queue,
+          pipeline,
+          config,
+          db,
+          registry,
+          commandRegistry: deps.commandRegistry,
+          pauseSet: deps.pauseSet,
+        },
+      );
+
+      if (result.queued) {
+        console.log(`[http:pebble] queued id=${result.id} enqueued_count=${result.enqueued_count}`);
+      } else {
+        console.log(`[http:pebble] not queued reason=${result.reason}`);
+      }
+      return result;
+    });
+  }
 
   return server;
 }

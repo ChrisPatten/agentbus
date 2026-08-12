@@ -39,6 +39,18 @@ const ContactPlatformsSchema = z.object({
       address: z.union([z.string(), z.array(z.string()).min(1)]),
     })
     .optional(),
+  pebble: z
+    .object({
+      /**
+       * Bearer token this contact's Pebble Ring proxy sends as
+       * `Authorization: Bearer <token>`. The token doubles as identity: a
+       * matching token resolves the inbound message's sender directly to
+       * this contact — there is no separate login step and no fallback
+       * identity for an unrecognized token (see E25 hard-reject decision).
+       */
+      token: z.string().min(1),
+    })
+    .optional(),
 });
 
 /** A named contact that can send messages to the bus. */
@@ -58,6 +70,15 @@ const ContactSchema = z.object({
  */
 const BusConfigSchema = z.object({
   http_port: z.number().int().min(1).max(65535).default(3000),
+  /**
+   * Interface the HTTP server binds to. Default '127.0.0.1' — loopback only,
+   * matching "Not exposed to the public internet" in docs/HTTP_API.md.
+   * Set to '0.0.0.0' to accept connections from other hosts on the LAN (e.g.
+   * a reverse proxy on a different machine for a webhook channel like
+   * Pebble). Widening this also exposes every other HTTP endpoint on the
+   * network; set auth_token too if anything beyond localhost can reach it.
+   */
+  host: z.string().default('127.0.0.1'),
   db_path: z.string(),
   log_level: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   /** If set, all API requests must include a matching X-Bus-Token header */
@@ -210,12 +231,23 @@ const CcHeadlessAdapterSchema = z.object({
     .prefault({}),
 });
 
+/**
+ * Pebble Ring webhook channel — receive-only HTTP ingress (no host/port/
+ * instance fields; there is nothing to poll or connect to). A pure toggle.
+ */
+const PebbleAdapterSchema = z.object({
+  enabled: z.boolean().default(true),
+  /** Multipart body-size guard for POST /api/v1/webhooks/pebble. Voice transcripts are short text. */
+  max_body_bytes: z.number().int().positive().default(65536),
+});
+
 const AdaptersConfigSchema = z.object({
   telegram: z.union([TelegramAdapterSchema, z.record(z.string(), TelegramAdapterSchema)]).optional(),
   email: z.union([EmailAdapterSchema, z.record(z.string(), EmailAdapterSchema)]).optional(),
   bluebubbles: BlueBubblesAdapterSchema.optional(),
   'claude-code': ClaudeCodeAdapterSchema.optional(),
   'cc-headless': z.union([CcHeadlessAdapterSchema, z.record(z.string(), CcHeadlessAdapterSchema)]).optional(),
+  pebble: PebbleAdapterSchema.optional(),
 });
 
 const MemoryConfigSchema = z.object({
@@ -357,10 +389,39 @@ const RouteRuleSchema = z.object({
 });
 
 /**
+ * A relay target: a different channel a message should be re-arrived on,
+ * plus a template rendered over its body. `{{body}}`, `{{sender}}`, and
+ * `{{channel}}` (the *source* channel) placeholders are substituted by the
+ * `channel-relay` stage (Stage 25) using the same `{{variable}}` renderer
+ * `prompt-renderer.ts` uses for cc-headless system prompts.
+ */
+const RelayTargetSchema = z.object({
+  channel: z.string(),
+  template: z.string().default('{{body}}'),
+});
+
+/**
+ * A relay rule (E26). Unlike a route rule — which picks a delivery target for
+ * an already-arrived message — a relay rule re-submits the message as a
+ * brand-new inbound arrival on a different channel, with its body rewritten.
+ * match fields are AND-ed the same way RouteRuleSchema.match is; an empty
+ * match ({}) is a catch-all — if it appears before the last rule,
+ * channel-relay emits a construction-time warning.
+ */
+const RelayRuleSchema = z.object({
+  match: z.object({
+    sender: z.string().optional(),
+    channel: z.string().optional(),
+    topic: z.string().optional(),
+  }),
+  target: RelayTargetSchema,
+});
+
+/**
  * Controls every aspect of inbound message processing: deduplication window,
  * unrouted-message behaviour, topic classification rules, priority scoring
- * weights, and routing rules. All fields have sensible defaults so an empty
- * pipeline: {} block is valid.
+ * weights, and routing/relay rules. All fields have sensible defaults so an
+ * empty pipeline: {} block is valid.
  */
 const PipelineConfigSchema = z.object({
   stages: z.array(z.string()).optional(),
@@ -371,6 +432,7 @@ const PipelineConfigSchema = z.object({
   urgency_keywords: z.array(z.string()).default(['urgent', 'asap', 'emergency', 'critical']),
   vip_contacts: z.array(z.string()).default([]),
   routes: z.array(RouteRuleSchema).default([]),
+  relays: z.array(RelayRuleSchema).default([]),
 });
 
 /**
@@ -428,6 +490,24 @@ export const AppConfigSchema = z.object({
         });
       }
     }
+
+    // Pebble bearer tokens double as sender identity — a token shared by two
+    // contacts would make sender resolution ambiguous, so duplicates are rejected.
+    const byToken = new Map<string, string>();
+    for (const [key, contact] of Object.entries(contacts)) {
+      const token = contact.platforms.pebble?.token;
+      if (!token) continue;
+      const owner = byToken.get(token);
+      if (owner) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Duplicate pebble token — also used by contact "${owner}"`,
+          path: [key, 'platforms', 'pebble', 'token'],
+        });
+      } else {
+        byToken.set(token, key);
+      }
+    }
   }),
   topics: z.array(z.string()).default(['general']),
   agents: z.record(z.string(), AgentConfigSchema).default({}),
@@ -455,6 +535,7 @@ export const AppConfigSchema = z.object({
     urgency_keywords: ['urgent', 'asap', 'emergency', 'critical'],
     vip_contacts: [],
     routes: [],
+    relays: [],
   }),
 });
 

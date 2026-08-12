@@ -8,6 +8,7 @@ import { readFileSync } from 'node:fs';
 import { resolve, isAbsolute } from 'node:path';
 
 export interface PromptContext {
+  [key: string]: string;
   contact_id: string;
   channel: string;
   date: string;
@@ -16,10 +17,21 @@ export interface PromptContext {
   agent_id: string;
 }
 
-export function renderSystemPrompt(template: string, ctx: PromptContext): string {
+/**
+ * Replace `{{key}}` placeholders in `template` with values from `vars`.
+ * Unknown placeholders are left as-is so partial templates fail visibly
+ * rather than silently. Shared by `renderSystemPrompt` (cc-headless) and
+ * the `channel-relay` pipeline stage (E26) rather than reimplementing
+ * substitution twice.
+ */
+export function renderTemplate(template: string, vars: Record<string, string>): string {
   return template.replace(/\{\{(\w+)\}\}/g, (match, key: string) => {
-    return key in ctx ? ctx[key as keyof PromptContext] : match;
+    return key in vars ? vars[key]! : match;
   });
+}
+
+export function renderSystemPrompt(template: string, ctx: PromptContext): string {
+  return renderTemplate(template, ctx);
 }
 
 /**

@@ -10,6 +10,34 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-12
+
+### Added
+- **Pebble Ring webhook channel (E25).** New `POST /api/v1/webhooks/pebble`
+  receive-only ingress for the Pebble Ring Index 01's voice-memo webhook
+  (`multipart/form-data`: `transcription`, `recordedAt`, `client`). The
+  `Authorization: Bearer <token>` header doubles as sender identity —
+  resolved directly against `contacts[*].platforms.pebble.token` — with no
+  fallback for an unrecognized token (always a hard 401). See
+  [docs/PEBBLE_ADAPTER.md](docs/PEBBLE_ADAPTER.md).
+- **Channel relay: content-transform routing (E26).** New
+  `pipeline.relays[]` config and `channel-relay` pipeline stage (Stage 25):
+  a message matching a relay rule is re-submitted as a brand-new inbound
+  message on a different channel, with its body rendered through a
+  `{{body}}`/`{{sender}}`/`{{channel}}` template, sender preserved. Runs the
+  full pipeline again on the new channel (dedup, routing, delivery); the
+  original message's pipeline run is aborted. Bounded to 3 hops to guard
+  against a misconfigured relay cycle. See
+  [docs/CHANNEL_RELAY.md](docs/CHANNEL_RELAY.md).
+- **`bus.host` config option.** bus-core's HTTP server bound `127.0.0.1`
+  unconditionally; a webhook channel whose sender lives on another device
+  (e.g. Pebble via a reverse proxy on a different LAN host) needs it
+  reachable from outside loopback. Defaults to `127.0.0.1` (unchanged
+  behavior); set to `0.0.0.0` to accept LAN connections — widening this
+  exposes every other HTTP route too, so set `bus.auth_token` alongside it
+  if anything besides your intended proxy path can reach the port. See
+  [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#exposing-bus-core-to-a-reverse-proxy).
+
 ### Fixed
 - Image/file-only Telegram messages (no caption) were silently dropped before
   reaching the agent's queue, even though the attachment downloaded
@@ -17,6 +45,12 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
   without checking `metadata.attachments`. The stage now allows an empty body
   when attachments are present, matching the guard already in place in
   `src/http/api.ts`. See [docs/ATTACHMENTS.md](docs/ATTACHMENTS.md).
+- `make logs`, `make status`, and `make restart` now scope to the `bus-core`
+  pm2 process (via `pm2 logs bus-core` / `pm2 describe bus-core`) instead of
+  operating against the whole shared pm2 daemon, which previously mixed in
+  processes and logs from unrelated projects. Note `pm2 describe` can print
+  secrets from divergent shell env vars to the terminal — see
+  [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#daily-operations).
 
 ## [0.7.1] - 2026-07-01
 
@@ -240,7 +274,8 @@ Baseline release. Core bus, pipeline, adapters, memory, scheduling.
 - Built-in slash commands + plugin command registry. (E6)
 - Scheduled messages (cron + one-shot) via background scheduler. (E18)
 
-[Unreleased]: https://github.com/ChrisPatten/agentbus/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/ChrisPatten/agentbus/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/ChrisPatten/agentbus/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/ChrisPatten/agentbus/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/ChrisPatten/agentbus/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/ChrisPatten/agentbus/compare/v0.5.0...v0.6.0

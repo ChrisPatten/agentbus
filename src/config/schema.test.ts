@@ -277,6 +277,137 @@ describe('AppConfigSchema — agents (E17)', () => {
   });
 });
 
+describe('AppConfigSchema — bus.host', () => {
+  const base = {
+    bus: { db_path: ':memory:' },
+    adapters: {},
+    memory: {},
+  };
+
+  it('defaults bus.host to 127.0.0.1 (loopback only)', () => {
+    const parsed = AppConfigSchema.parse(base);
+    expect(parsed.bus.host).toBe('127.0.0.1');
+  });
+
+  it('accepts an explicit host override', () => {
+    const parsed = AppConfigSchema.parse({ ...base, bus: { ...base.bus, host: '0.0.0.0' } });
+    expect(parsed.bus.host).toBe('0.0.0.0');
+  });
+});
+
+describe('AppConfigSchema — pebble (E25)', () => {
+  const base = {
+    bus: { db_path: ':memory:' },
+    adapters: {},
+    memory: {},
+  };
+
+  it('defaults adapters.pebble.enabled to true and max_body_bytes to 65536 when the block is present', () => {
+    const parsed = AppConfigSchema.parse({ ...base, adapters: { pebble: {} } });
+    expect(parsed.adapters.pebble?.enabled).toBe(true);
+    expect(parsed.adapters.pebble?.max_body_bytes).toBe(65536);
+  });
+
+  it('allows adapters.pebble to be omitted entirely', () => {
+    const parsed = AppConfigSchema.parse(base);
+    expect(parsed.adapters.pebble).toBeUndefined();
+  });
+
+  it('parses a contact with a pebble token', () => {
+    const parsed = AppConfigSchema.parse({
+      ...base,
+      contacts: {
+        chris: { id: 'chris', displayName: 'Chris', platforms: { pebble: { token: 'tok-chris' } } },
+      },
+    });
+    expect(parsed.contacts['chris']?.platforms.pebble?.token).toBe('tok-chris');
+  });
+
+  it('rejects an empty pebble token', () => {
+    expect(() =>
+      AppConfigSchema.parse({
+        ...base,
+        contacts: {
+          chris: { id: 'chris', displayName: 'Chris', platforms: { pebble: { token: '' } } },
+        },
+      }),
+    ).toThrow();
+  });
+
+  it('rejects two contacts sharing the same pebble token', () => {
+    expect(() =>
+      AppConfigSchema.parse({
+        ...base,
+        contacts: {
+          chris: { id: 'chris', displayName: 'Chris', platforms: { pebble: { token: 'shared' } } },
+          alice: { id: 'alice', displayName: 'Alice', platforms: { pebble: { token: 'shared' } } },
+        },
+      }),
+    ).toThrow(/Duplicate pebble token/);
+  });
+
+  it('allows distinct contacts with distinct pebble tokens', () => {
+    const parsed = AppConfigSchema.parse({
+      ...base,
+      contacts: {
+        chris: { id: 'chris', displayName: 'Chris', platforms: { pebble: { token: 'tok-chris' } } },
+        alice: { id: 'alice', displayName: 'Alice', platforms: { pebble: { token: 'tok-alice' } } },
+      },
+    });
+    expect(parsed.contacts['chris']?.platforms.pebble?.token).toBe('tok-chris');
+    expect(parsed.contacts['alice']?.platforms.pebble?.token).toBe('tok-alice');
+  });
+});
+
+describe('AppConfigSchema — pipeline.relays (E26)', () => {
+  const base = {
+    bus: { db_path: ':memory:' },
+    adapters: {},
+    memory: {},
+  };
+
+  it('defaults pipeline.relays to an empty array', () => {
+    const parsed = AppConfigSchema.parse(base);
+    expect(parsed.pipeline.relays).toEqual([]);
+  });
+
+  it('parses a relay rule and defaults target.template to {{body}}', () => {
+    const parsed = AppConfigSchema.parse({
+      ...base,
+      pipeline: {
+        relays: [{ match: { channel: 'pebble' }, target: { channel: 'telegram:peggy' } }],
+      },
+    });
+    expect(parsed.pipeline.relays).toEqual([
+      { match: { channel: 'pebble' }, target: { channel: 'telegram:peggy', template: '{{body}}' } },
+    ]);
+  });
+
+  it('parses an explicit template', () => {
+    const parsed = AppConfigSchema.parse({
+      ...base,
+      pipeline: {
+        relays: [
+          {
+            match: { channel: 'pebble', sender: 'contact:chris' },
+            target: { channel: 'telegram:peggy', template: 'Pebble ring voice note:\n{{body}}' },
+          },
+        ],
+      },
+    });
+    expect(parsed.pipeline.relays[0]?.target.template).toBe('Pebble ring voice note:\n{{body}}');
+  });
+
+  it('rejects a relay rule with no target.channel', () => {
+    expect(() =>
+      AppConfigSchema.parse({
+        ...base,
+        pipeline: { relays: [{ match: {}, target: {} }] },
+      }),
+    ).toThrow();
+  });
+});
+
 describe('AppConfigSchema — cc-headless memory + journaling (E20)', () => {
   const base = {
     bus: { db_path: ':memory:' },
