@@ -1,10 +1,10 @@
-# E27 — Telegram Threaded Mode & Reply Context
+# E28 — Telegram Threaded Mode & Reply Context
 
 | Field | Value |
 |---|---|
-| Epic ID | E27 |
-| Dependencies | None blocking. Reuses machinery already complete: E20 (long-lived per-`conversation_id` sessions), E21's `thread:<hash>` topic pattern (`THREAD_TOPIC_PREFIX`/`isThreadTopic()`, `email_threads` table as the schema template). |
-| Story Count | 7 |
+| Epic ID | E28 |
+| Dependencies | E27 (generic thread store — `threads` table, `src/pipeline/thread-store.ts`, shared `topicForThreadKey`). E20 (long-lived per-`conversation_id` sessions). |
+| Story Count | 6 |
 | Estimated Complexity | M |
 
 ---
@@ -23,14 +23,15 @@ codebase).
 
 These are two independent capabilities and this epic keeps them that way:
 
-1. **Forum topics → per-thread sessions.** A Telegram topic is a deliberate,
-   persistent, user-visible structure — the same shape as an email thread.
-   E27 mirrors E21's email-thread pattern exactly: derive `topic =
-   thread:<hash>` from `message_thread_id`, let the existing
+1. **Forum topics → per-thread sessions**, built entirely on E27's generic
+   mechanism — no new table. Derive `topic = thread:<hash>` via the shared
+   `topicForThreadKey()` from a chat-scoped thread key
+   (`${chatId}:${messageThreadId}`), let the existing
    `topic-classify`/`route-resolve` machinery give it its own
-   `conversation_id` and long-lived session, and persist per-thread reply
-   state (`telegram_threads`, modeled on `email_threads`) so outbound sends
-   land back in the right topic.
+   `conversation_id` and long-lived session, and persist `{ chatId,
+   messageThreadId }` through `getThread`/`upsertThread` (E27) keyed on
+   `(channel: this.id, topic)` so outbound sends land back in the right
+   topic.
 
 2. **Reply-to-message is a context annotation, not session routing.** A user
    quote-replying to a message on a *normal* (non-topic) chat is a
@@ -43,7 +44,8 @@ These are two independent capabilities and this epic keeps them that way:
    555:42]` in `formatMessagesForSampling`), and outbound replies use the
    **already-existing** `reply_to` field (bus message ID, currently accepted
    by `send_message`/`reply` but never turned into an actual Telegram reply)
-   to produce a native reply quote via `reply_parameters`.
+   to produce a native reply quote via `reply_parameters`. This has nothing
+   to do with E27's thread store — it never touches `threads` at all.
 
 ```yaml
 adapters:
@@ -57,6 +59,9 @@ adapters:
 
 ## Entry Criteria
 
+- **E27 complete:** `threads` table and `src/pipeline/thread-store.ts`
+  (`getThread`/`upsertThread`/`patchThreadMetadata`) exist and are exercised
+  by the (retrofitted) email adapter.
 - **Operator prerequisite (outside the codebase):** Threaded Mode must be
   turned on per bot via **BotFather → your bot → Bot Settings → Threads
   Settings → Turn on Threaded Mode**. Until that's done, Telegram never sends
@@ -65,7 +70,8 @@ adapters:
   (reply context) needs no BotFather change and works today.
 - `pipeline.route-resolve` already computes `conversation_id =
   sha256(sorted([contact_id, channel, topic]))`; `topic-classify` already
-  preserves `thread:`-prefixed topics verbatim (`src/pipeline/stages/topic-classify.ts:26-31`).
+  preserves `thread:`-prefixed topics verbatim
+  (`src/pipeline/stages/topic-classify.ts:26-31`).
 
 ---
 
@@ -93,19 +99,22 @@ adapters:
    (verified: `src/mcp/tools/messaging.ts` hardcodes `'general'`;
    `src/scheduler/scheduler.ts` defaults to `'general'`; neither is touched
    by this epic).
-7. `tsc --noEmit` clean; unit tests cover thread-key derivation/hashing,
-   `telegram_threads` upsert+lookup, the `create_telegram_topic` tool, the
-   `reply_to` → `reply_parameters` resolution path, and quoted-context
-   rendering.
-8. `docs/TELEGRAM_ADAPTER.md` gains a "Threaded Mode & replies" section
-   (BotFather setup, config, worked example) mirroring
-   `docs/EMAIL_ADAPTER.md`'s "Threading & sessions".
+7. No new database table — forum-topic state lives in E27's `threads` table
+   alongside email's rows, distinguished by `channel`.
+8. `tsc --noEmit` clean; unit tests cover thread-key derivation/hashing, the
+   `threads`-table round trip for a Telegram row, the `create_telegram_topic`
+   tool, the `reply_to` → `reply_parameters` resolution path, and
+   quoted-context rendering.
+9. `docs/TELEGRAM_ADAPTER.md` gains a "Threaded Mode & replies" section
+   (BotFather setup, config, worked example) that links to
+   `docs/THREADING.md` (E27) for the shared mechanism, mirroring how
+   `docs/EMAIL_ADAPTER.md`'s "Threading & sessions" does.
 
 ---
 
 ## Stories
 
-### S27.1 — Config schema: `threaded_mode` per instance
+### S28.1 — Config schema: `threaded_mode` per instance
 
 **User story:** As an operator, I want to declare that a given Telegram bot
 has Threaded Mode enabled, so the adapter knows it's safe to create topics
@@ -117,60 +126,60 @@ and attach `message_thread_id` on sends.
 2. `getTelegramInstances()` (`src/config/schema.ts:563+`) carries
    `threaded_mode` through to `TelegramInstanceConfig` for both the legacy
    single-bot form and the named-record form.
-3. Inbound parsing of `message_thread_id`/`is_topic_message` (S27.2) is
+3. Inbound parsing of `message_thread_id`/`is_topic_message` (S28.2) is
    feature-detected from the update itself and does **not** depend on this
-   flag — it only gates outbound topic-creation (S27.4) and is documented as
+   flag — it only gates outbound topic-creation (S28.3) and is documented as
    the BotFather prerequisite.
 4. `docs/TELEGRAM_ADAPTER.md` documents the exact BotFather steps.
 
 **Complexity:** S
 
-### S27.2 — Inbound: forum-topic → thread session
+### S28.2 — Forum topics on the generic thread store
 
 **User story:** As a user, I want each topic in the bot's DM to be its own
-conversation with the agent, the same way separate email threads are.
+conversation with the agent, the same way separate email threads are — and
+as a maintainer, I want this to cost no new table.
 
 **Acceptance criteria:**
 1. `TelegramMessage` (`src/adapters/telegram.ts:98-107`) gains
    `message_thread_id?: number` and `is_topic_message?: boolean`.
-2. New pure helper (mirrors `topicForThreadKey` in `email-thread.ts`):
-   `topicForForumThread(chatId: number, messageThreadId: number): string` —
-   hashes `${chatId}:${messageThreadId}` (chat-scoped, since
-   `message_thread_id` is only unique within a chat) into `thread:<hash>`.
+2. Local `TelegramThreadMetadata { chatId: number; messageThreadId: number }`
+   interface (mirrors `EmailThreadMetadata` from E27).
 3. `processUpdate` (`src/adapters/telegram.ts:703+`): when
-   `msg.is_topic_message && msg.message_thread_id`, sets `topic:
-   topicForForumThread(...)` on the `InboundMessage` before calling
-   `processInbound`.
-4. New migration `012_telegram_threads.sql`: `telegram_threads(channel TEXT,
-   topic TEXT, chat_id INTEGER, message_thread_id INTEGER, updated_at TEXT,
-   PRIMARY KEY (channel, topic))` — modeled directly on `email_threads`
-   (`src/db/migrations/010_email_threads.sql`). Registered in
-   `src/db/schema.ts` alongside the other migrations.
-5. `processUpdate` upserts a `telegram_threads` row on every message that
-   carries a `message_thread_id`.
-6. No config or topic-classify changes needed beyond what already exists —
-   `isThreadTopic`/`thread:` preservation is generic (E21).
+   `msg.is_topic_message && msg.message_thread_id`, derives `threadKey =
+   \`${msg.chat.id}:${msg.message_thread_id}\`` (chat-scoped, since
+   `message_thread_id` is only unique within a chat), computes `topic =
+   topicForThreadKey(threadKey)` (E27, shared), sets it on the
+   `InboundMessage` before calling `processInbound`, and calls
+   `upsertThread(db, { channel: this.id, topic, threadKey, metadata: {
+   chatId: msg.chat.id, messageThreadId: msg.message_thread_id } })`
+   (E27's `thread-store.ts` — no new table, no new migration).
+4. No config or topic-classify changes needed beyond what already exists —
+   `isThreadTopic`/`thread:` preservation is generic (E21/E27).
 
 **Complexity:** M
 
-### S27.3 — Outbound: reply into the correct topic
+### S28.3 — Outbound: reply into the correct topic
 
 **User story:** As a user, I want the agent's replies to land back in the
 topic I was using, not the DM's default area.
 
 **Acceptance criteria:**
-1. `TelegramAdapter.send()` (`src/adapters/telegram.ts:329+`) looks up
-   `telegram_threads` by `(channel: this.id, topic: envelope.topic)`; if a
-   row exists, includes `message_thread_id` in the `sendMessage` call.
-2. No match (including `topic === 'general'`, which never gets a
-   `telegram_threads` row) → `message_thread_id` omitted, message posts to
-   the DM's non-topic default area exactly as today.
+1. `TelegramAdapter.send()` (`src/adapters/telegram.ts:329+`) calls
+   `getThread<TelegramThreadMetadata>(db, this.id, envelope.topic)`; if found,
+   includes `message_thread_id: metadata.messageThreadId` in the
+   `sendMessage` call.
+2. No match (including `topic === 'general'`, which never has a thread row)
+   → `message_thread_id` omitted, message posts to the DM's non-topic
+   default area exactly as today.
 3. Test: a two-topic conversation round-trips independently — a reply
-   addressed to topic A's `conversation_id` never appears in topic B.
+   addressed to topic A's `conversation_id` never appears in topic B; a
+   Telegram row and an email row coexisting in `threads` under different
+   `channel` values don't interfere.
 
 **Complexity:** S
 
-### S27.4 — Agent-originated topics: `create_telegram_topic` tool
+### S28.4 — Agent-originated topics: `create_telegram_topic` tool
 
 **User story:** As the agent, I want to start a new topic on my own
 initiative (e.g. "let's track the Wanda-prep stuff separately") and be able
@@ -183,24 +192,25 @@ to refer back to it later.
    private chats — that restriction is supergroup-only).
 2. Registered only for Telegram instances with `threaded_mode: true`;
    returns a clear error naming the BotFather prerequisite otherwise.
-3. On success: upserts the returned `message_thread_id` into
-   `telegram_threads` immediately (so `send()` can resolve it before any
-   inbound message has arrived on it) and returns `{ topic: "thread:<hash>",
+3. On success: derives `threadKey`/`topic` the same way as S28.2 and calls
+   `upsertThread` immediately (so `send()` can resolve it before any inbound
+   message has arrived on it), returning `{ topic: "thread:<hash>",
    message_thread_id, name }` to the agent — the `topic` value is what the
    agent passes as `topic` on a later `schedule_message`/`send_message` call
    to target this thread on purpose.
-4. Tests: tool registration gating, successful creation + `telegram_threads`
+4. Tests: tool registration gating, successful creation + `threads` row
    upsert, rejection when `threaded_mode` is false.
 
 **Complexity:** M
 
-### S27.5 — Outbound: native reply via existing `reply_to`
+### S28.5 — Reply-to-message: outbound native reply + inbound context
 
 **User story:** As a user, I want the agent's answer to visually quote the
-specific message it's responding to, when that's meaningful (e.g. answering
-one of several rapid-fire questions).
+specific message it's responding to when that's meaningful, and I want the
+agent to know which message I'm quoting when I reply — without either of
+these forking my conversation into a new session.
 
-**Acceptance criteria:**
+**Acceptance criteria (outbound):**
 1. `reply_to` (bus message ID) already exists as an accepted parameter on
    `send_message`/`reply` (`src/mcp/tools/messaging.ts:22`) and is stored on
    the outbound envelope, but nothing currently turns it into a platform-level
@@ -215,59 +225,46 @@ one of several rapid-fire questions).
    (format `"chatId:messageId"`, the same encoding used for
    `platform_message_id` everywhere else); when present, includes
    `reply_parameters: { message_id: <parsed>, allow_sending_without_reply:
-   true }` in the `sendMessage` call.
-3. `allow_sending_without_reply: true` so a since-deleted target message
-   never blocks delivery — worst case, the reply just isn't visually linked.
-4. If the resolved chat doesn't match the send's target chat (shouldn't
-   happen in practice, but transcripts span channels), the reply parameter is
-   dropped rather than sent to the wrong chat.
-5. Test: `reply_to` resolves and is forwarded; missing/foreign-channel
-   `reply_to` is a no-op; `allow_sending_without_reply` is always set when a
-   reply target is included.
+   true }` in the `sendMessage` call. `allow_sending_without_reply: true` so a
+   since-deleted target message never blocks delivery.
+3. If the resolved chat doesn't match the send's target chat, the reply
+   parameter is dropped rather than sent to the wrong chat.
 
-**Complexity:** M
-
-### S27.6 — Inbound: reply-to-message as context (not routing)
-
-**User story:** As the agent, I want to know which prior message a reply is
-about, without every reply-quote fragmenting the conversation into a new
-session.
-
-**Acceptance criteria:**
-1. `TelegramMessage` gains `reply_to_message?: { message_id: number; from?:
+**Acceptance criteria (inbound):**
+4. `TelegramMessage` gains `reply_to_message?: { message_id: number; from?:
    TelegramUser; text?: string; caption?: string }` (minimal subset, not the
    full recursive type).
-2. `processUpdate`: when present, attaches
+5. `processUpdate`: when present, attaches
    `metadata.quoted_message = { platform_message_id: "chatId:messageId",
-   sender_name, text }` to the `InboundMessage` (`text` truncated to a
-   reasonable length, e.g. 200 chars, to bound context cost).
-3. **Explicitly does not** affect `topic`/session routing — orthogonal to
-   S27.2.
-4. `formatMessagesForSampling` (`src/adapters/cc.ts:82+`, shared by both the
+   sender_name, text }` to the `InboundMessage` (`text` truncated to ~200
+   chars to bound context cost). **Does not** affect `topic`/session routing
+   — orthogonal to S28.2, and never touches `threads`.
+6. `formatMessagesForSampling` (`src/adapters/cc.ts:82+`, shared by both the
    polling and headless CC adapters) renders a line before the body when
    `metadata.quoted_message` is present: `[Replying to <sender_name>: "<text>"]`
    — same placement/style precedent as the existing `[reacted 👍 to message
    555:42]` reaction line.
-5. Test: rendering with/without a sender name, truncation, and no regression
-   to existing reaction/attachment rendering tests.
+7. Tests: `reply_to` resolves and is forwarded; missing/foreign-channel
+   `reply_to` is a no-op; quoted-message rendering with/without a sender
+   name and with truncation; no regression to existing reaction/attachment
+   rendering tests.
 
-**Complexity:** S
+**Complexity:** M
 
-### S27.7 — Wiring, docs, tests
+### S28.6 — Wiring, docs, tests
 
 **User story:** As a maintainer, I want this documented and tested
 end-to-end.
 
 **Acceptance criteria:**
-1. Migration `012_telegram_threads.sql` registered in `src/db/schema.ts`.
-2. `docs/TELEGRAM_ADAPTER.md`: new "Threaded Mode & replies" section covering
-   the BotFather steps, `threaded_mode` config, the
-   `create_telegram_topic` tool, and the reply-context vs. thread-routing
-   distinction — mirroring `docs/EMAIL_ADAPTER.md`'s "Threading & sessions".
-3. `docs/MCP_TOOLS.md` documents `create_telegram_topic` and the now-functional
+1. `docs/TELEGRAM_ADAPTER.md`: new "Threaded Mode & replies" section covering
+   the BotFather steps, `threaded_mode` config, the `create_telegram_topic`
+   tool, and the reply-context vs. thread-routing distinction — linking to
+   `docs/THREADING.md` (E27) for the shared storage mechanism.
+2. `docs/MCP_TOOLS.md` documents `create_telegram_topic` and the now-functional
    `reply_to` behavior on `send_message`/`reply`.
-4. `CHANGELOG.md` entry under `[Unreleased]`.
-5. All new unit tests green; `tsc --noEmit` clean.
+3. `CHANGELOG.md` entry under `[Unreleased]`.
+4. All new unit tests green; `tsc --noEmit` clean.
 
 **Complexity:** S
 
@@ -277,7 +274,7 @@ end-to-end.
 
 - **Why two features, not one.** Forum topics are Telegram's explicit,
   persistent multi-conversation primitive — the DM analogue of email threads
-  — so they get the full E21-style session-partitioning treatment. A
+  — so they get the full E21/E27-style session-partitioning treatment. A
   reply-quote is a much more casual, extremely common gesture (correcting
   which of several messages you meant) that happens constantly in ordinary
   chat flow; routing it into a new session every time would fragment normal
@@ -305,3 +302,8 @@ end-to-end.
   So "one main session, separate threads, with proactive delivery defaulting
   to main" falls out of the existing architecture for free; this epic only
   adds thread-derivation to the Telegram adapter's *inbound* path.
+- **Why this epic added no table even in its first draft's shape.** An
+  earlier draft of this epic proposed a bespoke `telegram_threads` table
+  mirroring `email_threads` directly. E27 was carved out specifically to
+  avoid that duplication before it happened — see E27's summary for the
+  reasoning.

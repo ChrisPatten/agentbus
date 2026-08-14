@@ -45,8 +45,8 @@ Scope: remove the handlers + their registrations in `createBuiltinCommands`, dro
 ### Relay Claude Code permission prompts to user
 When Claude Code surfaces a permission prompt (tool approval request), relay it to the user via the appropriate channel so they can approve or deny without being at the terminal. See https://code.claude.com/docs/en/channels-reference#relay-permission-prompts
 
-### ~~Telegram: Threaded Mode (DM topics) + reply-to-message → per-thread sessions~~ → promoted to E27 (backlog 2026-08-14)
-See `_bmad-output/epics/E27-telegram-threaded-mode.md`. Split into two independent capabilities: forum topics get full E21-style per-thread sessions; reply-to-message is inbound context only (rendered to the agent, no session/routing effect) plus a native outbound reply via the already-existing `reply_to` field.
+### ~~Telegram: Threaded Mode (DM topics) + reply-to-message → per-thread sessions~~ → promoted to E27 + E28 (backlog 2026-08-14)
+See `_bmad-output/epics/E27-generic-thread-store.md` (generalizes E21's email-thread mechanism into a channel-agnostic `threads` table/store, retrofitting email onto it with no behavior change) and `_bmad-output/epics/E28-telegram-threaded-mode.md` (Telegram forum topics built on E27's store, plus reply-to-message as inbound context only — not session routing — via a native outbound reply through the already-existing `reply_to` field).
 
 ### ~~Inbound emoji reactions: deliver user reactions to agents~~ → complete 2026-05-12
 Telegram adapter subscribes to `message_reaction_updated`; net emoji diff (added > removed) delivered as `{ type: 'reaction'; emoji; removed; target_message_id }` payload. CC adapter renders as `[reacted 👍 to message 555:42]`. Custom-emoji-only and anonymous-admin reactions are skipped. See commit message for details.
