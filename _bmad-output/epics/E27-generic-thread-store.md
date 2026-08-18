@@ -20,6 +20,12 @@ Telegram forum topics — a different thread-key derivation (chat_id +
 `message_thread_id` instead of mail headers) but an identical shape:
 `(channel, topic)` → some reply-state payload that `send()` looks up.
 
+> **Note (2026-08-18):** E28 originally targeted Telegram DM Threaded Mode;
+> it has since pivoted to **group** forum topics after DM Threaded Mode
+> failed a hands-on test (see E28's pivot note). This mechanism is unaffected
+> either way — a chat-scoped thread key doesn't care whether the chat is a
+> DM or a group, which is exactly the point of generalizing it here.
+
 Rather than let a second bespoke `telegram_threads` table (E28's original
 draft) duplicate this pattern — and a third, fourth adapter duplicate it
 again later — E27 generalizes it once:
