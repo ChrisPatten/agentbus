@@ -216,6 +216,11 @@ section h2 {
   border-color: var(--accent-dim);
 }
 
+.node-planned {
+  border-style: dashed;
+  opacity: 0.6;
+}
+
 .diagram-links {
   display: flex;
   justify-content: center;

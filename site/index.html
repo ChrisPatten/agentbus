@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>AgentBus — a message bus for AI agents</title>
-  <meta name="description" content="AgentBus unifies Claude Code, Telegram, iMessage, email, and more into a single ambient inbox/outbox for an AI agent." />
+  <meta name="description" content="AgentBus unifies Claude Code, Telegram, email, and voice-memo webhooks into a single ambient inbox/outbox for an AI agent." />
   <link rel="icon" type="image/svg+xml" href="favicon.svg" />
   <link rel="stylesheet" href="styles.css" />
 </head>
@@ -31,7 +31,7 @@
         <h1>One ambient inbox for your AI agent.</h1>
         <p class="lede">
           AgentBus is a TypeScript message bus that unifies Claude Code,
-          Telegram, iMessage, email, and voice-memo webhooks into a single
+          Telegram, email, and voice-memo webhooks into a single
           inbox/outbox — so an AI agent can hear from, and reply to, any of
           them without knowing which one it's talking to.
         </p>
@@ -73,12 +73,12 @@
               <span>Bot API, long-poll</span>
             </div>
             <div class="node">
-              <strong>bluebubbles-adapter</strong>
-              <span>iMessage, webhooks</span>
-            </div>
-            <div class="node">
               <strong>email &amp; pebble adapters</strong>
               <span>IMAP · voice-memo webhook</span>
+            </div>
+            <div class="node node-planned">
+              <strong>bluebubbles-adapter</strong>
+              <span>iMessage (planned)</span>
             </div>
           </div>
         </div>
@@ -91,13 +91,22 @@
         <div class="grid">
           <div class="card">
             <h3>Multi-channel by design</h3>
-            <p>Claude Code (MCP), Telegram, iMessage/BlueBubbles, email, and
-            Pebble Ring voice-memo webhooks all feed the same inbox.</p>
+            <p>Claude Code (MCP), Telegram, email, and Pebble Ring
+            voice-memo webhooks all feed the same inbox; iMessage/BlueBubbles
+            support is planned.</p>
+          </div>
+          <div class="card">
+            <h3>Telegram group topics</h3>
+            <p>A topic-enabled Telegram group becomes its own channel, and
+            each forum topic gets its own long-lived session — the agent can
+            even spin up a new topic on its own initiative and pick up right
+            where a reply-quoted message left off.</p>
           </div>
           <div class="card">
             <h3>Threaded, persistent memory</h3>
-            <p>SQLite-backed thread store with transcript logging and
-            summarization, so context survives across sessions and channels.</p>
+            <p>A generic per-thread session store (shared by email and
+            Telegram) plus transcript logging and summarization, so context
+            survives across sessions and channels.</p>
           </div>
           <div class="card">
             <h3>Slash commands</h3>
