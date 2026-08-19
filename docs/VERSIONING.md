@@ -18,7 +18,12 @@ hardcode a version string elsewhere — import `VERSION` instead.
 1. **Update the changelog.** Move the relevant items from `## [Unreleased]` in
    [CHANGELOG.md](../CHANGELOG.md) into a new `## [x.y.z] - YYYY-MM-DD` section,
    and update the compare links at the bottom. Commit it.
-2. **Run the release script** for the bump type. This runs the test suite
+2. **Review the homepage.** If this release changes the pitch, feature list,
+   or quick start steps, update `site/index.html` to match and commit it
+   alongside the changelog. Version/license/last-commit badges on the page
+   are live shields.io badges — they update automatically and need no edits.
+   See [GITHUB_PAGES.md](GITHUB_PAGES.md).
+3. **Run the release script** for the bump type. This runs the test suite
    (`preversion`), bumps `package.json`, commits, and creates an annotated git
    tag `vX.Y.Z`:
 
@@ -28,7 +33,7 @@ hardcode a version string elsewhere — import `VERSION` instead.
    npm run release:major   # 0.1.0 -> 1.0.0
    ```
 
-3. **Push** the commit and the tag:
+4. **Push** the commit and the tag:
 
    ```bash
    git push && git push --tags

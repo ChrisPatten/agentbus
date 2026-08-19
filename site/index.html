@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AgentBus — a message bus for AI agents</title>
+  <meta name="description" content="AgentBus unifies Claude Code, Telegram, iMessage, email, and more into a single ambient inbox/outbox for an AI agent." />
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="site-header">
+    <div class="wrap header-inner">
+      <a class="brand" href="#top">
+        <img src="favicon.svg" alt="" class="brand-mark" width="24" height="24" />
+        AgentBus
+      </a>
+      <nav class="nav">
+        <a href="#features">Features</a>
+        <a href="#architecture">Architecture</a>
+        <a href="#quick-start">Quick start</a>
+        <a href="https://github.com/ChrisPatten/agentbus/tree/main/docs">Docs</a>
+        <a href="https://github.com/ChrisPatten/agentbus" class="nav-cta">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="top">
+    <section class="hero">
+      <div class="wrap">
+        <h1>One ambient inbox for your AI agent.</h1>
+        <p class="lede">
+          AgentBus is a TypeScript message bus that unifies Claude Code,
+          Telegram, iMessage, email, and voice-memo webhooks into a single
+          inbox/outbox — so an AI agent can hear from, and reply to, any of
+          them without knowing which one it's talking to.
+        </p>
+        <div class="cta-row">
+          <a class="btn btn-primary" href="#quick-start">Quick start</a>
+          <a class="btn" href="https://github.com/ChrisPatten/agentbus">View on GitHub</a>
+        </div>
+        <p class="badges">
+          <img alt="latest tag" src="https://img.shields.io/github/v/tag/ChrisPatten/agentbus?label=version&sort=semver" />
+          <img alt="license" src="https://img.shields.io/github/license/ChrisPatten/agentbus" />
+          <img alt="last commit" src="https://img.shields.io/github/last-commit/ChrisPatten/agentbus" />
+        </p>
+      </div>
+    </section>
+
+    <section id="architecture" class="architecture">
+      <div class="wrap">
+        <h2>Four processes, one HTTP boundary</h2>
+        <p class="section-lede">
+          Every adapter is a separate process that talks to the core over
+          <code>localhost</code> HTTP — never by importing bus-core directly.
+          That keeps each channel pluggable and independently restartable.
+        </p>
+        <div class="diagram">
+          <div class="node node-core">
+            <strong>bus-core</strong>
+            <span>SQLite · message queue · inbound pipeline</span>
+          </div>
+          <div class="diagram-links" aria-hidden="true">
+            <span></span><span></span><span></span><span></span>
+          </div>
+          <div class="node-row">
+            <div class="node">
+              <strong>claude-code-adapter</strong>
+              <span>MCP server over stdio</span>
+            </div>
+            <div class="node">
+              <strong>telegram-adapter</strong>
+              <span>Bot API, long-poll</span>
+            </div>
+            <div class="node">
+              <strong>bluebubbles-adapter</strong>
+              <span>iMessage, webhooks</span>
+            </div>
+            <div class="node">
+              <strong>email &amp; pebble adapters</strong>
+              <span>IMAP · voice-memo webhook</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="features" class="features">
+      <div class="wrap">
+        <h2>What it does</h2>
+        <div class="grid">
+          <div class="card">
+            <h3>Multi-channel by design</h3>
+            <p>Claude Code (MCP), Telegram, iMessage/BlueBubbles, email, and
+            Pebble Ring voice-memo webhooks all feed the same inbox.</p>
+          </div>
+          <div class="card">
+            <h3>Threaded, persistent memory</h3>
+            <p>SQLite-backed thread store with transcript logging and
+            summarization, so context survives across sessions and channels.</p>
+          </div>
+          <div class="card">
+            <h3>Slash commands</h3>
+            <p>A command registry lets any channel trigger the same
+            structured actions, no matter where the message came from.</p>
+          </div>
+          <div class="card">
+            <h3>Scheduling</h3>
+            <p>Cron-like scheduled sends and reminders, built on the same
+            pipeline as every other inbound/outbound message.</p>
+          </div>
+          <div class="card">
+            <h3>Channel relay &amp; routing</h3>
+            <p>Rewrite and re-submit a message from one channel to another
+            with templated bodies — bounded hop count, full pipeline re-run.</p>
+          </div>
+          <div class="card">
+            <h3>Write your own adapter</h3>
+            <p>Adapters only need to speak HTTP to bus-core. See the plugin
+            authoring guide to add a new channel.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="quick-start" class="quick-start">
+      <div class="wrap">
+        <h2>Quick start</h2>
+        <pre><code>npm install
+
+cp config.yaml.example config.yaml
+cp .env.example .env
+# edit config.yaml and .env with your credentials
+
+npx tsx src/index.ts        # run bus-core
+npx tsx src/adapters/cc.ts   # run the Claude Code adapter</code></pre>
+        <p class="section-lede">
+          See the <a href="https://github.com/ChrisPatten/agentbus#readme">README</a>
+          for full configuration details, and
+          <a href="https://github.com/ChrisPatten/agentbus/tree/main/docs">docs/</a>
+          for each adapter, the HTTP API, and the memory model.
+        </p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap footer-inner">
+      <span>MIT licensed.</span>
+      <a href="https://github.com/ChrisPatten/agentbus/blob/main/CHANGELOG.md">Changelog</a>
+      <a href="https://github.com/ChrisPatten/agentbus/issues">Issues</a>
+      <a href="https://github.com/ChrisPatten/agentbus">GitHub</a>
+    </div>
+  </footer>
+</body>
+</html>
