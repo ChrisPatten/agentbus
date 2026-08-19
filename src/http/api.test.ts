@@ -46,6 +46,16 @@ function makeStubAdapter(opts: {
   channels: string[];
   canReact?: boolean;
   reactFn?: (id: string, emoji: string) => Promise<void>;
+  ownsChannel?: (channel: string) => boolean;
+  canType?: boolean;
+  startTypingFn?: (contactId: string, channel?: string) => void;
+  canToolStatus?: boolean;
+  reportToolCallFn?: (contactId: string, text: string, channel?: string) => void;
+  createTopicFn?: (
+    channel: string,
+    name: string,
+    context?: string,
+  ) => Promise<{ ok: true; topic: string; message_thread_id: number; name: string } | { ok: false; error: string }>;
 }): AdapterInstance {
   return {
     id: opts.id,
@@ -53,6 +63,8 @@ function makeStubAdapter(opts: {
     capabilities: {
       send: true,
       react: opts.canReact ?? false,
+      typing: opts.canType ?? false,
+      toolStatus: opts.canToolStatus ?? false,
       channels: opts.channels,
     },
     start: async () => {},
@@ -60,6 +72,10 @@ function makeStubAdapter(opts: {
     health: async () => ({ status: 'healthy' as const }),
     send: async () => ({ success: true }),
     react: opts.canReact ? opts.reactFn ?? (async () => {}) : undefined,
+    ownsChannel: opts.ownsChannel,
+    startTyping: opts.canType ? opts.startTypingFn ?? (() => {}) : undefined,
+    reportToolCall: opts.canToolStatus ? opts.reportToolCallFn ?? (() => {}) : undefined,
+    createTopic: opts.createTopicFn,
   };
 }
 
@@ -261,6 +277,103 @@ describe('HTTP API', () => {
   });
 });
 
+describe('POST /api/v1/messages — reply_to resolution (E28)', () => {
+  let server: FastifyInstance;
+  let db: Database.Database;
+
+  beforeEach(async () => {
+    ({ server, db } = await makeServer());
+  });
+
+  afterEach(async () => {
+    await server.close();
+  });
+
+  function insertTranscript(
+    msgId: string,
+    channel: string,
+    metadata = '{}',
+    opts: { direction?: 'inbound' | 'outbound'; createdAt?: string; conversationId?: string } = {},
+  ) {
+    const conversationId = opts.conversationId ?? 'conv-1';
+    const sessionId = randomUUID();
+    db.prepare(
+      `INSERT OR IGNORE INTO sessions (id, conversation_id, channel, contact_id, started_at, last_activity, message_count)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(sessionId, conversationId, channel, 'contact:alice', new Date().toISOString(), new Date().toISOString(), 1);
+    db.prepare(
+      `INSERT INTO transcripts (id, message_id, conversation_id, session_id, created_at, channel, contact_id, direction, body, metadata)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      randomUUID(),
+      msgId,
+      conversationId,
+      sessionId,
+      opts.createdAt ?? new Date().toISOString(),
+      channel,
+      'contact:alice',
+      opts.direction ?? 'inbound',
+      'hi',
+      metadata,
+    );
+  }
+
+  async function enqueueAndFetch(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const postRes = await server.inject({ method: 'POST', url: '/api/v1/messages', payload });
+    const { id } = JSON.parse(postRes.body) as { id: string };
+    const getRes = await server.inject({ method: 'GET', url: `/api/v1/messages/${id}` });
+    const { message } = JSON.parse(getRes.body) as { message: Record<string, unknown> };
+    return message;
+  }
+
+  it('resolves reply_to to reply_to_platform_message_id when replying to an earlier (not the latest) inbound message', async () => {
+    const origId = randomUUID();
+    const laterId = randomUUID();
+    insertTranscript(origId, 'telegram', JSON.stringify({ platform_message_id: '555:42' }), {
+      createdAt: '2026-01-01T00:00:00.000Z',
+    });
+    insertTranscript(laterId, 'telegram', JSON.stringify({ platform_message_id: '555:43' }), {
+      createdAt: '2026-01-01T00:01:00.000Z',
+    });
+
+    const message = await enqueueAndFetch({ ...validMessage, reply_to: origId });
+    const metadata = message['metadata'] as Record<string, unknown>;
+    expect(metadata['reply_to_platform_message_id']).toBe('555:42');
+  });
+
+  it('is a no-op (plain message) when replying to the latest inbound message — the quote would be redundant', async () => {
+    const latestId = randomUUID();
+    insertTranscript(latestId, 'telegram', JSON.stringify({ platform_message_id: '555:99' }));
+
+    const message = await enqueueAndFetch({ ...validMessage, reply_to: latestId });
+    const metadata = message['metadata'] as Record<string, unknown>;
+    expect(metadata['reply_to_platform_message_id']).toBeUndefined();
+  });
+
+  it('is a no-op when reply_to references an unknown message', async () => {
+    const message = await enqueueAndFetch({ ...validMessage, reply_to: 'no-such-message' });
+    const metadata = message['metadata'] as Record<string, unknown>;
+    expect(metadata['reply_to_platform_message_id']).toBeUndefined();
+  });
+
+  it('is a no-op when the transcript has no platform_message_id (even though not the latest)', async () => {
+    const origId = randomUUID();
+    const laterId = randomUUID();
+    insertTranscript(origId, 'telegram', '{}', { createdAt: '2026-01-01T00:00:00.000Z' });
+    insertTranscript(laterId, 'telegram', '{}', { createdAt: '2026-01-01T00:01:00.000Z' });
+
+    const message = await enqueueAndFetch({ ...validMessage, reply_to: origId });
+    const metadata = message['metadata'] as Record<string, unknown>;
+    expect(metadata['reply_to_platform_message_id']).toBeUndefined();
+  });
+
+  it('does nothing when reply_to is absent', async () => {
+    const message = await enqueueAndFetch(validMessage);
+    const metadata = message['metadata'] as Record<string, unknown>;
+    expect(metadata['reply_to_platform_message_id']).toBeUndefined();
+  });
+});
+
 // ── E7 endpoint tests ─────────────────────────────────────────────────────────
 
 describe('GET /api/v1/adapters', () => {
@@ -291,6 +404,212 @@ describe('GET /api/v1/adapters', () => {
     expect(body.adapters).toHaveLength(1);
     expect(body.adapters[0]!.id).toBe('telegram');
     expect(body.adapters[0]!.channels).toEqual(['telegram']);
+  });
+});
+
+describe('GET /api/v1/adapters/resolve', () => {
+  let server: FastifyInstance;
+  let registry: AdapterRegistry;
+
+  beforeEach(async () => {
+    ({ server, registry } = await makeServer());
+  });
+
+  afterEach(async () => {
+    await server.close();
+  });
+
+  it('400s when channel is missing', async () => {
+    const res = await server.inject({ method: 'GET', url: '/api/v1/adapters/resolve' });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('resolves a channel in capabilities.channels', async () => {
+    registry.register(makeStubAdapter({ id: 'telegram', channels: ['telegram'] }));
+    const res = await server.inject({ method: 'GET', url: '/api/v1/adapters/resolve?channel=telegram' });
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ ok: true, exists: true });
+  });
+
+  it('resolves a dynamically-derived channel via ownsChannel (E28)', async () => {
+    registry.register(
+      makeStubAdapter({
+        id: 'telegram',
+        channels: ['telegram'],
+        ownsChannel: (channel) => channel.startsWith('telegram:group:'),
+      }),
+    );
+    const res = await server.inject({
+      method: 'GET',
+      url: '/api/v1/adapters/resolve?channel=telegram:group:-100123',
+    });
+    expect(JSON.parse(res.body)).toEqual({ ok: true, exists: true });
+  });
+
+  it('reports a channel no adapter owns as not existing', async () => {
+    const res = await server.inject({ method: 'GET', url: '/api/v1/adapters/resolve?channel=nope' });
+    expect(JSON.parse(res.body)).toEqual({ ok: true, exists: false });
+  });
+});
+
+describe('POST /api/v1/adapters/:id/typing and /tool-status', () => {
+  let server: FastifyInstance;
+  let registry: AdapterRegistry;
+
+  beforeEach(async () => {
+    ({ server, registry } = await makeServer());
+  });
+
+  afterEach(async () => {
+    await server.close();
+  });
+
+  it('resolves :id by exact adapter id, unchanged for a plain channel', async () => {
+    const calls: Array<[string, string | undefined]> = [];
+    registry.register(
+      makeStubAdapter({
+        id: 'telegram',
+        channels: ['telegram'],
+        canType: true,
+        startTypingFn: (contactId, channel) => calls.push([contactId, channel]),
+      }),
+    );
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/adapters/telegram/typing',
+      payload: { contact_id: 'contact:chris' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(calls).toEqual([['contact:chris', 'telegram']]);
+  });
+
+  it('resolves :id as a dynamically-derived group channel via ownsChannel (E28)', async () => {
+    const calls: Array<[string, string, string | undefined]> = [];
+    registry.register(
+      makeStubAdapter({
+        id: 'telegram',
+        channels: ['telegram'],
+        ownsChannel: (channel) => channel.startsWith('telegram:group:'),
+        canToolStatus: true,
+        reportToolCallFn: (contactId, text, channel) => calls.push([contactId, text, channel]),
+      }),
+    );
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/adapters/telegram:group:-100123/tool-status',
+      payload: { contact_id: 'contact:chris', text: 'Bash: ls' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(calls).toEqual([['contact:chris', 'Bash: ls', 'telegram:group:-100123']]);
+  });
+
+  it('no-ops (still 200) for an unresolvable channel', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/adapters/unknown/typing',
+      payload: { contact_id: 'contact:chris' },
+    });
+    expect(res.statusCode).toBe(200);
+  });
+});
+
+describe('POST /api/v1/adapters/:id/topics (E28)', () => {
+  let server: FastifyInstance;
+  let registry: AdapterRegistry;
+
+  beforeEach(async () => {
+    ({ server, registry } = await makeServer());
+  });
+
+  afterEach(async () => {
+    await server.close();
+  });
+
+  it('400s when name is missing', async () => {
+    const res = await server.inject({ method: 'POST', url: '/api/v1/adapters/telegram/topics', payload: {} });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('404s when no adapter resolves the channel', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/adapters/telegram/topics',
+      payload: { name: 'x' },
+    });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it('400s when the resolved adapter has no createTopic', async () => {
+    registry.register(makeStubAdapter({ id: 'telegram', channels: ['telegram'] }));
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/adapters/telegram/topics',
+      payload: { name: 'x' },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).error).toContain('not supported');
+  });
+
+  it('resolves via ownsChannel and forwards to createTopic with the group channel', async () => {
+    const calls: Array<[string, string]> = [];
+    registry.register(
+      makeStubAdapter({
+        id: 'telegram',
+        channels: ['telegram'],
+        ownsChannel: (channel) => channel.startsWith('telegram:group:'),
+        createTopicFn: async (channel, name) => {
+          calls.push([channel, name]);
+          return { ok: true, topic: 'thread:abc', message_thread_id: 42, name };
+        },
+      }),
+    );
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/adapters/telegram:group:-100123/topics',
+      payload: { name: 'Wanda prep' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ ok: true, topic: 'thread:abc', message_thread_id: 42, name: 'Wanda prep' });
+    expect(calls).toEqual([['telegram:group:-100123', 'Wanda prep']]);
+  });
+
+  it('forwards an optional context param to createTopic', async () => {
+    const calls: Array<[string, string, string | undefined]> = [];
+    registry.register(
+      makeStubAdapter({
+        id: 'telegram',
+        channels: ['telegram'],
+        ownsChannel: (channel) => channel.startsWith('telegram:group:'),
+        createTopicFn: async (channel, name, context) => {
+          calls.push([channel, name, context]);
+          return { ok: true, topic: 'thread:abc', message_thread_id: 42, name };
+        },
+      }),
+    );
+    await server.inject({
+      method: 'POST',
+      url: '/api/v1/adapters/telegram:group:-100123/topics',
+      payload: { name: 'Wanda prep', context: 'Track Wanda birthday planning here' },
+    });
+    expect(calls).toEqual([['telegram:group:-100123', 'Wanda prep', 'Track Wanda birthday planning here']]);
+  });
+
+  it('surfaces an ok:false result (e.g. missing admin rights) as-is', async () => {
+    registry.register(
+      makeStubAdapter({
+        id: 'telegram',
+        channels: ['telegram'],
+        ownsChannel: (channel) => channel.startsWith('telegram:group:'),
+        createTopicFn: async () => ({ ok: false, error: 'missing Manage Topics' }),
+      }),
+    );
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/adapters/telegram:group:-100123/topics',
+      payload: { name: 'x' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ ok: false, error: 'missing Manage Topics' });
   });
 });
 

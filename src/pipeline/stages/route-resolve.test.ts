@@ -109,6 +109,34 @@ describe('route-resolve stage', () => {
     expect(result!.routes[0]!.adapterId).toBe('telegram-adapter');
   });
 
+  it('a rule matching a bot\'s DM channel also matches a group derived from it (E28)', async () => {
+    const config = makeConfig({
+      routes: [
+        { match: { channel: 'telegram:peggy' }, target: { adapterId: 'cc-headless', recipientId: 'agent:peggy' } },
+      ],
+    });
+    const db = makeDb();
+    const stage = createRouteResolve(config, db);
+    const ctx = makeCtx({ channel: 'telegram:peggy:group:-1003977797157' }, config, db);
+    const result = await stage(ctx);
+    expect(result!.routes[0]!.adapterId).toBe('cc-headless');
+    expect(result!.routes[0]!.recipientId).toBe('agent:peggy');
+  });
+
+  it('does not match an unrelated channel that merely shares a prefix', async () => {
+    const config = makeConfig({
+      routes: [
+        { match: { channel: 'telegram:peggy' }, target: { adapterId: 'cc-headless', recipientId: 'agent:peggy' } },
+      ],
+    });
+    const db = makeDb();
+    const stage = createRouteResolve(config, db);
+    // "telegram:peggyland" is not a group of "telegram:peggy" — must fall through to the default route.
+    const ctx = makeCtx({ channel: 'telegram:peggyland' }, config, db);
+    const result = await stage(ctx);
+    expect(result!.routes[0]!.adapterId).toBe('claude-code');
+  });
+
   it('matches route rule by sender', async () => {
     const config = makeConfig({
       routes: [

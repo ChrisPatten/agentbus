@@ -10,6 +10,32 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+### Added
+- **Telegram group forum topics & reply context (E28).** A topic-enabled
+  Telegram group the bot is added to becomes its own channel
+  (`telegram:group:<chatId>`), distinct from any member's DM, derived
+  per-message with no static config; each forum topic within it (including
+  "General") becomes its own long-lived session, built entirely on E27's
+  generic thread store with no new table. Typing indicator and live
+  tool-call status updates land in the specific topic being discussed, not
+  just the right group — two topics active at once in the same group never
+  collide. New `create_telegram_topic` MCP tool lets the agent start a topic
+  on its own initiative (gated on "Manage Topics" admin rights, verified
+  before creation with a clear error if missing), always as a brand-new
+  session with no prior history, optionally seeded with agent-supplied
+  `context` injected into the topic's first turn only; the agent references
+  the topic later via the `thread:<hash>` topic the tool returns. `reply_to`
+  (already accepted by `send_message`/`reply`) is now functional on
+  Telegram — resolved server-side to the target message's platform ID and
+  turned into a native reply quote, dropped (not blocking delivery) if the
+  target chat doesn't match, the message was deleted, or the target is
+  already the latest inbound message (quoting it would be redundant).
+  Inbound quote-replies are surfaced to the agent as `[Replying to
+  <sender>: "<text>"]` context, never forking the session. No new
+  authorization mechanism — the existing sender allowlist already gates
+  groups exactly like DMs. See
+  [docs/TELEGRAM_ADAPTER.md](docs/TELEGRAM_ADAPTER.md#group-topics--replies-e28).
+
 ### Changed
 - **Generalized per-thread session storage (E27).** Email's bespoke
   `email_threads` table is replaced by a channel-agnostic `threads` table
@@ -19,6 +45,20 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
   add its own per-thread sessions with no schema change. Internal-only —
   email threading behavior is unchanged. See
   [docs/THREADING.md](docs/THREADING.md).
+- **Adapter channel resolution now supports a dynamically-derived channel**
+  (`AdapterInstance.ownsChannel`, E28) — outbound delivery, `react_to_message`,
+  slash-command replies, pause checks, and the typing/tool-call-status
+  endpoints all resolve a Telegram group channel the same way they resolve a
+  DM one, with no new per-group registration.
+- **`pipeline.routes`/`pipeline.relays` matching also recognizes a group
+  derived from a configured channel** (`channelMatches()`, E28) — a
+  `match.channel` rule written against a bot's DM channel (e.g.
+  `telegram:peggy`) now also matches any group under it
+  (`telegram:peggy:group:<chatId>`), so an existing route/relay config keeps
+  working for groups with no changes. Fixes a bug where the very first live
+  group message after this branch landed fell through to the default
+  `claude-code` route instead of the configured `cc-headless` agent, since
+  route-resolve previously compared channels with exact string equality.
 
 ## [0.9.0] - 2026-08-18
 

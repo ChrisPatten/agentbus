@@ -386,14 +386,15 @@ class HeadlessInstance {
   /**
    * Tell the source adapter to start its typing indicator while claude -p runs.
    * Fire-and-forget — no-ops server-side for channels without typing capability.
-   * Email channels have no typing indicator, so skip the call entirely.
+   * Email channels have no typing indicator, so skip the call entirely. `topic`
+   * (E28) further targets a specific Telegram forum topic within a group.
    */
-  private startTyping(channel: string, contactId: string): void {
+  private startTyping(channel: string, contactId: string, topic?: string): void {
     if (channel === 'email' || channel.startsWith('email:')) return;
     fetch(`${this.busBaseUrl}/api/v1/adapters/${channel}/typing`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contact_id: contactId }),
+      body: JSON.stringify({ contact_id: contactId, topic }),
     }).catch(() => {});
   }
 
@@ -402,13 +403,14 @@ class HeadlessInstance {
    * Fire-and-forget — no-ops server-side for adapters without the
    * `toolStatus` capability. Email channels have no equivalent primitive, so
    * skip the call entirely, matching startTyping's existing email skip.
+   * `topic` (E28) further targets a specific Telegram forum topic.
    */
-  private reportToolCall(channel: string, contactId: string, text: string): void {
+  private reportToolCall(channel: string, contactId: string, text: string, topic?: string): void {
     if (channel === 'email' || channel.startsWith('email:')) return;
     fetch(`${this.busBaseUrl}/api/v1/adapters/${channel}/tool-status`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contact_id: contactId, text }),
+      body: JSON.stringify({ contact_id: contactId, text, topic }),
     }).catch(() => {});
   }
 
@@ -525,9 +527,11 @@ class HeadlessInstance {
     const first = envelopes[0]!;
     const contactId = first.sender; // contact:alice after pipeline resolution
     const channel = first.channel;
+    const topic = first.topic;
 
-    // Show activity on the source channel while the (cold-start) claude -p runs.
-    this.startTyping(channel, contactId);
+    // Show activity on the source channel (and forum topic, if any — E28)
+    // while the (cold-start) claude -p runs.
+    this.startTyping(channel, contactId, topic);
 
     // E20: key resume on conversation_id (per-thread sessions, long-lived).
     const conversationId = resolveConversationId(db, first);
@@ -546,7 +550,7 @@ class HeadlessInstance {
       prompt,
       resumeId,
       onToolCall: (call) =>
-        this.reportToolCall(channel, contactId, formatToolCallSummary(call.name, call.input)),
+        this.reportToolCall(channel, contactId, formatToolCallSummary(call.name, call.input), topic),
     });
 
     if (stoppedByUser) {

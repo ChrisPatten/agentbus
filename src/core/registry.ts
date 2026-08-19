@@ -55,28 +55,61 @@ export interface AdapterInstance {
   poll?(): Promise<MessageEnvelope[]>;
   markRead?(platformMessageId: string): Promise<void>;
   react?(platformMessageId: string, reaction: string): Promise<void>;
-  /** Start a typing indicator for a contact. Called when the agent confirms receipt. */
-  startTyping?(contactId: string): void;
+  /**
+   * True if this adapter instance handles `channel`, beyond what's listed in
+   * its static `capabilities.channels[]` — e.g. a Telegram group channel
+   * derived per-message (`telegram:group:<chatId>`) that was never
+   * statically registered (E28). The registry's channel lookups consult this
+   * in addition to `capabilities.channels`.
+   */
+  ownsChannel?(channel: string): boolean;
+  /**
+   * Start a typing indicator for a contact. Called when the agent confirms
+   * receipt. `channel` disambiguates which chat to target when a single
+   * adapter instance serves more than one chat per contact (e.g. a Telegram
+   * contact's DM vs. a group channel, E28) — omitted, it defaults to the
+   * contact's primary chat. `topic` further disambiguates a specific forum
+   * topic within a group channel, so the indicator lands in the topic being
+   * discussed rather than just the right group — omitted, or a non-thread
+   * topic, targets the group's general area.
+   */
+  startTyping?(contactId: string, channel?: string, topic?: string): void;
   /**
    * Report a live tool-call status line for a contact's in-flight turn (E29).
    * Fire-and-forget — called once per non-delivery tool call as the agent
    * works. No-op unless the adapter declares `capabilities.toolStatus`.
+   * `channel`/`topic` disambiguate the target chat/topic, as with `startTyping`.
    */
-  reportToolCall?(contactId: string, text: string): void;
+  reportToolCall?(contactId: string, text: string, channel?: string, topic?: string): void;
   /**
    * Finalize the live tool-call status draft for a contact (E29 / `/stop`):
    * append `note` as a final line and stop treating the message as an
    * editable draft, so it persists in the conversation as-is. Returns true
    * if a draft was open and finalized, false if there was nothing to do —
    * callers use this to decide whether `note` already reached the user (so
-   * they can skip sending a separate confirmation).
+   * they can skip sending a separate confirmation). `channel`/`topic`
+   * disambiguate the target chat/topic, as with `startTyping`.
    */
-  finalizeDraft?(contactId: string, note: string): boolean;
+  finalizeDraft?(contactId: string, note: string, channel?: string, topic?: string): boolean;
   /**
    * Register slash commands with the platform (e.g. Telegram setMyCommands).
    * Called at startup after all commands are registered. Failure is non-fatal.
    */
   registerCommands?(commands: CommandManifest[]): Promise<void>;
+  /**
+   * Create a new thread-scoped topic on this channel (E28 — Telegram forum
+   * topics). Group-only; adapters without topic support simply don't
+   * implement this. Always starts a brand-new session — the topic has never
+   * existed before, so there is no prior conversation to inherit. `context`,
+   * when given, is injected into the agent's first turn on this topic only
+   * (one-shot). Returns the `thread:<hash>` topic the caller can target on a
+   * later send.
+   */
+  createTopic?(
+    channel: string,
+    name: string,
+    context?: string,
+  ): Promise<{ ok: true; topic: string; message_thread_id: number; name: string } | { ok: false; error: string }>;
 }
 
 export type { CommandManifest };
@@ -111,11 +144,12 @@ export class AdapterRegistry {
 
   /**
    * Return all adapters that declare the given channel in their
-   * `capabilities.channels[]`.
+   * `capabilities.channels[]`, or whose `ownsChannel(channel)` returns true
+   * (e.g. a dynamically-derived Telegram group channel, E28).
    */
   lookupByChannel(channel: string): AdapterInstance[] {
-    return Array.from(this.adapters.values()).filter((a) =>
-      a.capabilities.channels.includes(channel)
+    return Array.from(this.adapters.values()).filter(
+      (a) => a.capabilities.channels.includes(channel) || a.ownsChannel?.(channel) === true,
     );
   }
 

@@ -23,6 +23,20 @@ export function topicForThreadKey(threadKey: string): string {
   return `${THREAD_TOPIC_PREFIX}${hash}`;
 }
 
+/**
+ * True when `channel` matches `matchChannel` exactly, or is a group derived
+ * from it (`${matchChannel}:group:<chatId>`, e.g. a Telegram group under a
+ * DM bot instance, E28). Lets a config-declared `match.channel` rule
+ * (route-resolve, channel-relay) written against a bot's base DM channel
+ * also apply to any group that bot is added to, with no separate per-group
+ * rule — matching E28's "one bot instance, one agent" design (a group's
+ * messages route to the same agent its DM does, unless a rule explicitly
+ * targets the group's exact derived channel).
+ */
+export function channelMatches(matchChannel: string, channel: string): boolean {
+  return channel === matchChannel || channel.startsWith(`${matchChannel}:group:`);
+}
+
 /** Resolved contact info attached during contact-resolve stage */
 export interface ResolvedContact {
   id: string;

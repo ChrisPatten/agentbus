@@ -6,7 +6,6 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { toolError, toolSuccess } from './helpers.js';
-import type { AdaptersResponse } from './types.js';
 import { getEmailInstances, type AppConfig } from '../../config/schema.js';
 
 export function registerMessagingTools(server: McpServer, busBaseUrl: string): void {
@@ -32,15 +31,18 @@ export function registerMessagingTools(server: McpServer, busBaseUrl: string): v
       },
     },
     async ({ to, channel, body, reply_to, priority, metadata }) => {
-      // Validate channel exists
+      // Validate channel exists — resolved the same way real delivery is
+      // (registry.lookupPrimaryByChannel), so a dynamically-derived channel
+      // (e.g. a Telegram group, E28) validates correctly too.
       try {
-        const adaptersRes = await fetch(`${busBaseUrl}/api/v1/adapters`);
-        if (!adaptersRes.ok) {
-          return toolError(`Failed to resolve channel: HTTP ${adaptersRes.status}`);
+        const resolveRes = await fetch(
+          `${busBaseUrl}/api/v1/adapters/resolve?channel=${encodeURIComponent(channel)}`,
+        );
+        if (!resolveRes.ok) {
+          return toolError(`Failed to resolve channel: HTTP ${resolveRes.status}`);
         }
-        const adaptersData = (await adaptersRes.json()) as AdaptersResponse;
-        const channelExists = adaptersData.adapters.some((a) => a.channels.includes(channel));
-        if (!channelExists) {
+        const resolveData = (await resolveRes.json()) as { ok: boolean; exists?: boolean };
+        if (!resolveData.exists) {
           return toolError(`Unknown channel: "${channel}". Call list_channels to see available channels.`);
         }
       } catch (err) {

@@ -27,6 +27,11 @@ pipeline:
   (`sender`/`channel`/`topic`, all optional, AND-ed). Rules are evaluated in
   order; the first match wins. An empty match (`{}`) is a catch-all — a
   construction-time warning is logged if one appears before the last rule.
+  **`match.channel` also matches a group derived from it** (E28) —
+  `channel: "telegram:peggy"` matches both `telegram:peggy` itself and any
+  `telegram:peggy:group:<chatId>`, via the shared `channelMatches()` helper
+  (`src/pipeline/types.ts`) both this stage and `route-resolve` use, not raw
+  string equality. No separate rule is needed to cover a bot's groups.
 - **`target.channel`** — the channel the new message will arrive on.
 - **`target.template`** — rendered with `{{body}}`, `{{sender}}`, and
   `{{channel}}` (the *source* channel) substituted. Defaults to `'{{body}}'`

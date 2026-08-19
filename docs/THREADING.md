@@ -21,9 +21,12 @@ in the adapter, since only the adapter understands the channel's protocol.
   of the `References` header, else `In-Reply-To`, else the message's own
   `Message-ID` for a brand-new thread. A forward has neither `References` nor
   `In-Reply-To`, so it always starts a new thread.
-- **Telegram** (planned, E28): `${chatId}:${messageThreadId}` — `chatId` is
-  included because `message_thread_id` is only unique within a chat, so two
-  different groups could otherwise collide on the same topic id.
+- **Telegram** (`src/adapters/telegram.ts`, E28): `${chatId}:${messageThreadId}`
+  — `chatId` is included because `message_thread_id` is only unique within a
+  chat, so two different groups could otherwise collide on the same topic id.
+  Unlike email, this only applies to *groups* — a Telegram forum topic has no
+  DM equivalent (DM Threaded Mode was evaluated and retired; see
+  [TELEGRAM_ADAPTER.md](./TELEGRAM_ADAPTER.md#group-topics--replies-e28)).
 
 ## 2. Topic mapping (generic)
 

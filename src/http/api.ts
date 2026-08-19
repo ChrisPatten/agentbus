@@ -536,6 +536,42 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       return reply.status(400).send({ ok: false, error: parsed.error.message });
     }
     const data = parsed.data;
+
+    // reply_to (bus message ID) resolves to the referenced transcript's
+    // platform_message_id (E28) — the same lookup react_to_message already
+    // does — so an adapter can turn it into a native platform reply without
+    // ever needing to know platform-specific ID formats itself. A missing or
+    // malformed transcript is silently a no-op: the send still proceeds, just
+    // without a reply quote. If the referenced message is the *latest* inbound
+    // message in its conversation, the quote would be visually redundant — it's
+    // already obvious what a reply is responding to — so it's sent as a plain
+    // message instead of a native reply in that case.
+    const metadata: Record<string, unknown> = { ...data.metadata };
+    if (data.reply_to) {
+      const transcript = db
+        .prepare(`SELECT conversation_id, metadata FROM transcripts WHERE message_id = ? LIMIT 1`)
+        .get(data.reply_to) as { conversation_id: string; metadata: string } | undefined;
+      if (transcript) {
+        const latestInbound = db
+          .prepare(
+            `SELECT message_id FROM transcripts WHERE conversation_id = ? AND direction = 'inbound' ORDER BY created_at DESC LIMIT 1`,
+          )
+          .get(transcript.conversation_id) as { message_id: string } | undefined;
+        const isLatestInbound = latestInbound?.message_id === data.reply_to;
+
+        if (!isLatestInbound) {
+          try {
+            const meta = JSON.parse(transcript.metadata) as Record<string, unknown>;
+            if (typeof meta['platform_message_id'] === 'string') {
+              metadata['reply_to_platform_message_id'] = meta['platform_message_id'];
+            }
+          } catch {
+            // malformed transcript metadata — leave reply_to_platform_message_id unset
+          }
+        }
+      }
+    }
+
     const envelope: MessageEnvelope = {
       id: data.id ?? randomUUID(),
       timestamp: data.timestamp ?? new Date().toISOString(),
@@ -546,7 +582,7 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       reply_to: data.reply_to,
       priority: data.priority,
       payload: data.payload,
-      metadata: data.metadata,
+      metadata,
     };
     const id = queue.enqueue(envelope, data.expires_at);
     return reply.status(201).send({ ok: true, id, queued: true });
@@ -572,33 +608,80 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     return { ok: true, adapters };
   });
 
+  // GET /api/v1/adapters/resolve?channel=... — does any adapter handle this
+  // channel? Backed by the same lookupPrimaryByChannel real delivery uses
+  // (including a dynamically-derived channel via ownsChannel, E28), so tool-side
+  // channel-exists validation (e.g. send_message) can't drift out of sync with it.
+  server.get<{ Querystring: { channel?: string } }>('/api/v1/adapters/resolve', async (req, reply) => {
+    const { channel } = req.query;
+    if (!channel) {
+      return reply.status(400).send({ ok: false, error: 'channel is required' });
+    }
+    const adapter = registry.lookupPrimaryByChannel(channel);
+    return { ok: true, exists: adapter != null };
+  });
+
   // POST /api/v1/adapters/:id/typing — signal that the agent received a message;
   // adapter starts its typing indicator so the user sees activity while Claude works.
+  // `:id` is a channel (matched via lookupPrimaryByChannel, which also covers a
+  // dynamically-derived channel via ownsChannel, E28) — for every channel that
+  // predates E28, adapter id === channel, so this is unchanged for them. `topic`
+  // (E28) further targets a specific forum topic within a group channel.
   // Fire-and-forget by callers — always returns 200, even when adapter is not found
   // or doesn't support typing (no-op in those cases).
-  server.post<{ Params: { id: string }; Body: { contact_id?: string } }>(
+  server.post<{ Params: { id: string }; Body: { contact_id?: string; topic?: string } }>(
     '/api/v1/adapters/:id/typing',
     async (req, _reply) => {
-      const adapter = registry.lookup(req.params.id);
+      const adapter = registry.lookupPrimaryByChannel(req.params.id);
       if (adapter?.capabilities.typing && typeof adapter.startTyping === 'function') {
-        adapter.startTyping(req.body.contact_id ?? '');
+        adapter.startTyping(req.body.contact_id ?? '', req.params.id, req.body.topic);
       }
       return { ok: true };
     },
   );
 
   // POST /api/v1/adapters/:id/tool-status — live tool-call status line for an
-  // in-flight turn (E29). Fire-and-forget by callers — always returns 200,
-  // even when the adapter is not found or doesn't support the capability
-  // (no-op in those cases).
-  server.post<{ Params: { id: string }; Body: { contact_id?: string; text?: string } }>(
+  // in-flight turn (E29). `:id` is a channel, resolved the same way as `/typing`
+  // above; `topic` (E28) further targets a specific forum topic. Fire-and-forget
+  // by callers — always returns 200, even when the adapter is not found or
+  // doesn't support the capability (no-op in those cases).
+  server.post<{ Params: { id: string }; Body: { contact_id?: string; text?: string; topic?: string } }>(
     '/api/v1/adapters/:id/tool-status',
     async (req, _reply) => {
-      const adapter = registry.lookup(req.params.id);
+      const adapter = registry.lookupPrimaryByChannel(req.params.id);
       if (adapter?.capabilities.toolStatus && typeof adapter.reportToolCall === 'function' && req.body.text) {
-        adapter.reportToolCall(req.body.contact_id ?? '', req.body.text);
+        adapter.reportToolCall(req.body.contact_id ?? '', req.body.text, req.params.id, req.body.topic);
       }
       return { ok: true };
+    },
+  );
+
+  // POST /api/v1/adapters/:id/topics — create a new forum topic (E28,
+  // Telegram groups only). `:id` is a channel, resolved the same way as
+  // `/typing`/`/tool-status` above. Unlike those, this is a real
+  // request/response (the agent needs the created topic's id back), so it
+  // 404s/400s on resolution failure rather than silently no-opping.
+  server.post<{ Params: { id: string }; Body: { name?: string; context?: string } }>(
+    '/api/v1/adapters/:id/topics',
+    async (req, reply) => {
+      const { name, context } = req.body ?? {};
+      if (!name || typeof name !== 'string') {
+        return reply.status(400).send({ ok: false, error: 'name is required' });
+      }
+
+      const adapter = registry.lookupPrimaryByChannel(req.params.id);
+      if (!adapter) {
+        return reply.status(404).send({ ok: false, error: `No adapter registered for channel: ${req.params.id}` });
+      }
+      if (typeof adapter.createTopic !== 'function') {
+        return reply.status(400).send({
+          ok: false,
+          error: `Topic creation not supported on channel: ${req.params.id}`,
+        });
+      }
+
+      const result = await adapter.createTopic(req.params.id, name, context);
+      return result;
     },
   );
 
