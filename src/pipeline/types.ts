@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import type { MessageEnvelope } from '../types/envelope.js';
 import type { AppConfig } from '../config/schema.js';
@@ -14,6 +15,12 @@ export const THREAD_TOPIC_PREFIX = 'thread:';
 /** True when a topic encodes a per-thread identity (see THREAD_TOPIC_PREFIX). */
 export function isThreadTopic(topic: string): boolean {
   return topic.startsWith(THREAD_TOPIC_PREFIX);
+}
+
+/** Map a channel-specific thread key to the reserved `thread:<hash>` topic used for routing. */
+export function topicForThreadKey(threadKey: string): string {
+  const hash = createHash('sha256').update(threadKey).digest('hex').slice(0, 16);
+  return `${THREAD_TOPIC_PREFIX}${hash}`;
 }
 
 /** Resolved contact info attached during contact-resolve stage */

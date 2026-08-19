@@ -10,6 +10,16 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+### Changed
+- **Generalized per-thread session storage (E27).** Email's bespoke
+  `email_threads` table is replaced by a channel-agnostic `threads` table
+  (migration `012_threads.sql`, zero data loss) and a shared
+  `src/pipeline/thread-store.ts` module
+  (`getThread`/`upsertThread`/`patchThreadMetadata`), so a future channel can
+  add its own per-thread sessions with no schema change. Internal-only —
+  email threading behavior is unchanged. See
+  [docs/THREADING.md](docs/THREADING.md).
+
 ## [0.9.0] - 2026-08-18
 
 ### Added
