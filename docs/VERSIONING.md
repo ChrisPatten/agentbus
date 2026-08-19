@@ -39,10 +39,6 @@ hardcode a version string elsewhere — import `VERSION` instead.
    git push && git push --tags
    ```
 
-The current `[Unreleased]` changelog entries are features (the headless
-adapter), so the next release is a **minor** bump (`npm run release:minor` →
-`0.2.0`).
-
 ## Notes
 
 - `preversion` runs `vitest run`; a failing suite aborts the release before
