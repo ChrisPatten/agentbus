@@ -10,6 +10,14 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+### Added
+- **GitHub Pages homepage.** New static landing page in `site/` (pitch,
+  architecture overview, feature grid, quick start), deployed automatically
+  via `.github/workflows/pages.yml` on push to `main`. Version/license
+  badges are live shields.io badges. Release checklist in
+  [docs/VERSIONING.md](docs/VERSIONING.md) now includes a step to review the
+  homepage copy; see [docs/GITHUB_PAGES.md](docs/GITHUB_PAGES.md).
+
 ## [0.8.0] - 2026-08-12
 
 ### Added
