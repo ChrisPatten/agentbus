@@ -16,6 +16,14 @@ npx tsc --noEmit                # Type-check without building
 npm run build                   # Compile to dist/
 ```
 
+## Testing policy
+
+Only run the full suite (`npx vitest run`) after changes to application code (anything under `src/` that isn't a `*.test.ts` file). Skip it for:
+- Documentation-only changes (`docs/`, `CLAUDE.md`, `README.md`, etc.)
+- Changes that only add or modify test files, with no application code touched
+
+For those cases, `npx tsc --noEmit` (if `.ts` files changed) is sufficient — application behavior hasn't changed, so there's no need to re-run the full suite.
+
 ## TypeScript / ESM
 
 This project uses `"module": "NodeNext"`. All imports between `.ts` files **must** use `.js` extensions, not `.ts`:
