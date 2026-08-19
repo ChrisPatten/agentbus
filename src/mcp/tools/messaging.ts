@@ -6,7 +6,6 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { toolError, toolSuccess } from './helpers.js';
-import type { AdaptersResponse } from './types.js';
 import { getEmailInstances, type AppConfig } from '../../config/schema.js';
 
 export function registerMessagingTools(server: McpServer, busBaseUrl: string): void {
@@ -19,6 +18,15 @@ export function registerMessagingTools(server: McpServer, busBaseUrl: string): v
         to: z.string().min(1).describe('Recipient identifier (e.g. "contact:chris", "contact:alice")'),
         channel: z.string().min(1).describe('Target channel (e.g. "telegram", "bluebubbles")'),
         body: z.string().min(1).describe('Message text body'),
+        topic: z
+          .string()
+          .optional()
+          .default('general')
+          .describe(
+            'Message topic (default: "general"). To target a specific Telegram forum topic ' +
+              '(e.g. one created via create_telegram_topic), pass the `topic` value it returned ' +
+              '(a "thread:<hash>" id) — not the channel or a plain topic name.',
+          ),
         reply_to: z.string().optional().describe('Bus message ID this message is replying to'),
         priority: z
           .enum(['normal', 'high', 'urgent'])
@@ -31,16 +39,19 @@ export function registerMessagingTools(server: McpServer, busBaseUrl: string): v
           .describe('Optional key/value metadata attached to the message'),
       },
     },
-    async ({ to, channel, body, reply_to, priority, metadata }) => {
-      // Validate channel exists
+    async ({ to, channel, body, topic, reply_to, priority, metadata }) => {
+      // Validate channel exists — resolved the same way real delivery is
+      // (registry.lookupPrimaryByChannel), so a dynamically-derived channel
+      // (e.g. a Telegram group, E28) validates correctly too.
       try {
-        const adaptersRes = await fetch(`${busBaseUrl}/api/v1/adapters`);
-        if (!adaptersRes.ok) {
-          return toolError(`Failed to resolve channel: HTTP ${adaptersRes.status}`);
+        const resolveRes = await fetch(
+          `${busBaseUrl}/api/v1/adapters/resolve?channel=${encodeURIComponent(channel)}`,
+        );
+        if (!resolveRes.ok) {
+          return toolError(`Failed to resolve channel: HTTP ${resolveRes.status}`);
         }
-        const adaptersData = (await adaptersRes.json()) as AdaptersResponse;
-        const channelExists = adaptersData.adapters.some((a) => a.channels.includes(channel));
-        if (!channelExists) {
+        const resolveData = (await resolveRes.json()) as { ok: boolean; exists?: boolean };
+        if (!resolveData.exists) {
           return toolError(`Unknown channel: "${channel}". Call list_channels to see available channels.`);
         }
       } catch (err) {
@@ -52,7 +63,7 @@ export function registerMessagingTools(server: McpServer, busBaseUrl: string): v
       // against transcripts (no /api/v1/transcripts/:id endpoint exists yet).
       const envelope = {
         channel,
-        topic: 'general',
+        topic: topic ?? 'general',
         sender: 'agent:claude',
         recipient: to,
         reply_to: reply_to ?? null,

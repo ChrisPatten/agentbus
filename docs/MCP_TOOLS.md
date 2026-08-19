@@ -21,6 +21,7 @@ All tools are registered via `registerAllTools()` in `src/mcp/tools/index.ts`.
 | `get_session` | S7.4 | Get session metadata and summary |
 | `list_sessions` | S7.4 | Browse recent sessions |
 | `react_to_message` | S7.5 | Send an emoji reaction to a message |
+| `create_telegram_topic` | E28 | Create a new forum topic in a Telegram group |
 
 ---
 
@@ -86,7 +87,7 @@ List all adapters registered with bus-core and their capabilities. Use this befo
 
 ### `send_message`
 
-Send a message to any contact on any channel. Validates the channel exists and (if `reply_to` is provided) that the referenced message exists.
+Send a message to any contact on any channel. Validates the channel exists (resolved the same way real delivery is — `GET /api/v1/adapters/resolve`, which also recognizes a dynamically-derived channel like a Telegram group, E28).
 
 **Input:**
 ```json
@@ -94,13 +95,18 @@ Send a message to any contact on any channel. Validates the channel exists and (
   "to": "contact:chris",
   "channel": "telegram",
   "body": "Your message text",
+  "topic": "general",
   "reply_to": "optional-msg-uuid",
   "priority": "normal",
   "metadata": {}
 }
 ```
 
-Priority values: `low`, `normal`, `high`. `low` maps to `normal` in the envelope.
+Priority values: `normal`, `high`, `urgent`.
+
+**`topic` (default `"general"`, E28):** to land a message in a specific Telegram forum topic instead of the group's General topic, pass the `topic` value returned by `create_telegram_topic` (a `"thread:<hash>"` id) — not the channel, and not a plain topic name. `schedule_message` accepts the same `topic` param for the same purpose. A `topic` with no matching thread record on that channel is rejected server-side rather than silently falling back to General.
+
+**`reply_to` (E28):** when set, bus-core resolves it server-side to the referenced transcript's platform message ID and, on Telegram, turns it into a native reply quote (`reply_parameters`) — the agent never needs to know platform-specific ID formats. An unknown or foreign-chat `reply_to` is a silent no-op: the message still sends, just without a quote. **Replying to the latest inbound message in the conversation is also a no-op** — quoting the message a reply is obviously responding to would be visually redundant, so that case always sends as a plain message. Non-Telegram channels ignore it today.
 
 **Output:**
 ```json
@@ -338,6 +344,37 @@ Send an emoji reaction to a message. Only works on channels that support reactio
 
 ---
 
+## E28 — Telegram Group Topics
+
+### `create_telegram_topic`
+
+Create a new forum topic in a Telegram group the bot has been added to. Group-only — not available for a contact's DM channel (DM Threaded Mode is retired, see [TELEGRAM_ADAPTER.md](./TELEGRAM_ADAPTER.md#group-topics--replies-e28)). Only registered when a Telegram adapter is configured.
+
+This always starts a **brand-new session** for the topic — a fresh forum topic has no prior conversation to inherit.
+
+Requires the bot to have "Manage Topics" admin rights in the target group — verified before creating the topic, so a missing right returns a clear, actionable error naming the exact fix instead of an opaque API rejection.
+
+**Input:**
+```json
+{ "channel": "telegram:group:-100123456789", "name": "Wanda prep", "context": "Track Wanda birthday planning here" }
+```
+
+`channel` is the group's channel id, as seen on `channel`/`metadata` of any inbound message from that group. `context` is optional — when given, it's injected into the agent's *first* turn on this topic only (consumed once, the moment the first real message lands on it), letting the agent explain why the topic exists or what it should track.
+
+**Output (success):**
+```json
+{ "topic": "thread:ab12cd34ef56ab12", "message_thread_id": 42, "name": "Wanda prep" }
+```
+
+Pass the returned `topic` value as `topic` on a later `send_message`/`schedule_message` call to target this thread specifically.
+
+**Output (missing admin rights — an error, not a graceful `success: false`):**
+```
+Error: This bot lacks "Manage Topics" admin rights in this group. In Telegram: open the group, go to the member list, select this bot, "Edit Admin Rights", and enable "Manage Topics".
+```
+
+---
+
 ## Error Response Shape
 
 All tools return errors as:
@@ -358,3 +395,4 @@ Capability errors (channel doesn't support reactions) return `success: false` wi
 - `recall_memory` and `log_memory` are fully functional (E8) — they call bus-core HTTP endpoints backed by FTS5
 - `search_transcripts` is fully functional — `transcripts_fts` FTS5 table exists in the E1 schema
 - Platform message IDs for `react_to_message` are stored in `transcripts.metadata.platform_message_id` by adapters during inbound processing
+- `create_telegram_topic` follows the same pattern — `src/mcp/tools/telegram.ts` is a thin fetch wrapper; the admin-rights check, `createForumTopic` call, and thread-store upsert all live in `TelegramAdapter.createTopic()`, reached via `POST /api/v1/adapters/:id/topics`

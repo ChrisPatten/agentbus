@@ -27,6 +27,8 @@ Chris's suggested direction: **don't have interruption logic reach into post-rep
 
 **Open design question, same note (2026-08-18)**: once memory-logging moves to a separate agent/process, when should it actually fire? Firing it after every single reply is wasteful — most turns have nothing new worth logging. Recommend an idle-debounce: reset a timer on each inbound message, fire the sweep after ~3-5 min of conversation silence, plus a hard ceiling (~20-30 min) so a long uninterrupted back-and-forth still flushes periodically rather than deferring indefinitely. Checked `cc-headless.ts` — sessions already resume via `--resume`, so the full transcript persists independently of when memory files get written; a delayed sweep risks brief staleness, not data loss (`search_transcripts` can always recover the raw material), which makes debouncing low-risk here. Exception: high-stakes items (financial decisions, health/scheduling commitments) should still trigger an immediate out-of-band write rather than waiting on the debounce.
 
+**→ Promoted to E30 (backlog 2026-08-18).** The whole memory-decoupling thread above (post-reply risk, responsiveness fix, debounce/ceiling firing model, high-stakes exception) is now fully specced as its own epic: `_bmad-output/epics/E30-decoupled-memory-logging.md`. This backlog item's remaining scope narrows to the interrupt/steering mechanism itself — E30 is a prerequisite for it, not a duplicate.
+
 
 
 ### ~~Telegram: live tool-call status stream instead of just a typing indicator~~ → promoted to E29 (backlog 2026-08-18)

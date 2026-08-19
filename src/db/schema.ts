@@ -69,6 +69,11 @@ function loadMigrations(): Migration[] {
       description: 'Session agent_id column',
       sql: readFileSync(join(migrationsDir, '011_session_agent_id.sql'), 'utf-8'),
     },
+    {
+      version: 12,
+      description: 'Generic thread store',
+      sql: readFileSync(join(migrationsDir, '012_threads.sql'), 'utf-8'),
+    },
   ];
 }
 

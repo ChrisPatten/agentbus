@@ -963,7 +963,7 @@ describe('command handlers', () => {
       // a separate command-response message would be duplicative.
       expect(result.body).toBeUndefined();
       expect(stopTurn).toHaveBeenCalledWith('contact:chris');
-      expect(telegramAdapter.finalizeDraft).toHaveBeenCalledWith('contact:chris', 'Stopped by user');
+      expect(telegramAdapter.finalizeDraft).toHaveBeenCalledWith('contact:chris', 'Stopped by user', 'telegram', 'general');
     });
 
     it('falls back to a confirmation message when there was no draft to finalize', async () => {
@@ -982,7 +982,7 @@ describe('command handlers', () => {
       const result = await stop.handler([], makeCtx(db));
 
       expect(result.body).toContain('Stopped');
-      expect(telegramAdapter.finalizeDraft).toHaveBeenCalledWith('contact:chris', 'Stopped by user');
+      expect(telegramAdapter.finalizeDraft).toHaveBeenCalledWith('contact:chris', 'Stopped by user', 'telegram', 'general');
     });
 
     it('reports nothing to stop when no turn is running', async () => {

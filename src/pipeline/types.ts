@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import type { MessageEnvelope } from '../types/envelope.js';
 import type { AppConfig } from '../config/schema.js';
@@ -14,6 +15,26 @@ export const THREAD_TOPIC_PREFIX = 'thread:';
 /** True when a topic encodes a per-thread identity (see THREAD_TOPIC_PREFIX). */
 export function isThreadTopic(topic: string): boolean {
   return topic.startsWith(THREAD_TOPIC_PREFIX);
+}
+
+/** Map a channel-specific thread key to the reserved `thread:<hash>` topic used for routing. */
+export function topicForThreadKey(threadKey: string): string {
+  const hash = createHash('sha256').update(threadKey).digest('hex').slice(0, 16);
+  return `${THREAD_TOPIC_PREFIX}${hash}`;
+}
+
+/**
+ * True when `channel` matches `matchChannel` exactly, or is a group derived
+ * from it (`${matchChannel}:group:<chatId>`, e.g. a Telegram group under a
+ * DM bot instance, E28). Lets a config-declared `match.channel` rule
+ * (route-resolve, channel-relay) written against a bot's base DM channel
+ * also apply to any group that bot is added to, with no separate per-group
+ * rule — matching E28's "one bot instance, one agent" design (a group's
+ * messages route to the same agent its DM does, unless a rule explicitly
+ * targets the group's exact derived channel).
+ */
+export function channelMatches(matchChannel: string, channel: string): boolean {
+  return channel === matchChannel || channel.startsWith(`${matchChannel}:group:`);
 }
 
 /** Resolved contact info attached during contact-resolve stage */

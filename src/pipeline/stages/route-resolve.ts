@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import type { AppConfig } from '../../config/schema.js';
-import type { PipelineStage, RouteTarget } from '../types.js';
+import { channelMatches, type PipelineStage, type RouteTarget } from '../types.js';
 
 /**
  * Stage 70 — Route Resolve
@@ -39,7 +39,7 @@ export function createRouteResolve(config: AppConfig, _db: Database.Database): P
     for (const rule of routes) {
       const { match } = rule;
       if (match.sender && match.sender !== e.sender) continue;
-      if (match.channel && match.channel !== e.channel) continue;
+      if (match.channel && !channelMatches(match.channel, e.channel)) continue;
       if (match.topic && match.topic !== e.topic) continue;
 
       const targets: RouteTarget[] = [rule.target];

@@ -172,21 +172,28 @@ Two pipeline stages cooperate with the reserved prefix (`THREAD_TOPIC_PREFIX` in
 - `priority-score` does **not** award the non-general topic bonus for a `thread:`
   topic — it's a routing key, not a classification.
 
+The topic-derivation and storage mechanism here is generic, shared with any
+other channel that needs per-thread sessions — see
+[THREADING.md](./THREADING.md) for the full picture; email is just its first
+(and so far only) user.
+
 ### Reply threading state
 
-Per-thread reply metadata is persisted in the `email_threads` table (migration
-010), keyed by `(channel, topic)`:
+Per-thread reply metadata is persisted in the generic `threads` table
+(migration `012_threads.sql`, [THREADING.md](./THREADING.md)), keyed by
+`(channel, topic)`. Email's `metadata` JSON blob (`EmailThreadMetadata` in
+`src/adapters/email.ts`) carries:
 
-| column | purpose |
+| field | purpose |
 |---|---|
-| `thread_key` | the derived thread root id |
 | `subject` | base subject (for the `Re:` reply) |
-| `last_inbound_message_id` | becomes the reply's `In-Reply-To` |
-| `references_chain` | becomes the reply's `References` |
-| `contact_address` | the `To:` we reply to (the address they wrote from) |
+| `lastInboundMessageId` | becomes the reply's `In-Reply-To` |
+| `referencesChain` | becomes the reply's `References` |
+| `contactAddress` | the `To:` we reply to (the address they wrote from) |
 
-`send(envelope)` reads this row to build a correctly-threaded reply and appends its
-own outbound `Message-ID` to the chain.
+`send(envelope)` reads this row (via `getThread`, `src/pipeline/thread-store.ts`)
+to build a correctly-threaded reply and calls `patchThreadMetadata` to append
+its own outbound `Message-ID` to the chain.
 
 ---
 
@@ -204,7 +211,7 @@ whenever an email adapter is configured (see [MCP_TOOLS.md](./MCP_TOOLS.md)).
 - The envelope is routed to the owning `contact:<id>` (the delivery worker only
   dispatches `contact:`-prefixed recipients), with the exact target address carried
   in `metadata.email_to`.
-- There is no `email_threads` row for an agent-initiated message, so `send()` takes
+- There is no `threads` row for an agent-initiated message, so `send()` takes
   the no-thread path: it sends to `metadata.email_to` (re-checked against the
   allowlist as defense in depth). So even a malformed envelope cannot deliver to an
   off-allowlist recipient.

@@ -667,7 +667,8 @@ async function stopHandler(
 
   const adapter = deps.adapterRegistry.lookup(ctx.adapterId);
   const finalized =
-    typeof adapter?.finalizeDraft === 'function' && adapter.finalizeDraft(ctx.sender, 'Stopped by user');
+    typeof adapter?.finalizeDraft === 'function' &&
+    adapter.finalizeDraft(ctx.sender, 'Stopped by user', ctx.channel, ctx.envelope.topic);
 
   // When the draft was finalized, "Stopped by user" already reached the user
   // as part of the conversation — a separate confirmation would be duplicative.

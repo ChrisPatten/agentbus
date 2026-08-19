@@ -1,5 +1,5 @@
 import type { AppConfig } from '../../config/schema.js';
-import type { PipelineStage } from '../types.js';
+import { channelMatches, type PipelineStage } from '../types.js';
 import { processInbound } from '../../http/api.js';
 import { renderTemplate } from '../../adapters/prompt-renderer.js';
 
@@ -53,7 +53,7 @@ export function createChannelRelay(
     for (const rule of relays) {
       const { match } = rule;
       if (match.sender && match.sender !== e.sender) continue;
-      if (match.channel && match.channel !== e.channel) continue;
+      if (match.channel && !channelMatches(match.channel, e.channel)) continue;
       if (match.topic && match.topic !== e.topic) continue;
 
       const hops = typeof e.metadata['relay_hops'] === 'number' ? e.metadata['relay_hops'] : 0;

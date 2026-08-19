@@ -22,6 +22,8 @@ import { registerSessionTools } from './sessions.js';
 import { registerReactionTools } from './reactions.js';
 import { registerScheduleTools } from './scheduling.js';
 import { registerAttachmentTools } from './attachments.js';
+import { registerTelegramTools } from './telegram.js';
+import { getTelegramInstances } from '../../config/schema.js';
 
 export { toolError, toolSuccess };
 
@@ -59,6 +61,7 @@ export function registerAllTools(
   registerScheduleTools(server, busBaseUrl);
   registerAttachmentTools(server, busBaseUrl);
   maybeRegisterEmailTool(server, busBaseUrl, config);
+  maybeRegisterTelegramTools(server, busBaseUrl, config);
 }
 
 /** Register the `send_email` tool when an email adapter + allowlist is configured. */
@@ -70,6 +73,17 @@ function maybeRegisterEmailTool(
   if (!config) return;
   const emailCfg = buildEmailToolConfig(config);
   if (emailCfg) registerEmailTool(server, busBaseUrl, emailCfg);
+}
+
+/** Register `create_telegram_topic` (E28) when a Telegram adapter is configured. */
+function maybeRegisterTelegramTools(
+  server: McpServer,
+  busBaseUrl: string,
+  config?: AppConfig,
+): void {
+  if (!config) return;
+  if (getTelegramInstances(config).length === 0) return;
+  registerTelegramTools(server, busBaseUrl);
 }
 
 /**
@@ -94,6 +108,7 @@ export function registerHeadlessTools(
   registerScheduleTools(server, busBaseUrl);
   registerAttachmentTools(server, busBaseUrl);
   maybeRegisterEmailTool(server, busBaseUrl, config);
+  maybeRegisterTelegramTools(server, busBaseUrl, config);
 }
 
 // ── Core tools (E2) ───────────────────────────────────────────────────────────

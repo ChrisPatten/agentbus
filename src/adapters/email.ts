@@ -34,6 +34,7 @@ import { resolveMediaConfig, persistAttachmentBuffer } from '../media/attachment
 import type { MessageQueue } from '../core/queue.js';
 import type { PipelineEngine } from '../pipeline/engine.js';
 import type { CommandRegistry } from '../commands/registry.js';
+import { getThread, upsertThread, patchThreadMetadata } from '../pipeline/thread-store.js';
 import {
   normalizeMessageId,
   parseReferences,
@@ -78,16 +79,12 @@ interface InlineAttachmentRef {
   original_filename?: string;
 }
 
-/** Persisted per-thread reply metadata (mirrors the email_threads table). */
-interface ThreadRow {
-  channel: string;
-  topic: string;
-  thread_key: string;
+/** Per-thread reply metadata stored in the generic `threads` table (E27). */
+interface EmailThreadMetadata {
   subject: string | null;
-  last_inbound_message_id: string | null;
-  references_chain: string | null;
-  contact_address: string | null;
-  updated_at: string;
+  lastInboundMessageId: string | null;
+  referencesChain: string | null;
+  contactAddress: string | null;
 }
 
 export class EmailAdapter implements AdapterInstance {
@@ -205,7 +202,7 @@ export class EmailAdapter implements AdapterInstance {
       return { success: false, error: `Unsupported payload type: ${envelope.payload.type}`, retryable: false };
     }
 
-    const thread = this.getThread(envelope.topic);
+    const thread = getThread<EmailThreadMetadata>(this.deps.db, this.id, envelope.topic);
 
     let to: string | undefined;
     let subject: string;
@@ -213,10 +210,10 @@ export class EmailAdapter implements AdapterInstance {
     let references: string[] | undefined;
 
     if (thread) {
-      to = thread.contact_address ?? this.contactAddressFor(envelope.recipient);
-      subject = replySubject(thread.subject ?? '');
-      if (thread.last_inbound_message_id) inReplyTo = `<${thread.last_inbound_message_id}>`;
-      if (thread.references_chain) references = thread.references_chain.split(/\s+/).filter(Boolean);
+      to = thread.metadata.contactAddress ?? this.contactAddressFor(envelope.recipient);
+      subject = replySubject(thread.metadata.subject ?? '');
+      if (thread.metadata.lastInboundMessageId) inReplyTo = `<${thread.metadata.lastInboundMessageId}>`;
+      if (thread.metadata.referencesChain) references = thread.metadata.referencesChain.split(/\s+/).filter(Boolean);
     } else {
       // No thread row (e.g. an agent-initiated message via the send_email tool).
       // The exact target address is carried in metadata.email_to when present
@@ -450,13 +447,16 @@ export class EmailAdapter implements AdapterInstance {
     const subject = parsed.subject ?? '(no subject)';
 
     // Persist reply metadata so send() can thread the agent's response.
-    this.upsertThread({
+    upsertThread<EmailThreadMetadata>(this.deps.db, {
+      channel: this.id,
       topic,
       threadKey,
-      subject: baseSubject(subject),
-      lastInboundMessageId: messageId,
-      referencesChain: buildReferencesChain(references, messageId),
-      contactAddress: fromAddr,
+      metadata: {
+        subject: baseSubject(subject),
+        lastInboundMessageId: messageId,
+        referencesChain: buildReferencesChain(references, messageId),
+        contactAddress: fromAddr,
+      },
     });
 
     // Classify reply vs. forward. A forward is detected by its `Fwd:` subject or a
@@ -569,58 +569,17 @@ export class EmailAdapter implements AdapterInstance {
     return { attachments, inlineAttachments };
   }
 
-  // ── Thread persistence ─────────────────────────────────────────────────────
-
-  private getThread(topic: string): ThreadRow | null {
-    return (
-      (this.deps.db
-        .prepare(`SELECT * FROM email_threads WHERE channel = ? AND topic = ?`)
-        .get(this.id, topic) as ThreadRow | undefined) ?? null
-    );
-  }
-
-  private upsertThread(t: {
-    topic: string;
-    threadKey: string;
-    subject: string;
-    lastInboundMessageId: string;
-    referencesChain: string;
-    contactAddress: string;
-  }): void {
-    this.deps.db
-      .prepare(
-        `INSERT INTO email_threads
-           (channel, topic, thread_key, subject, last_inbound_message_id, references_chain, contact_address, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(channel, topic) DO UPDATE SET
-           subject = excluded.subject,
-           last_inbound_message_id = excluded.last_inbound_message_id,
-           references_chain = excluded.references_chain,
-           contact_address = excluded.contact_address,
-           updated_at = excluded.updated_at`,
-      )
-      .run(
-        this.id,
-        t.topic,
-        t.threadKey,
-        t.subject,
-        t.lastInboundMessageId,
-        t.referencesChain,
-        t.contactAddress,
-        new Date().toISOString(),
-      );
-  }
+  // ── Thread persistence (E27: src/pipeline/thread-store.ts) ─────────────────
 
   /** Append our outbound Message-ID to a thread's References chain. */
   private appendSentMessageId(topic: string, sentMessageId: string): void {
-    const thread = this.getThread(topic);
-    if (!thread || !sentMessageId) return;
-    const existing = thread.references_chain ?? '';
+    if (!sentMessageId) return;
+    const thread = getThread<EmailThreadMetadata>(this.deps.db, this.id, topic);
+    if (!thread) return;
+    const existing = thread.metadata.referencesChain ?? '';
     if (existing.includes(`<${sentMessageId}>`)) return;
     const updated = existing ? `${existing} <${sentMessageId}>` : `<${sentMessageId}>`;
-    this.deps.db
-      .prepare(`UPDATE email_threads SET references_chain = ?, updated_at = ? WHERE channel = ? AND topic = ?`)
-      .run(updated, new Date().toISOString(), this.id, topic);
+    patchThreadMetadata<EmailThreadMetadata>(this.deps.db, this.id, topic, { referencesChain: updated });
   }
 
   // ── Loop supervision ──────────────────────────────────────────────────────

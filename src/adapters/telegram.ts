@@ -30,6 +30,8 @@ import type { AdapterRegistry } from '../core/registry.js';
 import type { CommandRegistry } from '../commands/registry.js';
 import type Database from 'better-sqlite3';
 import { extensionFor, resolveMediaConfig } from '../media/attachments.js';
+import { topicForThreadKey, isThreadTopic } from '../pipeline/types.js';
+import { getThread, upsertThread } from '../pipeline/thread-store.js';
 
 // Re-exported from the shared media module for backwards-compatible imports.
 export { extensionFor, resolveMediaConfig };
@@ -41,6 +43,13 @@ const MAX_MESSAGE_LENGTH = 4096;
 const BACKOFF_INITIAL_MS = 1000;
 const BACKOFF_MAX_MS = 30_000;
 const LOOP_RESTART_DELAY_MS = 5000;
+
+/**
+ * Matches the trailing `:group:<chatId>` suffix of a dynamically-derived
+ * Telegram group channel (E28), e.g. `telegram:group:-1001234567890`. Chat
+ * ids for groups/supergroups are always negative integers.
+ */
+const GROUP_CHANNEL_SUFFIX_RE = /:group:(-?\d+)$/;
 
 // ── Live tool-call status stream (E29) ───────────────────────────────────────
 
@@ -112,6 +121,12 @@ interface TelegramMessage {
   caption?: string;
   photo?: TelegramPhotoSize[];
   document?: TelegramDocument;
+  /** Present when this message belongs to a forum topic thread (E28). */
+  message_thread_id?: number;
+  /** True for a message in a forum topic other than General (E28). */
+  is_topic_message?: boolean;
+  /** The message this one quote-replies to, if any (E28 — context only, not thread routing). */
+  reply_to_message?: { message_id: number; from?: TelegramUser; text?: string; caption?: string };
 }
 
 interface TelegramReactionType {
@@ -139,6 +154,24 @@ interface TelegramApiResponse<T> {
   ok: boolean;
   result?: T;
   description?: string;
+}
+
+/**
+ * Per-thread reply metadata stored in the generic `threads` table (E27),
+ * mirroring EmailAdapter's EmailThreadMetadata. `chatId` is redundant with
+ * the group channel string's own encoding but kept explicit — it's what
+ * send() actually needs, without re-parsing the channel every time.
+ */
+interface TelegramThreadMetadata {
+  chatId: number;
+  messageThreadId: number;
+  /**
+   * One-shot context injected by create_telegram_topic, consumed (and
+   * cleared) the first time any inbound message lands on this topic — this
+   * topic is guaranteed brand new, so that first message is definitionally
+   * the first turn of a fresh session, regardless of which contact sends it.
+   */
+  pendingContext?: string;
 }
 
 /** Per-chat state for the live tool-call status stream (E29). */
@@ -269,10 +302,13 @@ export class TelegramAdapter implements AdapterInstance {
   private inboundBackoffMs = BACKOFF_INITIAL_MS;
   private lastActivity: string | null = null;
   private consecutiveFailures = 0;
-  /** Per-chat typing indicator loops. Key is the Telegram chat_id. */
-  private readonly typingLoops = new Map<number, AbortController>();
-  /** Per-chat live tool-call status draft messages (E29). Key is the Telegram chat_id. */
-  private readonly draftMessages = new Map<number, DraftState>();
+  /** Per-(chat, topic) typing indicator loops. Key is draftKey(chatId, messageThreadId) — a
+   * forum topic's loop must not collide with another topic in the same group (E28). */
+  private readonly typingLoops = new Map<string, AbortController>();
+  /** Per-(chat, topic) live tool-call status draft messages (E29/E28). Key is draftKey(chatId, messageThreadId). */
+  private readonly draftMessages = new Map<string, DraftState>();
+  /** This bot's own Telegram user id, cached from getMe() at start() (E28 — admin-rights check for createTopic). Null if getMe failed. */
+  private botUserId: number | null = null;
 
   constructor(deps: TelegramAdapterDeps) {
     this.id = deps.instanceName ? `telegram:${deps.instanceName}` : 'telegram';
@@ -325,6 +361,76 @@ export class TelegramAdapter implements AdapterInstance {
     }
   }
 
+  // ── Group channel identity (E28) ──────────────────────────────────────────
+
+  /**
+   * True for this bot's own DM channel id, or any of its dynamically-derived
+   * group channels (`${this.id}:group:<chatId>`) — computed per-message in
+   * processUpdate, never statically registered. Lets the registry's channel
+   * lookups (outbound delivery, react_to_message, slash-command replies,
+   * pause checks, the typing/tool-status HTTP endpoints) resolve this
+   * instance for a group channel exactly as they already do for the DM one.
+   */
+  ownsChannel(channel: string): boolean {
+    return channel === this.id || channel.startsWith(`${this.id}:group:`);
+  }
+
+  /**
+   * Parse the group chat_id back out of a dynamically-derived group channel
+   * (e.g. "telegram:group:-100123" -> -100123). Null for this bot's DM
+   * channel or any unrelated channel string.
+   */
+  private parseGroupChatId(channel: string): number | null {
+    if (!channel.startsWith(`${this.id}:group:`)) return null;
+    const match = channel.match(GROUP_CHANNEL_SUFFIX_RE);
+    return match ? Number(match[1]) : null;
+  }
+
+  /**
+   * Resolve the chat to target for a contact-scoped, fire-and-forget action
+   * (typing indicator, live tool-call status, /stop finalization) — `channel`
+   * disambiguates a group from the contact's own DM (E28); omitted, or a DM
+   * channel, falls back to the contact's DM chat exactly as before E28.
+   */
+  private resolveChatId(contactId: string, channel?: string): number | undefined {
+    if (channel) {
+      const groupChatId = this.parseGroupChatId(channel);
+      if (groupChatId !== null) return groupChatId;
+    }
+    const id = contactId.startsWith('contact:') ? contactId.slice('contact:'.length) : contactId;
+    return this.contactChatIdMap.get(id);
+  }
+
+  /**
+   * Resolve both the chat *and* the forum topic (if any) to target for a
+   * contact-scoped, fire-and-forget action — so the typing indicator and live
+   * tool-call status stream land in the specific topic being discussed, not
+   * just the right group (E28). `topic` is looked up against the generic
+   * thread store (E27) exactly as resolveSendTarget does for a real send.
+   */
+  private resolveChatAndTopic(
+    contactId: string,
+    channel?: string,
+    topic?: string,
+  ): { chatId: number; messageThreadId?: number } | undefined {
+    const chatId = this.resolveChatId(contactId, channel);
+    if (!chatId) return undefined;
+    if (channel && topic && isThreadTopic(topic)) {
+      const thread = getThread<TelegramThreadMetadata>(this.deps.db, channel, topic);
+      if (thread) return { chatId, messageThreadId: thread.metadata.messageThreadId };
+    }
+    return { chatId };
+  }
+
+  /**
+   * Composite key for per-(chat, topic) ephemeral state (typing loops, live
+   * tool-call status drafts) — a forum topic's state must not collide with
+   * another topic in the same group (E28).
+   */
+  private draftKey(chatId: number, messageThreadId?: number): string {
+    return `${chatId}:${messageThreadId ?? 'general'}`;
+  }
+
   // ── AdapterInstance lifecycle ─────────────────────────────────────────────
 
   async start(): Promise<void> {
@@ -335,6 +441,16 @@ export class TelegramAdapter implements AdapterInstance {
     await this.clearWebhook();
     // Command registration is deferred to bus-core startup after all commands
     // are registered — bus-core calls adapter.registerCommands(manifests).
+
+    // Cache this bot's own user id for createTopic's admin-rights check (E28).
+    // Non-fatal: a failure here just means createTopic fails closed later with
+    // a clear error, not that startup itself fails.
+    try {
+      const me = await this.callTelegram<{ id: number }>('getMe');
+      this.botUserId = me.id;
+    } catch (err) {
+      console.warn(`${this.tag} getMe failed, create_telegram_topic will be unavailable: ${String(err)}`);
+    }
 
     // Launch inbound loop in background (supervised)
     void this.supervise('inboundLoop', () => this.inboundLoop());
@@ -381,12 +497,20 @@ export class TelegramAdapter implements AdapterInstance {
    * Sends (`sendMessage`) or edits (`editMessageText`, when `editMessageId`
    * is given) with the same Markdown-then-plain-text-on-400 retry either way.
    * Returns the resulting message_id (the edit target itself, for edits).
+   * `extraParams` (e.g. `message_thread_id`, `reply_parameters`) is only
+   * meaningful on a fresh send — an edit already targets an existing message
+   * whose thread/reply is fixed, so it's ignored when `editMessageId` is set.
    */
-  private async deliverText(chatId: number, text: string, editMessageId?: number): Promise<number> {
+  private async deliverText(
+    chatId: number,
+    text: string,
+    editMessageId?: number,
+    extraParams?: Record<string, unknown>,
+  ): Promise<number> {
     const method = editMessageId ? 'editMessageText' : 'sendMessage';
     const params: Record<string, unknown> = editMessageId
       ? { chat_id: chatId, message_id: editMessageId, text }
-      : { chat_id: chatId, text };
+      : { chat_id: chatId, text, ...extraParams };
 
     try {
       const result = await this.callTelegram<TelegramMessage>(method, { ...params, parse_mode: 'Markdown' });
@@ -402,19 +526,69 @@ export class TelegramAdapter implements AdapterInstance {
     }
   }
 
-  async send(envelope: MessageEnvelope): Promise<DeliveryResult> {
+  /**
+   * Resolve where an outbound envelope should land: a `thread:`-prefixed
+   * topic resolves chat_id/message_thread_id from E27's generic thread store
+   * (a Telegram forum topic, E28); a group channel with no thread topic (i.e.
+   * "General") resolves chat_id from the channel string itself; anything else
+   * (a DM) resolves from `contactChatIdMap`, exactly as before E28.
+   */
+  private resolveSendTarget(
+    envelope: MessageEnvelope,
+  ): { chatId: number; messageThreadId?: number } | { error: string } {
+    if (isThreadTopic(envelope.topic)) {
+      const thread = getThread<TelegramThreadMetadata>(this.deps.db, envelope.channel, envelope.topic);
+      if (!thread) {
+        return {
+          error: `No thread metadata for topic "${envelope.topic}" on channel "${envelope.channel}"`,
+        };
+      }
+      return { chatId: thread.metadata.chatId, messageThreadId: thread.metadata.messageThreadId };
+    }
+
+    const groupChatId = this.parseGroupChatId(envelope.channel);
+    if (groupChatId !== null) {
+      return { chatId: groupChatId };
+    }
+
     const contactId = envelope.recipient.startsWith('contact:')
       ? envelope.recipient.slice('contact:'.length)
       : envelope.recipient;
-
     const chatId = this.contactChatIdMap.get(contactId);
     if (!chatId) {
       return {
-        success: false,
-        error: `No Telegram chat_id for contact "${contactId}" (recipient="${envelope.recipient}"). ` +
+        error:
+          `No Telegram chat_id for contact "${contactId}" (recipient="${envelope.recipient}"). ` +
           `Known contacts: [${[...this.contactChatIdMap.keys()].join(', ')}]`,
-        retryable: false,
       };
+    }
+    return { chatId };
+  }
+
+  async send(envelope: MessageEnvelope): Promise<DeliveryResult> {
+    const target = this.resolveSendTarget(envelope);
+    if ('error' in target) {
+      return { success: false, error: target.error, retryable: false };
+    }
+    const { chatId, messageThreadId } = target;
+    const extraParams = messageThreadId ? { message_thread_id: messageThreadId } : undefined;
+
+    // Native reply quote (E28): reply_to_platform_message_id is "chatId:messageId",
+    // the same encoding processUpdate uses for platform_message_id everywhere else.
+    // Only applied when the resolved chat matches — a stale reply target from a
+    // different chat/topic must never leak across, and allow_sending_without_reply
+    // means a since-deleted target message never blocks delivery.
+    let replyParams: { reply_parameters: { message_id: number; allow_sending_without_reply: true } } | undefined;
+    const rawReplyTarget = envelope.metadata['reply_to_platform_message_id'];
+    if (typeof rawReplyTarget === 'string') {
+      const colonIdx = rawReplyTarget.indexOf(':');
+      if (colonIdx !== -1) {
+        const replyChatId = parseInt(rawReplyTarget.slice(0, colonIdx), 10);
+        const replyMessageId = parseInt(rawReplyTarget.slice(colonIdx + 1), 10);
+        if (!isNaN(replyChatId) && !isNaN(replyMessageId) && replyChatId === chatId) {
+          replyParams = { reply_parameters: { message_id: replyMessageId, allow_sending_without_reply: true } };
+        }
+      }
     }
 
     if (envelope.payload.type !== 'text') {
@@ -426,17 +600,18 @@ export class TelegramAdapter implements AdapterInstance {
     }
 
     const parts = splitMessage(envelope.payload.body);
+    const key = this.draftKey(chatId, messageThreadId);
 
-    // Stop the persistent typing loop for this chat now that we're delivering
-    this.stopTypingIndicator(chatId);
+    // Stop the persistent typing loop for this chat/topic now that we're delivering
+    this.stopTypingIndicator(chatId, messageThreadId);
 
-    // Overwrite-on-delivery (E29): a pending tool-call trail for this chat is
-    // torn down unconditionally below — success or fallback — so it never
+    // Overwrite-on-delivery (E29): a pending tool-call trail for this chat/topic
+    // is torn down unconditionally below — success or fallback — so it never
     // leaks across turns. When the draft's own creation is still in flight,
     // wait for it so a very-fast turn can't leave two messages behind.
-    const draft = this.draftMessages.get(chatId);
+    const draft = this.draftMessages.get(key);
     if (draft?.timer) clearTimeout(draft.timer);
-    this.draftMessages.delete(chatId);
+    this.draftMessages.delete(key);
 
     let sentParts = 0;
     let platformMessageId: string | undefined;
@@ -458,11 +633,16 @@ export class TelegramAdapter implements AdapterInstance {
       }
     }
 
-    for (let i = firstPartHandled ? 1 : 0; i < parts.length; i++) {
+    const startIndex = firstPartHandled ? 1 : 0;
+    for (let i = startIndex; i < parts.length; i++) {
       if (i > 0) await this.sleep(200);
 
+      // The reply quote only makes sense on the first freshly-sent part — a
+      // multi-part answer's later parts are continuations, not replies.
+      const partParams = i === startIndex ? { ...extraParams, ...replyParams } : extraParams;
+
       try {
-        const messageId = await this.deliverText(chatId, parts[i]!);
+        const messageId = await this.deliverText(chatId, parts[i]!, undefined, partParams);
         sentParts++;
         if (i === parts.length - 1) {
           platformMessageId = String(messageId);
@@ -479,6 +659,89 @@ export class TelegramAdapter implements AdapterInstance {
 
     this.lastActivity = new Date().toISOString();
     return { success: true, platformMessageId };
+  }
+
+  // ── AdapterInstance createTopic (E28) ─────────────────────────────────────
+
+  /**
+   * Create a new forum topic in a Telegram group. Group-only — DM Threaded
+   * Mode is retired, so this always rejects a DM channel. Requires this bot
+   * to have "Manage Topics" admin rights in the target group; verified via
+   * getChatMember before calling createForumTopic, so a missing right
+   * surfaces a clear, actionable error instead of an opaque Telegram API
+   * rejection. On success, upserts the thread row immediately (E27's generic
+   * thread store) so send() can resolve it before any inbound message ever
+   * arrives on the new topic.
+   *
+   * The topic always starts a brand-new session — a forum topic's
+   * message_thread_id is freshly issued by Telegram, so the `thread:<hash>`
+   * topic (and therefore conversation_id) it hashes into has never existed
+   * before; there is no prior history to inherit. `context`, when given, is
+   * stashed on the thread row and injected into the agent's *first* turn on
+   * this topic only (one-shot, consumed and cleared the moment any message
+   * lands on it — see `processUpdate`), rather than a real conversation turn.
+   */
+  async createTopic(
+    channel: string,
+    name: string,
+    context?: string,
+  ): Promise<{ ok: true; topic: string; message_thread_id: number; name: string } | { ok: false; error: string }> {
+    const chatId = this.parseGroupChatId(channel);
+    if (chatId === null) {
+      return {
+        ok: false,
+        error: `create_telegram_topic is group-only; "${channel}" is not a Telegram group channel (DM Threaded Mode is retired)`,
+      };
+    }
+
+    if (this.botUserId === null) {
+      return {
+        ok: false,
+        error: `Could not determine this bot's own Telegram user id (getMe failed at startup) — cannot verify admin rights`,
+      };
+    }
+
+    try {
+      const member = await this.callTelegram<{ status: string; can_manage_topics?: boolean }>('getChatMember', {
+        chat_id: chatId,
+        user_id: this.botUserId,
+      });
+      if (!member.can_manage_topics) {
+        return {
+          ok: false,
+          error:
+            'This bot lacks "Manage Topics" admin rights in this group. In Telegram: open the group, ' +
+            'go to the member list, select this bot, "Edit Admin Rights", and enable "Manage Topics".',
+        };
+      }
+    } catch (err) {
+      return { ok: false, error: `Failed to verify admin rights: ${String(err)}` };
+    }
+
+    let created: { message_thread_id: number; name: string };
+    try {
+      created = await this.callTelegram<{ message_thread_id: number; name: string }>('createForumTopic', {
+        chat_id: chatId,
+        name,
+      });
+    } catch (err) {
+      return { ok: false, error: `Failed to create forum topic: ${String(err)}` };
+    }
+
+    const threadKey = `${chatId}:${created.message_thread_id}`;
+    const topic = topicForThreadKey(threadKey);
+    upsertThread<TelegramThreadMetadata>(this.deps.db, {
+      channel,
+      topic,
+      threadKey,
+      metadata: {
+        chatId,
+        messageThreadId: created.message_thread_id,
+        ...(context ? { pendingContext: context } : {}),
+      },
+    });
+
+    return { ok: true, topic, message_thread_id: created.message_thread_id, name: created.name };
   }
 
   // ── AdapterInstance react ─────────────────────────────────────────────────
@@ -522,11 +785,10 @@ export class TelegramAdapter implements AdapterInstance {
    * delivered to the agent. Starts the persistent typing loop for the
    * contact's chat so the indicator appears while the agent works.
    */
-  startTyping(contactId: string): void {
-    const id = contactId.startsWith('contact:') ? contactId.slice('contact:'.length) : contactId;
-    const chatId = this.contactChatIdMap.get(id);
-    if (chatId) {
-      this.startTypingIndicator(chatId);
+  startTyping(contactId: string, channel?: string, topic?: string): void {
+    const resolved = this.resolveChatAndTopic(contactId, channel, topic);
+    if (resolved) {
+      this.startTypingIndicator(resolved.chatId, resolved.messageThreadId);
     } else {
       console.warn(`${this.tag} startTyping: no chat_id for contact "${contactId}"`);
     }
@@ -535,35 +797,40 @@ export class TelegramAdapter implements AdapterInstance {
   // ── Typing indicator ──────────────────────────────────────────────────────
 
   /**
-   * Start a persistent typing indicator loop for `chatId`. Resends
-   * `sendChatAction('typing')` every 4 seconds so the indicator stays visible
-   * while the agent processes the message. Auto-stops after 2 minutes as a
-   * safety valve. Idempotent — calling while a loop is already running is a no-op.
+   * Start a persistent typing indicator loop for `chatId` (and forum topic
+   * `messageThreadId`, if any — E28). Resends `sendChatAction('typing')`
+   * every 4 seconds so the indicator stays visible while the agent processes
+   * the message. Auto-stops after 2 minutes as a safety valve. Idempotent —
+   * calling while a loop is already running for this (chat, topic) is a no-op.
    */
-  private startTypingIndicator(chatId: number): void {
-    if (this.typingLoops.has(chatId)) return;
+  private startTypingIndicator(chatId: number, messageThreadId?: number): void {
+    const key = this.draftKey(chatId, messageThreadId);
+    if (this.typingLoops.has(key)) return;
 
     const controller = new AbortController();
-    this.typingLoops.set(chatId, controller);
+    this.typingLoops.set(key, controller);
 
     void (async () => {
       const deadline = Date.now() + 120_000;
       while (!controller.signal.aborted && !this.stopping && Date.now() < deadline) {
-        this.callTelegram('sendChatAction', { chat_id: chatId, action: 'typing' }).catch((err) =>
-          console.warn(`${this.tag} Typing indicator failed for chat ${chatId}: ${String(err)}`),
-        );
+        this.callTelegram('sendChatAction', {
+          chat_id: chatId,
+          action: 'typing',
+          ...(messageThreadId ? { message_thread_id: messageThreadId } : {}),
+        }).catch((err) => console.warn(`${this.tag} Typing indicator failed for chat ${chatId}: ${String(err)}`));
         await this.sleep(4000);
       }
-      this.typingLoops.delete(chatId);
+      this.typingLoops.delete(key);
     })();
   }
 
-  /** Stop the typing indicator loop for `chatId`, if one is running. */
-  private stopTypingIndicator(chatId: number): void {
-    const controller = this.typingLoops.get(chatId);
+  /** Stop the typing indicator loop for (`chatId`, `messageThreadId`), if one is running. */
+  private stopTypingIndicator(chatId: number, messageThreadId?: number): void {
+    const key = this.draftKey(chatId, messageThreadId);
+    const controller = this.typingLoops.get(key);
     if (controller) {
       controller.abort();
-      this.typingLoops.delete(chatId);
+      this.typingLoops.delete(key);
     }
   }
 
@@ -574,70 +841,83 @@ export class TelegramAdapter implements AdapterInstance {
    * turn. Appends `text` as a line to a single evolving Telegram message for
    * the contact's chat, batching edits to ~1/sec (see appendToolCallLine).
    */
-  reportToolCall(contactId: string, text: string): void {
-    const id = contactId.startsWith('contact:') ? contactId.slice('contact:'.length) : contactId;
-    const chatId = this.contactChatIdMap.get(id);
-    if (chatId) {
-      this.appendToolCallLine(chatId, text);
+  reportToolCall(contactId: string, text: string, channel?: string, topic?: string): void {
+    const resolved = this.resolveChatAndTopic(contactId, channel, topic);
+    if (resolved) {
+      this.appendToolCallLine(resolved.chatId, text, resolved.messageThreadId);
     } else {
       console.warn(`${this.tag} reportToolCall: no chat_id for contact "${contactId}"`);
     }
   }
 
   /**
-   * Append a tool-call line for `chatId`. The map check-and-reserve is
-   * synchronous (no `await` in between) so two calls arriving before the
-   * first `sendMessage` resolves can never both see "no draft" and both
-   * create one.
+   * Append a tool-call line for (`chatId`, `messageThreadId`). The map
+   * check-and-reserve is synchronous (no `await` in between) so two calls
+   * arriving before the first `sendMessage` resolves can never both see "no
+   * draft" and both create one.
    */
-  private appendToolCallLine(chatId: number, line: string): void {
-    const state = this.draftMessages.get(chatId);
+  private appendToolCallLine(chatId: number, line: string, messageThreadId?: number): void {
+    const key = this.draftKey(chatId, messageThreadId);
+    const state = this.draftMessages.get(key);
     if (state) {
       state.lines.push(line);
-      if (state.messageId !== null) this.scheduleDraftFlush(chatId, state);
+      if (state.messageId !== null) this.scheduleDraftFlush(chatId, key, state);
       // else: creation still in flight — createDraftMessage's post-await
       // check picks up this line once the initial send resolves.
       return;
     }
 
     const fresh: DraftState = { messageId: null, lines: [line], timer: null, creating: null };
-    this.draftMessages.set(chatId, fresh);
-    fresh.creating = this.createDraftMessage(chatId, fresh);
+    this.draftMessages.set(key, fresh);
+    fresh.creating = this.createDraftMessage(chatId, key, fresh, messageThreadId);
   }
 
-  /** Sends the first line as a new message and records its message_id. */
-  private async createDraftMessage(chatId: number, state: DraftState): Promise<void> {
+  /**
+   * Sends the first line as a new message (into forum topic `messageThreadId`,
+   * if any — E28) and records its message_id.
+   */
+  private async createDraftMessage(
+    chatId: number,
+    key: string,
+    state: DraftState,
+    messageThreadId?: number,
+  ): Promise<void> {
     try {
-      const messageId = await this.deliverText(chatId, state.lines[0]!);
+      const messageId = await this.deliverText(
+        chatId,
+        state.lines[0]!,
+        undefined,
+        messageThreadId ? { message_thread_id: messageThreadId } : undefined,
+      );
       state.messageId = messageId;
       if (state.lines.length > 1) {
         // More lines arrived while the create was in flight — the sent
         // message only shows lines[0]; flush now to catch it up.
-        this.scheduleDraftFlush(chatId, state);
+        this.scheduleDraftFlush(chatId, key, state);
       }
     } catch (err) {
       console.warn(`${this.tag} Failed to create draft message for chat ${chatId}: ${String(err)}`);
       // Nothing to track — the next tool call starts a fresh draft.
-      if (this.draftMessages.get(chatId) === state) this.draftMessages.delete(chatId);
+      if (this.draftMessages.get(key) === state) this.draftMessages.delete(key);
     } finally {
       state.creating = null;
     }
   }
 
-  /** Arms a batching timer for `chatId` if one isn't already pending. Anchored
+  /** Arms a batching timer for `key` if one isn't already pending. Anchored
    * on the first pending line (not a rolling debounce) so constant tool-call
    * traffic can never defer a flush forever. */
-  private scheduleDraftFlush(chatId: number, state: DraftState): void {
+  private scheduleDraftFlush(chatId: number, key: string, state: DraftState): void {
     if (state.timer) return;
     state.timer = setTimeout(() => {
       state.timer = null;
-      void this.flushDraft(chatId);
+      void this.flushDraft(chatId, key);
     }, DRAFT_BATCH_WINDOW_MS);
   }
 
   /** Edits the draft message with the current (possibly truncated) trail. */
-  private async flushDraft(chatId: number): Promise<void> {
-    const state = this.draftMessages.get(chatId);
+  private async flushDraft(chatId: number, key: string): Promise<void> {
+    const state = this.draftMessages.get(key);
     if (!state || state.messageId === null) return; // cleared/overwritten mid-flight
     const { text } = buildDraftTrail(state.lines);
     try {
@@ -659,23 +939,24 @@ export class TelegramAdapter implements AdapterInstance {
    * draft is currently open — the caller knows `note` never reached the user
    * and should fall back to its own confirmation message.
    */
-  finalizeDraft(contactId: string, note: string): boolean {
-    const id = contactId.startsWith('contact:') ? contactId.slice('contact:'.length) : contactId;
-    const chatId = this.contactChatIdMap.get(id);
-    if (!chatId) return false;
+  finalizeDraft(contactId: string, note: string, channel?: string, topic?: string): boolean {
+    const resolved = this.resolveChatAndTopic(contactId, channel, topic);
+    if (!resolved) return false;
+    const { chatId, messageThreadId } = resolved;
 
     // /stop is a hard stop — the typing indicator must not keep blinking for
     // up to its 2-minute safety timeout after the turn has already been
     // killed, whether or not a draft was open to finalize.
-    this.stopTypingIndicator(chatId);
+    this.stopTypingIndicator(chatId, messageThreadId);
 
-    const state = this.draftMessages.get(chatId);
+    const key = this.draftKey(chatId, messageThreadId);
+    const state = this.draftMessages.get(key);
     if (!state) return false;
 
     // Reserve immediately — a tool call arriving after this point must start
     // a brand-new draft rather than touch the one being finalized.
     if (state.timer) clearTimeout(state.timer);
-    this.draftMessages.delete(chatId);
+    this.draftMessages.delete(key);
     state.lines.push(note);
 
     void (async () => {
@@ -879,9 +1160,13 @@ export class TelegramAdapter implements AdapterInstance {
 
     const isRemoved = added.length === 0;
 
+    // Same DM-vs-group channel derivation as processUpdate (E28) — a reaction
+    // in a group is part of that group's conversation, not the reactor's DM.
+    const channel = reaction.chat.type === 'private' ? this.id : `${this.id}:group:${reaction.chat.id}`;
+
     try {
       const message: InboundMessage = {
-        channel: this.id,
+        channel,
         sender: senderId,
         payload: {
           type: 'reaction',
@@ -925,6 +1210,12 @@ export class TelegramAdapter implements AdapterInstance {
       return true;
     }
 
+    // A DM keeps today's channel (this.id) unchanged. A group/supergroup gets
+    // its own channel, distinct from any contact's DM, derived per-message —
+    // no static per-group config (E28). See ownsChannel() for how the
+    // registry's channel lookups recognize this dynamically-derived id.
+    const channel = msg.chat.type === 'private' ? this.id : `${this.id}:group:${msg.chat.id}`;
+
     // Detect an inbound image or file attachment.
     const attachmentSource = this.extractAttachmentSource(msg);
 
@@ -943,9 +1234,50 @@ export class TelegramAdapter implements AdapterInstance {
     const fallback = attachmentSource?.kind === 'file' ? '[File]' : '[Image]';
     const effectiveBody = body || (attachmentSource && (!attachments || attachments.length === 0) ? fallback : '');
 
+    // Forum topic → its own long-lived session, on E27's generic thread store
+    // (E28). No message_thread_id (posted in "General") gets no thread row —
+    // its own session falls out of the group channel alone, same as a DM's
+    // main conversation needs no thread row either. Deliberately placed after
+    // the skip-check above: a skipped update (no text/attachment, e.g. a
+    // sticker) must never consume create_telegram_topic's one-shot
+    // pendingContext before a real message actually reaches the agent.
+    let topic: string | undefined;
+    let injectedTopicContext: string | undefined;
+    if (msg.is_topic_message && msg.message_thread_id) {
+      const threadKey = `${msg.chat.id}:${msg.message_thread_id}`;
+      topic = topicForThreadKey(threadKey);
+      const existingThread = getThread<TelegramThreadMetadata>(this.deps.db, channel, topic);
+      if (existingThread?.metadata.pendingContext) {
+        injectedTopicContext = existingThread.metadata.pendingContext;
+      }
+      // Full replace (not patch): omitting pendingContext here is what clears
+      // it — this topic's very first delivered message is definitionally the
+      // first turn of a fresh session, so the injection is naturally one-shot.
+      upsertThread<TelegramThreadMetadata>(this.deps.db, {
+        channel,
+        topic,
+        threadKey,
+        metadata: { chatId: msg.chat.id, messageThreadId: msg.message_thread_id },
+      });
+    }
+
+    // Quoted reply context (E28) — a user quote-replying to a message is a
+    // conversational gesture, not a request to fork a session: surfaced to
+    // the agent as context only, via metadata.quoted_message. Never touches
+    // topic/thread routing (computed independently above).
+    const quoted = msg.reply_to_message;
+    const quotedMessage = quoted
+      ? {
+          platform_message_id: `${msg.chat.id}:${quoted.message_id}`,
+          sender_name: quoted.from?.first_name,
+          text: (quoted.text ?? quoted.caption ?? '').slice(0, 200),
+        }
+      : undefined;
+
     try {
       const message: InboundMessage = {
-        channel: this.id,
+        channel,
+        ...(topic ? { topic } : {}),
         sender: senderId,
         payload: { type: 'text', body: effectiveBody },
         metadata: {
@@ -953,6 +1285,8 @@ export class TelegramAdapter implements AdapterInstance {
           telegram_message_id: msg.message_id,
           // Encodes both IDs so react() can call setMessageReaction without a separate lookup
           platform_message_id: `${msg.chat.id}:${msg.message_id}`,
+          ...(quotedMessage ? { quoted_message: quotedMessage } : {}),
+          ...(injectedTopicContext ? { injected_topic_context: injectedTopicContext } : {}),
         },
         ...(attachments && attachments.length > 0 ? { attachments } : {}),
       };
