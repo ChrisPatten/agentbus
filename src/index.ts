@@ -232,6 +232,8 @@ for (const [agentId, headless] of startHeadless(db)) {
   sessionTracker.registerJournalingRunner(agentId, headless.runJournalingTurn);
   // Let /clear reach the owning instance's journaling hook.
   headlessControl.journalResumeId.set(agentId, headless.journalResumeId);
+  // Let /stop reach the owning instance's in-flight turn.
+  headlessControl.stopTurn.set(agentId, headless.stopTurn);
 }
 
 sessionTracker.start();

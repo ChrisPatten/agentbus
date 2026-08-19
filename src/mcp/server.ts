@@ -26,7 +26,6 @@ export function createMcpServer(): McpServer {
         'Multiple messages in one turn are separated by a blank line, each with its own [id:...] tag.',
         '',
         'To reply, call reply(message_id="<id>", body="..."). The tool resolves the channel and recipient automatically.',
-        'To show a typing/processing indicator, call react_to_message(message_id="<id>", emoji="👀") before long-running work.',
         'The [id:...] value is stable — use the id from each message to reply to that specific message.',
       ].join('\n'),
     }

@@ -918,4 +918,185 @@ describe('command handlers', () => {
       expect(row.ended_at).not.toBeNull();
     });
   });
+
+  describe('/stop', () => {
+    function insertSession(
+      db: Database.Database,
+      opts: { id: string; channel?: string; agentId?: string | null },
+    ) {
+      const now = new Date().toISOString();
+      db.prepare(
+        `INSERT INTO sessions (id, conversation_id, channel, contact_id, started_at, last_activity, ended_at, claude_session_id, agent_id)
+         VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
+      ).run(opts.id, `conv-${opts.id}`, opts.channel ?? 'telegram', 'chris', now, now, opts.agentId ?? null);
+    }
+
+    function makeTelegramAdapterWithFinalize(finalizeReturns = true) {
+      return {
+        id: 'telegram',
+        name: 'telegram',
+        capabilities: { send: true as const, channels: ['telegram'], toolStatus: true },
+        health: vi.fn().mockResolvedValue({ status: 'healthy' }),
+        start: vi.fn(),
+        stop: vi.fn(),
+        send: vi.fn(),
+        finalizeDraft: vi.fn().mockReturnValue(finalizeReturns),
+      };
+    }
+
+    it('stops the in-flight turn, finalizes the Telegram draft, and sends no separate confirmation', async () => {
+      const db = makeDb();
+      insertSession(db, { id: 'sess-1', agentId: 'agent:peggy' });
+      const telegramAdapter = makeTelegramAdapterWithFinalize(true);
+      const stopTurn = vi.fn().mockReturnValue(true);
+      const deps = {
+        ...makeDeps({ db }),
+        adapterRegistry: { lookup: (id: string) => (id === 'telegram' ? telegramAdapter : undefined), list: () => [telegramAdapter] } as never,
+        headlessControl: { journalResumeId: new Map(), stopTurn: new Map([['agent:peggy', stopTurn]]) },
+      };
+      const commands = createBuiltinCommands(deps as never);
+      const stop = commands.find((c) => c.name === 'stop')!;
+
+      const result = await stop.handler([], makeCtx(db));
+
+      // The finalized draft ("Stopped by user") is the user's only feedback —
+      // a separate command-response message would be duplicative.
+      expect(result.body).toBeUndefined();
+      expect(stopTurn).toHaveBeenCalledWith('contact:chris');
+      expect(telegramAdapter.finalizeDraft).toHaveBeenCalledWith('contact:chris', 'Stopped by user');
+    });
+
+    it('falls back to a confirmation message when there was no draft to finalize', async () => {
+      const db = makeDb();
+      insertSession(db, { id: 'sess-1b', agentId: 'agent:peggy' });
+      const telegramAdapter = makeTelegramAdapterWithFinalize(false); // no draft was open
+      const stopTurn = vi.fn().mockReturnValue(true);
+      const deps = {
+        ...makeDeps({ db }),
+        adapterRegistry: { lookup: (id: string) => (id === 'telegram' ? telegramAdapter : undefined), list: () => [telegramAdapter] } as never,
+        headlessControl: { journalResumeId: new Map(), stopTurn: new Map([['agent:peggy', stopTurn]]) },
+      };
+      const commands = createBuiltinCommands(deps as never);
+      const stop = commands.find((c) => c.name === 'stop')!;
+
+      const result = await stop.handler([], makeCtx(db));
+
+      expect(result.body).toContain('Stopped');
+      expect(telegramAdapter.finalizeDraft).toHaveBeenCalledWith('contact:chris', 'Stopped by user');
+    });
+
+    it('reports nothing to stop when no turn is running', async () => {
+      const db = makeDb();
+      insertSession(db, { id: 'sess-2', agentId: 'agent:peggy' });
+      const telegramAdapter = makeTelegramAdapterWithFinalize();
+      const stopTurn = vi.fn().mockReturnValue(false);
+      const deps = {
+        ...makeDeps({ db }),
+        adapterRegistry: { lookup: (id: string) => (id === 'telegram' ? telegramAdapter : undefined), list: () => [telegramAdapter] } as never,
+        headlessControl: { journalResumeId: new Map(), stopTurn: new Map([['agent:peggy', stopTurn]]) },
+      };
+      const commands = createBuiltinCommands(deps as never);
+      const stop = commands.find((c) => c.name === 'stop')!;
+
+      const result = await stop.handler([], makeCtx(db));
+
+      expect(result.body).toContain('No active turn to stop');
+      expect(telegramAdapter.finalizeDraft).not.toHaveBeenCalled();
+    });
+
+    it('reports nothing to stop when the headless adapter is not running', async () => {
+      const db = makeDb();
+      insertSession(db, { id: 'sess-3', agentId: 'agent:peggy' });
+      const deps = makeDeps({ db }); // no headlessControl
+      const commands = createBuiltinCommands(deps);
+      const stop = commands.find((c) => c.name === 'stop')!;
+
+      const result = await stop.handler([], makeCtx(db));
+
+      expect(result.body).toContain('No active turn to stop');
+    });
+
+    it('routes to the owning agent when multiple headless instances are registered (E23)', async () => {
+      const db = makeDb();
+      insertSession(db, { id: 'sess-poke', agentId: 'agent:pokeclaude' });
+      const peggyStop = vi.fn().mockReturnValue(true);
+      const pokeclaudeStop = vi.fn().mockReturnValue(true);
+      const deps = {
+        ...makeDeps({ db }),
+        headlessControl: {
+          journalResumeId: new Map(),
+          stopTurn: new Map([
+            ['agent:peggy', peggyStop],
+            ['agent:pokeclaude', pokeclaudeStop],
+          ]),
+        },
+      };
+      const commands = createBuiltinCommands(deps as never);
+      const stop = commands.find((c) => c.name === 'stop')!;
+
+      await stop.handler([], makeCtx(db));
+
+      expect(pokeclaudeStop).toHaveBeenCalledWith('contact:chris');
+      expect(peggyStop).not.toHaveBeenCalled();
+    });
+
+    it('falls back to the sole registered instance when the session predates agent_id tracking', async () => {
+      const db = makeDb();
+      insertSession(db, { id: 'sess-legacy', agentId: null });
+      const soloStop = vi.fn().mockReturnValue(true);
+      const deps = {
+        ...makeDeps({ db }),
+        headlessControl: { journalResumeId: new Map(), stopTurn: new Map([['agent:peggy', soloStop]]) },
+      };
+      const commands = createBuiltinCommands(deps as never);
+      const stop = commands.find((c) => c.name === 'stop')!;
+
+      const result = await stop.handler([], makeCtx(db));
+
+      expect(soloStop).toHaveBeenCalledWith('contact:chris');
+      expect(result.body).toContain('Stopped');
+    });
+
+    it('does not fall back for an orphaned agent_id when multiple instances are registered', async () => {
+      const db = makeDb();
+      insertSession(db, { id: 'sess-orphan', agentId: 'agent:retired' });
+      const peggyStop = vi.fn().mockReturnValue(true);
+      const pokeclaudeStop = vi.fn().mockReturnValue(true);
+      const deps = {
+        ...makeDeps({ db }),
+        headlessControl: {
+          journalResumeId: new Map(),
+          stopTurn: new Map([
+            ['agent:peggy', peggyStop],
+            ['agent:pokeclaude', pokeclaudeStop],
+          ]),
+        },
+      };
+      const commands = createBuiltinCommands(deps as never);
+      const stop = commands.find((c) => c.name === 'stop')!;
+
+      const result = await stop.handler([], makeCtx(db));
+
+      expect(result.body).toContain('No active turn to stop');
+      expect(peggyStop).not.toHaveBeenCalled();
+      expect(pokeclaudeStop).not.toHaveBeenCalled();
+    });
+
+    it('stops the turn without error when the originating adapter has no finalizeDraft (non-Telegram)', async () => {
+      const db = makeDb();
+      insertSession(db, { id: 'sess-email', channel: 'email:peggy', agentId: 'agent:peggy' });
+      const stopTurn = vi.fn().mockReturnValue(true);
+      const deps = {
+        ...makeDeps({ db, adapters: [{ id: 'email:peggy' }] }),
+        headlessControl: { journalResumeId: new Map(), stopTurn: new Map([['agent:peggy', stopTurn]]) },
+      };
+      const commands = createBuiltinCommands(deps as never);
+      const stop = commands.find((c) => c.name === 'stop')!;
+
+      const result = await stop.handler([], makeCtx(db, { channel: 'email:peggy', adapterId: 'email:peggy' }));
+
+      expect(result.body).toContain('Stopped');
+      expect(stopTurn).toHaveBeenCalledWith('contact:chris');
+    });
+  });
 });

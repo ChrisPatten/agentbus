@@ -10,6 +10,29 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-08-18
+
+### Added
+- **Telegram live tool-call status stream (E29).** While a headless agent
+  works on a turn, non-delivery tool calls now appear as lines in a single
+  evolving Telegram message (`editMessageText`), batched to roughly one edit
+  per second, which is then overwritten by the final answer once delivered —
+  no separate draft/final messages, and no change to the zero-tool-call fast
+  path. `Bash`/`Agent` calls use their own `description` field verbatim;
+  other common tools get a small fixed template; anything else falls back to
+  a generic line. Subagent internals never surface — an `Agent` call always
+  renders as one line. See
+  [docs/TELEGRAM_ADAPTER.md](docs/TELEGRAM_ADAPTER.md#live-tool-call-status-stream-e29).
+- **`/stop` slash command.** Cancels the sender's in-flight `claude -p` turn
+  on a headless (`cc-headless`) agent — hard-kills the running child process
+  with `SIGKILL` rather than waiting it out (`SIGTERM` let the CLI catch the
+  interrupt and quietly re-prompt itself instead of stopping). On Telegram,
+  if a live tool-call status draft is open, it's finalized in place with a
+  "Stopped by user" note instead of being abandoned or silently overwritten
+  — and that's the only confirmation sent, so cancelling never produces a
+  duplicate "stopped" message. See
+  [docs/SLASH_COMMANDS.md](docs/SLASH_COMMANDS.md#stop).
+
 ## [0.8.0] - 2026-08-12
 
 ### Added
@@ -274,7 +297,8 @@ Baseline release. Core bus, pipeline, adapters, memory, scheduling.
 - Built-in slash commands + plugin command registry. (E6)
 - Scheduled messages (cron + one-shot) via background scheduler. (E18)
 
-[Unreleased]: https://github.com/ChrisPatten/agentbus/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/ChrisPatten/agentbus/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/ChrisPatten/agentbus/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/ChrisPatten/agentbus/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/ChrisPatten/agentbus/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/ChrisPatten/agentbus/compare/v0.6.0...v0.7.0

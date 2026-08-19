@@ -587,6 +587,21 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     },
   );
 
+  // POST /api/v1/adapters/:id/tool-status — live tool-call status line for an
+  // in-flight turn (E29). Fire-and-forget by callers — always returns 200,
+  // even when the adapter is not found or doesn't support the capability
+  // (no-op in those cases).
+  server.post<{ Params: { id: string }; Body: { contact_id?: string; text?: string } }>(
+    '/api/v1/adapters/:id/tool-status',
+    async (req, _reply) => {
+      const adapter = registry.lookup(req.params.id);
+      if (adapter?.capabilities.toolStatus && typeof adapter.reportToolCall === 'function' && req.body.text) {
+        adapter.reportToolCall(req.body.contact_id ?? '', req.body.text);
+      }
+      return { ok: true };
+    },
+  );
+
   // GET /api/v1/transcripts/search — FTS5 full-text search over transcripts
   server.get<{
     Querystring: { q?: string; channel?: string; since?: string; limit?: string };

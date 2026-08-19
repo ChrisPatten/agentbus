@@ -94,6 +94,12 @@ no-op unless the outbound channel is a Telegram instance.
 5. No subagent-internal tool call ever appears in the trail — an `Agent`
    call always renders as exactly one line, regardless of how many tool
    calls the subagent itself makes.
+5a. **No status message of any kind is ever created for tool calls that
+   occur after a turn's delivery tool has already fired.** A turn that
+   calls `reply`/`send_message` and then continues doing work (e.g.
+   Peggy's routine post-reply memory/journaling writes) produces zero
+   visible trail for that later work — confirmed necessary by live testing,
+   not just a nice-to-have (see Notes).
 6. Rapid-fire tool calls are batched: no more than roughly one edit per
    second is sent to Telegram, even if multiple tool calls complete within
    that window — verified by a test that fires N tool-call events in quick
@@ -141,6 +147,16 @@ returns when the turn completes.
    rendered as one line, per S29.2/S29.4) but the implementation does **not**
    add `--forward-subagent-text` and does not parse any events a subagent
    might emit — there is nothing to filter out because it's never requested.
+5. **Once `deliveredViaTool` becomes true for a turn, the callback stops
+   firing entirely for the remainder of that turn** — found via live testing
+   (2026-08-18, see Notes): a turn routinely keeps calling tools *after*
+   `reply`/`send_message` (Peggy's own post-reply memory/journaling writes
+   are the common case), and those tool calls have no future delivery event
+   to be overwritten by, so S29.3/S29.4's "start a fresh draft if none
+   exists" behavior would otherwise spawn a second, permanently-dangling
+   status message on every single turn that does any post-reply work. This
+   is a hard behavioral requirement, not an optimization — without it the
+   feature produces a visible bug on ordinary turns, not just an edge case.
 
 **Complexity:** S
 
@@ -249,6 +265,11 @@ end-to-end.
    call, a Read call, and an Agent call, observed end-to-end against the
    real `peggy` bot, confirming the trail appears, batches sensibly, and
    gets cleanly overwritten by the final answer.
+5. A second manual/integration check specifically covering S29.1's
+   acceptance criterion 5: a turn that calls `reply`/`send_message` and then
+   makes at least one more tool call afterward (the realistic shape being
+   Peggy's own post-reply memory-log write) produces **no** second Telegram
+   message — confirms the real bug found in testing (see Notes) stays fixed.
 
 **Complexity:** S
 
@@ -256,6 +277,25 @@ end-to-end.
 
 ## Notes
 
+- **Real bug found via live testing, 2026-08-18 — post-delivery tool calls
+  spawned a dangling second status message.** Chris tested an early build
+  of this feature: after Peggy delivered her answer via `reply()`, she (per
+  her own standing operating practice) continued working — reading and
+  editing her daily memory-log file. Those post-reply tool calls triggered
+  S29.3's "no draft exists for this turn → start a new one" path, producing
+  a *second*, separate Telegram message (a tool-call trail with no final
+  answer to ever overwrite it into — nothing left in the turn calls
+  `reply`/`send_message` again). This isn't a rare edge case: **any turn
+  where Peggy does bookkeeping after answering** — which is normal,
+  expected behavior per her own memory-writing discipline — would trigger
+  it. Fixed by adding S29.1's acceptance criterion 5: the callback must stop
+  firing entirely once `deliveredViaTool` flips true for a turn, so nothing
+  after delivery ever creates or updates a status message. This was caught
+  specifically *because* it was tested against a real turn with real
+  post-reply behavior rather than a synthetic "tool calls then done" test
+  case — worth remembering as a reason to always test epics like this
+  against a real, full-shaped turn, not just the happy path the story
+  describes.
 - **Why no new `claude` CLI flags.** The event stream this epic consumes
   (`tool_use` blocks in `assistant` events) is already part of the existing
   `--output-format stream-json` invocation. No flag change is needed to

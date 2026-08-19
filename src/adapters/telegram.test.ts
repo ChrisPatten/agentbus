@@ -3,11 +3,12 @@ import { mkdtempSync, rmSync, readdirSync, readFileSync, statSync } from 'node:f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
-import { pickLargestPhoto, extensionFor, resolveMediaConfig, TelegramAdapter } from './telegram.js';
+import { pickLargestPhoto, extensionFor, resolveMediaConfig, buildDraftTrail, TelegramAdapter } from './telegram.js';
 import { runMigrations } from '../db/schema.js';
 import type { AppConfig } from '../config/schema.js';
 import type { MessageQueue } from '../core/queue.js';
 import type { PipelineEngine } from '../pipeline/engine.js';
+import type { MessageEnvelope } from '../types/envelope.js';
 
 describe('pickLargestPhoto', () => {
   it('returns the entry with the greatest file_size', () => {
@@ -553,5 +554,399 @@ describe('TelegramAdapter inbound reaction handling', () => {
     });
 
     expect(processInboundCalls).toHaveLength(0);
+  });
+});
+
+// ── TelegramAdapter outbound send() (E29 baseline regression) ───────────────
+
+function makeTextEnvelope(body: string, overrides: Partial<MessageEnvelope> = {}): MessageEnvelope {
+  return {
+    id: 'env-1',
+    timestamp: new Date(0).toISOString(),
+    channel: 'telegram',
+    topic: 'general',
+    sender: 'agent:claude',
+    recipient: 'contact:chris',
+    reply_to: null,
+    priority: 'normal',
+    payload: { type: 'text', body },
+    metadata: {},
+    ...overrides,
+  };
+}
+
+/** Fetch mock for the Telegram Bot API: succeeds for sendMessage/editMessageText
+ * with an incrementing message_id, unless a call is queued via `queueFailure`. */
+function makeTelegramFetchMock() {
+  let nextMessageId = 100;
+  const failures = new Map<string, { status: number; description: string }>();
+
+  const fn = vi.fn(async (url: string, init?: { body?: string }) => {
+    const method = url.split('/').pop() ?? '';
+    const body = init?.body ? (JSON.parse(init.body) as Record<string, unknown>) : {};
+    const key = method === 'sendMessage' || method === 'editMessageText'
+      ? `${method}:${'parse_mode' in body ? 'markdown' : 'plain'}`
+      : method;
+
+    const failure = failures.get(key) ?? failures.get(method);
+    if (failure) {
+      return {
+        ok: false,
+        status: failure.status,
+        json: async () => ({ ok: false, description: failure.description }),
+      } as unknown as Response;
+    }
+
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        ok: true,
+        result: { message_id: nextMessageId++, chat: { id: 555, type: 'private' }, date: 0 },
+      }),
+    } as unknown as Response;
+  });
+
+  return {
+    fn,
+    /** Fail every call to `method` (optionally scoped to markdown vs. plain-text retry). */
+    queueFailure(method: string, status: number, description = 'boom') {
+      failures.set(method, { status, description });
+    },
+  };
+}
+
+function getDraftState(adapter: TelegramAdapter, chatId: number) {
+  return (
+    adapter as unknown as {
+      draftMessages: Map<number, { messageId: number | null; lines: string[]; creating: Promise<void> | null }>;
+    }
+  ).draftMessages.get(chatId);
+}
+
+function callsTo(fetchMock: ReturnType<typeof vi.fn>, method: string): unknown[] {
+  return fetchMock.mock.calls.filter((c) => String(c[0]).endsWith(`/${method}`));
+}
+
+describe('TelegramAdapter send() (outbound, baseline regression)', () => {
+  let adapter: TelegramAdapter;
+  let telegramFetch: ReturnType<typeof makeTelegramFetchMock>;
+
+  beforeEach(() => {
+    const config = makeTestConfig('/tmp/unused-e29-outbound');
+    adapter = new TelegramAdapter({
+      config,
+      queue: {} as unknown as MessageQueue,
+      pipeline: {} as unknown as PipelineEngine,
+      db: {} as unknown as Database.Database,
+      instanceConfig: { token: 'test:token', poll_timeout: 30 },
+    });
+    telegramFetch = makeTelegramFetchMock();
+    vi.stubGlobal('fetch', telegramFetch.fn);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('sends a single short message via sendMessage', async () => {
+    const result = await adapter.send(makeTextEnvelope('hello'));
+    expect(result.success).toBe(true);
+    expect(callsTo(telegramFetch.fn, 'sendMessage')).toHaveLength(1);
+    expect(callsTo(telegramFetch.fn, 'editMessageText')).toHaveLength(0);
+  });
+
+  it('splits a long message into multiple sendMessage calls', async () => {
+    const body = Array.from({ length: 10 }, (_, i) => `line ${i}`.repeat(500)).join('\n');
+    const result = await adapter.send(makeTextEnvelope(body));
+    expect(result.success).toBe(true);
+    expect(callsTo(telegramFetch.fn, 'sendMessage').length).toBeGreaterThan(1);
+  });
+
+  it('retries without parse_mode when Telegram rejects Markdown with HTTP 400', async () => {
+    telegramFetch.queueFailure('sendMessage:markdown', 400, 'Bad Request: can\'t parse entities');
+    const result = await adapter.send(makeTextEnvelope('some *bad markdown'));
+    expect(result.success).toBe(true);
+    expect(callsTo(telegramFetch.fn, 'sendMessage')).toHaveLength(2);
+  });
+
+  it('fails with a non-retryable error for an unknown contact', async () => {
+    const result = await adapter.send(makeTextEnvelope('hi', { recipient: 'contact:nobody' }));
+    expect(result.success).toBe(false);
+    expect(result.retryable).toBe(false);
+    expect(result.error).toContain('No Telegram chat_id');
+  });
+
+  it('fails with a non-retryable error for a non-text payload', async () => {
+    const result = await adapter.send(
+      makeTextEnvelope('unused', {
+        payload: { type: 'reaction', emoji: '👍', removed: false, target_message_id: '555:1' },
+      }),
+    );
+    expect(result.success).toBe(false);
+    expect(result.retryable).toBe(false);
+    expect(result.error).toContain('Unsupported payload type');
+  });
+});
+
+// ── buildDraftTrail (E29 length cap / truncation) ────────────────────────────
+
+describe('buildDraftTrail', () => {
+  it('returns an empty, non-truncated trail for no lines', () => {
+    expect(buildDraftTrail([])).toEqual({ text: '', truncated: false });
+  });
+
+  it('joins lines as-is when they fit under the budget', () => {
+    const { text, truncated } = buildDraftTrail(['🐚 one', '📖 two', '✏️ three'], 1000);
+    expect(text).toBe('🐚 one\n📖 two\n✏️ three');
+    expect(truncated).toBe(false);
+  });
+
+  it('drops oldest whole lines and prefixes a notice when the trail exceeds the budget', () => {
+    const lines = Array.from({ length: 50 }, (_, i) => `line ${i}`);
+    const { text, truncated } = buildDraftTrail(lines, 100);
+    expect(truncated).toBe(true);
+    expect(text.startsWith('… (earlier steps omitted)')).toBe(true);
+    expect(text.length).toBeLessThanOrEqual(100);
+    // Never cuts mid-line — every remaining line is intact
+    const kept = text.split('\n').slice(1);
+    for (const line of kept) {
+      expect(lines).toContain(line);
+    }
+    // The most recent line must always survive truncation
+    expect(text).toContain('line 49');
+  });
+});
+
+// ── TelegramAdapter draft-message lifecycle (E29) ────────────────────────────
+
+describe('TelegramAdapter draft-message lifecycle (E29)', () => {
+  let adapter: TelegramAdapter;
+  let telegramFetch: ReturnType<typeof makeTelegramFetchMock>;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    const config = makeTestConfig('/tmp/unused-e29-draft');
+    adapter = new TelegramAdapter({
+      config,
+      queue: {} as unknown as MessageQueue,
+      pipeline: {} as unknown as PipelineEngine,
+      db: {} as unknown as Database.Database,
+      instanceConfig: { token: 'test:token', poll_timeout: 30 },
+    });
+    telegramFetch = makeTelegramFetchMock();
+    vi.stubGlobal('fetch', telegramFetch.fn);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it('a single tool call sends one message and issues no edits', async () => {
+    adapter.reportToolCall('chris', 'first line');
+    await getDraftState(adapter, 12345)?.creating;
+
+    expect(callsTo(telegramFetch.fn, 'sendMessage')).toHaveLength(1);
+    expect(callsTo(telegramFetch.fn, 'editMessageText')).toHaveLength(0);
+  });
+
+  it('batches lines arriving within one window into a single edit', async () => {
+    adapter.reportToolCall('chris', 'line1');
+    await getDraftState(adapter, 12345)?.creating;
+
+    adapter.reportToolCall('chris', 'line2');
+    adapter.reportToolCall('chris', 'line3');
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(callsTo(telegramFetch.fn, 'sendMessage')).toHaveLength(1);
+    expect(callsTo(telegramFetch.fn, 'editMessageText')).toHaveLength(1);
+    const [, init] = callsTo(telegramFetch.fn, 'editMessageText')[0] as [string, { body: string }];
+    const editedText = (JSON.parse(init.body) as { text: string }).text;
+    expect(editedText).toContain('line1');
+    expect(editedText).toContain('line2');
+    expect(editedText).toContain('line3');
+  });
+
+  it('three calls spread across three windows issue one send and two edits', async () => {
+    adapter.reportToolCall('chris', 'line1');
+    await getDraftState(adapter, 12345)?.creating;
+
+    adapter.reportToolCall('chris', 'line2');
+    await vi.advanceTimersByTimeAsync(1000);
+
+    adapter.reportToolCall('chris', 'line3');
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(callsTo(telegramFetch.fn, 'sendMessage')).toHaveLength(1);
+    expect(callsTo(telegramFetch.fn, 'editMessageText')).toHaveLength(2);
+  });
+
+  it('two tool calls arriving before the first sendMessage resolves create only one draft', () => {
+    let resolveSend!: () => void;
+    telegramFetch.fn.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveSend = () =>
+            resolve({
+              ok: true,
+              status: 200,
+              json: async () => ({ ok: true, result: { message_id: 999, chat: { id: 12345, type: 'private' }, date: 0 } }),
+            } as unknown as Response);
+        }),
+    );
+
+    adapter.reportToolCall('chris', 'line1');
+    adapter.reportToolCall('chris', 'line2'); // arrives before the mocked sendMessage settles
+
+    expect(telegramFetch.fn).toHaveBeenCalledTimes(1);
+    resolveSend();
+  });
+
+  it('overwrites the draft with the final answer and clears it', async () => {
+    adapter.reportToolCall('chris', 'first line');
+    const draft = getDraftState(adapter, 12345);
+    await draft?.creating;
+    const draftMessageId = draft?.messageId;
+
+    const result = await adapter.send(makeTextEnvelope('the final answer'));
+
+    expect(result.success).toBe(true);
+    expect(callsTo(telegramFetch.fn, 'sendMessage')).toHaveLength(1); // only the draft's original send
+    expect(callsTo(telegramFetch.fn, 'editMessageText')).toHaveLength(1);
+    const [, init] = callsTo(telegramFetch.fn, 'editMessageText')[0] as [string, { body: string }];
+    const body = JSON.parse(init.body) as { message_id: number; text: string };
+    expect(body.message_id).toBe(draftMessageId);
+    expect(body.text).toBe('the final answer');
+    expect(getDraftState(adapter, 12345)).toBeUndefined();
+
+    // A subsequent tool call starts a brand-new draft, proving no stale state leaked.
+    adapter.reportToolCall('chris', 'next turn line');
+    await getDraftState(adapter, 12345)?.creating;
+    expect(callsTo(telegramFetch.fn, 'sendMessage')).toHaveLength(2);
+  });
+
+  it('send() behaves exactly as today when no draft exists', async () => {
+    const result = await adapter.send(makeTextEnvelope('no tool calls happened'));
+    expect(result.success).toBe(true);
+    expect(callsTo(telegramFetch.fn, 'sendMessage')).toHaveLength(1);
+    expect(callsTo(telegramFetch.fn, 'editMessageText')).toHaveLength(0);
+  });
+
+  it('falls back to sendMessage when the draft overwrite edit fails', async () => {
+    adapter.reportToolCall('chris', 'first line');
+    await getDraftState(adapter, 12345)?.creating;
+
+    // A non-400 failure isn't retried without parse_mode — it's thrown straight
+    // through deliverText, so send() falls back to a fresh sendMessage.
+    telegramFetch.queueFailure('editMessageText:markdown', 500, 'internal error');
+
+    const result = await adapter.send(makeTextEnvelope('the final answer'));
+
+    expect(result.success).toBe(true);
+    expect(callsTo(telegramFetch.fn, 'editMessageText')).toHaveLength(1);
+    expect(callsTo(telegramFetch.fn, 'sendMessage')).toHaveLength(2); // draft creation + fallback send
+    expect(getDraftState(adapter, 12345)).toBeUndefined();
+  });
+});
+
+// ── TelegramAdapter finalizeDraft (/stop) ────────────────────────────────────
+
+describe('TelegramAdapter finalizeDraft (/stop)', () => {
+  let adapter: TelegramAdapter;
+  let telegramFetch: ReturnType<typeof makeTelegramFetchMock>;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    const config = makeTestConfig('/tmp/unused-e29-stop');
+    adapter = new TelegramAdapter({
+      config,
+      queue: {} as unknown as MessageQueue,
+      pipeline: {} as unknown as PipelineEngine,
+      db: {} as unknown as Database.Database,
+      instanceConfig: { token: 'test:token', poll_timeout: 30 },
+    });
+    telegramFetch = makeTelegramFetchMock();
+    vi.stubGlobal('fetch', telegramFetch.fn);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it('appends the note and edits the open draft with it', async () => {
+    adapter.reportToolCall('chris', 'first line');
+    await getDraftState(adapter, 12345)?.creating;
+    const draftMessageId = getDraftState(adapter, 12345)?.messageId;
+
+    expect(adapter.finalizeDraft('chris', 'Stopped by user')).toBe(true);
+    await vi.advanceTimersByTimeAsync(0); // flush finalizeDraft's internal edit call
+
+    const [, init] = callsTo(telegramFetch.fn, 'editMessageText')[0] as [string, { body: string }];
+    const body = JSON.parse(init.body) as { message_id: number; text: string };
+    expect(body.message_id).toBe(draftMessageId);
+    expect(body.text).toContain('first line');
+    expect(body.text).toContain('Stopped by user');
+  });
+
+  it('clears the draft so a later tool call starts fresh, not a new edit', async () => {
+    adapter.reportToolCall('chris', 'first line');
+    await getDraftState(adapter, 12345)?.creating;
+
+    adapter.finalizeDraft('chris', 'Stopped by user');
+    await vi.advanceTimersByTimeAsync(0); // flush finalizeDraft's internal edit call
+    expect(getDraftState(adapter, 12345)).toBeUndefined();
+
+    adapter.reportToolCall('chris', 'a new turn begins');
+    await getDraftState(adapter, 12345)?.creating;
+    expect(callsTo(telegramFetch.fn, 'sendMessage')).toHaveLength(2); // original draft + this fresh one
+    expect(callsTo(telegramFetch.fn, 'editMessageText')).toHaveLength(1); // unchanged — no stray edit from the old draft
+  });
+
+  it('cancels a pending batch timer so it never fires after finalize', async () => {
+    adapter.reportToolCall('chris', 'first line');
+    await getDraftState(adapter, 12345)?.creating;
+    adapter.reportToolCall('chris', 'second line'); // arms the batch timer
+
+    adapter.finalizeDraft('chris', 'Stopped by user');
+    await vi.advanceTimersByTimeAsync(0); // flush finalizeDraft's internal edit call
+
+    // Advance well past the batch window — the old timer must not fire a second edit.
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(callsTo(telegramFetch.fn, 'editMessageText')).toHaveLength(1);
+  });
+
+  it('is a no-op when no draft is open for the contact', () => {
+    expect(adapter.finalizeDraft('chris', 'Stopped by user')).toBe(false);
+    expect(telegramFetch.fn).not.toHaveBeenCalled();
+  });
+
+  it('is a no-op for an unknown contact', () => {
+    expect(adapter.finalizeDraft('nobody', 'Stopped by user')).toBe(false);
+    expect(telegramFetch.fn).not.toHaveBeenCalled();
+  });
+
+  function getTypingLoops(a: TelegramAdapter) {
+    return (a as unknown as { typingLoops: Map<number, AbortController> }).typingLoops;
+  }
+
+  it('stops a running typing indicator even when a draft is open', async () => {
+    adapter.startTyping('chris');
+    expect(getTypingLoops(adapter).has(12345)).toBe(true);
+
+    adapter.reportToolCall('chris', 'first line');
+    await getDraftState(adapter, 12345)?.creating;
+
+    adapter.finalizeDraft('chris', 'Stopped by user');
+    expect(getTypingLoops(adapter).has(12345)).toBe(false);
+  });
+
+  it('stops a running typing indicator even when there is no draft to finalize', () => {
+    adapter.startTyping('chris');
+    expect(getTypingLoops(adapter).has(12345)).toBe(true);
+
+    expect(adapter.finalizeDraft('chris', 'Stopped by user')).toBe(false);
+    expect(getTypingLoops(adapter).has(12345)).toBe(false);
   });
 });

@@ -10,6 +10,9 @@ export interface AdapterCapabilities {
   react?: boolean;
   /** Typing indicators */
   typing?: boolean;
+  /** Live tool-call status stream — a single evolving message showing what the
+   * agent is doing mid-turn (E29). Telegram only today. */
+  toolStatus?: boolean;
   /** Can accept slash command registration */
   registerCommands?: boolean;
   /** Maximum message length in characters. Default: 4096 (Telegram limit) */
@@ -54,6 +57,21 @@ export interface AdapterInstance {
   react?(platformMessageId: string, reaction: string): Promise<void>;
   /** Start a typing indicator for a contact. Called when the agent confirms receipt. */
   startTyping?(contactId: string): void;
+  /**
+   * Report a live tool-call status line for a contact's in-flight turn (E29).
+   * Fire-and-forget — called once per non-delivery tool call as the agent
+   * works. No-op unless the adapter declares `capabilities.toolStatus`.
+   */
+  reportToolCall?(contactId: string, text: string): void;
+  /**
+   * Finalize the live tool-call status draft for a contact (E29 / `/stop`):
+   * append `note` as a final line and stop treating the message as an
+   * editable draft, so it persists in the conversation as-is. Returns true
+   * if a draft was open and finalized, false if there was nothing to do —
+   * callers use this to decide whether `note` already reached the user (so
+   * they can skip sending a separate confirmation).
+   */
+  finalizeDraft?(contactId: string, note: string): boolean;
   /**
    * Register slash commands with the platform (e.g. Telegram setMyCommands).
    * Called at startup after all commands are registered. Failure is non-fatal.
