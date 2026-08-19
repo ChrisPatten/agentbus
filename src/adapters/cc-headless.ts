@@ -25,7 +25,7 @@ import { writeFileSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import type Database from 'better-sqlite3';
@@ -35,6 +35,7 @@ import { renderSystemPrompt, expandFileReferences, type PromptContext } from './
 import { assembleMemoryContext, formatLocalDate } from './memory-context.js';
 import type { MessageEnvelope } from '../types/envelope.js';
 import { formatMessagesForSampling } from './cc.js';
+import { formatToolCallSummary } from './tool-call-summary.js';
 
 const configPath = process.env['AGENTBUS_CONFIG'] ?? resolve(process.cwd(), 'config.yaml');
 const config = loadConfig(configPath);
@@ -82,9 +83,19 @@ function resolveConversationId(db: Database.Database, env: MessageEnvelope): str
     .get(env.id) as { conversation_id: string } | undefined;
   if (row) return row.conversation_id;
 
-  const contactId = env.sender.startsWith('contact:') ? env.sender.slice('contact:'.length) : env.sender;
-  const parts = [contactId, env.channel, env.topic].sort();
+  const parts = [normalizeContactId(env.sender), env.channel, env.topic].sort();
   return createHash('sha256').update(parts.join(':')).digest('hex');
+}
+
+/**
+ * Strip the "contact:" prefix if present. `processBatch()` keys turns by the
+ * envelope's raw `sender` ("contact:chris"), but journaling turns key by the
+ * bare `sessions.contact_id` ("chris") — normalizing both to the same form
+ * here means `activeChildren`/`stoppedByUser` (used by `/stop`) find a turn
+ * regardless of which path spawned it.
+ */
+export function normalizeContactId(contactId: string): string {
+  return contactId.startsWith('contact:') ? contactId.slice('contact:'.length) : contactId;
 }
 
 // ── Temp file helpers ─────────────────────────────────────────────────────────
@@ -126,12 +137,70 @@ interface SpawnResult {
   /** True if the agent called reply/send_message during the run (owns delivery). */
   deliveredViaTool: boolean;
   error: string | null;
+  /** True if `/stop` killed this turn. The caller must not treat this as a
+   * failure needing an error reply — the Telegram adapter already finalized
+   * any open draft with a "Stopped by user" note. */
+  stoppedByUser: boolean;
 }
 
 /** MCP tool names (namespaced by the server key) that deliver to the user. */
 const DELIVERY_TOOL_NAMES = new Set(['mcp__agentbus__reply', 'mcp__agentbus__send_message']);
 
 const ERROR_DETAIL_MAX_LENGTH = 500;
+
+/** One tool_use content block from a stream-json `assistant` event, with
+ * delivery-tool detection folded in so extraction and delivery detection
+ * happen in a single pass over `event.message.content`. */
+export interface ExtractedToolCall {
+  name: string;
+  input: Record<string, unknown>;
+  isDelivery: boolean;
+}
+
+/**
+ * Pure. Extracts tool_use blocks from a single stream-json event. Returns []
+ * for any non-`assistant` event or one with no content array — exported so
+ * this can be unit-tested with plain object fixtures, no process spawning.
+ */
+export function extractToolCalls(event: {
+  type?: string;
+  message?: { content?: Array<{ type?: string; name?: string; input?: unknown }> };
+}): ExtractedToolCall[] {
+  if (event.type !== 'assistant' || !Array.isArray(event.message?.content)) return [];
+  const calls: ExtractedToolCall[] = [];
+  for (const block of event.message.content) {
+    if (block.type !== 'tool_use' || !block.name) continue;
+    const input = block.input && typeof block.input === 'object' ? (block.input as Record<string, unknown>) : {};
+    calls.push({ name: block.name, input, isDelivery: DELIVERY_TOOL_NAMES.has(block.name) });
+  }
+  return calls;
+}
+
+/**
+ * Pure. Filters `calls` (one event's worth, in order) down to the ones that
+ * should be reported via onToolCall, given whether delivery has already
+ * happened earlier in the run. A turn doesn't necessarily end the instant
+ * reply/send_message fires — the agent can keep working afterward — but the
+ * user already has their answer by then, so no further tool-call line should
+ * reopen the (already-overwritten) status trail. Once a delivery call is
+ * seen, every call from that point on (including later ones in the same
+ * event) is suppressed.
+ */
+export function selectReportableCalls(
+  calls: ExtractedToolCall[],
+  alreadyDelivered: boolean,
+): { reportable: ExtractedToolCall[]; delivered: boolean } {
+  let delivered = alreadyDelivered;
+  const reportable: ExtractedToolCall[] = [];
+  for (const call of calls) {
+    if (call.isDelivery) {
+      delivered = true;
+    } else if (!delivered) {
+      reportable.push(call);
+    }
+  }
+  return { reportable, delivered };
+}
 
 /** Handle returned per instance for the bus to drive journaling turns. */
 export interface HeadlessHandle {
@@ -145,6 +214,12 @@ export interface HeadlessHandle {
    * whose DB session row has already been closed (used by `/clear`).
    */
   journalResumeId(opts: { claudeSessionId: string; contactId: string; channel: string }): void;
+  /**
+   * Kill the in-flight `claude -p` turn for `contactId`, if one is running
+   * (used by `/stop`). Returns true if a turn was found and killed, false if
+   * none was running.
+   */
+  stopTurn(contactId: string): boolean;
 }
 
 /**
@@ -160,6 +235,11 @@ class HeadlessInstance {
   private readonly busBaseUrl: string;
   private readonly label: string;
   private readonly queues = new Map<string, Promise<void>>();
+  /** In-flight `claude -p` child processes, keyed by contactId. Used by `/stop`. */
+  private readonly activeChildren = new Map<string, ChildProcess>();
+  /** contactIds whose in-flight turn was killed via `/stop` — consulted once,
+   * by that turn's own close handler, to skip the normal error-reply path. */
+  private readonly stoppedByUser = new Set<string>();
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
   private shuttingDown = false;
 
@@ -188,6 +268,8 @@ class HeadlessInstance {
     systemPromptPath: string,
     mcpConfigPath: string,
     resumeId: string | null,
+    contactId: string,
+    onToolCall?: (call: { name: string; input: Record<string, unknown> }) => void,
   ): Promise<SpawnResult> {
     const args = [
       '-p', prompt,
@@ -204,6 +286,10 @@ class HeadlessInstance {
       args.push('--resume', resumeId);
     }
 
+    // Normalized so /stop's stopTurn() finds this turn regardless of which
+    // contactId format the caller used (see normalizeContactId).
+    const trackingId = normalizeContactId(contactId);
+
     return new Promise((resolvePromise) => {
       // cwd drives which CLAUDE.md hierarchy claude -p auto-loads into context.
       // CLAUDE_CODE_DISABLE_AUTO_MEMORY: the adapter already injects the agent's
@@ -215,6 +301,7 @@ class HeadlessInstance {
         cwd: this.workingDir,
         env: { ...process.env, CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' },
       });
+      this.activeChildren.set(trackingId, child);
 
       let claudeSessionId: string | null = null;
       let resultText: string | null = null;
@@ -236,21 +323,25 @@ class HeadlessInstance {
             result?: string;
             is_error?: boolean;
             subtype?: string;
-            message?: { content?: Array<{ type?: string; name?: string }> };
+            message?: { content?: Array<{ type?: string; name?: string; input?: unknown }> };
           };
 
           if (event.session_id && !claudeSessionId) {
             claudeSessionId = event.session_id;
           }
 
-          // Watch assistant turns for reply/send_message tool calls — when the
-          // agent delivers via a tool, the adapter must NOT also post stdout.
-          if (event.type === 'assistant' && Array.isArray(event.message?.content)) {
-            for (const block of event.message!.content!) {
-              if (block.type === 'tool_use' && block.name && DELIVERY_TOOL_NAMES.has(block.name)) {
-                deliveredViaTool = true;
-              }
-            }
+          // Watch assistant turns for tool calls: reply/send_message means the
+          // agent delivers via a tool (the adapter must NOT also post stdout);
+          // every other tool call is surfaced via onToolCall for E29's live
+          // status stream (a no-op when no callback is registered) — but only
+          // up to the point of delivery. The agent can keep working after
+          // calling reply/send_message; once delivered, further tool calls
+          // must not reopen the status trail the user already saw replaced
+          // by their answer.
+          const { reportable, delivered } = selectReportableCalls(extractToolCalls(event), deliveredViaTool);
+          deliveredViaTool = delivered;
+          for (const call of reportable) {
+            onToolCall?.({ name: call.name, input: call.input });
           }
 
           if (event.type === 'result') {
@@ -273,13 +364,18 @@ class HeadlessInstance {
 
       child.on('close', (code) => {
         rl.close();
-        if (spawnError) {
-          resolvePromise({ claudeSessionId, resultText: null, deliveredViaTool, error: spawnError });
+        if (this.activeChildren.get(trackingId) === child) this.activeChildren.delete(trackingId);
+        const wasStopped = this.stoppedByUser.delete(trackingId);
+
+        if (wasStopped) {
+          resolvePromise({ claudeSessionId, resultText: null, deliveredViaTool, error: null, stoppedByUser: true });
+        } else if (spawnError) {
+          resolvePromise({ claudeSessionId, resultText: null, deliveredViaTool, error: spawnError, stoppedByUser: false });
         } else if (code !== 0 && resultText === null) {
           const detail = errorOutput.slice(-500).trim() || `exit code ${code}`;
-          resolvePromise({ claudeSessionId, resultText: null, deliveredViaTool, error: detail });
+          resolvePromise({ claudeSessionId, resultText: null, deliveredViaTool, error: detail, stoppedByUser: false });
         } else {
-          resolvePromise({ claudeSessionId, resultText, deliveredViaTool, error: null });
+          resolvePromise({ claudeSessionId, resultText, deliveredViaTool, error: null, stoppedByUser: false });
         }
       });
     });
@@ -299,6 +395,43 @@ class HeadlessInstance {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ contact_id: contactId }),
     }).catch(() => {});
+  }
+
+  /**
+   * Report a formatted tool-call status line to the source adapter (E29).
+   * Fire-and-forget — no-ops server-side for adapters without the
+   * `toolStatus` capability. Email channels have no equivalent primitive, so
+   * skip the call entirely, matching startTyping's existing email skip.
+   */
+  private reportToolCall(channel: string, contactId: string, text: string): void {
+    if (channel === 'email' || channel.startsWith('email:')) return;
+    fetch(`${this.busBaseUrl}/api/v1/adapters/${channel}/tool-status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contact_id: contactId, text }),
+    }).catch(() => {});
+  }
+
+  /**
+   * Kill the in-flight `claude -p` turn for `contactId`, if one is running
+   * (`/stop`). Marks the contact as user-stopped first so the turn's own
+   * close handler resolves with `stoppedByUser: true` instead of treating
+   * the kill as a crash needing an error reply.
+   *
+   * Uses SIGKILL, not SIGTERM: `claude`'s own interrupt handling treats a
+   * catchable signal as "wrap up gracefully," which in practice re-prompted
+   * itself with a bare "Continue from where you left off" instead of
+   * actually stopping — the opposite of what `/stop` is for. SIGKILL cannot
+   * be caught, so the whole turn dies outright and the user, not the agent,
+   * decides what happens next.
+   */
+  stopTurn(contactId: string): boolean {
+    const trackingId = normalizeContactId(contactId);
+    const child = this.activeChildren.get(trackingId);
+    if (!child) return false;
+    this.stoppedByUser.add(trackingId);
+    child.kill('SIGKILL');
+    return true;
   }
 
   private async deliverResponse(original: MessageEnvelope, resultText: string): Promise<void> {
@@ -348,6 +481,7 @@ class HeadlessInstance {
     channel: string;
     prompt: string;
     resumeId: string | null;
+    onToolCall?: (call: { name: string; input: Record<string, unknown> }) => void;
   }): Promise<SpawnResult> {
     const now = new Date();
     const ctx: PromptContext = {
@@ -370,7 +504,7 @@ class HeadlessInstance {
     const mcpPath = writeTmp(JSON.stringify(buildMcpConfig()), '.json');
 
     try {
-      const result = await this.invokeClaude(opts.prompt, spPath, mcpPath, opts.resumeId);
+      const result = await this.invokeClaude(opts.prompt, spPath, mcpPath, opts.resumeId, opts.contactId, opts.onToolCall);
       // Persist the claude_session_id so subsequent turns --resume the same one.
       if (result.claudeSessionId && opts.session) {
         try {
@@ -404,14 +538,23 @@ class HeadlessInstance {
     // the Stage-85 <memory> block in the user message to avoid double injection.
     const prompt = formatMessagesForSampling(envelopes, { includeMemoryContext: false });
 
-    const { resultText, deliveredViaTool, error } = await this.runClaudeTurn({
+    const { resultText, deliveredViaTool, error, stoppedByUser } = await this.runClaudeTurn({
       db,
       session,
       contactId,
       channel,
       prompt,
       resumeId,
+      onToolCall: (call) =>
+        this.reportToolCall(channel, contactId, formatToolCallSummary(call.name, call.input)),
     });
+
+    if (stoppedByUser) {
+      // `/stop` killed this turn. The source adapter (Telegram) has already
+      // finalized any open draft with a "Stopped by user" note — nothing
+      // further to deliver, and definitely not the normal error reply.
+      return;
+    }
 
     // The agent owns delivery via the reply/send_message tools. Only the adapter
     // steps in when the agent delivered nothing through a tool:
@@ -569,6 +712,7 @@ class HeadlessInstance {
     return {
       runJournalingTurn: (conversationId: string) => this.runJournalingTurn(conversationId, db),
       journalResumeId: (opts) => this.journalResumeId(db, opts),
+      stopTurn: (contactId: string) => this.stopTurn(contactId),
     };
   }
 

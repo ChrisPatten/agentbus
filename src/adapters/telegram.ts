@@ -42,6 +42,14 @@ const BACKOFF_INITIAL_MS = 1000;
 const BACKOFF_MAX_MS = 30_000;
 const LOOP_RESTART_DELAY_MS = 5000;
 
+// ── Live tool-call status stream (E29) ───────────────────────────────────────
+
+/** How long to batch tool-call lines before issuing a single editMessageText. */
+const DRAFT_BATCH_WINDOW_MS = 1000;
+/** Comfortably under Telegram's 4096-char hard limit, leaving overhead margin. */
+const DRAFT_MAX_CHARS = 3500;
+const DRAFT_TRUNCATION_NOTICE = '… (earlier steps omitted)';
+
 /**
  * Emoji that Telegram's Bot API accepts for sendReaction.
  * Stored without variation selectors (U+FE0F) — that's the form the API expects.
@@ -133,6 +141,17 @@ interface TelegramApiResponse<T> {
   description?: string;
 }
 
+/** Per-chat state for the live tool-call status stream (E29). */
+interface DraftState {
+  /** null while the initial sendMessage (draft creation) is in flight. */
+  messageId: number | null;
+  lines: string[];
+  timer: ReturnType<typeof setTimeout> | null;
+  /** Resolves when the initial sendMessage settles — send() awaits this to
+   * close the race where final delivery arrives before the draft exists. */
+  creating: Promise<void> | null;
+}
+
 // ── Dependencies for inbound pipeline processing ─────────────────────────────
 
 export interface TelegramAdapterDeps {
@@ -186,6 +205,31 @@ export function splitMessage(text: string, maxLen: number = MAX_MESSAGE_LENGTH):
   return parts;
 }
 
+/**
+ * Build the visible text for a tool-call trail (E29), dropping the oldest
+ * whole lines (never mid-line) until it fits `maxChars`, prefixing a
+ * truncation notice when anything was dropped.
+ */
+export function buildDraftTrail(lines: string[], maxChars: number = DRAFT_MAX_CHARS): { text: string; truncated: boolean } {
+  if (lines.length === 0) return { text: '', truncated: false };
+
+  const kept = [...lines];
+  let truncated = false;
+  const render = (): string => (truncated ? `${DRAFT_TRUNCATION_NOTICE}\n${kept.join('\n')}` : kept.join('\n'));
+
+  while (kept.length > 1 && render().length > maxChars) {
+    kept.shift();
+    truncated = true;
+  }
+
+  let text = render();
+  // Defensive last resort: formatToolCallSummary bounds individual fields, so
+  // a single line should never alone exceed maxChars — but never exceed the
+  // budget regardless.
+  if (text.length > maxChars) text = `${text.slice(0, maxChars - 1)}…`;
+  return { text, truncated };
+}
+
 // ── Image attachment helpers (E17) ───────────────────────────────────────────
 
 /** Pick the highest-resolution entry from a Telegram photo array. */
@@ -227,6 +271,8 @@ export class TelegramAdapter implements AdapterInstance {
   private consecutiveFailures = 0;
   /** Per-chat typing indicator loops. Key is the Telegram chat_id. */
   private readonly typingLoops = new Map<number, AbortController>();
+  /** Per-chat live tool-call status draft messages (E29). Key is the Telegram chat_id. */
+  private readonly draftMessages = new Map<number, DraftState>();
 
   constructor(deps: TelegramAdapterDeps) {
     this.id = deps.instanceName ? `telegram:${deps.instanceName}` : 'telegram';
@@ -237,6 +283,7 @@ export class TelegramAdapter implements AdapterInstance {
       react: true,
       markRead: false,
       typing: true,
+      toolStatus: true,
       registerCommands: true,
       channels: [this.id],
     };
@@ -300,6 +347,10 @@ export class TelegramAdapter implements AdapterInstance {
     this.stopping = true;
     for (const controller of this.typingLoops.values()) controller.abort();
     this.typingLoops.clear();
+    for (const state of this.draftMessages.values()) {
+      if (state.timer) clearTimeout(state.timer);
+    }
+    this.draftMessages.clear();
     this.stopController.abort();
   }
 
@@ -325,6 +376,31 @@ export class TelegramAdapter implements AdapterInstance {
   }
 
   // ── AdapterInstance send ──────────────────────────────────────────────────
+
+  /**
+   * Sends (`sendMessage`) or edits (`editMessageText`, when `editMessageId`
+   * is given) with the same Markdown-then-plain-text-on-400 retry either way.
+   * Returns the resulting message_id (the edit target itself, for edits).
+   */
+  private async deliverText(chatId: number, text: string, editMessageId?: number): Promise<number> {
+    const method = editMessageId ? 'editMessageText' : 'sendMessage';
+    const params: Record<string, unknown> = editMessageId
+      ? { chat_id: chatId, message_id: editMessageId, text }
+      : { chat_id: chatId, text };
+
+    try {
+      const result = await this.callTelegram<TelegramMessage>(method, { ...params, parse_mode: 'Markdown' });
+      return editMessageId ?? result.message_id;
+    } catch (err: unknown) {
+      // Retry without parse_mode if Telegram rejects due to malformed markdown (HTTP 400)
+      if ((err as { status?: number }).status === 400) {
+        console.error(`${this.tag} Markdown parse error for ${method}, retrying plain text`);
+        const result = await this.callTelegram<TelegramMessage>(method, params);
+        return editMessageId ?? result.message_id;
+      }
+      throw err;
+    }
+  }
 
   async send(envelope: MessageEnvelope): Promise<DeliveryResult> {
     const contactId = envelope.recipient.startsWith('contact:')
@@ -354,46 +430,50 @@ export class TelegramAdapter implements AdapterInstance {
     // Stop the persistent typing loop for this chat now that we're delivering
     this.stopTypingIndicator(chatId);
 
+    // Overwrite-on-delivery (E29): a pending tool-call trail for this chat is
+    // torn down unconditionally below — success or fallback — so it never
+    // leaks across turns. When the draft's own creation is still in flight,
+    // wait for it so a very-fast turn can't leave two messages behind.
+    const draft = this.draftMessages.get(chatId);
+    if (draft?.timer) clearTimeout(draft.timer);
+    this.draftMessages.delete(chatId);
+
     let sentParts = 0;
     let platformMessageId: string | undefined;
+    let firstPartHandled = false;
 
-    for (let i = 0; i < parts.length; i++) {
+    if (draft) {
+      if (draft.creating) await draft.creating.catch(() => {});
+      if (draft.messageId !== null) {
+        try {
+          const messageId = await this.deliverText(chatId, parts[0]!, draft.messageId);
+          sentParts = 1;
+          platformMessageId = String(messageId);
+          firstPartHandled = true;
+        } catch (err) {
+          console.warn(
+            `${this.tag} Draft overwrite failed for chat ${chatId}, falling back to sendMessage: ${String(err)}`,
+          );
+        }
+      }
+    }
+
+    for (let i = firstPartHandled ? 1 : 0; i < parts.length; i++) {
       if (i > 0) await this.sleep(200);
 
       try {
-        const result = await this.callTelegram<TelegramMessage>('sendMessage', {
-          chat_id: chatId,
-          text: parts[i],
-          parse_mode: 'Markdown',
-        });
+        const messageId = await this.deliverText(chatId, parts[i]!);
         sentParts++;
         if (i === parts.length - 1) {
-          platformMessageId = String(result.message_id);
+          platformMessageId = String(messageId);
         }
-      } catch (err: unknown) {
-        // Retry without parse_mode if Telegram rejects due to malformed markdown (HTTP 400)
-        const status = (err as { status?: number }).status;
-        if (status === 400) {
-          console.error(
-            `${this.tag} Markdown parse error for part ${i + 1}/${parts.length}, retrying plain text`,
-          );
-          const result = await this.callTelegram<TelegramMessage>('sendMessage', {
-            chat_id: chatId,
-            text: parts[i],
-          });
-          sentParts++;
-          if (i === parts.length - 1) {
-            platformMessageId = String(result.message_id);
-          }
-        } else {
-            const prefix =
-            sentParts > 0 ? `Partial delivery (${sentParts}/${parts.length} parts sent): ` : '';
-          return {
-            success: false,
-            error: `${prefix}${String(err)}`,
-            retryable: true,
-          };
-        }
+      } catch (err) {
+        const prefix = sentParts > 0 ? `Partial delivery (${sentParts}/${parts.length} parts sent): ` : '';
+        return {
+          success: false,
+          error: `${prefix}${String(err)}`,
+          retryable: true,
+        };
       }
     }
 
@@ -485,6 +565,131 @@ export class TelegramAdapter implements AdapterInstance {
       controller.abort();
       this.typingLoops.delete(chatId);
     }
+  }
+
+  // ── AdapterInstance reportToolCall (E29) ──────────────────────────────────
+
+  /**
+   * Called by bus-core once per non-delivery tool call during an in-flight
+   * turn. Appends `text` as a line to a single evolving Telegram message for
+   * the contact's chat, batching edits to ~1/sec (see appendToolCallLine).
+   */
+  reportToolCall(contactId: string, text: string): void {
+    const id = contactId.startsWith('contact:') ? contactId.slice('contact:'.length) : contactId;
+    const chatId = this.contactChatIdMap.get(id);
+    if (chatId) {
+      this.appendToolCallLine(chatId, text);
+    } else {
+      console.warn(`${this.tag} reportToolCall: no chat_id for contact "${contactId}"`);
+    }
+  }
+
+  /**
+   * Append a tool-call line for `chatId`. The map check-and-reserve is
+   * synchronous (no `await` in between) so two calls arriving before the
+   * first `sendMessage` resolves can never both see "no draft" and both
+   * create one.
+   */
+  private appendToolCallLine(chatId: number, line: string): void {
+    const state = this.draftMessages.get(chatId);
+    if (state) {
+      state.lines.push(line);
+      if (state.messageId !== null) this.scheduleDraftFlush(chatId, state);
+      // else: creation still in flight — createDraftMessage's post-await
+      // check picks up this line once the initial send resolves.
+      return;
+    }
+
+    const fresh: DraftState = { messageId: null, lines: [line], timer: null, creating: null };
+    this.draftMessages.set(chatId, fresh);
+    fresh.creating = this.createDraftMessage(chatId, fresh);
+  }
+
+  /** Sends the first line as a new message and records its message_id. */
+  private async createDraftMessage(chatId: number, state: DraftState): Promise<void> {
+    try {
+      const messageId = await this.deliverText(chatId, state.lines[0]!);
+      state.messageId = messageId;
+      if (state.lines.length > 1) {
+        // More lines arrived while the create was in flight — the sent
+        // message only shows lines[0]; flush now to catch it up.
+        this.scheduleDraftFlush(chatId, state);
+      }
+    } catch (err) {
+      console.warn(`${this.tag} Failed to create draft message for chat ${chatId}: ${String(err)}`);
+      // Nothing to track — the next tool call starts a fresh draft.
+      if (this.draftMessages.get(chatId) === state) this.draftMessages.delete(chatId);
+    } finally {
+      state.creating = null;
+    }
+  }
+
+  /** Arms a batching timer for `chatId` if one isn't already pending. Anchored
+   * on the first pending line (not a rolling debounce) so constant tool-call
+   * traffic can never defer a flush forever. */
+  private scheduleDraftFlush(chatId: number, state: DraftState): void {
+    if (state.timer) return;
+    state.timer = setTimeout(() => {
+      state.timer = null;
+      void this.flushDraft(chatId);
+    }, DRAFT_BATCH_WINDOW_MS);
+  }
+
+  /** Edits the draft message with the current (possibly truncated) trail. */
+  private async flushDraft(chatId: number): Promise<void> {
+    const state = this.draftMessages.get(chatId);
+    if (!state || state.messageId === null) return; // cleared/overwritten mid-flight
+    const { text } = buildDraftTrail(state.lines);
+    try {
+      await this.deliverText(chatId, text, state.messageId);
+    } catch (err) {
+      // Leave state as-is — the next scheduled flush retries with the fuller
+      // trail; if delivery happens first, overwrite-on-delivery still lands.
+      console.warn(`${this.tag} Draft edit failed for chat ${chatId}: ${String(err)}`);
+    }
+  }
+
+  // ── AdapterInstance finalizeDraft (/stop) ─────────────────────────────────
+
+  /**
+   * Called when `/stop` cancels a contact's in-flight turn. Appends `note` as
+   * a final line to the contact's open draft (if any) and stops treating it
+   * as a draft — no future tool call or delivery will edit it again, so it
+   * persists in the conversation exactly as left. Returns false (no-op) if no
+   * draft is currently open — the caller knows `note` never reached the user
+   * and should fall back to its own confirmation message.
+   */
+  finalizeDraft(contactId: string, note: string): boolean {
+    const id = contactId.startsWith('contact:') ? contactId.slice('contact:'.length) : contactId;
+    const chatId = this.contactChatIdMap.get(id);
+    if (!chatId) return false;
+
+    // /stop is a hard stop — the typing indicator must not keep blinking for
+    // up to its 2-minute safety timeout after the turn has already been
+    // killed, whether or not a draft was open to finalize.
+    this.stopTypingIndicator(chatId);
+
+    const state = this.draftMessages.get(chatId);
+    if (!state) return false;
+
+    // Reserve immediately — a tool call arriving after this point must start
+    // a brand-new draft rather than touch the one being finalized.
+    if (state.timer) clearTimeout(state.timer);
+    this.draftMessages.delete(chatId);
+    state.lines.push(note);
+
+    void (async () => {
+      if (state.creating) await state.creating.catch(() => {});
+      if (state.messageId === null) return; // draft never actually got created
+      const { text } = buildDraftTrail(state.lines);
+      try {
+        await this.deliverText(chatId, text, state.messageId);
+      } catch (err) {
+        console.warn(`${this.tag} Failed to finalize draft for chat ${chatId}: ${String(err)}`);
+      }
+    })();
+
+    return true;
   }
 
   // ── Telegram API helper ──────────────────────────────────────────────────

@@ -17,6 +17,7 @@ Slash commands let you operate AgentBus from any connected channel without SSH a
 | `/forget <contact_id>` | Expire all memory records for a contact | `/forget chris` |
 | `/retry_summary <session_id>` | Re-queue summarization for a failed session | `/retry_summary aaaabbbb` |
 | `/clear` | Start a fresh session; journal the previous one in the background | `/clear` |
+| `/stop` | Cancel the current in-flight turn | `/stop` |
 
 ### `/status`
 
@@ -159,6 +160,28 @@ Scope and edge cases:
 - **Headless not running.** On an MCP-only deployment the session is still closed, but there is no background memory pass (the reply says so).
 
 This command is most useful for headless agents (see [CC_HEADLESS_ADAPTER.md](./CC_HEADLESS_ADAPTER.md)); the journaling step is a no-op pass-through when the headless adapter isn't running.
+
+### `/stop`
+
+Cancels the sender's in-flight `claude -p` turn for a headless (`cc-headless`) agent — useful when a turn is stuck, taking far longer than expected, or you simply want to interrupt it. Resolves the owning headless instance the same way `/clear` does (by the active session's `agent_id`, falling back to the sole registered instance for sessions that predate `agent_id` tracking), then kills that instance's in-flight child process for the sender with `SIGKILL`.
+
+**Hard stop, not a graceful interrupt.** `SIGTERM` is deliberately not used: `claude`'s own interrupt handling treats a catchable signal as "wrap up," which in practice caused it to silently re-prompt itself with a bare "Continue from where you left off" instead of actually stopping — the opposite of what `/stop` is for. `SIGKILL` cannot be caught, so the whole turn dies outright. The user decides what happens next, not the agent.
+
+If nothing is running for the sender, or the headless adapter isn't running at all:
+```
+/stop
+-> No active turn to stop.
+```
+
+**Telegram-only side effect:** if the source channel is Telegram and a live tool-call status draft is open (see [TELEGRAM_ADAPTER.md](./TELEGRAM_ADAPTER.md#live-tool-call-status-stream-e29)), `/stop` appends a "Stopped by user" line to it and finalizes it in place — the message persists in the chat as-is rather than being silently abandoned or later overwritten. **That finalized line is the only confirmation you get** — `/stop` sends no separate reply in this case, to avoid showing the same "stopped" information twice. On any other channel (or when no draft was open, e.g. the turn hadn't made a tool call yet), `/stop` falls back to a plain text confirmation instead:
+```
+/stop
+-> Stopped the current turn.
+```
+
+**No result is delivered for a stopped turn.** Once killed, the turn does not fall back to the configured `error_reply` — the cancellation confirmation (finalized draft, or the fallback message above) is the only feedback. On Telegram, the persistent typing indicator is also stopped immediately as part of cancelling — it does not keep blinking for its usual 2-minute safety timeout after the turn has already been killed.
+
+**Reaches journaling turns too.** A silent background journaling turn (fired on session close, or by `/clear`) runs through the same per-contact queue as normal turns, so a stuck journaling turn blocks new messages exactly like a stuck normal turn would. `/stop` can cancel either kind — it doesn't matter which one is currently occupying the contact's turn slot.
 
 ---
 

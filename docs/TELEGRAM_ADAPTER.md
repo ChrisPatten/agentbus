@@ -173,6 +173,75 @@ Outbound delivery is handled by the bus-core delivery worker, which calls `adapt
 
 ---
 
+## Live Tool-Call Status Stream (E29)
+
+While a headless agent works on a turn, `TelegramAdapter` surfaces its tool
+calls live as a single evolving message, replaced by the final answer once
+delivered — instead of just a typing indicator.
+
+1. `cc-headless.ts` already runs `claude -p --output-format stream-json` and
+   parses the resulting JSONL stream. For every `tool_use` block that isn't
+   the `reply`/`send_message` delivery tools, it formats a short summary
+   (`formatToolCallSummary`, `src/adapters/tool-call-summary.ts`) and POSTs it
+   to `POST /api/v1/adapters/:id/tool-status` — the same HTTP-bridge pattern
+   the existing typing indicator uses (`POST /api/v1/adapters/:id/typing`).
+2. **Summary derivation:** `Bash` and `Agent` (subagent launch) tool calls
+   carry their own required `description` field, used verbatim (`🐚 {description}`,
+   `🤖 {description}`) — zero synthesis. `Read`, `Edit`, `Write`, `Grep`,
+   `WebFetch`, and `WebSearch` render via a small fixed per-tool template
+   (e.g. `Read` → `📖 Reading {file_path}`). Any other tool name, or a covered
+   tool missing its expected field, falls back to the identical generic line:
+   `⚙️ Running {name}`.
+3. **Subagent internals are never shown.** An `Agent` tool call renders as one
+   collapsed line — nothing about what the subagent does internally reaches
+   the trail.
+4. **Draft-message lifecycle:** the first tool-call line sends a new message
+   (`sendMessage`) and records its `message_id`; every subsequent line is
+   appended and the message is updated via `editMessageText`. Edits are
+   batched to roughly one per second per chat — rapid-fire tool calls
+   accumulate into a single edit rather than one API call each.
+5. **Length cap:** if the accumulated trail would exceed a configured
+   character budget (comfortably under Telegram's 4096-char limit), the
+   oldest whole lines are dropped from the visible text (never mid-line),
+   prefixed with `… (earlier steps omitted)`.
+6. **Overwrite on delivery:** when the agent's answer is ready, `send()`
+   overwrites the same message with the final text via `editMessageText`
+   instead of sending a new one — no separate draft/final messages. If the
+   overwrite edit fails (e.g. the draft was deleted), it falls back to a
+   fresh `sendMessage` so the answer is never lost. A turn with no
+   qualifying tool calls behaves exactly as before: one message sent once,
+   no draft, no edits.
+7. **Non-goals:** token-level text streaming (`--include-partial-messages`)
+   and surfacing thinking-trace content are both explicitly deferred — see
+   the E29 epic's Notes (`_bmad-output/epics/E29-telegram-tool-call-status-stream.md`)
+   for why (Telegram's own edit-rate limits already approximate this
+   feature's batching cadence, and the main agent's own thinking-block shape
+   is unverified against this pipeline).
+8. This feature is Telegram-only: the `onToolCall` callback added to
+   `invokeClaude()` is generic, but only a Telegram-backed adapter registers
+   `capabilities.toolStatus` — other channels see no behavior change.
+9. **`/stop` finalizes an open draft instead of abandoning it.** Cancelling
+   a turn (see [SLASH_COMMANDS.md](./SLASH_COMMANDS.md#stop)) calls
+   `TelegramAdapter.finalizeDraft(contactId, note)`: any pending batch timer
+   is cancelled, `note` (e.g. "Stopped by user") is appended as a final line,
+   and the message is edited one last time before being dropped from the
+   draft map — it persists in the chat exactly as left, and is never touched
+   by a later edit or overwrite. `finalizeDraft` returns `true` when it found
+   and finalized a draft, `false` when there was nothing open — `/stop`'s
+   command handler uses this to skip sending its own generic confirmation
+   reply when the finalized draft already told the user, so cancelling a
+   turn never produces two separate "stopped" messages. `finalizeDraft` also
+   unconditionally stops the persistent typing indicator for the chat
+   (whether or not a draft was open) — otherwise it would keep blinking for
+   up to its 2-minute safety timeout after the turn was already killed.
+
+**Known limitation:** if bus-core crashes mid-turn, a draft message can be
+left showing a stale tool-call trail on Telegram forever (the same exposure
+the persistent typing indicator already has, just visually stickier). No
+crash-recovery/orphan-cleanup exists for this today.
+
+---
+
 ## Slash Commands
 
 At startup, the adapter calls `setMyCommands` to register a menu of slash commands in Telegram:
@@ -193,6 +262,7 @@ This causes Telegram to display autocomplete suggestions when users type `/` in 
 | Capability | Supported |
 |---|---|
 | Typing indicator | Yes — persistent loop, stays active while agent works |
+| Live tool-call status stream | Yes — see [Live Tool-Call Status Stream](#live-tool-call-status-stream-e29) |
 | Read receipts | No |
 | Slash command registration | Yes (`setMyCommands`) |
 | Reactions | Yes (`sendReaction` with emoji) |

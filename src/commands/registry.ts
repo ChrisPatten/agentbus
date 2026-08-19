@@ -49,7 +49,9 @@ export interface SlashCommandContext {
 
 /** Response returned by a command handler */
 export interface CommandResponse {
-  body: string;
+  /** Omit to send no reply at all — e.g. when a side effect (like finalizing
+   * a Telegram draft) already gave the user their confirmation. */
+  body?: string;
   metadata?: Record<string, unknown>;
 }
 
