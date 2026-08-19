@@ -10,6 +10,8 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-08-18
+
 ### Added
 - **Telegram group forum topics & reply context (E28).** A topic-enabled
   Telegram group the bot is added to becomes its own channel
@@ -347,7 +349,8 @@ Baseline release. Core bus, pipeline, adapters, memory, scheduling.
 - Built-in slash commands + plugin command registry. (E6)
 - Scheduled messages (cron + one-shot) via background scheduler. (E18)
 
-[Unreleased]: https://github.com/ChrisPatten/agentbus/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/ChrisPatten/agentbus/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/ChrisPatten/agentbus/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/ChrisPatten/agentbus/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/ChrisPatten/agentbus/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/ChrisPatten/agentbus/compare/v0.7.0...v0.7.1
