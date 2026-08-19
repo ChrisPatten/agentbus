@@ -169,6 +169,45 @@ describe('formatMessagesForSampling', () => {
     expect(env.metadata?.['memory_context']).toBe(context);
   });
 
+  // ── injected_topic_context (E28, create_telegram_topic) ──────────────────────
+
+  it('prepends injected_topic_context when present in first envelope metadata', () => {
+    const env = makeEnvelope({ metadata: { injected_topic_context: 'Track Wanda birthday planning here' } });
+    const result = formatMessagesForSampling([env]);
+    expect(result.startsWith('[Context for this new topic')).toBe(true);
+    expect(result).toContain('Track Wanda birthday planning here');
+    expect(result).toContain('New message from contact:alice');
+  });
+
+  it('does not prepend when injected_topic_context is absent', () => {
+    const result = formatMessagesForSampling([makeEnvelope()]);
+    expect(result.startsWith('New message')).toBe(true);
+  });
+
+  it('does not double-inject injected_topic_context if called twice on the same envelope', () => {
+    const env = makeEnvelope({ metadata: { injected_topic_context: 'seed context' } });
+    const first = formatMessagesForSampling([env]);
+    const second = formatMessagesForSampling([env]);
+
+    expect(first).toContain('seed context');
+    expect(second.startsWith('New message')).toBe(true);
+    expect(second).not.toContain('seed context');
+  });
+
+  it('applies injected_topic_context even when includeMemoryContext is false (headless path)', () => {
+    const env = makeEnvelope({ metadata: { injected_topic_context: 'seed context' } });
+    const result = formatMessagesForSampling([env], { includeMemoryContext: false });
+    expect(result).toContain('seed context');
+  });
+
+  it('applies both memory_context and injected_topic_context together, memory first', () => {
+    const memory = '<memory contact="alice">\n## Known facts\n</memory>';
+    const env = makeEnvelope({ metadata: { memory_context: memory, injected_topic_context: 'seed context' } });
+    const result = formatMessagesForSampling([env]);
+    expect(result.indexOf(memory)).toBe(0);
+    expect(result.indexOf('seed context')).toBeGreaterThan(result.indexOf(memory));
+  });
+
   // ── image attachments ────────────────────────────────────────────────────────
 
   it('appends a single [Image: path] line after the body', () => {
@@ -317,5 +356,37 @@ describe('formatMessagesForSampling', () => {
     });
     const result = formatMessagesForSampling([env]);
     expect(result).toContain('[removed reaction ❤ to message 555:42]');
+  });
+
+  // ── quoted-reply context (E28) ────────────────────────────────────────────────
+
+  it('renders a [Replying to <sender>: "<text>"] line before the body when quoted_message is present', () => {
+    const env = makeEnvelope({
+      metadata: { quoted_message: { platform_message_id: '555:1', sender_name: 'Peggy', text: 'Original message' } },
+    });
+    const result = formatMessagesForSampling([env]);
+    expect(result).toContain('[Replying to Peggy: "Original message"]\nHello!');
+  });
+
+  it('falls back to a generic label when quoted_message has no sender_name', () => {
+    const env = makeEnvelope({
+      metadata: { quoted_message: { platform_message_id: '555:1', text: 'Original message' } },
+    });
+    const result = formatMessagesForSampling([env]);
+    expect(result).toContain('[Replying to someone: "Original message"]');
+  });
+
+  it('does not render a quoted line when quoted_message is absent', () => {
+    const result = formatMessagesForSampling([makeEnvelope()]);
+    expect(result).not.toContain('Replying to');
+  });
+
+  it('does not affect reaction rendering when quoted_message is absent', () => {
+    const env = makeEnvelope({
+      payload: { type: 'reaction', emoji: '👍', removed: false, target_message_id: '555:42' },
+    });
+    const result = formatMessagesForSampling([env]);
+    expect(result).toContain('[reacted 👍 to message 555:42]');
+    expect(result).not.toContain('Replying to');
   });
 });

@@ -29,13 +29,10 @@ describe('send_message tool', () => {
   });
 
   it('sends a message when channel is valid', async () => {
-    // First call: GET /api/v1/adapters (channel validation)
+    // First call: GET /api/v1/adapters/resolve (channel validation)
     fetchMock.mockResolvedValueOnce({
       ok: true,
-      json: async () => ({
-        ok: true,
-        adapters: [{ id: 'telegram', channels: ['telegram'] }],
-      }),
+      json: async () => ({ ok: true, exists: true }),
     });
     // Second call: POST /api/v1/messages
     fetchMock.mockResolvedValueOnce({
@@ -63,7 +60,7 @@ describe('send_message tool', () => {
   it('returns error for unknown channel', async () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,
-      json: async () => ({ ok: true, adapters: [] }),
+      json: async () => ({ ok: true, exists: false }),
     });
 
     const client = await makeClient();
@@ -81,7 +78,7 @@ describe('send_message tool', () => {
   it('passes priority: high through to bus unmodified', async () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,
-      json: async () => ({ ok: true, adapters: [{ id: 'telegram', channels: ['telegram'] }] }),
+      json: async () => ({ ok: true, exists: true }),
     });
     fetchMock.mockResolvedValueOnce({
       ok: true,
@@ -104,7 +101,7 @@ describe('send_message tool', () => {
   it('passes priority: urgent through to bus unmodified', async () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,
-      json: async () => ({ ok: true, adapters: [{ id: 'telegram', channels: ['telegram'] }] }),
+      json: async () => ({ ok: true, exists: true }),
     });
     fetchMock.mockResolvedValueOnce({
       ok: true,
@@ -124,6 +121,57 @@ describe('send_message tool', () => {
     await client.close();
   });
 
+  it('defaults topic to "general" when omitted', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ ok: true, exists: true }),
+    });
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ ok: true, id: 'msg-topic-default' }),
+    });
+
+    const client = await makeClient();
+    await client.callTool({
+      name: 'send_message',
+      arguments: { to: 'contact:alice', channel: 'telegram', body: 'hi' },
+    });
+
+    const postCall = fetchMock.mock.calls[1]! as [string, { body: string }];
+    const sentBody = JSON.parse(postCall[1].body) as { topic: string };
+    expect(sentBody.topic).toBe('general');
+
+    await client.close();
+  });
+
+  it('passes an explicit topic (e.g. a Telegram forum thread) through to the bus unmodified', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ ok: true, exists: true }),
+    });
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ ok: true, id: 'msg-topic-thread' }),
+    });
+
+    const client = await makeClient();
+    await client.callTool({
+      name: 'send_message',
+      arguments: {
+        to: 'contact:chris',
+        channel: 'telegram:peggy:group:-1003977797157',
+        body: 'moved here',
+        topic: 'thread:040db5054be44ff4',
+      },
+    });
+
+    const postCall = fetchMock.mock.calls[1]! as [string, { body: string }];
+    const sentBody = JSON.parse(postCall[1].body) as { topic: string };
+    expect(sentBody.topic).toBe('thread:040db5054be44ff4');
+
+    await client.close();
+  });
+
   it('rejects unknown priority value', async () => {
     const client = await makeClient();
     const result = await client.callTool({
@@ -139,7 +187,7 @@ describe('send_message tool', () => {
   it('serializes metadata into POST body', async () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,
-      json: async () => ({ ok: true, adapters: [{ id: 'telegram', channels: ['telegram'] }] }),
+      json: async () => ({ ok: true, exists: true }),
     });
     fetchMock.mockResolvedValueOnce({
       ok: true,
@@ -167,7 +215,7 @@ describe('send_message tool', () => {
   it('includes reply_to in POST body when provided', async () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,
-      json: async () => ({ ok: true, adapters: [{ id: 'telegram', channels: ['telegram'] }] }),
+      json: async () => ({ ok: true, exists: true }),
     });
     fetchMock.mockResolvedValueOnce({
       ok: true,

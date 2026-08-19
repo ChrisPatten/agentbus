@@ -10,6 +10,94 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-08-19
+
+### Added
+- **GitHub Pages homepage.** New static landing page in `site/` (pitch,
+  architecture overview, feature grid, quick start), deployed automatically
+  via `.github/workflows/pages.yml` on push to `main`. Version/license
+  badges are live shields.io badges. Release checklist in
+  [docs/VERSIONING.md](docs/VERSIONING.md) now includes a step to review the
+  homepage copy; see [docs/GITHUB_PAGES.md](docs/GITHUB_PAGES.md).
+- **Telegram live tool-call status stream (E29).** While a headless agent
+  works on a turn, non-delivery tool calls now appear as lines in a single
+  evolving Telegram message (`editMessageText`), batched to roughly one edit
+  per second, which is then overwritten by the final answer once delivered —
+  no separate draft/final messages, and no change to the zero-tool-call fast
+  path. `Bash`/`Agent` calls use their own `description` field verbatim;
+  other common tools get a small fixed template; anything else falls back to
+  a generic line. Subagent internals never surface — an `Agent` call always
+  renders as one line. See
+  [docs/TELEGRAM_ADAPTER.md](docs/TELEGRAM_ADAPTER.md#live-tool-call-status-stream-e29).
+- **`/stop` slash command.** Cancels the sender's in-flight `claude -p` turn
+  on a headless (`cc-headless`) agent — hard-kills the running child process
+  with `SIGKILL` rather than waiting it out (`SIGTERM` let the CLI catch the
+  interrupt and quietly re-prompt itself instead of stopping). On Telegram,
+  if a live tool-call status draft is open, it's finalized in place with a
+  "Stopped by user" note instead of being abandoned or silently overwritten
+  — and that's the only confirmation sent, so cancelling never produces a
+  duplicate "stopped" message. See
+  [docs/SLASH_COMMANDS.md](docs/SLASH_COMMANDS.md#stop).
+- **Telegram group forum topics & reply context (E28).** A topic-enabled
+  Telegram group the bot is added to becomes its own channel
+  (`telegram:group:<chatId>`), distinct from any member's DM, derived
+  per-message with no static config; each forum topic within it (including
+  "General") becomes its own long-lived session, built entirely on E27's
+  generic thread store with no new table. Typing indicator and live
+  tool-call status updates land in the specific topic being discussed, not
+  just the right group — two topics active at once in the same group never
+  collide. New `create_telegram_topic` MCP tool lets the agent start a topic
+  on its own initiative (gated on "Manage Topics" admin rights, verified
+  before creation with a clear error if missing), always as a brand-new
+  session with no prior history, optionally seeded with agent-supplied
+  `context` injected into the topic's first turn only; the agent references
+  the topic later via the `thread:<hash>` topic the tool returns. `reply_to`
+  (already accepted by `send_message`/`reply`) is now functional on
+  Telegram — resolved server-side to the target message's platform ID and
+  turned into a native reply quote, dropped (not blocking delivery) if the
+  target chat doesn't match, the message was deleted, or the target is
+  already the latest inbound message (quoting it would be redundant).
+  Inbound quote-replies are surfaced to the agent as `[Replying to
+  <sender>: "<text>"]` context, never forking the session. No new
+  authorization mechanism — the existing sender allowlist already gates
+  groups exactly like DMs. See
+  [docs/TELEGRAM_ADAPTER.md](docs/TELEGRAM_ADAPTER.md#group-topics--replies-e28).
+
+### Changed
+- **Generalized per-thread session storage (E27).** Email's bespoke
+  `email_threads` table is replaced by a channel-agnostic `threads` table
+  (migration `012_threads.sql`, zero data loss) and a shared
+  `src/pipeline/thread-store.ts` module
+  (`getThread`/`upsertThread`/`patchThreadMetadata`), so a future channel can
+  add its own per-thread sessions with no schema change. Internal-only —
+  email threading behavior is unchanged. See
+  [docs/THREADING.md](docs/THREADING.md).
+- **Adapter channel resolution now supports a dynamically-derived channel**
+  (`AdapterInstance.ownsChannel`, E28) — outbound delivery, `react_to_message`,
+  slash-command replies, pause checks, and the typing/tool-call-status
+  endpoints all resolve a Telegram group channel the same way they resolve a
+  DM one, with no new per-group registration.
+- **`pipeline.routes`/`pipeline.relays` matching also recognizes a group
+  derived from a configured channel** (`channelMatches()`, E28) — a
+  `match.channel` rule written against a bot's DM channel (e.g.
+  `telegram:peggy`) now also matches any group under it
+  (`telegram:peggy:group:<chatId>`), so an existing route/relay config keeps
+  working for groups with no changes. Fixes a bug where the very first live
+  group message after this branch landed fell through to the default
+  `claude-code` route instead of the configured `cc-headless` agent, since
+  route-resolve previously compared channels with exact string equality.
+
+### Fixed
+- **`send_message` had no `topic` param and hard-coded `"general"` in the
+  envelope (E28).** Passing a `create_telegram_topic`-returned `thread:<hash>`
+  topic — as `metadata.topic` or otherwise — was silently ignored, so the
+  message always landed in the group's General topic even though S28.3's
+  outbound resolution (`resolveSendTarget` in `src/adapters/telegram.ts`) was
+  already correctly wired to `envelope.topic`. `send_message` now accepts an
+  optional `topic` (default `"general"`), documented in
+  [docs/MCP_TOOLS.md](docs/MCP_TOOLS.md#send_message) alongside the existing
+  `schedule_message` `topic` param it mirrors.
+
 ## [0.8.0] - 2026-08-12
 
 ### Added
@@ -274,7 +362,8 @@ Baseline release. Core bus, pipeline, adapters, memory, scheduling.
 - Built-in slash commands + plugin command registry. (E6)
 - Scheduled messages (cron + one-shot) via background scheduler. (E18)
 
-[Unreleased]: https://github.com/ChrisPatten/agentbus/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/ChrisPatten/agentbus/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/ChrisPatten/agentbus/compare/v0.8.0...v0.10.0
 [0.8.0]: https://github.com/ChrisPatten/agentbus/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/ChrisPatten/agentbus/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/ChrisPatten/agentbus/compare/v0.6.0...v0.7.0

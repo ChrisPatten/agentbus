@@ -29,6 +29,12 @@ export interface HeadlessControl {
    * than one headless instance is running (E23).
    */
   journalResumeId: Map<string, (opts: { claudeSessionId: string; contactId: string; channel: string }) => void>;
+  /**
+   * Kill the in-flight `claude -p` turn for a contact, keyed by the owning
+   * cc-headless agent_id (e.g. "agent:peggy"). Used by `/stop`. Returns true
+   * if a turn was found and killed.
+   */
+  stopTurn: Map<string, (contactId: string) => boolean>;
 }
 
 export interface HandlerDeps {
@@ -619,6 +625,60 @@ async function clearHandler(
   };
 }
 
+// ── /stop ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Cancel the sender's in-flight `claude -p` turn on this channel. Resolves
+ * the owning cc-headless instance the same way /clear does (by the active
+ * session's agent_id, falling back to the sole registered instance when the
+ * session predates agent_id tracking), then kills that instance's child
+ * process for this contact. When the source adapter is Telegram, the
+ * in-flight tool-call status draft (if any) is finalized in place with a
+ * "Stopped by user" note rather than left to be silently overwritten or
+ * abandoned — see TelegramAdapter.finalizeDraft (E29).
+ */
+async function stopHandler(
+  _args: string[],
+  ctx: SlashCommandContext,
+  deps: HandlerDeps,
+): Promise<CommandResponse> {
+  const contactId = ctx.sender.startsWith('contact:') ? ctx.sender.slice('contact:'.length) : ctx.sender;
+
+  const session = deps.db
+    .prepare(
+      `SELECT agent_id FROM sessions
+       WHERE contact_id = ? AND channel = ? AND ended_at IS NULL
+       ORDER BY last_activity DESC LIMIT 1`,
+    )
+    .get(contactId, ctx.channel) as { agent_id: string | null } | undefined;
+
+  const runners = deps.headlessControl?.stopTurn;
+  const stop = session?.agent_id
+    ? runners?.get(session.agent_id)
+    : runners?.size === 1
+      ? [...runners.values()][0]
+      : undefined;
+
+  const stopped = stop ? stop(ctx.sender) : false;
+
+  if (!stopped) {
+    return { body: 'No active turn to stop.' };
+  }
+
+  const adapter = deps.adapterRegistry.lookup(ctx.adapterId);
+  const finalized =
+    typeof adapter?.finalizeDraft === 'function' &&
+    adapter.finalizeDraft(ctx.sender, 'Stopped by user', ctx.channel, ctx.envelope.topic);
+
+  // When the draft was finalized, "Stopped by user" already reached the user
+  // as part of the conversation — a separate confirmation would be duplicative.
+  if (finalized) {
+    return {};
+  }
+
+  return { body: 'Stopped the current turn.' };
+}
+
 // ── Factory ───────────────────────────────────────────────────────────────────
 
 /**
@@ -703,6 +763,13 @@ export function createBuiltinCommands(deps: HandlerDeps): CommandDefinition[] {
       usage: '/clear',
       scope: 'bus',
       handler: (args, ctx) => clearHandler(args, ctx, deps),
+    },
+    {
+      name: 'stop',
+      description: 'Cancel the current in-flight turn',
+      usage: '/stop',
+      scope: 'bus',
+      handler: (args, ctx) => stopHandler(args, ctx, deps),
     },
   ];
 }

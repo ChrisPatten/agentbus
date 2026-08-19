@@ -3,11 +3,14 @@ import { mkdtempSync, rmSync, readdirSync, readFileSync, statSync } from 'node:f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
-import { pickLargestPhoto, extensionFor, resolveMediaConfig, TelegramAdapter } from './telegram.js';
+import { pickLargestPhoto, extensionFor, resolveMediaConfig, buildDraftTrail, TelegramAdapter } from './telegram.js';
 import { runMigrations } from '../db/schema.js';
+import { upsertThread } from '../pipeline/thread-store.js';
+import { topicForThreadKey } from '../pipeline/types.js';
 import type { AppConfig } from '../config/schema.js';
 import type { MessageQueue } from '../core/queue.js';
 import type { PipelineEngine } from '../pipeline/engine.js';
+import type { MessageEnvelope } from '../types/envelope.js';
 
 describe('pickLargestPhoto', () => {
   it('returns the entry with the greatest file_size', () => {
@@ -397,6 +400,360 @@ describe('TelegramAdapter inbound image handling', () => {
   });
 });
 
+// ── TelegramAdapter group channel identity (E28) ─────────────────────────────
+
+describe('TelegramAdapter group channel identity (E28)', () => {
+  let db: Database.Database;
+  let tmpDir: string;
+  let adapter: TelegramAdapter;
+  let processInboundCalls: Array<Record<string, unknown>>;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'agentbus-group-'));
+    db = new Database(':memory:');
+    runMigrations(db);
+
+    const config = makeTestConfig(tmpDir);
+    processInboundCalls = [];
+
+    const pipeline = {
+      process: async (ctx: { envelope: Record<string, unknown> }) => {
+        processInboundCalls.push(ctx.envelope);
+        return null;
+      },
+    } as unknown as PipelineEngine;
+
+    const queue = {} as unknown as MessageQueue;
+
+    adapter = new TelegramAdapter({
+      config,
+      queue,
+      pipeline,
+      db,
+      instanceConfig: { token: 'test:token', poll_timeout: 30 },
+    });
+
+    vi.stubGlobal('fetch', vi.fn());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    db.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('keeps a DM on the base channel', async () => {
+    await (adapter as unknown as { processUpdate: (u: unknown) => Promise<boolean> }).processUpdate({
+      update_id: 1,
+      message: {
+        message_id: 1,
+        from: { id: 12345, first_name: 'Chris' },
+        chat: { id: 555, type: 'private' },
+        date: Math.floor(Date.now() / 1000),
+        text: 'hello',
+      },
+    });
+
+    expect(processInboundCalls).toHaveLength(1);
+    expect(processInboundCalls[0]!['channel']).toBe('telegram');
+  });
+
+  it('derives a distinct channel for a supergroup message', async () => {
+    await (adapter as unknown as { processUpdate: (u: unknown) => Promise<boolean> }).processUpdate({
+      update_id: 2,
+      message: {
+        message_id: 2,
+        from: { id: 12345, first_name: 'Chris' },
+        chat: { id: -100123, type: 'supergroup' },
+        date: Math.floor(Date.now() / 1000),
+        text: 'hello group',
+      },
+    });
+
+    expect(processInboundCalls).toHaveLength(1);
+    expect(processInboundCalls[0]!['channel']).toBe('telegram:group:-100123');
+  });
+
+  it('derives distinct channels for two different groups', async () => {
+    await (adapter as unknown as { processUpdate: (u: unknown) => Promise<boolean> }).processUpdate({
+      update_id: 3,
+      message: {
+        message_id: 3,
+        from: { id: 12345, first_name: 'Chris' },
+        chat: { id: -100111, type: 'group' },
+        date: Math.floor(Date.now() / 1000),
+        text: 'group one',
+      },
+    });
+    await (adapter as unknown as { processUpdate: (u: unknown) => Promise<boolean> }).processUpdate({
+      update_id: 4,
+      message: {
+        message_id: 4,
+        from: { id: 12345, first_name: 'Chris' },
+        chat: { id: -100222, type: 'group' },
+        date: Math.floor(Date.now() / 1000),
+        text: 'group two',
+      },
+    });
+
+    expect(processInboundCalls).toHaveLength(2);
+    expect(processInboundCalls[0]!['channel']).toBe('telegram:group:-100111');
+    expect(processInboundCalls[1]!['channel']).toBe('telegram:group:-100222');
+    expect(processInboundCalls[0]!['channel']).not.toBe(processInboundCalls[1]!['channel']);
+  });
+
+  it('ownsChannel recognizes the DM channel and any of this bot\'s group channels', () => {
+    expect(adapter.ownsChannel('telegram')).toBe(true);
+    expect(adapter.ownsChannel('telegram:group:-100123')).toBe(true);
+    expect(adapter.ownsChannel('telegram:group:-1')).toBe(true);
+    expect(adapter.ownsChannel('bluebubbles')).toBe(false);
+    expect(adapter.ownsChannel('telegram:peggy')).toBe(false);
+  });
+});
+
+// ── TelegramAdapter inbound quoted-reply context (E28) ───────────────────────
+
+describe('TelegramAdapter inbound quoted-reply context (E28)', () => {
+  let db: Database.Database;
+  let tmpDir: string;
+  let adapter: TelegramAdapter;
+  let processInboundCalls: Array<Record<string, unknown>>;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'agentbus-quoted-'));
+    db = new Database(':memory:');
+    runMigrations(db);
+
+    const config = makeTestConfig(tmpDir);
+    processInboundCalls = [];
+
+    const pipeline = {
+      process: async (ctx: { envelope: Record<string, unknown> }) => {
+        processInboundCalls.push(ctx.envelope);
+        return null;
+      },
+    } as unknown as PipelineEngine;
+
+    const queue = {} as unknown as MessageQueue;
+
+    adapter = new TelegramAdapter({
+      config,
+      queue,
+      pipeline,
+      db,
+      instanceConfig: { token: 'test:token', poll_timeout: 30 },
+    });
+
+    vi.stubGlobal('fetch', vi.fn());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    db.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('attaches metadata.quoted_message when reply_to_message is present', async () => {
+    await (adapter as unknown as { processUpdate: (u: unknown) => Promise<boolean> }).processUpdate({
+      update_id: 1,
+      message: {
+        message_id: 2,
+        from: { id: 12345, first_name: 'Chris' },
+        chat: { id: 555, type: 'private' },
+        date: Math.floor(Date.now() / 1000),
+        text: 'I meant this one',
+        reply_to_message: {
+          message_id: 1,
+          from: { id: 999, first_name: 'Peggy' },
+          text: 'Original message',
+        },
+      },
+    });
+
+    expect(processInboundCalls).toHaveLength(1);
+    const metadata = processInboundCalls[0]!['metadata'] as Record<string, unknown>;
+    expect(metadata['quoted_message']).toEqual({
+      platform_message_id: '555:1',
+      sender_name: 'Peggy',
+      text: 'Original message',
+    });
+  });
+
+  it('truncates quoted text to 200 chars', async () => {
+    const longText = 'x'.repeat(500);
+    await (adapter as unknown as { processUpdate: (u: unknown) => Promise<boolean> }).processUpdate({
+      update_id: 2,
+      message: {
+        message_id: 3,
+        from: { id: 12345, first_name: 'Chris' },
+        chat: { id: 555, type: 'private' },
+        date: Math.floor(Date.now() / 1000),
+        text: 'reply',
+        reply_to_message: { message_id: 1, from: { id: 999, first_name: 'Peggy' }, text: longText },
+      },
+    });
+
+    const metadata = processInboundCalls[0]!['metadata'] as Record<string, unknown>;
+    const quoted = metadata['quoted_message'] as { text: string };
+    expect(quoted.text).toHaveLength(200);
+  });
+
+  it('does not set quoted_message when there is no reply_to_message', async () => {
+    await (adapter as unknown as { processUpdate: (u: unknown) => Promise<boolean> }).processUpdate({
+      update_id: 3,
+      message: {
+        message_id: 4,
+        from: { id: 12345, first_name: 'Chris' },
+        chat: { id: 555, type: 'private' },
+        date: Math.floor(Date.now() / 1000),
+        text: 'a plain message',
+      },
+    });
+
+    const metadata = processInboundCalls[0]!['metadata'] as Record<string, unknown>;
+    expect(metadata['quoted_message']).toBeUndefined();
+  });
+
+  it('does not affect topic/session routing', async () => {
+    await (adapter as unknown as { processUpdate: (u: unknown) => Promise<boolean> }).processUpdate({
+      update_id: 4,
+      message: {
+        message_id: 5,
+        from: { id: 12345, first_name: 'Chris' },
+        chat: { id: -100123, type: 'supergroup' },
+        date: Math.floor(Date.now() / 1000),
+        text: 'reply in group General',
+        reply_to_message: { message_id: 1, from: { id: 999, first_name: 'Peggy' }, text: 'x' },
+      },
+    });
+
+    expect(processInboundCalls[0]!['channel']).toBe('telegram:group:-100123');
+    expect(processInboundCalls[0]!['topic']).toBe('');
+    const count = db.prepare(`SELECT COUNT(*) AS n FROM threads`).get() as { n: number };
+    expect(count.n).toBe(0);
+  });
+});
+
+// ── TelegramAdapter forum topics on the generic thread store (E28) ──────────
+
+describe('TelegramAdapter forum topics on the generic thread store (E28)', () => {
+  let db: Database.Database;
+  let tmpDir: string;
+  let adapter: TelegramAdapter;
+  let processInboundCalls: Array<Record<string, unknown>>;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'agentbus-topics-'));
+    db = new Database(':memory:');
+    runMigrations(db);
+
+    const config = makeTestConfig(tmpDir);
+    processInboundCalls = [];
+
+    const pipeline = {
+      process: async (ctx: { envelope: Record<string, unknown> }) => {
+        processInboundCalls.push(ctx.envelope);
+        return null;
+      },
+    } as unknown as PipelineEngine;
+
+    const queue = {} as unknown as MessageQueue;
+
+    adapter = new TelegramAdapter({
+      config,
+      queue,
+      pipeline,
+      db,
+      instanceConfig: { token: 'test:token', poll_timeout: 30 },
+    });
+
+    vi.stubGlobal('fetch', vi.fn());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    db.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('upserts a threads row keyed by the group channel for a topic message', async () => {
+    await (adapter as unknown as { processUpdate: (u: unknown) => Promise<boolean> }).processUpdate({
+      update_id: 1,
+      message: {
+        message_id: 1,
+        from: { id: 12345, first_name: 'Chris' },
+        chat: { id: -100123, type: 'supergroup' },
+        date: Math.floor(Date.now() / 1000),
+        text: 'in a topic',
+        is_topic_message: true,
+        message_thread_id: 42,
+      },
+    });
+
+    expect(processInboundCalls).toHaveLength(1);
+    const topic = processInboundCalls[0]!['topic'] as string;
+    expect(topic).toMatch(/^thread:/);
+
+    const row = db
+      .prepare(`SELECT channel, thread_key, metadata FROM threads WHERE channel = ? AND topic = ?`)
+      .get('telegram:group:-100123', topic) as { channel: string; thread_key: string; metadata: string } | undefined;
+    expect(row).toBeDefined();
+    expect(row!.thread_key).toBe('-100123:42');
+    expect(JSON.parse(row!.metadata)).toEqual({ chatId: -100123, messageThreadId: 42 });
+  });
+
+  it('creates no thread row for a General-topic message (no message_thread_id)', async () => {
+    await (adapter as unknown as { processUpdate: (u: unknown) => Promise<boolean> }).processUpdate({
+      update_id: 2,
+      message: {
+        message_id: 2,
+        from: { id: 12345, first_name: 'Chris' },
+        chat: { id: -100123, type: 'supergroup' },
+        date: Math.floor(Date.now() / 1000),
+        text: 'general area',
+      },
+    });
+
+    expect(processInboundCalls).toHaveLength(1);
+    expect(processInboundCalls[0]!['topic']).toBe('');
+    const count = db.prepare(`SELECT COUNT(*) AS n FROM threads`).get() as { n: number };
+    expect(count.n).toBe(0);
+  });
+
+  it('gives two different message_thread_ids in the same chat two different topics', async () => {
+    await (adapter as unknown as { processUpdate: (u: unknown) => Promise<boolean> }).processUpdate({
+      update_id: 3,
+      message: {
+        message_id: 3,
+        from: { id: 12345, first_name: 'Chris' },
+        chat: { id: -100123, type: 'supergroup' },
+        date: Math.floor(Date.now() / 1000),
+        text: 'topic A',
+        is_topic_message: true,
+        message_thread_id: 1,
+      },
+    });
+    await (adapter as unknown as { processUpdate: (u: unknown) => Promise<boolean> }).processUpdate({
+      update_id: 4,
+      message: {
+        message_id: 4,
+        from: { id: 12345, first_name: 'Chris' },
+        chat: { id: -100123, type: 'supergroup' },
+        date: Math.floor(Date.now() / 1000),
+        text: 'topic B',
+        is_topic_message: true,
+        message_thread_id: 2,
+      },
+    });
+
+    const topicA = processInboundCalls[0]!['topic'];
+    const topicB = processInboundCalls[1]!['topic'];
+    expect(topicA).not.toBe(topicB);
+    const count = db.prepare(`SELECT COUNT(*) AS n FROM threads`).get() as { n: number };
+    expect(count.n).toBe(2);
+  });
+});
+
 // ── TelegramAdapter inbound reaction handling ────────────────────────────────
 
 describe('TelegramAdapter inbound reaction handling', () => {
@@ -553,5 +910,1047 @@ describe('TelegramAdapter inbound reaction handling', () => {
     });
 
     expect(processInboundCalls).toHaveLength(0);
+  });
+});
+
+// ── TelegramAdapter outbound send() (E29 baseline regression) ───────────────
+
+function makeTextEnvelope(body: string, overrides: Partial<MessageEnvelope> = {}): MessageEnvelope {
+  return {
+    id: 'env-1',
+    timestamp: new Date(0).toISOString(),
+    channel: 'telegram',
+    topic: 'general',
+    sender: 'agent:claude',
+    recipient: 'contact:chris',
+    reply_to: null,
+    priority: 'normal',
+    payload: { type: 'text', body },
+    metadata: {},
+    ...overrides,
+  };
+}
+
+/** Fetch mock for the Telegram Bot API: succeeds for sendMessage/editMessageText
+ * with an incrementing message_id, unless a call is queued via `queueFailure`. */
+function makeTelegramFetchMock() {
+  let nextMessageId = 100;
+  const failures = new Map<string, { status: number; description: string }>();
+
+  const fn = vi.fn(async (url: string, init?: { body?: string }) => {
+    const method = url.split('/').pop() ?? '';
+    const body = init?.body ? (JSON.parse(init.body) as Record<string, unknown>) : {};
+    const key = method === 'sendMessage' || method === 'editMessageText'
+      ? `${method}:${'parse_mode' in body ? 'markdown' : 'plain'}`
+      : method;
+
+    const failure = failures.get(key) ?? failures.get(method);
+    if (failure) {
+      return {
+        ok: false,
+        status: failure.status,
+        json: async () => ({ ok: false, description: failure.description }),
+      } as unknown as Response;
+    }
+
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        ok: true,
+        result: { message_id: nextMessageId++, chat: { id: 555, type: 'private' }, date: 0 },
+      }),
+    } as unknown as Response;
+  });
+
+  return {
+    fn,
+    /** Fail every call to `method` (optionally scoped to markdown vs. plain-text retry). */
+    queueFailure(method: string, status: number, description = 'boom') {
+      failures.set(method, { status, description });
+    },
+  };
+}
+
+function getDraftState(adapter: TelegramAdapter, chatId: number, messageThreadId?: number) {
+  return (
+    adapter as unknown as {
+      draftMessages: Map<string, { messageId: number | null; lines: string[]; creating: Promise<void> | null }>;
+    }
+  ).draftMessages.get(`${chatId}:${messageThreadId ?? 'general'}`);
+}
+
+function isTypingLoopActive(adapter: TelegramAdapter, chatId: number, messageThreadId?: number): boolean {
+  return (adapter as unknown as { typingLoops: Map<string, unknown> }).typingLoops.has(
+    `${chatId}:${messageThreadId ?? 'general'}`,
+  );
+}
+
+function callsTo(fetchMock: ReturnType<typeof vi.fn>, method: string): unknown[] {
+  return fetchMock.mock.calls.filter((c) => String(c[0]).endsWith(`/${method}`));
+}
+
+describe('TelegramAdapter send() (outbound, baseline regression)', () => {
+  let adapter: TelegramAdapter;
+  let telegramFetch: ReturnType<typeof makeTelegramFetchMock>;
+
+  beforeEach(() => {
+    const config = makeTestConfig('/tmp/unused-e29-outbound');
+    adapter = new TelegramAdapter({
+      config,
+      queue: {} as unknown as MessageQueue,
+      pipeline: {} as unknown as PipelineEngine,
+      db: {} as unknown as Database.Database,
+      instanceConfig: { token: 'test:token', poll_timeout: 30 },
+    });
+    telegramFetch = makeTelegramFetchMock();
+    vi.stubGlobal('fetch', telegramFetch.fn);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('sends a single short message via sendMessage', async () => {
+    const result = await adapter.send(makeTextEnvelope('hello'));
+    expect(result.success).toBe(true);
+    expect(callsTo(telegramFetch.fn, 'sendMessage')).toHaveLength(1);
+    expect(callsTo(telegramFetch.fn, 'editMessageText')).toHaveLength(0);
+  });
+
+  it('splits a long message into multiple sendMessage calls', async () => {
+    const body = Array.from({ length: 10 }, (_, i) => `line ${i}`.repeat(500)).join('\n');
+    const result = await adapter.send(makeTextEnvelope(body));
+    expect(result.success).toBe(true);
+    expect(callsTo(telegramFetch.fn, 'sendMessage').length).toBeGreaterThan(1);
+  });
+
+  it('retries without parse_mode when Telegram rejects Markdown with HTTP 400', async () => {
+    telegramFetch.queueFailure('sendMessage:markdown', 400, 'Bad Request: can\'t parse entities');
+    const result = await adapter.send(makeTextEnvelope('some *bad markdown'));
+    expect(result.success).toBe(true);
+    expect(callsTo(telegramFetch.fn, 'sendMessage')).toHaveLength(2);
+  });
+
+  it('fails with a non-retryable error for an unknown contact', async () => {
+    const result = await adapter.send(makeTextEnvelope('hi', { recipient: 'contact:nobody' }));
+    expect(result.success).toBe(false);
+    expect(result.retryable).toBe(false);
+    expect(result.error).toContain('No Telegram chat_id');
+  });
+
+  it('fails with a non-retryable error for a non-text payload', async () => {
+    const result = await adapter.send(
+      makeTextEnvelope('unused', {
+        payload: { type: 'reaction', emoji: '👍', removed: false, target_message_id: '555:1' },
+      }),
+    );
+    expect(result.success).toBe(false);
+    expect(result.retryable).toBe(false);
+    expect(result.error).toContain('Unsupported payload type');
+  });
+});
+
+// ── TelegramAdapter send() group/topic resolution (E28) ──────────────────────
+
+describe('TelegramAdapter send() group/topic resolution (E28)', () => {
+  let db: Database.Database;
+  let adapter: TelegramAdapter;
+  let telegramFetch: ReturnType<typeof makeTelegramFetchMock>;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    runMigrations(db);
+    const config = makeTestConfig('/tmp/unused-e28-outbound');
+    adapter = new TelegramAdapter({
+      config,
+      queue: {} as unknown as MessageQueue,
+      pipeline: {} as unknown as PipelineEngine,
+      db,
+      instanceConfig: { token: 'test:token', poll_timeout: 30 },
+    });
+    telegramFetch = makeTelegramFetchMock();
+    vi.stubGlobal('fetch', telegramFetch.fn);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    db.close();
+  });
+
+  function lastSendMessageBody(): Record<string, unknown> {
+    const calls = callsTo(telegramFetch.fn, 'sendMessage') as Array<[string, { body: string }]>;
+    return JSON.parse(calls[calls.length - 1]![1].body) as Record<string, unknown>;
+  }
+
+  it('sends to a group\'s General area (no thread topic) using the channel\'s own chat_id', async () => {
+    const result = await adapter.send(
+      makeTextEnvelope('hi group', { channel: 'telegram:group:-100123', topic: 'general', recipient: 'contact:chris' }),
+    );
+    expect(result.success).toBe(true);
+    const body = lastSendMessageBody();
+    expect(body['chat_id']).toBe(-100123);
+    expect(body['message_thread_id']).toBeUndefined();
+  });
+
+  it('sends into a forum topic using thread metadata from the generic thread store (E27)', async () => {
+    const threadKey = '-100123:42';
+    const topic = topicForThreadKey(threadKey);
+    upsertThread(db, {
+      channel: 'telegram:group:-100123',
+      topic,
+      threadKey,
+      metadata: { chatId: -100123, messageThreadId: 42 },
+    });
+
+    const result = await adapter.send(
+      makeTextEnvelope('hi topic', { channel: 'telegram:group:-100123', topic, recipient: 'contact:chris' }),
+    );
+    expect(result.success).toBe(true);
+    const body = lastSendMessageBody();
+    expect(body['chat_id']).toBe(-100123);
+    expect(body['message_thread_id']).toBe(42);
+  });
+
+  it('fails with a non-retryable error for a thread topic with no stored metadata', async () => {
+    const result = await adapter.send(
+      makeTextEnvelope('hi', { channel: 'telegram:group:-100123', topic: 'thread:doesnotexist', recipient: 'contact:chris' }),
+    );
+    expect(result.success).toBe(false);
+    expect(result.retryable).toBe(false);
+    expect(result.error).toContain('No thread metadata');
+  });
+
+  it('a two-topic group conversation round-trips independently', async () => {
+    const keyA = '-100123:1';
+    const keyB = '-100123:2';
+    const topicA = topicForThreadKey(keyA);
+    const topicB = topicForThreadKey(keyB);
+    upsertThread(db, { channel: 'telegram:group:-100123', topic: topicA, threadKey: keyA, metadata: { chatId: -100123, messageThreadId: 1 } });
+    upsertThread(db, { channel: 'telegram:group:-100123', topic: topicB, threadKey: keyB, metadata: { chatId: -100123, messageThreadId: 2 } });
+
+    await adapter.send(makeTextEnvelope('to A', { channel: 'telegram:group:-100123', topic: topicA, recipient: 'contact:chris' }));
+    const bodyA = lastSendMessageBody();
+    await adapter.send(makeTextEnvelope('to B', { channel: 'telegram:group:-100123', topic: topicB, recipient: 'contact:chris' }));
+    const bodyB = lastSendMessageBody();
+
+    expect(bodyA['message_thread_id']).toBe(1);
+    expect(bodyB['message_thread_id']).toBe(2);
+  });
+
+  it('a DM send for the same contact never resolves to a group chat_id', async () => {
+    // A group row exists in `threads`, but a plain DM envelope (channel: 'telegram') must
+    // still resolve via contactChatIdMap, never accidentally picking up group state.
+    upsertThread(db, {
+      channel: 'telegram:group:-100123',
+      topic: 'thread:abc',
+      threadKey: '-100123:1',
+      metadata: { chatId: -100123, messageThreadId: 1 },
+    });
+
+    const result = await adapter.send(makeTextEnvelope('dm hello', { channel: 'telegram', topic: 'general', recipient: 'contact:chris' }));
+    expect(result.success).toBe(true);
+    const body = lastSendMessageBody();
+    expect(body['chat_id']).toBe(12345); // chris's DM chat_id from makeTestConfig
+  });
+
+  it('includes reply_parameters when reply_to_platform_message_id matches the resolved chat', async () => {
+    const result = await adapter.send(
+      makeTextEnvelope('a reply', {
+        channel: 'telegram',
+        topic: 'general',
+        recipient: 'contact:chris',
+        metadata: { reply_to_platform_message_id: '12345:99' },
+      }),
+    );
+    expect(result.success).toBe(true);
+    const body = lastSendMessageBody();
+    expect(body['reply_parameters']).toEqual({ message_id: 99, allow_sending_without_reply: true });
+  });
+
+  it('drops reply_parameters when the platform message id is for a different chat', async () => {
+    const result = await adapter.send(
+      makeTextEnvelope('a reply', {
+        channel: 'telegram',
+        topic: 'general',
+        recipient: 'contact:chris',
+        metadata: { reply_to_platform_message_id: '999:99' }, // foreign chat_id
+      }),
+    );
+    expect(result.success).toBe(true);
+    const body = lastSendMessageBody();
+    expect(body['reply_parameters']).toBeUndefined();
+  });
+
+  it('is a no-op when reply_to_platform_message_id is malformed', async () => {
+    const result = await adapter.send(
+      makeTextEnvelope('a reply', {
+        channel: 'telegram',
+        topic: 'general',
+        recipient: 'contact:chris',
+        metadata: { reply_to_platform_message_id: 'not-a-valid-id' },
+      }),
+    );
+    expect(result.success).toBe(true);
+    const body = lastSendMessageBody();
+    expect(body['reply_parameters']).toBeUndefined();
+  });
+
+  it('only applies reply_parameters to the first part of a multi-part reply', async () => {
+    const longBody = Array.from({ length: 10 }, (_, i) => `line ${i}`.repeat(500)).join('\n');
+    await adapter.send(
+      makeTextEnvelope(longBody, {
+        channel: 'telegram',
+        topic: 'general',
+        recipient: 'contact:chris',
+        metadata: { reply_to_platform_message_id: '12345:99' },
+      }),
+    );
+    const calls = callsTo(telegramFetch.fn, 'sendMessage') as Array<[string, { body: string }]>;
+    expect(calls.length).toBeGreaterThan(1);
+    const firstBody = JSON.parse(calls[0]![1].body) as Record<string, unknown>;
+    const secondBody = JSON.parse(calls[1]![1].body) as Record<string, unknown>;
+    expect(firstBody['reply_parameters']).toEqual({ message_id: 99, allow_sending_without_reply: true });
+    expect(secondBody['reply_parameters']).toBeUndefined();
+  });
+});
+
+describe('TelegramAdapter channel-aware typing/tool-status/finalizeDraft (E28)', () => {
+  let adapter: TelegramAdapter;
+  let telegramFetch: ReturnType<typeof makeTelegramFetchMock>;
+
+  beforeEach(() => {
+    const config = makeTestConfig('/tmp/unused-e28-status');
+    adapter = new TelegramAdapter({
+      config,
+      queue: {} as unknown as MessageQueue,
+      pipeline: {} as unknown as PipelineEngine,
+      db: {} as unknown as Database.Database,
+      instanceConfig: { token: 'test:token', poll_timeout: 30 },
+    });
+    telegramFetch = makeTelegramFetchMock();
+    vi.stubGlobal('fetch', telegramFetch.fn);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('startTyping targets the group chat, not the sender\'s DM, when a channel is given', () => {
+    adapter.startTyping!('contact:chris', 'telegram:group:-100123');
+    const calls = callsTo(telegramFetch.fn, 'sendChatAction') as Array<[string, { body: string }]>;
+    expect(calls.length).toBeGreaterThan(0);
+    const body = JSON.parse(calls[0]![1].body) as Record<string, unknown>;
+    expect(body['chat_id']).toBe(-100123);
+  });
+
+  it('startTyping without a channel keeps targeting the contact\'s DM (unchanged)', () => {
+    adapter.startTyping!('contact:chris');
+    const calls = callsTo(telegramFetch.fn, 'sendChatAction') as Array<[string, { body: string }]>;
+    const body = JSON.parse(calls[0]![1].body) as Record<string, unknown>;
+    expect(body['chat_id']).toBe(12345);
+  });
+
+  it('reportToolCall creates its draft message in the group chat when a channel is given', async () => {
+    adapter.reportToolCall!('contact:chris', 'Bash: ls', 'telegram:group:-100123');
+    const state = getDraftState(adapter, -100123);
+    expect(state).toBeDefined();
+    if (state?.creating) await state.creating.catch(() => {});
+    const calls = callsTo(telegramFetch.fn, 'sendMessage');
+    expect(calls).toHaveLength(1);
+  });
+});
+
+describe('TelegramAdapter topic-aware typing/tool-status/finalizeDraft (E28)', () => {
+  let db: Database.Database;
+  let adapter: TelegramAdapter;
+  let telegramFetch: ReturnType<typeof makeTelegramFetchMock>;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    runMigrations(db);
+    const config = makeTestConfig('/tmp/unused-e28-topic-status');
+    adapter = new TelegramAdapter({
+      config,
+      queue: {} as unknown as MessageQueue,
+      pipeline: {} as unknown as PipelineEngine,
+      db,
+      instanceConfig: { token: 'test:token', poll_timeout: 30 },
+    });
+    telegramFetch = makeTelegramFetchMock();
+    vi.stubGlobal('fetch', telegramFetch.fn);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    db.close();
+  });
+
+  it('startTyping targets the specific forum topic when topic is a thread:<hash>', () => {
+    const threadKey = '-100123:42';
+    const topic = topicForThreadKey(threadKey);
+    upsertThread(db, {
+      channel: 'telegram:group:-100123',
+      topic,
+      threadKey,
+      metadata: { chatId: -100123, messageThreadId: 42 },
+    });
+
+    adapter.startTyping!('contact:chris', 'telegram:group:-100123', topic);
+    const calls = callsTo(telegramFetch.fn, 'sendChatAction') as Array<[string, { body: string }]>;
+    const body = JSON.parse(calls[0]![1].body) as Record<string, unknown>;
+    expect(body['chat_id']).toBe(-100123);
+    expect(body['message_thread_id']).toBe(42);
+  });
+
+  it('startTyping targets General (no message_thread_id) when the topic is not thread-prefixed', () => {
+    adapter.startTyping!('contact:chris', 'telegram:group:-100123', 'general');
+    const calls = callsTo(telegramFetch.fn, 'sendChatAction') as Array<[string, { body: string }]>;
+    const body = JSON.parse(calls[0]![1].body) as Record<string, unknown>;
+    expect(body['chat_id']).toBe(-100123);
+    expect(body['message_thread_id']).toBeUndefined();
+  });
+
+  it('reportToolCall posts the draft into the specific topic', async () => {
+    const threadKey = '-100123:42';
+    const topic = topicForThreadKey(threadKey);
+    upsertThread(db, {
+      channel: 'telegram:group:-100123',
+      topic,
+      threadKey,
+      metadata: { chatId: -100123, messageThreadId: 42 },
+    });
+
+    adapter.reportToolCall!('contact:chris', 'Bash: ls', 'telegram:group:-100123', topic);
+    const state = getDraftState(adapter, -100123, 42);
+    expect(state).toBeDefined();
+    if (state?.creating) await state.creating.catch(() => {});
+    const calls = callsTo(telegramFetch.fn, 'sendMessage') as Array<[string, { body: string }]>;
+    expect(calls).toHaveLength(1);
+    const body = JSON.parse(calls[0]![1].body) as Record<string, unknown>;
+    expect(body['message_thread_id']).toBe(42);
+  });
+
+  it('two different topics in the same group get independent drafts, never colliding', async () => {
+    const keyA = '-100123:1';
+    const keyB = '-100123:2';
+    const topicA = topicForThreadKey(keyA);
+    const topicB = topicForThreadKey(keyB);
+    upsertThread(db, { channel: 'telegram:group:-100123', topic: topicA, threadKey: keyA, metadata: { chatId: -100123, messageThreadId: 1 } });
+    upsertThread(db, { channel: 'telegram:group:-100123', topic: topicB, threadKey: keyB, metadata: { chatId: -100123, messageThreadId: 2 } });
+
+    adapter.reportToolCall!('contact:chris', 'line A', 'telegram:group:-100123', topicA);
+    adapter.reportToolCall!('contact:chris', 'line B', 'telegram:group:-100123', topicB);
+
+    const stateA = getDraftState(adapter, -100123, 1);
+    const stateB = getDraftState(adapter, -100123, 2);
+    expect(stateA).toBeDefined();
+    expect(stateB).toBeDefined();
+    expect(stateA).not.toBe(stateB);
+    if (stateA?.creating) await stateA.creating.catch(() => {});
+    if (stateB?.creating) await stateB.creating.catch(() => {});
+    expect(callsTo(telegramFetch.fn, 'sendMessage')).toHaveLength(2);
+  });
+
+  it("finalizeDraft targets the specific topic's draft", async () => {
+    const threadKey = '-100123:42';
+    const topic = topicForThreadKey(threadKey);
+    upsertThread(db, {
+      channel: 'telegram:group:-100123',
+      topic,
+      threadKey,
+      metadata: { chatId: -100123, messageThreadId: 42 },
+    });
+
+    adapter.reportToolCall!('contact:chris', 'Bash: ls', 'telegram:group:-100123', topic);
+    await getDraftState(adapter, -100123, 42)?.creating;
+
+    const finalized = adapter.finalizeDraft!('contact:chris', 'Stopped by user', 'telegram:group:-100123', topic);
+    expect(finalized).toBe(true);
+    expect(getDraftState(adapter, -100123, 42)).toBeUndefined();
+  });
+});
+
+// ── TelegramAdapter createTopic (E28) ────────────────────────────────────────
+
+function setBotUserId(adapter: TelegramAdapter, id: number | null) {
+  (adapter as unknown as { botUserId: number | null }).botUserId = id;
+}
+
+/** Fetch mock for getChatMember/createForumTopic, used by createTopic tests. */
+function makeCreateTopicFetchMock(opts: {
+  canManageTopics?: boolean;
+  getChatMemberFails?: boolean;
+  createForumTopicFails?: boolean;
+  createForumTopicResult?: { message_thread_id: number; name: string };
+}) {
+  return vi.fn(async (url: string) => {
+    const method = url.split('/').pop() ?? '';
+    if (method === 'getChatMember') {
+      if (opts.getChatMemberFails) {
+        return { ok: false, status: 500, json: async () => ({ ok: false, description: 'boom' }) } as unknown as Response;
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, result: { status: 'administrator', can_manage_topics: opts.canManageTopics ?? true } }),
+      } as unknown as Response;
+    }
+    if (method === 'createForumTopic') {
+      if (opts.createForumTopicFails) {
+        return { ok: false, status: 500, json: async () => ({ ok: false, description: 'boom' }) } as unknown as Response;
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, result: opts.createForumTopicResult ?? { message_thread_id: 42, name: 'Test topic' } }),
+      } as unknown as Response;
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true, result: {} }) } as unknown as Response;
+  });
+}
+
+describe('TelegramAdapter createTopic (E28)', () => {
+  let db: Database.Database;
+  let adapter: TelegramAdapter;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    runMigrations(db);
+    const config = makeTestConfig('/tmp/unused-e28-createtopic');
+    adapter = new TelegramAdapter({
+      config,
+      queue: {} as unknown as MessageQueue,
+      pipeline: {} as unknown as PipelineEngine,
+      db,
+      instanceConfig: { token: 'test:token', poll_timeout: 30 },
+    });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    db.close();
+  });
+
+  it('rejects a DM channel outright', async () => {
+    setBotUserId(adapter, 999);
+    const result = await adapter.createTopic('telegram', 'x');
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain('group-only');
+  });
+
+  it('fails closed with a clear error when the bot\'s own user id is unknown', async () => {
+    setBotUserId(adapter, null);
+    const result = await adapter.createTopic('telegram:group:-100123', 'x');
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain('own Telegram user id');
+  });
+
+  it('fails with a clear, actionable error when the bot lacks Manage Topics', async () => {
+    setBotUserId(adapter, 999);
+    vi.stubGlobal('fetch', makeCreateTopicFetchMock({ canManageTopics: false }));
+
+    const result = await adapter.createTopic('telegram:group:-100123', 'x');
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toContain('Manage Topics');
+      expect(result.error).toContain('Edit Admin Rights');
+    }
+  });
+
+  it('creates the topic and upserts a threads row on success', async () => {
+    setBotUserId(adapter, 999);
+    vi.stubGlobal(
+      'fetch',
+      makeCreateTopicFetchMock({ canManageTopics: true, createForumTopicResult: { message_thread_id: 42, name: 'Wanda prep' } }),
+    );
+
+    const result = await adapter.createTopic('telegram:group:-100123', 'Wanda prep');
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.message_thread_id).toBe(42);
+      expect(result.name).toBe('Wanda prep');
+      expect(result.topic).toMatch(/^thread:/);
+
+      const row = db
+        .prepare(`SELECT thread_key, metadata FROM threads WHERE channel = ? AND topic = ?`)
+        .get('telegram:group:-100123', result.topic) as { thread_key: string; metadata: string } | undefined;
+      expect(row).toBeDefined();
+      expect(row!.thread_key).toBe('-100123:42');
+      expect(JSON.parse(row!.metadata)).toEqual({ chatId: -100123, messageThreadId: 42 });
+    }
+  });
+
+  it('surfaces a clear error when createForumTopic itself fails', async () => {
+    setBotUserId(adapter, 999);
+    vi.stubGlobal('fetch', makeCreateTopicFetchMock({ canManageTopics: true, createForumTopicFails: true }));
+
+    const result = await adapter.createTopic('telegram:group:-100123', 'x');
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain('Failed to create forum topic');
+  });
+
+  it('stores an optional context as pendingContext on the thread row', async () => {
+    setBotUserId(adapter, 999);
+    vi.stubGlobal(
+      'fetch',
+      makeCreateTopicFetchMock({ canManageTopics: true, createForumTopicResult: { message_thread_id: 42, name: 'Wanda prep' } }),
+    );
+
+    const result = await adapter.createTopic('telegram:group:-100123', 'Wanda prep', 'Track Wanda birthday planning here');
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const row = db
+        .prepare(`SELECT metadata FROM threads WHERE channel = ? AND topic = ?`)
+        .get('telegram:group:-100123', result.topic) as { metadata: string };
+      expect(JSON.parse(row.metadata)).toEqual({
+        chatId: -100123,
+        messageThreadId: 42,
+        pendingContext: 'Track Wanda birthday planning here',
+      });
+    }
+  });
+
+  it('omits pendingContext entirely when no context is given', async () => {
+    setBotUserId(adapter, 999);
+    vi.stubGlobal(
+      'fetch',
+      makeCreateTopicFetchMock({ canManageTopics: true, createForumTopicResult: { message_thread_id: 42, name: 'x' } }),
+    );
+
+    const result = await adapter.createTopic('telegram:group:-100123', 'x');
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const row = db
+        .prepare(`SELECT metadata FROM threads WHERE channel = ? AND topic = ?`)
+        .get('telegram:group:-100123', result.topic) as { metadata: string };
+      expect(JSON.parse(row.metadata)).not.toHaveProperty('pendingContext');
+    }
+  });
+});
+
+// ── TelegramAdapter create_telegram_topic context injection (E28) ───────────
+
+describe('TelegramAdapter create_telegram_topic context injection (E28)', () => {
+  let db: Database.Database;
+  let tmpDir: string;
+  let adapter: TelegramAdapter;
+  let processInboundCalls: Array<Record<string, unknown>>;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'agentbus-topic-context-'));
+    db = new Database(':memory:');
+    runMigrations(db);
+
+    const config = makeTestConfig(tmpDir);
+    processInboundCalls = [];
+
+    const pipeline = {
+      process: async (ctx: { envelope: Record<string, unknown> }) => {
+        processInboundCalls.push(ctx.envelope);
+        return null;
+      },
+    } as unknown as PipelineEngine;
+
+    const queue = {} as unknown as MessageQueue;
+
+    adapter = new TelegramAdapter({
+      config,
+      queue,
+      pipeline,
+      db,
+      instanceConfig: { token: 'test:token', poll_timeout: 30 },
+    });
+
+    vi.stubGlobal('fetch', vi.fn());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    db.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('injects pendingContext into the first message that lands on the topic, then clears it', async () => {
+    const threadKey = '-100123:42';
+    const topic = topicForThreadKey(threadKey);
+    upsertThread(db, {
+      channel: 'telegram:group:-100123',
+      topic,
+      threadKey,
+      metadata: { chatId: -100123, messageThreadId: 42, pendingContext: 'Track Wanda birthday planning here' },
+    });
+
+    await (adapter as unknown as { processUpdate: (u: unknown) => Promise<boolean> }).processUpdate({
+      update_id: 1,
+      message: {
+        message_id: 1,
+        from: { id: 12345, first_name: 'Chris' },
+        chat: { id: -100123, type: 'supergroup' },
+        date: Math.floor(Date.now() / 1000),
+        text: 'first message in the new topic',
+        is_topic_message: true,
+        message_thread_id: 42,
+      },
+    });
+
+    expect(processInboundCalls).toHaveLength(1);
+    const metadata = processInboundCalls[0]!['metadata'] as Record<string, unknown>;
+    expect(metadata['injected_topic_context']).toBe('Track Wanda birthday planning here');
+
+    // One-shot: cleared from the thread row after the first delivery.
+    const row = db.prepare(`SELECT metadata FROM threads WHERE channel = ? AND topic = ?`).get(
+      'telegram:group:-100123',
+      topic,
+    ) as { metadata: string };
+    expect(JSON.parse(row.metadata)).not.toHaveProperty('pendingContext');
+
+    // A second message on the same topic never sees it again.
+    await (adapter as unknown as { processUpdate: (u: unknown) => Promise<boolean> }).processUpdate({
+      update_id: 2,
+      message: {
+        message_id: 2,
+        from: { id: 12345, first_name: 'Chris' },
+        chat: { id: -100123, type: 'supergroup' },
+        date: Math.floor(Date.now() / 1000),
+        text: 'second message',
+        is_topic_message: true,
+        message_thread_id: 42,
+      },
+    });
+    const secondMetadata = processInboundCalls[1]!['metadata'] as Record<string, unknown>;
+    expect(secondMetadata['injected_topic_context']).toBeUndefined();
+  });
+
+  it('does not set injected_topic_context when the thread has none', async () => {
+    const threadKey = '-100123:42';
+    const topic = topicForThreadKey(threadKey);
+    upsertThread(db, {
+      channel: 'telegram:group:-100123',
+      topic,
+      threadKey,
+      metadata: { chatId: -100123, messageThreadId: 42 },
+    });
+
+    await (adapter as unknown as { processUpdate: (u: unknown) => Promise<boolean> }).processUpdate({
+      update_id: 1,
+      message: {
+        message_id: 1,
+        from: { id: 12345, first_name: 'Chris' },
+        chat: { id: -100123, type: 'supergroup' },
+        date: Math.floor(Date.now() / 1000),
+        text: 'hello',
+        is_topic_message: true,
+        message_thread_id: 42,
+      },
+    });
+
+    const metadata = processInboundCalls[0]!['metadata'] as Record<string, unknown>;
+    expect(metadata['injected_topic_context']).toBeUndefined();
+  });
+
+  it('does not consume pendingContext on a skipped update (no text/attachment)', async () => {
+    const threadKey = '-100123:42';
+    const topic = topicForThreadKey(threadKey);
+    upsertThread(db, {
+      channel: 'telegram:group:-100123',
+      topic,
+      threadKey,
+      metadata: { chatId: -100123, messageThreadId: 42, pendingContext: 'seed context' },
+    });
+
+    // A sticker/no-text update in the topic — skipped before ever reaching processInbound.
+    await (adapter as unknown as { processUpdate: (u: unknown) => Promise<boolean> }).processUpdate({
+      update_id: 1,
+      message: {
+        message_id: 1,
+        from: { id: 12345, first_name: 'Chris' },
+        chat: { id: -100123, type: 'supergroup' },
+        date: Math.floor(Date.now() / 1000),
+        is_topic_message: true,
+        message_thread_id: 42,
+      },
+    });
+    expect(processInboundCalls).toHaveLength(0);
+
+    const rowAfterSkip = db
+      .prepare(`SELECT metadata FROM threads WHERE channel = ? AND topic = ?`)
+      .get('telegram:group:-100123', topic) as { metadata: string };
+    expect(JSON.parse(rowAfterSkip.metadata)).toHaveProperty('pendingContext', 'seed context');
+
+    // The real first message still gets it.
+    await (adapter as unknown as { processUpdate: (u: unknown) => Promise<boolean> }).processUpdate({
+      update_id: 2,
+      message: {
+        message_id: 2,
+        from: { id: 12345, first_name: 'Chris' },
+        chat: { id: -100123, type: 'supergroup' },
+        date: Math.floor(Date.now() / 1000),
+        text: 'actual first message',
+        is_topic_message: true,
+        message_thread_id: 42,
+      },
+    });
+    expect(processInboundCalls).toHaveLength(1);
+    const metadata = processInboundCalls[0]!['metadata'] as Record<string, unknown>;
+    expect(metadata['injected_topic_context']).toBe('seed context');
+  });
+});
+
+// ── buildDraftTrail (E29 length cap / truncation) ────────────────────────────
+
+describe('buildDraftTrail', () => {
+  it('returns an empty, non-truncated trail for no lines', () => {
+    expect(buildDraftTrail([])).toEqual({ text: '', truncated: false });
+  });
+
+  it('joins lines as-is when they fit under the budget', () => {
+    const { text, truncated } = buildDraftTrail(['🐚 one', '📖 two', '✏️ three'], 1000);
+    expect(text).toBe('🐚 one\n📖 two\n✏️ three');
+    expect(truncated).toBe(false);
+  });
+
+  it('drops oldest whole lines and prefixes a notice when the trail exceeds the budget', () => {
+    const lines = Array.from({ length: 50 }, (_, i) => `line ${i}`);
+    const { text, truncated } = buildDraftTrail(lines, 100);
+    expect(truncated).toBe(true);
+    expect(text.startsWith('… (earlier steps omitted)')).toBe(true);
+    expect(text.length).toBeLessThanOrEqual(100);
+    // Never cuts mid-line — every remaining line is intact
+    const kept = text.split('\n').slice(1);
+    for (const line of kept) {
+      expect(lines).toContain(line);
+    }
+    // The most recent line must always survive truncation
+    expect(text).toContain('line 49');
+  });
+});
+
+// ── TelegramAdapter draft-message lifecycle (E29) ────────────────────────────
+
+describe('TelegramAdapter draft-message lifecycle (E29)', () => {
+  let adapter: TelegramAdapter;
+  let telegramFetch: ReturnType<typeof makeTelegramFetchMock>;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    const config = makeTestConfig('/tmp/unused-e29-draft');
+    adapter = new TelegramAdapter({
+      config,
+      queue: {} as unknown as MessageQueue,
+      pipeline: {} as unknown as PipelineEngine,
+      db: {} as unknown as Database.Database,
+      instanceConfig: { token: 'test:token', poll_timeout: 30 },
+    });
+    telegramFetch = makeTelegramFetchMock();
+    vi.stubGlobal('fetch', telegramFetch.fn);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it('a single tool call sends one message and issues no edits', async () => {
+    adapter.reportToolCall('chris', 'first line');
+    await getDraftState(adapter, 12345)?.creating;
+
+    expect(callsTo(telegramFetch.fn, 'sendMessage')).toHaveLength(1);
+    expect(callsTo(telegramFetch.fn, 'editMessageText')).toHaveLength(0);
+  });
+
+  it('batches lines arriving within one window into a single edit', async () => {
+    adapter.reportToolCall('chris', 'line1');
+    await getDraftState(adapter, 12345)?.creating;
+
+    adapter.reportToolCall('chris', 'line2');
+    adapter.reportToolCall('chris', 'line3');
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(callsTo(telegramFetch.fn, 'sendMessage')).toHaveLength(1);
+    expect(callsTo(telegramFetch.fn, 'editMessageText')).toHaveLength(1);
+    const [, init] = callsTo(telegramFetch.fn, 'editMessageText')[0] as [string, { body: string }];
+    const editedText = (JSON.parse(init.body) as { text: string }).text;
+    expect(editedText).toContain('line1');
+    expect(editedText).toContain('line2');
+    expect(editedText).toContain('line3');
+  });
+
+  it('three calls spread across three windows issue one send and two edits', async () => {
+    adapter.reportToolCall('chris', 'line1');
+    await getDraftState(adapter, 12345)?.creating;
+
+    adapter.reportToolCall('chris', 'line2');
+    await vi.advanceTimersByTimeAsync(1000);
+
+    adapter.reportToolCall('chris', 'line3');
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(callsTo(telegramFetch.fn, 'sendMessage')).toHaveLength(1);
+    expect(callsTo(telegramFetch.fn, 'editMessageText')).toHaveLength(2);
+  });
+
+  it('two tool calls arriving before the first sendMessage resolves create only one draft', () => {
+    let resolveSend!: () => void;
+    telegramFetch.fn.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveSend = () =>
+            resolve({
+              ok: true,
+              status: 200,
+              json: async () => ({ ok: true, result: { message_id: 999, chat: { id: 12345, type: 'private' }, date: 0 } }),
+            } as unknown as Response);
+        }),
+    );
+
+    adapter.reportToolCall('chris', 'line1');
+    adapter.reportToolCall('chris', 'line2'); // arrives before the mocked sendMessage settles
+
+    expect(telegramFetch.fn).toHaveBeenCalledTimes(1);
+    resolveSend();
+  });
+
+  it('overwrites the draft with the final answer and clears it', async () => {
+    adapter.reportToolCall('chris', 'first line');
+    const draft = getDraftState(adapter, 12345);
+    await draft?.creating;
+    const draftMessageId = draft?.messageId;
+
+    const result = await adapter.send(makeTextEnvelope('the final answer'));
+
+    expect(result.success).toBe(true);
+    expect(callsTo(telegramFetch.fn, 'sendMessage')).toHaveLength(1); // only the draft's original send
+    expect(callsTo(telegramFetch.fn, 'editMessageText')).toHaveLength(1);
+    const [, init] = callsTo(telegramFetch.fn, 'editMessageText')[0] as [string, { body: string }];
+    const body = JSON.parse(init.body) as { message_id: number; text: string };
+    expect(body.message_id).toBe(draftMessageId);
+    expect(body.text).toBe('the final answer');
+    expect(getDraftState(adapter, 12345)).toBeUndefined();
+
+    // A subsequent tool call starts a brand-new draft, proving no stale state leaked.
+    adapter.reportToolCall('chris', 'next turn line');
+    await getDraftState(adapter, 12345)?.creating;
+    expect(callsTo(telegramFetch.fn, 'sendMessage')).toHaveLength(2);
+  });
+
+  it('send() behaves exactly as today when no draft exists', async () => {
+    const result = await adapter.send(makeTextEnvelope('no tool calls happened'));
+    expect(result.success).toBe(true);
+    expect(callsTo(telegramFetch.fn, 'sendMessage')).toHaveLength(1);
+    expect(callsTo(telegramFetch.fn, 'editMessageText')).toHaveLength(0);
+  });
+
+  it('falls back to sendMessage when the draft overwrite edit fails', async () => {
+    adapter.reportToolCall('chris', 'first line');
+    await getDraftState(adapter, 12345)?.creating;
+
+    // A non-400 failure isn't retried without parse_mode — it's thrown straight
+    // through deliverText, so send() falls back to a fresh sendMessage.
+    telegramFetch.queueFailure('editMessageText:markdown', 500, 'internal error');
+
+    const result = await adapter.send(makeTextEnvelope('the final answer'));
+
+    expect(result.success).toBe(true);
+    expect(callsTo(telegramFetch.fn, 'editMessageText')).toHaveLength(1);
+    expect(callsTo(telegramFetch.fn, 'sendMessage')).toHaveLength(2); // draft creation + fallback send
+    expect(getDraftState(adapter, 12345)).toBeUndefined();
+  });
+});
+
+// ── TelegramAdapter finalizeDraft (/stop) ────────────────────────────────────
+
+describe('TelegramAdapter finalizeDraft (/stop)', () => {
+  let adapter: TelegramAdapter;
+  let telegramFetch: ReturnType<typeof makeTelegramFetchMock>;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    const config = makeTestConfig('/tmp/unused-e29-stop');
+    adapter = new TelegramAdapter({
+      config,
+      queue: {} as unknown as MessageQueue,
+      pipeline: {} as unknown as PipelineEngine,
+      db: {} as unknown as Database.Database,
+      instanceConfig: { token: 'test:token', poll_timeout: 30 },
+    });
+    telegramFetch = makeTelegramFetchMock();
+    vi.stubGlobal('fetch', telegramFetch.fn);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it('appends the note and edits the open draft with it', async () => {
+    adapter.reportToolCall('chris', 'first line');
+    await getDraftState(adapter, 12345)?.creating;
+    const draftMessageId = getDraftState(adapter, 12345)?.messageId;
+
+    expect(adapter.finalizeDraft('chris', 'Stopped by user')).toBe(true);
+    await vi.advanceTimersByTimeAsync(0); // flush finalizeDraft's internal edit call
+
+    const [, init] = callsTo(telegramFetch.fn, 'editMessageText')[0] as [string, { body: string }];
+    const body = JSON.parse(init.body) as { message_id: number; text: string };
+    expect(body.message_id).toBe(draftMessageId);
+    expect(body.text).toContain('first line');
+    expect(body.text).toContain('Stopped by user');
+  });
+
+  it('clears the draft so a later tool call starts fresh, not a new edit', async () => {
+    adapter.reportToolCall('chris', 'first line');
+    await getDraftState(adapter, 12345)?.creating;
+
+    adapter.finalizeDraft('chris', 'Stopped by user');
+    await vi.advanceTimersByTimeAsync(0); // flush finalizeDraft's internal edit call
+    expect(getDraftState(adapter, 12345)).toBeUndefined();
+
+    adapter.reportToolCall('chris', 'a new turn begins');
+    await getDraftState(adapter, 12345)?.creating;
+    expect(callsTo(telegramFetch.fn, 'sendMessage')).toHaveLength(2); // original draft + this fresh one
+    expect(callsTo(telegramFetch.fn, 'editMessageText')).toHaveLength(1); // unchanged — no stray edit from the old draft
+  });
+
+  it('cancels a pending batch timer so it never fires after finalize', async () => {
+    adapter.reportToolCall('chris', 'first line');
+    await getDraftState(adapter, 12345)?.creating;
+    adapter.reportToolCall('chris', 'second line'); // arms the batch timer
+
+    adapter.finalizeDraft('chris', 'Stopped by user');
+    await vi.advanceTimersByTimeAsync(0); // flush finalizeDraft's internal edit call
+
+    // Advance well past the batch window — the old timer must not fire a second edit.
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(callsTo(telegramFetch.fn, 'editMessageText')).toHaveLength(1);
+  });
+
+  it('is a no-op when no draft is open for the contact', () => {
+    expect(adapter.finalizeDraft('chris', 'Stopped by user')).toBe(false);
+    expect(telegramFetch.fn).not.toHaveBeenCalled();
+  });
+
+  it('is a no-op for an unknown contact', () => {
+    expect(adapter.finalizeDraft('nobody', 'Stopped by user')).toBe(false);
+    expect(telegramFetch.fn).not.toHaveBeenCalled();
+  });
+
+  it('stops a running typing indicator even when a draft is open', async () => {
+    adapter.startTyping('chris');
+    expect(isTypingLoopActive(adapter, 12345)).toBe(true);
+
+    adapter.reportToolCall('chris', 'first line');
+    await getDraftState(adapter, 12345)?.creating;
+
+    adapter.finalizeDraft('chris', 'Stopped by user');
+    expect(isTypingLoopActive(adapter, 12345)).toBe(false);
+  });
+
+  it('stops a running typing indicator even when there is no draft to finalize', () => {
+    adapter.startTyping('chris');
+    expect(isTypingLoopActive(adapter, 12345)).toBe(true);
+
+    expect(adapter.finalizeDraft('chris', 'Stopped by user')).toBe(false);
+    expect(isTypingLoopActive(adapter, 12345)).toBe(false);
   });
 });

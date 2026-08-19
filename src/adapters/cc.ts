@@ -97,6 +97,17 @@ export function formatMessagesForSampling(
     delete firstMeta!['memory_context'];
   }
 
+  // One-shot context injected by create_telegram_topic (E28) for a brand-new
+  // topic's first turn — unlike memory_context, this always applies (not
+  // gated by includeMemoryContext): cc-headless suppresses memory_context
+  // because it injects memory via the system prompt instead, but has no
+  // equivalent alternate path for agent-supplied topic context.
+  const topicContext = firstMeta?.injected_topic_context;
+  if (typeof topicContext === 'string' && topicContext.length > 0) {
+    parts.push(`[Context for this new topic, provided when it was created]\n${topicContext}`);
+    delete firstMeta!['injected_topic_context'];
+  }
+
   for (let i = 0; i < envelopes.length; i++) {
     const env = envelopes[i]!;
     let body: string;
@@ -107,6 +118,15 @@ export function formatMessagesForSampling(
       body = `[${verb} ${env.payload.emoji} to message ${env.payload.target_message_id}]`;
     } else {
       body = `[${(env.payload as { type: string }).type}]`;
+    }
+    // Quoted reply context (E28) — a user quote-replying to a message, rendered
+    // as a context line before the body (same precedent as the reaction line
+    // above), never affecting which session/topic the message routed to.
+    const quoted = env.metadata?.['quoted_message'] as
+      | { sender_name?: string; text?: string }
+      | undefined;
+    if (quoted) {
+      body = `[Replying to ${quoted.sender_name ?? 'someone'}: "${quoted.text ?? ''}"]\n${body}`;
     }
     const ts = env.timestamp ? ` at ${fmtTs(env.timestamp, i === 0)}` : '';
     // Append [Image: ...] and [File: ...] lines after the body so the agent can

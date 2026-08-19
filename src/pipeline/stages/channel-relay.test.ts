@@ -140,6 +140,24 @@ describe('channel-relay stage', () => {
     expect(messages[0]!.envelope.channel).toBe('telegram');
   });
 
+  it('a relay rule matching a bot\'s DM channel also matches a group derived from it (E28)', async () => {
+    const config = makeConfig({
+      relays: [{ match: { channel: 'telegram:peggy' }, target: { channel: 'other', template: '{{body}}' } }],
+      routes: [{ match: { channel: 'other' }, target: { adapterId: 'cc-headless', recipientId: 'agent:peggy' } }],
+    });
+    const { queue, deps } = makeHarness(config);
+
+    const result = await processInbound(
+      { channel: 'telegram:peggy:group:-1003977797157', sender: 'contact:chris', payload: { type: 'text', body: 'hi' } },
+      deps,
+    );
+
+    expect(result.queued).toBe(false);
+    const messages = queue.dequeue('agent:peggy', 'general', 10);
+    expect(messages).toHaveLength(1);
+    expect(messages[0]!.envelope.channel).toBe('other');
+  });
+
   it('deduplicates a retried source delivery after relaying', async () => {
     const config = makeConfig({
       relays: [{ match: { channel: 'pebble' }, target: { channel: 'telegram:peggy', template: 'wrapped: {{body}}' } }],

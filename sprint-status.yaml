@@ -335,4 +335,190 @@ epics:
       S23.4: complete  # index.ts wiring for N instances + startHeadless/stopHeadless multi-instance lifecycle tests
       S23.5: pending   # Live config.yaml migration: pokeclaude as second instance, retire tmux session (needs operator sign-off)
       S23.6: complete  # Docs (CC_HEADLESS_ADAPTER.md, config.yaml.example, CHANGELOG)
-last_updated: 2026-07-01  # E23 S23.1-S23.4/S23.6 complete; S23.5 pending operator sign-off
+  E4:
+    status: backlog
+    notes: >
+      BlueBubbles (iMessage) adapter. Config schema scaffolding exists
+      (BlueBubblesAdapterSchema in src/config/schema.ts, referenced by
+      AdaptersConfigSchema) but no adapter implementation file was ever
+      built — never picked up after Telegram (E3) shipped. S10.2 (markRead)
+      was explicitly deferred here.
+    stories:
+      S4.1: pending  # Webhook Receiver
+      S4.2: pending  # Outbound Message Delivery
+      S4.3: pending  # Adapter Capabilities: markRead and react
+  E11:
+    status: backlog
+    notes: >
+      Plugin loader + adapter interface. The AdapterInstance interface is a
+      stable de-facto contract (every real adapter — Telegram, email,
+      cc-headless — implements it), but config-driven loading of adapters
+      from npm packages (S11.2) was never built.
+    stories:
+      S11.1: pending  # Finalize AdapterInstance interface as a formal, documented contract
+      S11.2: pending  # Config-driven adapter plugin loading
+  E12:
+    status: in-progress
+    notes: >
+      Health API (S12.1, GET /api/v1/health) and the pm2 ecosystem file
+      (S12.2, ecosystem.config.cjs) shipped early, pre-dating this tracker.
+      Dead-letter *management* (S12.3 — /dead-letter command, GET/POST
+      /api/v1/dead-letter, retry_count, 24h auto-expiry sweep) was never
+      built; only a bare dead_letter status count exists today (queue
+      status counts, /status command).
+    stories:
+      S12.1: complete  # Health API
+      S12.2: complete  # pm2 ecosystem file
+      S12.3: pending   # Dead Letter Management (inspect/retry/auto-expiry)
+  E21:
+    status: complete
+    completed: 2026-06-23
+    notes: >
+      Email channel — multi-instance config, IMAP IDLE inbound, SMTP
+      threaded reply, per-thread sessions via thread:<hash> topics (the
+      pattern E27 later generalized into the shared threads table).
+      Agent-initiated send_email tool (S21.7) and Markdown→HTML rich-text
+      outbound (S21.8) follow-ups also shipped. See docs/EMAIL_ADAPTER.md.
+    stories:
+      S21.1: complete  # Email adapter config schema & multi-instance
+      S21.2: complete  # Thread-key derivation & topic mapping
+      S21.3: complete  # IMAP IDLE inbound
+      S21.4: complete  # Identity & anti-spoofing
+      S21.5: complete  # SMTP threaded reply
+      S21.6: complete  # Wiring, docs, tests
+      S21.7: complete  # Agent-initiated email (send_email tool)
+      S21.8: complete  # Rich-text (Markdown → HTML) outbound
+  E22:
+    status: backlog
+    notes: >
+      Shared sessions & conversation membership (multi-participant email).
+      Not started — every session is still strictly 1:1
+      (conversation_id = sha256(sorted([contact_id, channel, topic]))).
+    stories:
+      S22.1: pending  # Membership model + shared-session keying + admission rule
+      S22.2: pending  # Inbound participant capture, resolution & surfacing
+      S22.3: pending  # Reply-all from the member set
+      S22.4: pending  # Group adapter to validate the abstraction (deferred within its own epic doc)
+  E24:
+    status: backlog
+    notes: >
+      Sub-agent spawning — let an agent's turn spawn its own tracked child
+      `claude -p` runs (same_instance/fresh_directory modes, nesting-depth
+      enforcement, completion delivery back to the parent turn). Not started.
+    stories:
+      S24.1: pending  # Config schema: subagents: block + per-agent overrides
+      S24.2: pending  # Persistence: subagent_runs table
+      S24.3: pending  # Spawn/lifecycle core: process tracking, kill-on-shutdown
+      S24.4: pending  # Modes: same_instance and fresh_directory
+      S24.5: pending  # Nesting depth tracking and enforcement
+      S24.6: pending  # MCP tool surface
+      S24.7: pending  # Completion delivery
+      S24.8: pending  # Docs
+  E25:
+    status: complete
+    completed: 2026-08-12
+    notes: >
+      Pebble Ring voice-memo webhook channel. Bearer-token-as-identity
+      contact resolution, multipart parsing, dedup-correct envelope
+      construction. Pairs with E26 for forwarding into an existing
+      conversation on another channel. See docs/PEBBLE_ADAPTER.md.
+    stories:
+      S25.1: complete  # Config schema: pebble contact tokens + adapter toggle
+      S25.2: complete  # Multipart webhook endpoint
+      S25.3: complete  # Bearer token → contact resolution (auth is identity)
+      S25.4: complete  # Envelope construction & dedup correctness
+      S25.5: complete  # Wiring, docs, tests
+  E26:
+    status: complete
+    completed: 2026-08-12
+    notes: >
+      Generic channel-relay pipeline stage (pipeline.relays) — re-arrives a
+      message on a different channel with its body rewritten from a
+      template, preserving sender; loop guard caps relay hops at 3. Built to
+      unblock Pebble Ring → Telegram forwarding. See docs/CHANNEL_RELAY.md.
+    stories:
+      S26.1: complete  # Config schema: pipeline.relays
+      S26.2: complete  # channel-relay pipeline stage
+      S26.3: complete  # Extract shared inbound-submission path
+      S26.4: complete  # Loop guard
+      S26.5: complete  # Wiring, docs, tests
+  E27:
+    status: complete
+    completed: 2026-08-18
+    notes: >
+      Generic thread store (threads table) generalizing email's bespoke
+      email_threads table — src/pipeline/thread-store.ts
+      (getThread/upsertThread/patchThreadMetadata); migration 012 backfills
+      email_threads losslessly then drops it. Built specifically so E28
+      could add Telegram forum-topic sessions with no schema change. See
+      docs/THREADING.md.
+    stories:
+      S27.1: complete  # Consolidate the channel-agnostic thread helpers
+      S27.2: complete  # Migration: generic threads table
+      S27.3: complete  # src/pipeline/thread-store.ts
+      S27.4: complete  # Retrofit the email adapter onto the generic store
+      S27.5: complete  # Docs
+      S27.6: complete  # Wiring & full regression pass
+  E28:
+    status: complete
+    completed: 2026-08-19
+    notes: >
+      Telegram group forum topics & reply context. Pivoted mid-epic
+      (2026-08-18) from DM Threaded Mode — which broke the DM's plain
+      non-topic default area — to group forum topics instead. A
+      topic-enabled group becomes its own dynamically-derived channel
+      (AdapterInstance.ownsChannel, no static per-group config); each forum
+      topic is its own long-lived session on E27's generic thread store;
+      per-topic typing/tool-call-status isolation; create_telegram_topic MCP
+      tool (admin-rights checked, optional one-shot context injection);
+      functional reply_to (native quote, suppressed when replying to the
+      already-latest message). Also fixed post-implementation during live
+      testing: pipeline.routes/relays exact-channel-equality bug
+      (channelMatches(), so existing config matches a bot's groups with no
+      changes) and send_message's missing topic param (was hard-coded to
+      "general", so a create_telegram_topic-returned thread could never be
+      targeted). Implemented on feat/e27-e28-thread-store, not yet merged to
+      dev/main as of this entry. See
+      docs/TELEGRAM_ADAPTER.md#group-topics--replies-e28.
+    stories:
+      S28.1: complete  # Group channel identity: auto-routing, no per-group config
+      S28.2: complete  # Forum topics on the generic thread store (group-scoped)
+      S28.3: complete  # Outbound: reply into the correct chat and topic
+      S28.4: complete  # Agent-originated topics: create_telegram_topic tool (group-only)
+      S28.5: complete  # Reply-to-message: outbound native reply + inbound context
+      S28.6: complete  # Wiring, docs, tests
+  E29:
+    status: complete
+    completed: 2026-08-18
+    notes: >
+      Live tool-call status stream — non-delivery tool calls during a
+      headless turn appear as batched lines in a single evolving Telegram
+      message (editMessageText), overwritten by the final answer on
+      delivery. Also shipped in the same branch: /stop slash command
+      (hard-kills the in-flight claude -p child with SIGKILL, since SIGTERM
+      let the CLI quietly re-prompt itself instead of stopping). See
+      docs/TELEGRAM_ADAPTER.md#live-tool-call-status-stream-e29.
+    stories:
+      S29.1: complete  # invokeClaude(): tool-call event callback
+      S29.2: complete  # Tool-call summary formatting
+      S29.3: complete  # Telegram adapter: draft-message lifecycle
+      S29.4: complete  # Overwrite-on-delivery
+      S29.5: complete  # Length cap / truncation
+      S29.6: complete  # Wiring, docs, tests
+  E30:
+    status: backlog
+    notes: >
+      Decoupled memory-logging agent — move Peggy's per-turn memory logging
+      (journal/MEMORY.md writes) out of the interruptible main turn into a
+      debounced background sweep, with a high-stakes immediate-logging
+      exception. Prerequisite for the "interrupt in-flight turn on rapid
+      follow-up message" backlog item (_bmad-output/backlog.md) — that
+      design is only safe once memory-logging no longer runs inside an
+      interruptible turn. Not started.
+    stories:
+      S30.1: pending  # Strip post-reply memory-logging out of the main turn
+      S30.2: pending  # Debounced memory-sweep scheduler
+      S30.3: pending  # High-stakes immediate-logging exception
+      S30.4: pending  # Queue responsiveness: advance on reply, not on full turn completion
+      S30.5: pending  # Docs, tests, wiring
+last_updated: 2026-08-19  # Backfilled E4, E11, E12, E21, E22, E24, E25, E26, E29, E30 (never tracked here); added E27 (complete) and E28 (complete, implemented on feat/e27-e28-thread-store, pending merge to dev). current_epic (E23) left as-is — S23.5 still genuinely pending operator sign-off; picking the next active epic among the backlog entries above is an open call for the operator, not inferred here.

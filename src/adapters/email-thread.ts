@@ -4,8 +4,7 @@
  * Threading, subject handling, quoted-reply stripping, and Authentication-Results
  * parsing — all side-effect-free so they can be unit tested without IMAP/SMTP.
  */
-import { createHash } from 'node:crypto';
-import { THREAD_TOPIC_PREFIX } from '../pipeline/types.js';
+export { topicForThreadKey } from '../pipeline/types.js';
 
 /** Strip surrounding angle brackets and whitespace from a Message-ID. */
 export function normalizeMessageId(id: string | null | undefined): string {
@@ -43,12 +42,6 @@ export function deriveThreadKey(opts: {
   if (opts.references.length > 0) return opts.references[0]!;
   if (opts.inReplyTo) return opts.inReplyTo;
   return opts.messageId;
-}
-
-/** Map a thread key to the reserved `thread:<hash>` topic used for routing. */
-export function topicForThreadKey(threadKey: string): string {
-  const hash = createHash('sha256').update(threadKey).digest('hex').slice(0, 16);
-  return `${THREAD_TOPIC_PREFIX}${hash}`;
 }
 
 /** Strip leading Re:/Fwd:/Fw: prefixes (any number, any case) to a base subject. */
