@@ -62,6 +62,17 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
   `claude-code` route instead of the configured `cc-headless` agent, since
   route-resolve previously compared channels with exact string equality.
 
+### Fixed
+- **`send_message` had no `topic` param and hard-coded `"general"` in the
+  envelope (E28).** Passing a `create_telegram_topic`-returned `thread:<hash>`
+  topic — as `metadata.topic` or otherwise — was silently ignored, so the
+  message always landed in the group's General topic even though S28.3's
+  outbound resolution (`resolveSendTarget` in `src/adapters/telegram.ts`) was
+  already correctly wired to `envelope.topic`. `send_message` now accepts an
+  optional `topic` (default `"general"`), documented in
+  [docs/MCP_TOOLS.md](docs/MCP_TOOLS.md#send_message) alongside the existing
+  `schedule_message` `topic` param it mirrors.
+
 ## [0.9.0] - 2026-08-18
 
 ### Added
