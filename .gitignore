@@ -8,3 +8,5 @@ dist/
 *.db-shm
 .DS_Store
 config.yaml
+*.bak.*
+*.bak
