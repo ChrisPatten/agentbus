@@ -50,6 +50,7 @@ function insertSession(
     channel?: string;
     status?: string;
     lastActivityOffset?: number; // ms in the past
+    startedAtOffset?: number; // ms in the past (E30 — hard-ceiling baseline when never journaled)
     endedAt?: string | null;
     summaryAttempts?: number;
     messageCount?: number;
@@ -60,7 +61,7 @@ function insertSession(
 ) {
   const id = opts.id ?? 'sess-' + Math.random().toString(36).slice(2);
   const lastActivity = new Date(Date.now() - (opts.lastActivityOffset ?? 0)).toISOString();
-  const now = new Date().toISOString();
+  const startedAt = new Date(Date.now() - (opts.startedAtOffset ?? 0)).toISOString();
   db.prepare(
     `INSERT INTO sessions (id, conversation_id, channel, contact_id, started_at, last_activity, ended_at, message_count, status, summary_attempts, claude_session_id, last_journaled_at)
      VALUES (?, ?, ?, 'contact:chris', ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -68,7 +69,7 @@ function insertSession(
     id,
     opts.conversationId ?? 'conv-1',
     opts.channel ?? 'telegram',
-    now,
+    startedAt,
     lastActivity,
     opts.endedAt !== undefined ? opts.endedAt : null,
     opts.messageCount ?? 1,
@@ -316,6 +317,7 @@ describe('SessionTracker.dispatchJournaling() (E20)', () => {
   function journalingConfig(
     threshold_ms: number | Record<string, number>,
     enabled = true,
+    ceiling_ms?: number,
   ): AppConfig {
     return {
       ...stubConfig,
@@ -327,7 +329,7 @@ describe('SessionTracker.dispatchJournaling() (E20)', () => {
           claude_bin: 'claude',
           error_reply: 'err',
           memory: { dir: 'memory', index_file: 'MEMORY.md', daily_subdir: 'daily', journal_lookback_days: 3 },
-          journaling: { enabled, threshold_ms, prompt: 'journal please' },
+          journaling: { enabled, threshold_ms, ceiling_ms, prompt: 'journal please' },
         },
       },
     } as unknown as AppConfig;
@@ -482,6 +484,157 @@ describe('SessionTracker.dispatchJournaling() (E20)', () => {
       last_journaled_at: string | null;
     };
     expect(row.last_journaled_at).toBeNull();
+  });
+
+  describe('hard ceiling (E30)', () => {
+    it('dispatches a never-idle session once the ceiling elapses since session start', async () => {
+      // lastActivityOffset: 0 → not idle at all (well under the 15-min threshold),
+      // but started 40 min ago and never journaled → ceiling (30 min) trips.
+      const id = insertSession(db, {
+        lastActivityOffset: 0,
+        startedAtOffset: 40 * 60 * 1000,
+        claudeSessionId: 'cc-1',
+      });
+      const tracker = makeTracker(journalingConfig(900000, true, 30 * 60 * 1000));
+
+      tracker.tick();
+      await flush();
+
+      expect(runner).toHaveBeenCalledTimes(1);
+      expect(runner).toHaveBeenCalledWith('conv-1');
+      const row = db.prepare('SELECT last_journaled_at FROM sessions WHERE id = ?').get(id) as {
+        last_journaled_at: string | null;
+      };
+      expect(row.last_journaled_at).not.toBeNull();
+    });
+
+    it('does not dispatch a never-idle session before the ceiling elapses', async () => {
+      insertSession(db, {
+        lastActivityOffset: 0,
+        startedAtOffset: 10 * 60 * 1000, // 10 min < 30-min ceiling
+        claudeSessionId: 'cc-1',
+      });
+      const tracker = makeTracker(journalingConfig(900000, true, 30 * 60 * 1000));
+
+      tracker.tick();
+      await flush();
+
+      expect(runner).not.toHaveBeenCalled();
+    });
+
+    it('measures the ceiling from last_journaled_at, not session start, once journaled once', async () => {
+      // Journaled 10 min ago (within the 30-min ceiling), started 2h ago.
+      // Without using last_journaled_at as the baseline this would re-fire
+      // immediately off the old session-start timestamp.
+      insertSession(db, {
+        lastActivityOffset: 0,
+        startedAtOffset: 2 * 60 * 60 * 1000,
+        lastJournaledAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+        claudeSessionId: 'cc-1',
+      });
+      const tracker = makeTracker(journalingConfig(900000, true, 30 * 60 * 1000));
+
+      tracker.tick();
+      await flush();
+
+      expect(runner).not.toHaveBeenCalled();
+    });
+
+    it('the idle debounce and hard ceiling are independent — either can trigger', async () => {
+      // Idle past the 15-min threshold, well under the 30-min ceiling — the
+      // debounce leg alone should still fire.
+      insertSession(db, {
+        lastActivityOffset: 20 * 60 * 1000,
+        startedAtOffset: 20 * 60 * 1000,
+        claudeSessionId: 'cc-1',
+      });
+      const tracker = makeTracker(journalingConfig(900000, true, 30 * 60 * 1000));
+
+      tracker.tick();
+      await flush();
+
+      expect(runner).toHaveBeenCalledTimes(1);
+    });
+
+    it('leaves ceiling behavior off (idle-only) when ceiling_ms is unset', async () => {
+      // Never idle, started long ago — with no ceiling configured this must
+      // never dispatch, matching pre-E30 behavior.
+      insertSession(db, {
+        lastActivityOffset: 0,
+        startedAtOffset: 6 * 60 * 60 * 1000,
+        claudeSessionId: 'cc-1',
+      });
+      const tracker = makeTracker(journalingConfig(900000)); // ceiling_ms omitted
+
+      tracker.tick();
+      await flush();
+
+      expect(runner).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('overlap suppression (E30)', () => {
+    it('does not dispatch a second journaling turn while one is already in flight for the same conversation', async () => {
+      insertSession(db, { lastActivityOffset: 20 * 60 * 1000, claudeSessionId: 'cc-1' });
+      let resolveRunner: (v: { skipped?: boolean }) => void;
+      runner.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            resolveRunner = resolve;
+          }),
+      );
+      const tracker = makeTracker(journalingConfig(900000));
+
+      tracker.tick(); // dispatches, runner() pending
+      await flush();
+      tracker.tick(); // would re-select the same candidate — must be suppressed
+      await flush();
+
+      expect(runner).toHaveBeenCalledTimes(1);
+
+      // Once the in-flight turn resolves and stamps last_journaled_at, the
+      // session is no longer a candidate at all (journaled since last activity).
+      resolveRunner!({});
+      await flush();
+      tracker.tick();
+      await flush();
+
+      expect(runner).toHaveBeenCalledTimes(1);
+    });
+
+    it('re-allows dispatch for a conversation once its in-flight turn settles and new activity re-arms it', async () => {
+      const id = insertSession(db, { lastActivityOffset: 20 * 60 * 1000, claudeSessionId: 'cc-1' });
+      let resolveRunner: (v: { skipped?: boolean }) => void;
+      runner.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            resolveRunner = resolve;
+          }),
+      );
+      const tracker = makeTracker(journalingConfig(900000));
+
+      tracker.tick();
+      await flush();
+      expect(runner).toHaveBeenCalledTimes(1);
+
+      resolveRunner!({});
+      await flush();
+
+      // Simulate new activity after the first journaling turn (last_activity
+      // advances past last_journaled_at), followed by enough idle time to
+      // re-trip the debounce — mirrors the plain "re-arms" test above, since
+      // real wall-clock time can't actually elapse 15+ minutes here.
+      db.prepare('UPDATE sessions SET last_journaled_at = ?, last_activity = ? WHERE id = ?').run(
+        new Date(Date.now() - 40 * 60 * 1000).toISOString(),
+        new Date(Date.now() - 20 * 60 * 1000).toISOString(),
+        id,
+      );
+      runner.mockResolvedValue({});
+      tracker.tick();
+      await flush();
+
+      expect(runner).toHaveBeenCalledTimes(2);
+    });
   });
 
   describe('multi-instance routing (E23)', () => {

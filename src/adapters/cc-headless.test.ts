@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type Database from 'better-sqlite3';
+import RealDatabase from 'better-sqlite3';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
+import { runMigrations } from '../db/schema.js';
 import type { AppConfig } from '../config/schema.js';
 
 const stubConfig: AppConfig = {
@@ -63,6 +67,18 @@ vi.mock('../config/loader.js', () => ({
 // mocked global.fetch below, contaminating assertions about this module).
 vi.mock('./cc.js', () => ({
   formatMessagesForSampling: vi.fn(() => ''),
+}));
+
+// E30 (S30.4): mock the child_process spawn so tests can script a fake
+// `claude -p` stream-json stdout (delivery tool call, close timing) without
+// running a real process. Hoisted so the *same* mock function instance backs
+// the module regardless of how many times `vi.resetModules()` forces
+// cc-headless.ts to be re-imported (each fresh import re-runs this factory —
+// without hoisting, a plain `vi.fn()` created inside the factory would be a
+// new, unconfigured instance every time).
+const spawnMock = vi.hoisted(() => vi.fn());
+vi.mock('node:child_process', () => ({
+  spawn: spawnMock,
 }));
 
 let currentConfig: AppConfig = stubConfig;
@@ -290,5 +306,155 @@ describe('cc-headless multi-instance lifecycle (E23)', () => {
     await new Promise((r) => setTimeout(r, 1200));
 
     expect(fetchMock.mock.calls.length).toBe(callsBeforeStop);
+  });
+});
+
+describe('queue responsiveness — advance on delivery, not process exit (E30 / S30.4)', () => {
+  const singleInstanceConfig: AppConfig = {
+    ...stubConfig,
+    adapters: {
+      'cc-headless': {
+        agent_id: 'peggy',
+        poll_interval_ms: 15,
+        system_prompt: 'You are Peggy.',
+        claude_bin: 'claude',
+        error_reply: 'err',
+        error_passthrough: false,
+        memory: { dir: 'memory', index_file: 'MEMORY.md', daily_subdir: 'daily', journal_lookback_days: 3 },
+        journaling: { enabled: true, threshold_ms: 1_800_000, prompt: 'journal' },
+      },
+    },
+  } as unknown as AppConfig;
+
+  let realDb: InstanceType<typeof RealDatabase>;
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  /** A fake ChildProcess: an EventEmitter with stdout/stderr PassThrough streams. */
+  function makeFakeChild() {
+    const child = new EventEmitter() as EventEmitter & {
+      stdout: PassThrough;
+      stderr: PassThrough;
+      kill: ReturnType<typeof vi.fn>;
+    };
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.kill = vi.fn();
+    return child;
+  }
+
+  function writeEvent(stream: PassThrough, obj: unknown): void {
+    stream.write(JSON.stringify(obj) + '\n');
+  }
+
+  function pendingResponse(messages: unknown[]): Response {
+    return { ok: true, json: async () => ({ ok: true, messages }) } as unknown as Response;
+  }
+
+  function makeEnvelope(id: string, sender: string) {
+    return { id, sender, channel: 'telegram', topic: undefined, body: `msg ${id}` };
+  }
+
+  beforeEach(() => {
+    vi.resetModules();
+    realDb = new RealDatabase(':memory:');
+    runMigrations(realDb);
+
+    currentConfig = singleInstanceConfig;
+    spawnMock.mockReset();
+
+    fetchMock = vi.fn();
+    global.fetch = fetchMock as unknown as typeof fetch;
+  });
+
+  afterEach(async () => {
+    const { stopHeadless } = await import('./cc-headless.js');
+    stopHeadless();
+    realDb.close();
+    vi.restoreAllMocks();
+  });
+
+  it('starts processing message 2 at message 1s delivery, not at message 1s process close', async () => {
+    const events: Array<{ label: string; t: number }> = [];
+    const t0 = Date.now();
+    const mark = (label: string) => events.push({ label, t: Date.now() - t0 });
+
+    let pendingCall = 0;
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      const u = String(url);
+      if (u.includes('/messages/pending')) {
+        pendingCall += 1;
+        if (pendingCall === 1) return Promise.resolve(pendingResponse([makeEnvelope('m1', 'contact:alice')]));
+        if (pendingCall === 2) return Promise.resolve(pendingResponse([makeEnvelope('m2', 'contact:alice')]));
+        return Promise.resolve(pendingResponse([]));
+      }
+      if (u.includes('/ack')) return Promise.resolve({ ok: true, json: async () => ({}) } as unknown as Response);
+      if (u.includes('/typing') || u.includes('/tool-status')) {
+        return Promise.resolve({ ok: true, json: async () => ({}) } as unknown as Response);
+      }
+      if (u.includes('/api/v1/messages') && init?.method === 'POST') {
+        return Promise.resolve({ ok: true, json: async () => ({}) } as unknown as Response);
+      }
+      return Promise.resolve(pendingResponse([]));
+    });
+
+    const children: ReturnType<typeof makeFakeChild>[] = [];
+    spawnMock.mockImplementation(() => {
+      const child = makeFakeChild();
+      const index = children.length;
+      children.push(child);
+
+      if (index === 0) {
+        // Turn 1: deliver quickly via the `reply` tool, but keep the process
+        // itself alive for a while afterward (simulating trailing teardown /
+        // any lingering work) — the queue must not wait for this.
+        setTimeout(() => {
+          mark('turn1 delivered');
+          writeEvent(child.stdout, {
+            type: 'assistant',
+            session_id: 'sess-1',
+            message: { content: [{ type: 'tool_use', name: 'mcp__agentbus__reply', input: { text: 'hi' } }] },
+          });
+        }, 15);
+        setTimeout(() => {
+          mark('turn1 closed');
+          writeEvent(child.stdout, { type: 'result', session_id: 'sess-1', result: 'hi' });
+          child.emit('close', 0);
+        }, 150);
+      } else {
+        mark('turn2 spawned');
+        setTimeout(() => {
+          writeEvent(child.stdout, {
+            type: 'assistant',
+            session_id: 'sess-1',
+            message: { content: [{ type: 'tool_use', name: 'mcp__agentbus__reply', input: { text: 'hi again' } }] },
+          });
+        }, 5);
+        setTimeout(() => child.emit('close', 0), 20);
+      }
+
+      return child as unknown as import('node:child_process').ChildProcess;
+    });
+
+    const { startHeadless } = await import('./cc-headless.js');
+    startHeadless(realDb as unknown as Database.Database);
+
+    // Give both polls, turn 1's delivery, and turn 2's spawn+delivery+close
+    // time to happen, but well before turn 1's scripted close at 150ms.
+    await new Promise((r) => setTimeout(r, 220));
+
+    const turn1Delivered = events.find((e) => e.label === 'turn1 delivered');
+    const turn1Closed = events.find((e) => e.label === 'turn1 closed');
+    const turn2Spawned = events.find((e) => e.label === 'turn2 spawned');
+
+    expect(spawnMock).toHaveBeenCalledTimes(2);
+    expect(turn1Delivered).toBeDefined();
+    expect(turn1Closed).toBeDefined();
+    expect(turn2Spawned).toBeDefined();
+
+    // The core S30.4 assertion: turn 2 began (spawn #2) after turn 1
+    // delivered but well before turn 1's process actually closed — proving
+    // the per-contact queue advanced on delivery, not on process exit.
+    expect(turn2Spawned!.t).toBeGreaterThanOrEqual(turn1Delivered!.t);
+    expect(turn2Spawned!.t).toBeLessThan(turn1Closed!.t);
   });
 });
