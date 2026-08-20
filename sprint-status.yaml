@@ -506,19 +506,35 @@ epics:
       S29.5: complete  # Length cap / truncation
       S29.6: complete  # Wiring, docs, tests
   E30:
-    status: backlog
+    status: complete
+    completed: 2026-08-19
     notes: >
-      Decoupled memory-logging agent — move Peggy's per-turn memory logging
-      (journal/MEMORY.md writes) out of the interruptible main turn into a
-      debounced background sweep, with a high-stakes immediate-logging
-      exception. Prerequisite for the "interrupt in-flight turn on rapid
-      follow-up message" backlog item (_bmad-output/backlog.md) — that
-      design is only safe once memory-logging no longer runs inside an
-      interruptible turn. Not started.
+      Decoupled memory-logging agent. Discovered mid-implementation that
+      E20's journaling-on-pause dispatcher (SessionTracker.dispatchJournaling)
+      already provided most of the "separate debounced sweep" mechanism the
+      epic called for, so S30.2 extends it rather than building a parallel
+      system: added a hard ceiling (journaling.ceiling_ms) so a
+      continuously-active conversation still flushes periodically (the
+      pre-existing idle-only trigger never tripped for those), and
+      in-flight suppression so a slow sweep can't accumulate a queued
+      backlog of redundant retriggers. S30.1/S30.3 are prompt-template/doc
+      guidance (system_prompt should stop instructing post-reply journaling,
+      with a documented high-stakes inline exception) rather than adapter
+      code changes — there was no hardcoded post-reply instruction in
+      agentbus itself to remove. S30.4 decouples
+      HeadlessInstance.enqueue()'s per-contact queue from full process exit:
+      it now advances at the moment a turn calls reply/send_message
+      (onDelivered callback threaded through invokeClaude/runClaudeTurn),
+      with claude_session_id now persisted as soon as it's first seen in the
+      stream (not just at turn end) to close a rapid-fire-second-message
+      race the early-advance would otherwise open on a brand-new
+      conversation. Implemented on feat/e30-decoupled-memory-logging, not
+      yet merged to dev as of this entry. See
+      docs/CC_HEADLESS_ADAPTER.md#memory-logging-e30.
     stories:
-      S30.1: pending  # Strip post-reply memory-logging out of the main turn
-      S30.2: pending  # Debounced memory-sweep scheduler
-      S30.3: pending  # High-stakes immediate-logging exception
-      S30.4: pending  # Queue responsiveness: advance on reply, not on full turn completion
-      S30.5: pending  # Docs, tests, wiring
+      S30.1: complete  # Strip post-reply memory-logging out of the main turn (docs/prompt-template guidance)
+      S30.2: complete  # Debounced memory-sweep scheduler (extended E20's dispatcher: hard ceiling + overlap suppression)
+      S30.3: complete  # High-stakes immediate-logging exception (documented policy + system_prompt template)
+      S30.4: complete  # Queue responsiveness: advance on reply, not on full turn completion
+      S30.5: complete  # Docs, tests, wiring
 last_updated: 2026-08-19  # Backfilled E4, E11, E12, E21, E22, E24, E25, E26, E29, E30 (never tracked here); added E27 (complete) and E28 (complete, implemented on feat/e27-e28-thread-store, pending merge to dev). current_epic (E23) left as-is — S23.5 still genuinely pending operator sign-off; picking the next active epic among the backlog entries above is an open call for the operator, not inferred here.

@@ -467,6 +467,21 @@ describe('AppConfigSchema — cc-headless memory + journaling (E20)', () => {
     expect(() => parseHeadless({ memory: { journal_lookback_days: -1 } })).toThrow();
   });
 
+  it('leaves ceiling_ms unset by default (E30 — idle-only, pre-E30 behavior)', () => {
+    const h = parseHeadless();
+    expect(h.journaling.ceiling_ms).toBeUndefined();
+  });
+
+  it('accepts an explicit ceiling_ms (E30)', () => {
+    const h = parseHeadless({ journaling: { ceiling_ms: 1_800_000 } });
+    expect(h.journaling.ceiling_ms).toBe(1_800_000);
+  });
+
+  it('rejects a negative / zero ceiling_ms (E30)', () => {
+    expect(() => parseHeadless({ journaling: { ceiling_ms: -1 } })).toThrow();
+    expect(() => parseHeadless({ journaling: { ceiling_ms: 0 } })).toThrow();
+  });
+
   it('allows journal_lookback_days of 0', () => {
     const h = parseHeadless({ memory: { journal_lookback_days: 0 } });
     expect(h.memory.journal_lookback_days).toBe(0);

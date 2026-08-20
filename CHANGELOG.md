@@ -10,6 +10,31 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+### Added
+- **Decoupled memory-logging (E30).** The reply-producing `claude -p` turn no
+  longer keeps running housekeeping tool calls after `reply`/`send_message`
+  fires — memory-logging is now the exclusive job of the existing E20
+  journaling-on-pause sweep, which gains a hard **ceiling** trigger
+  (`journaling.ceiling_ms`) alongside the idle debounce so a long,
+  continuously-active conversation still flushes periodically instead of only
+  on pause. Overlapping sweeps for the same conversation are now suppressed.
+  One documented exception: financial, health, scheduling, and
+  safety/security-relevant content is still logged immediately, inline, in
+  the reply-producing turn — see
+  [docs/CC_HEADLESS_ADAPTER.md](docs/CC_HEADLESS_ADAPTER.md#memory-logging-e30).
+
+### Changed
+- **`HeadlessInstance.enqueue()` advances on delivery, not process exit
+  (E30).** The per-contact serialization queue now unblocks the next queued
+  message as soon as a turn calls a delivery tool, instead of waiting for the
+  whole `claude -p` process to close — so one turn's trailing housekeeping (or
+  teardown latency) no longer delays a rapid-fire follow-up message.
+  `claude_session_id` is now persisted to the DB as soon as it's known (the
+  first stream event that carries it) rather than only at the end of the
+  turn, to avoid a new conversation's rapid-fire second message reading a
+  stale/null session id. See
+  [docs/CC_HEADLESS_ADAPTER.md](docs/CC_HEADLESS_ADAPTER.md#per-contact-serialization).
+
 ## [0.10.0] - 2026-08-19
 
 ### Added
