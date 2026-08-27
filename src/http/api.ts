@@ -317,7 +317,7 @@ export async function processInbound(
           id: randomUUID(),
           timestamp: new Date().toISOString(),
           channel: result.envelope.channel,
-          topic: 'command',
+          topic: result.envelope.topic,
           sender: 'system:bus',
           recipient: result.envelope.sender,
           reply_to: result.envelope.id,

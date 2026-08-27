@@ -35,6 +35,15 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
   stale/null session id. See
   [docs/CC_HEADLESS_ADAPTER.md](docs/CC_HEADLESS_ADAPTER.md#per-contact-serialization).
 
+### Fixed
+- **Bus-scope slash-command responses now reply in the originating Telegram
+  forum topic instead of General.** The response envelope built in
+  `src/http/api.ts` hardcoded `topic: 'command'`, which never matched
+  `TelegramAdapter`'s `thread:<id>` topic convention, so `resolveSendTarget()`
+  always fell back to the group's General topic regardless of which topic a
+  command like `/stop` was run from. It now preserves the inbound envelope's
+  `topic`.
+
 ## [0.10.0] - 2026-08-19
 
 ### Added
