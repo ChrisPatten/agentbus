@@ -55,6 +55,7 @@ import type { PipelineContext } from '../pipeline/types.js';
 import type Database from 'better-sqlite3';
 import type { CommandRegistry, SlashCommandContext } from '../commands/registry.js';
 import { createSafeDatabase } from '../db/safe-database.js';
+import { logOutboundTranscript } from '../pipeline/outbound-transcript.js';
 import { VERSION } from '../version.js';
 
 export interface HttpServerDeps {
@@ -336,27 +337,18 @@ export async function processInbound(
         // Marked with command_response:true so E8/E9 can exclude from memory processing.
         if (result.sessionId && result.conversationId) {
           try {
-            const now = new Date().toISOString();
             const contactId = result.envelope.sender.startsWith('contact:')
               ? result.envelope.sender.slice('contact:'.length)
               : result.envelope.sender;
-            deps.db
-              .prepare(
-                `INSERT INTO transcripts (id, message_id, conversation_id, session_id, created_at, channel, contact_id, direction, body, metadata)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, json(?))`,
-              )
-              .run(
-                randomUUID(),
-                responseEnvelope.id,
-                result.conversationId,
-                result.sessionId,
-                now,
-                result.envelope.channel,
-                contactId,
-                'outbound',
-                responseBody,
-                JSON.stringify({ command_response: true, command: commandName }),
-              );
+            logOutboundTranscript(deps.db, {
+              messageId: responseEnvelope.id,
+              conversationId: result.conversationId,
+              sessionId: result.sessionId,
+              channel: result.envelope.channel,
+              contactId,
+              body: responseBody,
+              metadata: { command_response: true, command: commandName },
+            });
           } catch (err) {
             console.error(`[inbound] Failed to log command response transcript: ${String(err)}`);
           }

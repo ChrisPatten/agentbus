@@ -4,6 +4,17 @@ How AgentBus handles memory for a single-user / single-agent personal assistant 
 
 > **E30 changes:** journaling is no longer purely pause-triggered — a hard ceiling now fires the same sweep even during a continuously-active conversation, so memory-logging is fully decoupled from the reply-producing turn (which no longer does any post-reply tool work at all, high-stakes content excepted). See [CC_HEADLESS_ADAPTER.md → Memory Logging](./CC_HEADLESS_ADAPTER.md#memory-logging-e30).
 
+> **E31 changes:** `transcripts` now captures both directions. Inbound rows are
+> written by `transcript-log.ts` (Stage 80), unchanged. Outbound rows —
+> `reply`, `send_message`, `send_email`, and scheduled-message delivery — are
+> written by `DeliveryWorker.deliver()` (`src/core/delivery.ts`) on confirmed
+> `adapter.send()` success, plus the bus-scope slash-command bypass
+> (`src/http/api.ts`, e.g. `/status`). Both call the same insert helper
+> (`logOutboundTranscript` in `src/pipeline/outbound-transcript.ts`) so the SQL
+> can't drift between the two paths. A failed/dead-lettered send never
+> produces a row; an unresolvable conversation/session (no prior inbound
+> history for that contact+channel) is skipped rather than failing the send.
+
 ## The layered model
 
 For a personal assistant, **the agent's own files are the memory system**:

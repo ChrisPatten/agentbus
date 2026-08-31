@@ -7,8 +7,14 @@
  * connectors (recipients starting with "agent:") remain in the queue for
  * the CC adapter to poll via GET /api/v1/messages/pending.
  */
+import type Database from 'better-sqlite3';
 import type { MessageQueue } from './queue.js';
 import type { AdapterRegistry, AdapterInstance } from './registry.js';
+import {
+  logOutboundTranscript,
+  renderOutboundBody,
+  resolveConversationForOutbound,
+} from '../pipeline/outbound-transcript.js';
 
 const POLL_INTERVAL_MS = 1000;
 const BATCH_SIZE = 20;
@@ -17,17 +23,20 @@ const MAX_RETRIES = 3;
 export interface DeliveryWorkerDeps {
   queue: MessageQueue;
   registry: AdapterRegistry;
+  db: Database.Database;
 }
 
 export class DeliveryWorker {
   private readonly queue: MessageQueue;
   private readonly registry: AdapterRegistry;
+  private readonly db: Database.Database;
   private stopping = false;
   private timer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(deps: DeliveryWorkerDeps) {
     this.queue = deps.queue;
     this.registry = deps.registry;
+    this.db = deps.db;
   }
 
   start(): void {
@@ -85,6 +94,7 @@ export class DeliveryWorker {
 
       if (result.success) {
         this.queue.ack(messageId);
+        this.logOutboundTranscript(messageId, envelope);
       } else if (result.retryable && (envelope.metadata['retry_count'] as number ?? 0) < MAX_RETRIES) {
         // Put back in queue for retry — reset to pending
         console.warn(`[delivery] Retryable failure for ${messageId}: ${result.error}`);
@@ -120,5 +130,38 @@ export class DeliveryWorker {
 
     // Fallback: resolve by channel
     return this.registry.lookupPrimaryByChannel(envelope.channel);
+  }
+
+  /**
+   * Best-effort transcript log for a confirmed-delivered send (S31.2).
+   * Errors here (including an unresolvable conversation/session) are caught
+   * and logged, never allowed to affect delivery/ack/retry — this runs after
+   * `queue.ack()` has already succeeded.
+   */
+  private logOutboundTranscript(
+    messageId: string,
+    envelope: import('../types/envelope.js').MessageEnvelope,
+  ): void {
+    try {
+      const contactId = envelope.recipient.startsWith('contact:')
+        ? envelope.recipient.slice('contact:'.length)
+        : envelope.recipient;
+      const { conversationId, sessionId } = resolveConversationForOutbound(
+        this.db,
+        contactId,
+        envelope.channel,
+      );
+      logOutboundTranscript(this.db, {
+        messageId,
+        conversationId,
+        sessionId,
+        channel: envelope.channel,
+        contactId,
+        body: renderOutboundBody(envelope.payload),
+        metadata: envelope.metadata,
+      });
+    } catch (err) {
+      console.error(`[delivery] Failed to log outbound transcript for ${messageId}: ${String(err)}`);
+    }
   }
 }

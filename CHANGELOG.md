@@ -11,6 +11,20 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 ## [Unreleased]
 
 ### Added
+- **Outbound transcript logging (E31).** `transcripts` now captures
+  `direction: 'outbound'` rows for every message a platform adapter
+  successfully delivers via `DeliveryWorker.deliver()` — `reply`,
+  `send_message`, `send_email`, and scheduled-message delivery — not just
+  the inbound side. Logging happens on confirmed `adapter.send()` success
+  only; a failed or dead-lettered send never produces a row. Conversation
+  and session are resolved via `conversation_registry`, the same lookup the
+  inbound pipeline uses; an unresolvable contact/channel pair is skipped
+  rather than failing the send. The pre-existing slash-command
+  outbound-logging path (`src/http/api.ts`) now shares the same insert
+  helper (`src/pipeline/outbound-transcript.ts`) instead of inlining its own
+  SQL. `search_transcripts` can now find an agent's own past outbound
+  message content. See
+  [docs/MEMORY_MODEL.md](docs/MEMORY_MODEL.md#the-layered-model).
 - **Decoupled memory-logging (E30).** The reply-producing `claude -p` turn no
   longer keeps running housekeeping tool calls after `reply`/`send_message`
   fires — memory-logging is now the exclusive job of the existing E20

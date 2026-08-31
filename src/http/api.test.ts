@@ -671,6 +671,29 @@ describe('GET /api/v1/transcripts/search', () => {
     });
     expect(res.statusCode).toBe(400);
   });
+
+  it('finds an outbound transcript row by its body text (E31)', async () => {
+    const sessionId = randomUUID();
+    db.prepare(
+      `INSERT INTO sessions (id, conversation_id, channel, contact_id, started_at, last_activity, message_count)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run(sessionId, 'conv-2', 'telegram', 'contact:alice', new Date().toISOString(), new Date().toISOString(), 1);
+    const msgId = randomUUID();
+    db.prepare(
+      `INSERT INTO transcripts (id, message_id, conversation_id, session_id, created_at, channel, contact_id, direction, body, metadata)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(randomUUID(), msgId, 'conv-2', sessionId, new Date().toISOString(), 'telegram', 'contact:alice', 'outbound', 'the scheduled reminder went out fine', '{}');
+
+    const res = await server.inject({
+      method: 'GET',
+      url: '/api/v1/transcripts/search?q=scheduled+reminder',
+    });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body) as { ok: boolean; results: Array<{ body: string; direction: string }> };
+    expect(body.results.length).toBeGreaterThan(0);
+    expect(body.results[0]!.direction).toBe('outbound');
+    expect(body.results[0]!.body).toContain('scheduled reminder');
+  });
 });
 
 describe('GET /api/v1/sessions and GET /api/v1/sessions/:id', () => {
