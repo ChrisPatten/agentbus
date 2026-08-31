@@ -24,6 +24,8 @@ interface Session {
   ended_at: string | null;
   message_count: number;
   summary: SessionSummary | null;
+  /** Conversation topic (e.g. "general" or "thread:<hash>"), via conversation_registry (E32). */
+  topic: string | null;
 }
 
 interface SessionResponse {

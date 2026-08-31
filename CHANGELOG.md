@@ -11,6 +11,15 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 ## [Unreleased]
 
 ### Added
+- **Session topic exposure (E32).** `get_session`/`list_sessions` now return
+  a `topic` field (e.g. `"general"` or a Telegram forum `"thread:<hash>"`),
+  resolved via a `LEFT JOIN conversation_registry` in both
+  `GET /api/v1/sessions` and `GET /api/v1/sessions/:id` — no migration or
+  backfill needed, since `sessions.conversation_id` and
+  `conversation_registry.id` were already the same value for every existing
+  session. Lets an agent target a proactive `send_message`/
+  `schedule_message` at the topic a conversation is actually in instead of
+  guessing.
 - **Outbound transcript logging (E31).** `transcripts` now captures
   `direction: 'outbound'` rows for every message a platform adapter
   successfully delivers via `DeliveryWorker.deliver()` — `reply`,

@@ -709,7 +709,7 @@ describe('GET /api/v1/sessions and GET /api/v1/sessions/:id', () => {
   });
 
   function insertSession(overrides: Partial<{
-    id: string; channel: string; contact_id: string; started_at: string;
+    id: string; channel: string; contact_id: string; started_at: string; conversationId: string;
   }> = {}) {
     const id = overrides.id ?? randomUUID();
     db.prepare(
@@ -717,7 +717,7 @@ describe('GET /api/v1/sessions and GET /api/v1/sessions/:id', () => {
        VALUES (?, ?, ?, ?, ?, ?, ?)`
     ).run(
       id,
-      'conv-1',
+      overrides.conversationId ?? 'conv-1',
       overrides.channel ?? 'telegram',
       overrides.contact_id ?? 'contact:alice',
       overrides.started_at ?? new Date().toISOString(),
@@ -725,6 +725,16 @@ describe('GET /api/v1/sessions and GET /api/v1/sessions/:id', () => {
       5
     );
     return id;
+  }
+
+  function insertConversationRegistry(overrides: {
+    id: string; contactId: string; channel: string; topic: string;
+  }) {
+    const now = new Date().toISOString();
+    db.prepare(
+      `INSERT INTO conversation_registry (id, contact_id, channel, topic, first_seen, last_seen)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    ).run(overrides.id, overrides.contactId, overrides.channel, overrides.topic, now, now);
   }
 
   it('returns empty sessions list when none exist', async () => {
@@ -768,6 +778,39 @@ describe('GET /api/v1/sessions and GET /api/v1/sessions/:id', () => {
     expect(body.ok).toBe(true);
     expect(body.session.id).toBe(id);
     expect(body.session.summary).toBeNull();
+  });
+
+  it('exposes the session topic via conversation_registry on the default topic (E32)', async () => {
+    insertConversationRegistry({ id: 'conv-general', contactId: 'alice', channel: 'telegram', topic: 'general' });
+    const id = insertSession({ conversationId: 'conv-general' });
+
+    const listRes = await server.inject({ method: 'GET', url: '/api/v1/sessions' });
+    const listBody = JSON.parse(listRes.body) as { sessions: Array<{ id: string; topic: string | null }> };
+    expect(listBody.sessions[0]!.topic).toBe('general');
+
+    const getRes = await server.inject({ method: 'GET', url: `/api/v1/sessions/${id}` });
+    const getBody = JSON.parse(getRes.body) as { session: { topic: string | null } };
+    expect(getBody.session.topic).toBe('general');
+  });
+
+  it('exposes a non-default (forum thread) topic via conversation_registry (E32)', async () => {
+    insertConversationRegistry({ id: 'conv-thread', contactId: 'alice', channel: 'telegram', topic: 'thread:abc123' });
+    const id = insertSession({ conversationId: 'conv-thread' });
+
+    const listRes = await server.inject({ method: 'GET', url: '/api/v1/sessions' });
+    const listBody = JSON.parse(listRes.body) as { sessions: Array<{ id: string; topic: string | null }> };
+    expect(listBody.sessions[0]!.topic).toBe('thread:abc123');
+
+    const getRes = await server.inject({ method: 'GET', url: `/api/v1/sessions/${id}` });
+    const getBody = JSON.parse(getRes.body) as { session: { topic: string | null } };
+    expect(getBody.session.topic).toBe('thread:abc123');
+  });
+
+  it('returns topic: null when conversation_registry has no matching row', async () => {
+    const id = insertSession({ conversationId: 'conv-orphan' });
+    const res = await server.inject({ method: 'GET', url: `/api/v1/sessions/${id}` });
+    const body = JSON.parse(res.body) as { session: { topic: string | null } };
+    expect(body.session.topic).toBeNull();
   });
 });
 

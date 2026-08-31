@@ -287,6 +287,7 @@ Get details for a session — metadata plus any available AI summary. If no `ses
   "last_activity": "2026-04-12T10:30:00Z",
   "ended_at": null,
   "message_count": 15,
+  "topic": "general",
   "summary": {
     "summary": "Discussed weekend plans.",
     "model": "claude-opus-4-6",
@@ -295,6 +296,8 @@ Get details for a session — metadata plus any available AI summary. If no `ses
   }
 }
 ```
+
+`topic` (E32) is the conversation's topic (e.g. `"general"` or a Telegram forum `"thread:<hash>"`, E28), resolved via `conversation_registry`. Use it to target a proactive `send_message`/`schedule_message` at the same place this conversation is happening, instead of guessing — pass it as `send_message`'s `topic` param. `null` if the session's conversation has no matching `conversation_registry` row (shouldn't happen in practice).
 
 Returns `{ available: false }` if no session is found.
 

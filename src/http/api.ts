@@ -742,9 +742,11 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     let sql = `
       SELECT s.id, s.conversation_id, s.channel, s.contact_id,
              s.started_at, s.last_activity, s.ended_at, s.message_count,
-             ss.summary, ss.model, ss.token_count, ss.created_at AS summary_created_at
+             ss.summary, ss.model, ss.token_count, ss.created_at AS summary_created_at,
+             cr.topic
       FROM sessions s
       LEFT JOIN session_summaries ss ON ss.session_id = s.id
+      LEFT JOIN conversation_registry cr ON cr.id = s.conversation_id
       WHERE 1=1
     `;
     const params: unknown[] = [];
@@ -778,6 +780,7 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
         model: string | null;
         token_count: number | null;
         summary_created_at: string | null;
+        topic: string | null;
       }>;
 
       const sessions = rows.map(({ summary, model, token_count, summary_created_at, ...s }) => ({
@@ -801,9 +804,11 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       .prepare(
         `SELECT s.id, s.conversation_id, s.channel, s.contact_id,
                 s.started_at, s.last_activity, s.ended_at, s.message_count,
-                ss.summary, ss.model, ss.token_count, ss.created_at AS summary_created_at
+                ss.summary, ss.model, ss.token_count, ss.created_at AS summary_created_at,
+                cr.topic
          FROM sessions s
          LEFT JOIN session_summaries ss ON ss.session_id = s.id
+         LEFT JOIN conversation_registry cr ON cr.id = s.conversation_id
          WHERE s.id = ?`
       )
       .get(id) as
@@ -820,6 +825,7 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
           model: string | null;
           token_count: number | null;
           summary_created_at: string | null;
+          topic: string | null;
         }
       | undefined;
 
