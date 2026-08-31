@@ -537,6 +537,107 @@ epics:
       S30.3: complete  # High-stakes immediate-logging exception (documented policy + system_prompt template)
       S30.4: complete  # Queue responsiveness: advance on reply, not on full turn completion
       S30.5: complete  # Docs, tests, wiring
+  E31:
+    status: complete
+    completed: 2026-08-31
+    notes: >
+      Outbound transcript logging. transcripts previously only ever received
+      direction:'inbound' rows outside a narrow slash-command special case
+      (src/http/api.ts) — the actual delivery chokepoint for reply,
+      send_message, send_email, and scheduled-message delivery
+      (DeliveryWorker.deliver(), src/core/delivery.ts) never wrote a
+      transcripts row at all, so search_transcripts could never confirm what
+      an agent's own outbound reply actually said/used. Shared
+      logOutboundTranscript() helper (src/pipeline/outbound-transcript.ts)
+      extracted from the pre-existing slash-command insert; DeliveryWorker
+      now calls it after a confirmed adapter.send() success, resolving
+      conversation_id/session_id via conversation_registry the same way the
+      inbound pipeline does (falls back to null when unresolvable rather than
+      failing the send); a failed/dead-lettered send writes zero rows;
+      logging failures are caught/logged, never allowed to affect
+      delivery/ack/retry. Origin: two production debugging incidents
+      (2026-08-19 send_message topic-param bug, 2026-08-20 scheduled-wakeup
+      channel-routing question) where outbound content was unverifiable.
+    stories:
+      S31.1: complete  # Shared outbound-transcript-insert helper (src/pipeline/outbound-transcript.ts)
+      S31.2: complete  # Log outbound sends in DeliveryWorker.deliver() (src/core/delivery.ts)
+      S31.3: complete  # Metadata parity with the inbound path (channel/metadata/topic, reaction placeholder)
+      S31.4: complete  # Tests (delivery.test.ts, inbound-commands.test.ts, search_transcripts integration)
+      S31.5: complete  # Docs (MEMORY_MODEL.md) + CHANGELOG
+  E32:
+    status: complete
+    completed: 2026-08-31
+    notes: >
+      Session topic exposure. get_session/list_sessions previously had no
+      way to report a session's conversation topic (e.g. "general" or a
+      Telegram forum "thread:<hash>", E28) — the only path was a raw DB
+      query. Root-caused same-day by a real incident: a guessed stale topic
+      value on a send_message call misrouted a message, caught only via
+      manual DB inspection. Fix is a LEFT JOIN conversation_registry cr ON
+      cr.id = s.conversation_id (mirroring the existing session_summaries
+      join) added to both GET /api/v1/sessions and GET /api/v1/sessions/:id
+      — no migration/backfill needed since sessions.conversation_id and
+      conversation_registry.id are already stamped from the same
+      pipeline-resolved value for every session, historical and future.
+      Session interface in src/mcp/tools/sessions.ts updated with
+      topic: string | null; pass-through shape required no other tool-layer
+      changes. Lets an agent target a proactive send_message/
+      schedule_message at the topic a conversation is actually in, instead
+      of guessing.
+    stories:
+      S32.1: complete  # LEFT JOIN conversation_registry in both session endpoints (src/http/api.ts)
+      S32.2: complete  # Surface topic through the MCP tool layer (src/mcp/tools/sessions.ts)
+      S32.3: complete  # Tests + docs/MCP_TOOLS.md + CHANGELOG
+  E33:
+    status: complete
+    completed: 2026-08-31
+    notes: >
+      Journaling sweep: warn (don't silently no-op) on missing cc-headless
+      config. SessionTracker.dispatchJournaling() (E20/E23/E30) opens with an
+      all-or-nothing early return when zero cc-headless instances are
+      configured or zero journaling runners are registered — bus-wide, not
+      scoped to the missing adapter. Confirmed by a real ~5-day incident
+      (2026-08-26–2026-08-31): an operator swap away from cc-headless
+      silently disabled the sweep for the entire bus with no error, no log
+      line — only caught because the operator asked directly, verified
+      against last_journaled_at staying frozen while last_activity kept
+      advancing. Fix: edge-triggered console.warn (not per-tick) the moment
+      dispatchJournaling's early-return condition is newly detected while at
+      least one eligible session is actually waiting on the sweep
+      (claude_session_id IS NOT NULL, ended_at IS NULL, last_journaled_at
+      stale vs last_activity) — names which sub-condition tripped (no
+      instances vs. no runners) and the count of waiting sessions; resets
+      when the condition clears so a future recurrence re-warns. No behavior
+      change to the no-op itself or to journaling semantics — purely
+      observability. Deliberately not a structural per-adapter-scoping fix
+      (out of scope, noted as a possible future item).
+    stories:
+      S33.1: complete  # Edge-triggered warning in dispatchJournaling() (src/memory/session-tracker.ts)
+      S33.2: complete  # Docs (docs/MEMORY_MODEL.md) + CHANGELOG
+  E34:
+    status: complete
+    completed: 2026-08-31
+    notes: >
+      Tool-call status stream: escape underscored values before sending to
+      Telegram. formatToolCallSummary() (src/adapters/tool-call-summary.ts,
+      E29) interpolated raw dynamic tool-input values (file_path,
+      description, pattern, url, query, and the generic-fallback tool name)
+      directly into status lines sent with parse_mode: 'Markdown'
+      (TelegramAdapter.deliverText()) — a bare underscore is an emphasis
+      delimiter, so any snake_case path or tool name risked mangled
+      rendering or an outright HTTP 400 (already visible in production logs
+      as "Markdown parse error ... retrying plain text", silently dropping
+      formatting rather than fixing the cause). Fix: wrap each interpolated
+      field in backticks (inline code, exempt from further Markdown parsing)
+      after truncateField() truncation and after a small
+      escapeForCodeSpan()-style substitution that swaps any backtick already
+      present in the value for a safe lookalike character, so a value
+      containing a backtick can't break out of its own code span. Existing
+      malformed-Markdown plain-text fallback in telegram.ts left in place as
+      defense-in-depth, not removed.
+    stories:
+      S34.1: complete  # Backtick-wrap interpolated fields in formatToolCallSummary (src/adapters/tool-call-summary.ts)
+      S34.2: complete  # Doc comment on the convention + CHANGELOG
   E35:
     status: complete
     completed: 2026-08-31
@@ -557,4 +658,4 @@ epics:
       S35.1: complete  # GET /api/v1/sessions/:id/transcript endpoint (src/http/api.ts)
       S35.2: complete  # get_transcript MCP tool (src/mcp/tools/sessions.ts)
       S35.3: complete  # Tests + docs/MCP_TOOLS.md + CHANGELOG
-last_updated: 2026-08-31  # Added E35 (complete). E31–E34 remain unbackfilled here (not tracked at implementation time); current_epic (E23) left as-is — S23.5 still genuinely pending operator sign-off; picking the next active epic among the backlog entries above is an open call for the operator, not inferred here.
+last_updated: 2026-08-31  # Backfilled E31 (outbound transcript logging), E32 (session topic exposure), E33 (journaling sweep warning), E34 (tool-call status Markdown escaping) — all complete, none tracked here at implementation time; added E35 (complete). current_epic (E23) left as-is — S23.5 still genuinely pending operator sign-off; picking the next active epic among the backlog entries above is an open call for the operator, not inferred here.
