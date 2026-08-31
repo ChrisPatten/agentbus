@@ -63,8 +63,8 @@ Today every `claude -p` spawn (cc-headless.ts:213) inherits the bus-core process
 ### Email: strip token-heavy noise from forwarded/inbound bodies
 Forwarded emails (especially HTML newsletters and receipts) carry a lot of content that costs tokens but adds no signal once converted to text: very long tracking/click-through URLs, `data:` URIs (inline base64 images/fonts), unsubscribe/preference footers, repeated whitespace, and link soup. The inbound path (`resolveInboundText` / `htmlToPlainText` in `src/adapters/email-render.ts`, plus `selectInboundBody`) currently passes the converted text through largely intact. Add a configurable cleanup pass that: truncates or drops long query-string tracking URLs (keep the host/path, strip `?utm_*`/long opaque tokens), removes `data:` URLs entirely, collapses excessive blank lines, and optionally trims known boilerplate footers (unsubscribe blocks). Keep it conservative (never drop the user's note or core forwarded content) and measure token savings on a few real forwards. Consider a per-adapter `inbound_cleanup` config toggle and a max-body-size guard.
 
-### get_transcript MCP tool: fetch full session transcript by ID
-Agent can already search transcripts (FTS5) and list/get sessions, but cannot retrieve the full ordered message history for a specific session. Add a `get_transcript` MCP tool backed by a new `GET /api/v1/sessions/:id/transcript` endpoint that returns all transcript rows for a session in chronological order. Enables the agent to pull full conversation context when a memory reference or `list_sessions` result points to a relevant prior session.
+### ~~get_transcript MCP tool: fetch full session transcript by ID~~ → promoted to E35 (backlog 2026-08-31)
+See `_bmad-output/epics/E35-get-transcript-mcp-tool.md`. Agent can already search transcripts (FTS5) and list/get sessions, but cannot retrieve the full ordered message history for a specific session. Adds a `get_transcript` MCP tool backed by a new `GET /api/v1/sessions/:id/transcript` endpoint that returns all transcript rows for a session in chronological order, mirroring the existing `GET /api/v1/sessions/:id` pattern. Enables the agent to pull full conversation context when a memory reference or `list_sessions` result points to a relevant prior session. Noted as meaningfully more valuable now that E31 (outbound transcript logging) has shipped — a "full transcript" before E31 would have silently been half a conversation.
 
 ### ~~Headless Claude Code adapter (per-request `claude -p`)~~ → promoted to E19 (backlog 2026-05-26)
 See `docs/CC_HEADLESS_ADAPTER.md` and E19 in `sprint-status.yaml`.
@@ -72,12 +72,8 @@ See `docs/CC_HEADLESS_ADAPTER.md` and E19 in `sprint-status.yaml`.
 ### ~~Multi-agent `cc-headless`: run every agent headless in one bus-core process~~ → promoted to E23 (backlog 2026-07-01)
 See `_bmad-output/epics/E23-multi-instance-cc-headless.md`.
 
-### Slash command cleanup: retire replay + legacy DB-memory commands
-The built-in command set still carries surfaces tied to subsystems that E20 left dormant or that no longer earn their place. Prune them and tighten the registry:
-- **Replay family** — `/replay`, `/next`, `/cancel` (paginated transcript playback in `src/commands/handlers.ts`, plus `playbackStates` and `paginateLines`). Rarely used; the transcript/`get_transcript` path is the better tool.
-- **Legacy memory commands** — `/forget` (expires `memories` rows) and `/retry_summary` (re-queues summarization). Both target the E8/E9 structured-memory store, which E20 turned off by default (`memory.structured_extraction: false`) in favor of the agent's own files. With the DB store dormant these are vestigial for headless agents.
-
-Scope: remove the handlers + their registrations in `createBuiltinCommands`, drop the now-dead helpers/state, prune the tests, and update `docs/SLASH_COMMANDS.md`. Decide whether to keep `/forget` behind a capability check for any remaining MCP-store deployments or delete outright. Net effect: the autocomplete menu and `/help` shrink to the commands that still matter (`/status`, `/pause`, `/resume`, `/sessions`, `/schedule`, `/clear`, `/help`).
+### ~~Slash command cleanup: retire replay + legacy DB-memory commands~~ → done 2026-08-31 (no epic, small well-scoped task)
+Removed `/replay`, `/next`, `/cancel` (paginated transcript playback, plus `playbackStates`/`paginateLines`) and the legacy memory commands `/forget` and `/retry_summary` from `src/commands/handlers.ts`, along with their registrations, tests, and `docs/SLASH_COMMANDS.md`/`docs/MEMORY.md` mentions. `/forget` was deleted outright rather than gated behind a capability check, per the original note (the structured-memory store it targets is off by default). Remaining built-ins: `/status`, `/pause`, `/resume`, `/sessions`, `/schedule`, `/clear`, `/stop`, `/help`.
 
 ### Relay Claude Code permission prompts to user
 When Claude Code surfaces a permission prompt (tool approval request), relay it to the user via the appropriate channel so they can approve or deny without being at the terminal. See https://code.claude.com/docs/en/channels-reference#relay-permission-prompts

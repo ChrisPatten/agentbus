@@ -10,6 +10,15 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+### Removed
+- **Vestigial slash commands.** Removed `/replay`, `/next`, `/cancel`
+  (paginated transcript playback — `get_session`/`search_transcripts` are the
+  better tool now) and the legacy structured-memory commands `/forget` and
+  `/retry_summary` (both target the E8/E9 `memories`/summarizer store, which
+  E20 turned off by default in favor of agent-owned memory files). Built-ins
+  are now `/status`, `/pause`, `/resume`, `/sessions`, `/schedule`, `/clear`,
+  `/stop`, `/help`.
+
 ### Added
 - **Journaling no-op warning (E33).** `SessionTracker.dispatchJournaling()`
   now logs a one-time `console.warn` when it would silently no-op bus-wide
