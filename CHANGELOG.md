@@ -10,6 +10,17 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+### Added
+- **Journaling no-op warning (E33).** `SessionTracker.dispatchJournaling()`
+  now logs a one-time `console.warn` when it would silently no-op bus-wide
+  because zero `cc-headless` instances are configured, or none has a
+  registered journaling runner, while at least one headless session is
+  actually waiting on the sweep. Previously this condition (e.g. an operator
+  swap away from `cc-headless`) paused journaling for every session with no
+  visible symptom beyond a frozen `last_journaled_at`. Edge-triggered — fires
+  once per occurrence of the condition, resets once it clears, so it doesn't
+  spam logs every tick while persisting.
+
 ### Fixed
 - **Tool-call status Markdown escaping (E34).** `formatToolCallSummary()`
   now wraps every interpolated dynamic value (Bash/Agent `description`, Read/

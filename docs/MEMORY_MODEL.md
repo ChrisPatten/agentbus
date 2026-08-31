@@ -42,6 +42,20 @@ So E20 stops the bus from trying to **be** the memory store and makes it **orche
 
 2. **Journaling on pause or ceiling** — the idle threshold is repurposed from a *teardown* signal into a *journaling* signal. When a conversation pauses, the bus fires a **silent** `--resume` journaling turn: the agent reviews the conversation and updates its files, sends the user nothing, and the session stays open. E30 adds a hard ceiling alongside the idle debounce so a long, continuously-active conversation still flushes periodically instead of only on pause. See [CC_HEADLESS_ADAPTER.md → Memory Logging](./CC_HEADLESS_ADAPTER.md#memory-logging-e30).
 
+   **All-or-nothing dependency on `cc-headless` (E33).** The dispatcher
+   (`SessionTracker.dispatchJournaling()`, `src/memory/session-tracker.ts`) is
+   gated entirely on at least one configured *and* registered `cc-headless`
+   instance — if the config block is absent, or no instance has registered a
+   journaling runner, the sweep no-ops for **every** headless session
+   bus-wide on every tick, not just sessions tied to the missing instance.
+   Removing the last `cc-headless` instance (e.g. an operator swap to a
+   different Claude Code adapter) silently pauses the sweep. This is now
+   surfaced via a one-time `console.warn` (edge-triggered, not per-tick) the
+   moment the condition is detected with at least one session actually
+   waiting on the sweep — look for `[session-tracker] Journaling sweep is a
+   no-op bus-wide` if `last_journaled_at` looks stuck while `last_activity`
+   keeps advancing.
+
 3. **No memory work inside the reply-producing turn (E30)** — the turn that answers the user ends at `reply()`/`send_message()`; it no longer keeps running afterward to journal. That responsibility belongs entirely to the debounced sweep above, with one exception: financial, health, scheduling, or safety/security-relevant content is still captured immediately, inline, before the turn's process exits — see [CC_HEADLESS_ADAPTER.md → High-stakes immediate-logging exception](./CC_HEADLESS_ADAPTER.md#high-stakes-immediate-logging-exception-e30).
 
 ## Long-lived sessions

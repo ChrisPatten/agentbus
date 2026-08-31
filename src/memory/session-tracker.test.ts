@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
 import { runMigrations } from '../db/schema.js';
 import { SessionTracker } from './session-tracker.js';
@@ -730,6 +730,119 @@ describe('SessionTracker.dispatchJournaling() (E20)', () => {
       expect(peggyRunner).not.toHaveBeenCalled();
       expect(pokeclaudeRunner).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe('SessionTracker.dispatchJournaling() no-op warning (E33)', () => {
+  let db: Database.Database;
+  let summarizer: Summarizer;
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+
+  function ccHeadlessAdapterConfig() {
+    return {
+      agent_id: 'claude',
+      poll_interval_ms: 1000,
+      system_prompt: 'x',
+      claude_bin: 'claude',
+      error_reply: 'err',
+      memory: { dir: 'memory', index_file: 'MEMORY.md', daily_subdir: 'daily', journal_lookback_days: 3 },
+      journaling: { enabled: true, threshold_ms: 900000, prompt: 'journal please' },
+    };
+  }
+
+  beforeEach(() => {
+    db = makeDb();
+    summarizer = makeMockSummarizer();
+    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    warnSpy.mockRestore();
+  });
+
+  it('warns once (not per-tick) when no cc-headless instances are configured and a session is waiting', () => {
+    insertSession(db, { lastActivityOffset: 20 * 60 * 1000, claudeSessionId: 'cc-1' });
+    const tracker = new SessionTracker({ db, config: stubConfig, summarizer }); // adapters: {} — no cc-headless
+
+    tracker.tick();
+    tracker.tick();
+    tracker.tick();
+
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0]?.[0]).toContain('no cc-headless instances configured');
+  });
+
+  it('warns with the "no runners registered" reason when instances are configured but none are registered', () => {
+    insertSession(db, { lastActivityOffset: 20 * 60 * 1000, claudeSessionId: 'cc-1' });
+    const config = {
+      ...stubConfig,
+      adapters: { 'cc-headless': ccHeadlessAdapterConfig() },
+    } as unknown as AppConfig;
+    const tracker = new SessionTracker({ db, config, summarizer }); // no registerJournalingRunner call
+
+    tracker.tick();
+
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0]?.[0]).toContain('no journaling runners registered');
+  });
+
+  it('does not warn when no session is actually waiting on the sweep', () => {
+    const tracker = new SessionTracker({ db, config: stubConfig, summarizer });
+
+    tracker.tick();
+    tracker.tick();
+
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('never warns when instances and runners are both configured (healthy case, zero log noise)', async () => {
+    insertSession(db, { lastActivityOffset: 20 * 60 * 1000, claudeSessionId: 'cc-1' });
+    const config = {
+      ...stubConfig,
+      adapters: { 'cc-headless': ccHeadlessAdapterConfig() },
+    } as unknown as AppConfig;
+    const tracker = new SessionTracker({ db, config, summarizer });
+    tracker.registerJournalingRunner('agent:claude', vi.fn().mockResolvedValue({}));
+
+    tracker.tick();
+    await new Promise((r) => setTimeout(r, 15));
+    tracker.tick();
+
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('re-warns after the condition clears and then reoccurs (edge-triggered)', async () => {
+    const config = { ...stubConfig, adapters: {} } as unknown as AppConfig;
+    insertSession(db, {
+      id: 'sess-1',
+      conversationId: 'conv-1',
+      lastActivityOffset: 20 * 60 * 1000,
+      claudeSessionId: 'cc-1',
+    });
+    const tracker = new SessionTracker({ db, config, summarizer });
+
+    tracker.tick();
+    tracker.tick();
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+
+    // Condition clears: instance configured and its runner registered.
+    (config.adapters as Record<string, unknown>)['cc-headless'] = ccHeadlessAdapterConfig();
+    tracker.registerJournalingRunner('agent:claude', vi.fn().mockResolvedValue({}));
+    tracker.tick();
+    await new Promise((r) => setTimeout(r, 15));
+    expect(warnSpy).toHaveBeenCalledTimes(1); // no new warning while healthy
+
+    // Condition reoccurs: instance removed again, a fresh session is waiting.
+    delete (config.adapters as Record<string, unknown>)['cc-headless'];
+    insertSession(db, {
+      id: 'sess-2',
+      conversationId: 'conv-2',
+      lastActivityOffset: 20 * 60 * 1000,
+      claudeSessionId: 'cc-2',
+    });
+    tracker.tick();
+
+    expect(warnSpy).toHaveBeenCalledTimes(2);
   });
 });
 

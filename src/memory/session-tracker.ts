@@ -56,6 +56,13 @@ export class SessionTracker {
    * forever — MAX_JOURNALING_ATTEMPTS still bounds retries independently.
    */
   private journalingInFlight = new Set<string>();
+  /**
+   * E33 — whether the "no cc-headless instances/runners" no-op in
+   * dispatchJournaling() has already been warned about for the current
+   * occurrence of that condition. Edge-triggered: reset to false as soon as
+   * instances/runners are non-empty again, so a later recurrence re-warns.
+   */
+  private journalingConfigWarned = false;
 
   constructor(deps: {
     db: Database.Database;
@@ -147,7 +154,11 @@ export class SessionTracker {
    */
   private dispatchJournaling(): void {
     const instances = getCcHeadlessInstances(this.config);
-    if (instances.length === 0 || this.journalingRunners.size === 0) return;
+    if (instances.length === 0 || this.journalingRunners.size === 0) {
+      this.warnIfJournalingBlocked(instances.length === 0);
+      return;
+    }
+    this.journalingConfigWarned = false;
 
     const instanceByAgentId = new Map(instances.map((i) => [`agent:${i.agent_id}`, i]));
     const soleInstanceKey = instances.length === 1 ? `agent:${instances[0]!.agent_id}` : null;
@@ -222,6 +233,36 @@ export class SessionTracker {
           this.journalingInFlight.delete(session.conversation_id);
         });
     }
+  }
+
+  /**
+   * E33 — surfaces the dispatchJournaling() no-op path (no configured
+   * cc-headless instances, or none registered as runners) via a console.warn
+   * instead of leaving it silent. Only warns when at least one session is
+   * actually waiting on the sweep (would otherwise be a journaling
+   * candidate), and only once per occurrence of the condition —
+   * `journalingConfigWarned` is reset as soon as the condition clears.
+   */
+  private warnIfJournalingBlocked(noInstancesConfigured: boolean): void {
+    if (this.journalingConfigWarned) return;
+
+    const waiting = this.db
+      .prepare(
+        `SELECT COUNT(*) as count FROM sessions
+         WHERE ended_at IS NULL AND claude_session_id IS NOT NULL
+           AND (last_journaled_at IS NULL OR last_journaled_at < last_activity)`,
+      )
+      .get() as { count: number };
+    if (waiting.count === 0) return;
+
+    this.journalingConfigWarned = true;
+    const reason = noInstancesConfigured
+      ? 'no cc-headless instances configured'
+      : 'no journaling runners registered';
+    console.warn(
+      `[session-tracker] Journaling sweep is a no-op bus-wide (${reason}); ` +
+        `${waiting.count} session(s) waiting to be journaled.`,
+    );
   }
 
   /** Resolve the minimum message count required before a session can be closed, for a given channel. */
