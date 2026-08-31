@@ -10,6 +10,8 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-08-31
+
 ### Added
 - **`get_transcript` MCP tool (E35).** New `GET /api/v1/sessions/:id/transcript`
   endpoint and matching `get_transcript` tool return the full, ordered
@@ -19,17 +21,6 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
   cross-session snippets) and `get_session` (metadata + summary only) — until
   now there was no tool-level way to read a full session's transcript, only a
   raw DB query.
-
-### Removed
-- **Vestigial slash commands.** Removed `/replay`, `/next`, `/cancel`
-  (paginated transcript playback — `get_session`/`search_transcripts` are the
-  better tool now) and the legacy structured-memory commands `/forget` and
-  `/retry_summary` (both target the E8/E9 `memories`/summarizer store, which
-  E20 turned off by default in favor of agent-owned memory files). Built-ins
-  are now `/status`, `/pause`, `/resume`, `/sessions`, `/schedule`, `/clear`,
-  `/stop`, `/help`.
-
-### Added
 - **Journaling no-op warning (E33).** `SessionTracker.dispatchJournaling()`
   now logs a one-time `console.warn` when it would silently no-op bus-wide
   because zero `cc-headless` instances are configured, or none has a
@@ -39,25 +30,6 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
   visible symptom beyond a frozen `last_journaled_at`. Edge-triggered — fires
   once per occurrence of the condition, resets once it clears, so it doesn't
   spam logs every tick while persisting.
-
-### Fixed
-- **Tool-call status Markdown escaping (E34).** `formatToolCallSummary()`
-  now wraps every interpolated dynamic value (Bash/Agent `description`, Read/
-  Edit/Write `file_path`, Grep `pattern`, WebFetch `url`, WebSearch `query`,
-  and the tool `name` in the generic fallback) in a backtick code span
-  before it reaches `TelegramAdapter`'s `parse_mode: 'Markdown'` send. A bare
-  `_` in a snake_case path or identifier was previously interpolated raw,
-  which Telegram parses as an emphasis delimiter — occasionally breaking
-  Markdown parsing and falling back to an unformatted plain-text retry. A
-  value containing a backtick is substituted with `´` so it can't terminate
-  the code span early.
-
-### Changed
-- `send_message`'s tool description now points agents at `get_session`/
-  `list_sessions` to look up a conversation's current `topic` before sending,
-  instead of guessing one (docs-only, no behavior change).
-
-### Added
 - **Session topic exposure (E32).** `get_session`/`list_sessions` now return
   a `topic` field (e.g. `"general"` or a Telegram forum `"thread:<hash>"`),
   resolved via a `LEFT JOIN conversation_registry` in both
@@ -94,6 +66,9 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
   [docs/CC_HEADLESS_ADAPTER.md](docs/CC_HEADLESS_ADAPTER.md#memory-logging-e30).
 
 ### Changed
+- `send_message`'s tool description now points agents at `get_session`/
+  `list_sessions` to look up a conversation's current `topic` before sending,
+  instead of guessing one (docs-only, no behavior change).
 - **`HeadlessInstance.enqueue()` advances on delivery, not process exit
   (E30).** The per-contact serialization queue now unblocks the next queued
   message as soon as a turn calls a delivery tool, instead of waiting for the
@@ -106,6 +81,16 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
   [docs/CC_HEADLESS_ADAPTER.md](docs/CC_HEADLESS_ADAPTER.md#per-contact-serialization).
 
 ### Fixed
+- **Tool-call status Markdown escaping (E34).** `formatToolCallSummary()`
+  now wraps every interpolated dynamic value (Bash/Agent `description`, Read/
+  Edit/Write `file_path`, Grep `pattern`, WebFetch `url`, WebSearch `query`,
+  and the tool `name` in the generic fallback) in a backtick code span
+  before it reaches `TelegramAdapter`'s `parse_mode: 'Markdown'` send. A bare
+  `_` in a snake_case path or identifier was previously interpolated raw,
+  which Telegram parses as an emphasis delimiter — occasionally breaking
+  Markdown parsing and falling back to an unformatted plain-text retry. A
+  value containing a backtick is substituted with `´` so it can't terminate
+  the code span early.
 - **Bus-scope slash-command responses now reply in the originating Telegram
   forum topic instead of General.** The response envelope built in
   `src/http/api.ts` hardcoded `topic: 'command'`, which never matched
@@ -113,6 +98,15 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
   always fell back to the group's General topic regardless of which topic a
   command like `/stop` was run from. It now preserves the inbound envelope's
   `topic`.
+
+### Removed
+- **Vestigial slash commands.** Removed `/replay`, `/next`, `/cancel`
+  (paginated transcript playback — `get_session`/`search_transcripts` are the
+  better tool now) and the legacy structured-memory commands `/forget` and
+  `/retry_summary` (both target the E8/E9 `memories`/summarizer store, which
+  E20 turned off by default in favor of agent-owned memory files). Built-ins
+  are now `/status`, `/pause`, `/resume`, `/sessions`, `/schedule`, `/clear`,
+  `/stop`, `/help`.
 
 ## [0.10.0] - 2026-08-19
 
@@ -466,7 +460,8 @@ Baseline release. Core bus, pipeline, adapters, memory, scheduling.
 - Built-in slash commands + plugin command registry. (E6)
 - Scheduled messages (cron + one-shot) via background scheduler. (E18)
 
-[Unreleased]: https://github.com/ChrisPatten/agentbus/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/ChrisPatten/agentbus/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/ChrisPatten/agentbus/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/ChrisPatten/agentbus/compare/v0.8.0...v0.10.0
 [0.8.0]: https://github.com/ChrisPatten/agentbus/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/ChrisPatten/agentbus/compare/v0.7.0...v0.7.1
