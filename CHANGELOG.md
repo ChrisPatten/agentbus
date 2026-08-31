@@ -10,6 +10,11 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+### Changed
+- `send_message`'s tool description now points agents at `get_session`/
+  `list_sessions` to look up a conversation's current `topic` before sending,
+  instead of guessing one (docs-only, no behavior change).
+
 ### Added
 - **Session topic exposure (E32).** `get_session`/`list_sessions` now return
   a `topic` field (e.g. `"general"` or a Telegram forum `"thread:<hash>"`),

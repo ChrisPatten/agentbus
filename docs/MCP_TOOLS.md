@@ -106,6 +106,8 @@ Priority values: `normal`, `high`, `urgent`.
 
 **`topic` (default `"general"`, E28):** to land a message in a specific Telegram forum topic instead of the group's General topic, pass the `topic` value returned by `create_telegram_topic` (a `"thread:<hash>"` id) — not the channel, and not a plain topic name. `schedule_message` accepts the same `topic` param for the same purpose. A `topic` with no matching thread record on that channel is rejected server-side rather than silently falling back to General.
 
+For a proactive send (not a reply to a message you just received), call `get_session` or `list_sessions` first and use the `topic` field it returns (E32) rather than guessing — it reflects where that conversation is actually threaded.
+
 **`reply_to` (E28):** when set, bus-core resolves it server-side to the referenced transcript's platform message ID and, on Telegram, turns it into a native reply quote (`reply_parameters`) — the agent never needs to know platform-specific ID formats. An unknown or foreign-chat `reply_to` is a silent no-op: the message still sends, just without a quote. **Replying to the latest inbound message in the conversation is also a no-op** — quoting the message a reply is obviously responding to would be visually redundant, so that case always sends as a plain message. Non-Telegram channels ignore it today.
 
 **Output:**
