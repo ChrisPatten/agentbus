@@ -17,8 +17,16 @@ function truncateField(value: string): string {
   return value.length > MAX_FIELD_LENGTH ? `${value.slice(0, MAX_FIELD_LENGTH)}…` : value;
 }
 
+/** Neutralizes backticks in a value about to be wrapped in a code span — an
+ * unescaped backtick would terminate the span early and reintroduce the
+ * Markdown-breakage this module exists to avoid (E34). Not a general
+ * Markdown escaper: this is the only character that can break a code span. */
+function escapeForCodeSpan(value: string): string {
+  return value.replaceAll('`', '´');
+}
+
 function genericFallback(name: string): string {
-  return `⚙️ Running ${name || 'tool'}`;
+  return name ? `⚙️ Running \`${name}\`` : `⚙️ Running tool`;
 }
 
 /**
@@ -26,6 +34,13 @@ function genericFallback(name: string): string {
  * falls back to the generic line for `name`. Used both for unknown tool
  * names and for a covered tool whose required field is missing/malformed —
  * both cases render the identical generic fallback string.
+ *
+ * The value handed to `render` is truncated and backtick-escaped, but not
+ * wrapped in backticks itself — each `render` callback wraps its own value in
+ * a code span (leaving the emoji/verb prefix as plain Markdown prose) because
+ * Telegram's Markdown dialect treats a bare `_` as an emphasis delimiter, and
+ * these dynamic values (paths, URLs, patterns, tool names) routinely contain
+ * one (E34).
  */
 function withField(
   input: Record<string, unknown>,
@@ -35,7 +50,7 @@ function withField(
 ): string {
   const value = input[field];
   if (typeof value !== 'string' || value.trim() === '') return genericFallback(name);
-  return render(truncateField(value));
+  return render(escapeForCodeSpan(truncateField(value)));
 }
 
 /**
@@ -46,21 +61,21 @@ function withField(
 export function formatToolCallSummary(name: string, input: Record<string, unknown>): string {
   switch (name) {
     case 'Bash':
-      return withField(input, 'description', name, (d) => `🐚 ${d}`);
+      return withField(input, 'description', name, (d) => `🐚 \`${d}\``);
     case 'Agent':
-      return withField(input, 'description', name, (d) => `🤖 ${d}`);
+      return withField(input, 'description', name, (d) => `🤖 \`${d}\``);
     case 'Read':
-      return withField(input, 'file_path', name, (p) => `📖 Reading ${p}`);
+      return withField(input, 'file_path', name, (p) => `📖 Reading \`${p}\``);
     case 'Edit':
-      return withField(input, 'file_path', name, (p) => `✏️ Editing ${p}`);
+      return withField(input, 'file_path', name, (p) => `✏️ Editing \`${p}\``);
     case 'Write':
-      return withField(input, 'file_path', name, (p) => `📝 Writing ${p}`);
+      return withField(input, 'file_path', name, (p) => `📝 Writing \`${p}\``);
     case 'Grep':
-      return withField(input, 'pattern', name, (p) => `🔍 Searching for "${p}"`);
+      return withField(input, 'pattern', name, (p) => `🔍 Searching for \`${p}\``);
     case 'WebFetch':
-      return withField(input, 'url', name, (u) => `🌐 Fetching ${u}`);
+      return withField(input, 'url', name, (u) => `🌐 Fetching \`${u}\``);
     case 'WebSearch':
-      return withField(input, 'query', name, (q) => `🔎 Searching: "${q}"`);
+      return withField(input, 'query', name, (q) => `🔎 Searching: \`${q}\``);
     default:
       return genericFallback(name);
   }

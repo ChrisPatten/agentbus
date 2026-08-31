@@ -10,6 +10,18 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+### Fixed
+- **Tool-call status Markdown escaping (E34).** `formatToolCallSummary()`
+  now wraps every interpolated dynamic value (Bash/Agent `description`, Read/
+  Edit/Write `file_path`, Grep `pattern`, WebFetch `url`, WebSearch `query`,
+  and the tool `name` in the generic fallback) in a backtick code span
+  before it reaches `TelegramAdapter`'s `parse_mode: 'Markdown'` send. A bare
+  `_` in a snake_case path or identifier was previously interpolated raw,
+  which Telegram parses as an emphasis delimiter — occasionally breaking
+  Markdown parsing and falling back to an unformatted plain-text retry. A
+  value containing a backtick is substituted with `´` so it can't terminate
+  the code span early.
+
 ### Changed
 - `send_message`'s tool description now points agents at `get_session`/
   `list_sessions` to look up a conversation's current `topic` before sending,

@@ -370,7 +370,13 @@ delivered — instead of just a typing indicator.
    `WebFetch`, and `WebSearch` render via a small fixed per-tool template
    (e.g. `Read` → `📖 Reading {file_path}`). Any other tool name, or a covered
    tool missing its expected field, falls back to the identical generic line:
-   `⚙️ Running {name}`.
+   `⚙️ Running {name}`. Every one of these dynamic values (`description`,
+   `file_path`, `pattern`, `url`, `query`, and `name` in the fallback) is
+   wrapped in a backtick code span before it's embedded in the line, since
+   these values routinely contain a bare `_` that Telegram's Markdown dialect
+   would otherwise parse as an emphasis delimiter — a code span is exempt
+   from further Markdown parsing. A backtick inside the value itself is
+   substituted with `´` so it can't terminate the span early (E34).
 3. **Subagent internals are never shown.** An `Agent` tool call renders as one
    collapsed line — nothing about what the subagent does internally reaches
    the trail.
