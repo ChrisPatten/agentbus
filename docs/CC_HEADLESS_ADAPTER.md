@@ -1,4 +1,4 @@
-# Headless Claude Code Adapter (E19, refined in E19.1, E20, E23)
+# Headless Claude Code Adapter (E19, refined in E19.1, E20, E23, E30)
 
 Reference for the per-request Claude Code adapter that replaces long-lived tmux sessions with on-demand `claude -p` invocations.
 
@@ -6,7 +6,9 @@ Reference for the per-request Claude Code adapter that replaces long-lived tmux 
 
 > **E20 changes:** headless sessions are now **long-lived** — idle never tears them down, and resume is keyed on `conversation_id`. Context is assembled from the agent's **own memory files** (`MEMORY.md` + recent daily journals) instead of the DB memory/summary store, which is now dormant. When a conversation pauses, the bus fires a **silent journaling turn** that asks the agent to update its files (it messages nobody). See [Long-lived sessions](#session-continuity-long-lived-sessions-e20), [Context assembly](#context-assembly-memory-files-e20), and [Journaling on pause](#journaling-on-pause-e20). The conceptual model lives in [MEMORY_MODEL.md](./MEMORY_MODEL.md).
 
-> **E23 changes (this revision):** `adapters.cc-headless` now accepts either the single-object form (unchanged) or a **named record** of instances (same pattern as `adapters.telegram`), so one bus-core process can run multiple headless agents concurrently — each with its own `agent_id`, poll loop, `working_dir`, and journaling config, fully isolated from the others. See [Multi-instance deployments](#multi-instance-deployments-e23).
+> **E23 changes:** `adapters.cc-headless` now accepts either the single-object form (unchanged) or a **named record** of instances (same pattern as `adapters.telegram`), so one bus-core process can run multiple headless agents concurrently — each with its own `agent_id`, poll loop, `working_dir`, and journaling config, fully isolated from the others. See [Multi-instance deployments](#multi-instance-deployments-e23).
+
+> **E30 changes (this revision):** memory-logging is fully decoupled from the reply-producing turn. The journaling-on-pause mechanism gains a **hard ceiling** (`journaling.ceiling_ms`) so a continuously-active conversation still flushes periodically, not just on pause, and dispatch now suppresses overlapping sweeps for the same conversation. The per-contact queue (`enqueue`) also advances as soon as a turn **delivers** (calls `reply`/`send_message`) rather than waiting for the whole `claude -p` process to exit, so trailing housekeeping in one turn no longer delays the next queued message. See [Memory Logging](#memory-logging-e30).
 
 ## Motivation
 
@@ -190,18 +192,47 @@ Each file is wrapped in a `=== <relative path> ===` boundary marker. Missing fil
 
 Because the block is rebuilt every turn, an in-session journaling update (below) is reflected on the very next turn. This **replaces** the E8/E9 DB memory/summary injection (`recall_memory`/`session_summaries`), which is dormant — see [MEMORY_MODEL.md](./MEMORY_MODEL.md).
 
-## Journaling on pause (E20)
+## Journaling on pause or ceiling (E20, extended in E30)
 
-When a conversation goes idle past a per-channel threshold, the bus fires a **silent journaling turn**: the agent reviews the conversation and updates its own memory files. **Nothing is delivered to the user** — no reply, no typing indicator. The conversation is not ended; the same `claude_session_id` keeps resuming.
+When a conversation goes idle past a per-channel threshold, **or** has gone too long since its last sweep regardless of idle state (E30's hard ceiling), the bus fires a **silent journaling turn**: the agent reviews the conversation and updates its own memory files. **Nothing is delivered to the user** — no reply, no typing indicator. The conversation is not ended; the same `claude_session_id` keeps resuming.
 
-- **Dispatcher** — `SessionTracker.dispatchJournaling()` runs on the tracker tick. It selects open, headless-managed sessions (`claude_session_id IS NOT NULL`) whose `last_activity` is older than `journaling.threshold_ms` for their channel and that have not been journaled since (`last_journaled_at IS NULL OR last_journaled_at < last_activity`). One journaling turn per pause; new activity advances `last_activity` past `last_journaled_at` and re-arms it. Migration 009 adds `last_journaled_at`.
-- **Turn** — the adapter's `runJournalingTurn(conversationId)` looks up the session's `claude_session_id` and spawns `claude -p <journaling.prompt> --resume <id>` with the same `working_dir`, MCP config, and assembled memory context as a normal turn — but in **no-deliver mode**: `deliverResponse` is never called and the stdout fallback is bypassed. It is serialized through the same per-contact queue so it never races a live reply. A session with no `claude_session_id` yet (the agent never spoke) is skipped and stamped as journaled.
-- **Failure / cadence** — a failed journaling turn leaves `last_journaled_at` unchanged so a later tick retries, bounded by a small in-memory attempt cap (re-armed by new activity). Journaling is **pause-triggered, not periodic**: a never-idle conversation does not journal until it pauses.
+- **Dispatcher** — `SessionTracker.dispatchJournaling()` runs on the tracker tick. It selects open, headless-managed sessions (`claude_session_id IS NOT NULL`) that have not been journaled since their last activity (`last_journaled_at IS NULL OR last_journaled_at < last_activity`), then fires when **either** leg trips:
+  - **Idle debounce** — `last_activity` is older than `journaling.threshold_ms` for the session's channel (recommended ~3-5 min — most turns have nothing new worth journaling, so this only needs to catch a real pause).
+  - **Hard ceiling (E30)** — time since `last_journaled_at` (or `started_at`, if never journaled) exceeds `journaling.ceiling_ms` (recommended ~20-30 min), applied globally regardless of channel or idle state. This is what makes a long, continuously-active conversation still flush periodically instead of deferring indefinitely — the idle leg alone never trips for a conversation that never goes quiet. Unset (the pre-E30 default) disables the ceiling leg entirely.
+
+  One journaling turn per trigger; new activity advances `last_activity` past `last_journaled_at` and re-arms both legs. Migration 009 adds `last_journaled_at`.
+- **Overlap suppression (E30)** — a conversation with a journaling turn already in flight is skipped on subsequent ticks rather than having a second one queued up behind it. (Two sweeps for the same conversation could never actually run *concurrently* anyway — `runJournalingTurn` is serialized through the same per-contact queue as live turns — but without this guard a slow sweep could accumulate a backlog of redundant, already-stale journaling turns.)
+- **Turn** — the adapter's `runJournalingTurn(conversationId)` looks up the session's `claude_session_id` and spawns `claude -p <journaling.prompt> --resume <id>` with the same `working_dir`, MCP config, and assembled memory context as a normal turn — but in **no-deliver mode**: `deliverResponse` is never called and the stdout fallback is bypassed. It is serialized through the same per-contact queue so it never races a live reply. A session with no `claude_session_id` yet (the agent never spoke) is skipped and stamped as journaled. The full conversation is available to this turn via the resumed Claude session itself (recent context) and `search_transcripts`/`get_session` (complete history), independent of what the memory files looked like before the sweep ran.
+- **Failure / cadence** — a failed journaling turn leaves `last_journaled_at` unchanged so a later tick retries, bounded by a small in-memory attempt cap (re-armed by new activity).
 - **The journaling turn adds to the transcript.** The silent `--resume` turn appends an assistant turn, so the next user turn sees both the prior conversation and the journaling exchange. Auto-compaction absorbs the minor token cost.
+- **Crash safety.** If the sweep agent crashes or is killed mid-write, the underlying transcript is unaffected — it's already durable in the bus's own transcript store. Only the curated memory-file promotion is lost or delayed for that sweep, and is recovered by the next tick's retry (or the next debounce/ceiling trigger).
 
 Set `journaling.enabled: false` to disable it entirely (the dispatcher becomes a no-op).
 
-**Manual reset (`/clear`).** Pause-triggered journaling is automatic, but you can also force a fresh context window with the [`/clear`](./SLASH_COMMANDS.md#clear) slash command. It closes the active session for your contact on that channel immediately (next message starts fresh, no `--resume`), then fires the same silent journaling turn in the background — except it resumes the captured `claude_session_id` directly (via `HeadlessHandle.journalResumeId`), since the DB session row is already closed. Uses `journaling.prompt`, so disabling journaling does not disable `/clear`'s close; it just skips the memory pass.
+**Manual reset (`/clear`).** Journaling is automatic (pause or ceiling), but you can also force a fresh context window with the [`/clear`](./SLASH_COMMANDS.md#clear) slash command. It closes the active session for your contact on that channel immediately (next message starts fresh, no `--resume`), then fires the same silent journaling turn in the background — except it resumes the captured `claude_session_id` directly (via `HeadlessHandle.journalResumeId`), since the DB session row is already closed. Uses `journaling.prompt`, so disabling journaling does not disable `/clear`'s close; it just skips the memory pass.
+
+## Memory Logging (E30)
+
+E30 moves Peggy's per-turn memory-logging work (updating the daily journal, `MEMORY.md`, topic files) **out of** the reply-producing turn entirely, so a turn's `claude -p` process actually ends at delivery instead of continuing to run housekeeping tool calls the user never sees.
+
+**The model:**
+
+1. **The reply-producing turn does not journal.** The operator-authored `system_prompt` should **not** instruct the agent to update memory files immediately after calling `reply`/`send_message` — that responsibility belongs entirely to the debounced sweep below. `invokeClaude()`'s spawn mechanics are unchanged; this is a prompt/instruction concern; the process already exits naturally once the agent stops calling tools, so removing the instruction to keep working post-reply is what makes that happen sooner.
+2. **A separate, debounced sweep does the journaling.** This is exactly the [journaling-on-pause-or-ceiling](#journaling-on-pause-or-ceiling-e20-extended-in-e30) mechanism above — an idle debounce (~3-5 min of conversation silence) plus a hard ceiling (~20-30 min since the last sweep) so a long, uninterrupted conversation still flushes periodically. It spawns a fresh `claude -p --resume <id>` (the same "another instance of me" pattern used for background-task notifications elsewhere), prompted to update the daily journal / `MEMORY.md` / topic files exactly as the agent would have done inline before E30 — just decoupled in time and process from the turn that produced the reply.
+3. **High-stakes content is the one exception** — see below.
+4. **Why decoupling is safe, not just convenient.** `--resume` session continuity means a delayed sweep only risks brief *staleness* (memory files lag reality by a few minutes), never *data loss* — the raw conversation is always recoverable via `search_transcripts`/`get_session` regardless of when or whether a sweep has run. If the sweep agent itself crashes mid-write, the transcript is unaffected; only that sweep's file promotion is delayed until the next trigger.
+5. **Queue responsiveness follows from the same change.** Because the reply-producing turn no longer does post-reply tool work, `HeadlessInstance.enqueue()`'s per-contact queue advances to the next message as soon as the current turn delivers, not after its process fully exits — see [Per-Contact Serialization](#per-contact-serialization).
+
+### High-stakes immediate-logging exception (E30)
+
+Some content is time-sensitive enough that it should never wait on a debounce window, even a short one. The one exception to "no memory work in the reply-producing turn" is: if what just happened falls into one of these categories, log it immediately — inline, in the same turn, before or right after replying — rather than deferring to the sweep:
+
+- **Financial decisions or obligations** — payments, transfers, new bills, rate/loan decisions.
+- **Health or medical facts** — diagnoses, medication changes, appointment outcomes.
+- **Scheduling commitments** — anything the user is now committed to that wasn't true a moment ago.
+- **Safety- or security-relevant account events** — credential changes, suspicious activity, access grants/revocations.
+
+This is a judgment call the agent already makes informally ("this needs to be logged now, not later") — E30 just gives it an explicit name and scope, and confines it to genuinely high-stakes content so it stays the exception, not the norm. Recommended: word this directly into the `system_prompt` template (see `docs/CC_HEADLESS_ADAPTER.md`'s [Configuration Schema](#configuration-schema) example) rather than relying on it being implicit.
 
 ## Per-Contact Serialization
 
@@ -216,6 +247,12 @@ function enqueue(contactId: string, task: () => Promise<void>): void {
   queues.set(contactId, next);
 }
 ```
+
+**E30: the queue advances at delivery, not at process exit.** `processBatch()`'s `task` resolves — unblocking the next queued message — as soon as the turn calls a delivery tool (`reply`/`send_message`), not when the underlying `claude -p` process actually closes. Everything past that point (stdout-fallback delivery for a turn that called no delivery tool, error handling, final `claude_session_id` persistence) runs in the background and no longer gates the next message. Two consequences worth knowing:
+
+- For a turn that never calls a delivery tool (stdout fallback, spawn error, `/stop`), the queue still waits for the whole run to settle — there's nothing earlier to advance on in that case.
+- `claude_session_id` is now persisted to the DB as soon as it's known (the first stream event that carries it), not only at the end of the turn. This closes a narrow race the early-advance would otherwise open: without it, a rapid-fire second message on a brand-new conversation could read a stale/null `claude_session_id` before the first turn finished persisting it, and fail to `--resume` the session the first turn just created.
+- Two `claude -p` processes for the *same* `claude_session_id` running briefly overlapped is a theoretical residual risk of advancing before full process exit. In practice it's a non-issue once the reply-producing turn does no post-reply tool work (E30's own S30.1) — there's nothing left for the first process to do once it has delivered, so it exits essentially immediately after. Flagged here for anyone extending this further, not because it's been observed in practice.
 
 ## Configuration Schema
 
@@ -237,6 +274,12 @@ adapters:
       message id shown as [id:<id>]. Use it for quick "working on it" updates and
       for your final answer. Do not put your answer only in plain text.
 
+      Once you have replied, stop — do not keep working to update memory files.
+      A separate process handles that later. The one exception (E30): if what
+      just happened is a financial decision/obligation, a health/medical fact,
+      a scheduling commitment, or a safety/security-relevant account event, log
+      it to your memory files immediately, in this turn, before you stop.
+
       @persona.md
 
       {{memories}}
@@ -246,20 +289,26 @@ adapters:
       index_file: MEMORY.md     # always loaded into every turn
       daily_subdir: daily       # daily/YYYY-MM-DD.md
       journal_lookback_days: 3  # today + previous 2 days of journal (0 = index only)
-    # ── E20: journaling on pause ───────────────────────────────────────────────
+    # ── E20/E30: journaling on pause or ceiling ─────────────────────────────────
     journaling:
       enabled: true
-      # Per-channel idle gap (ms) that marks a conversation "paused" → journal.
-      # number | { <channel>: number, default: number }
+      # Per-channel idle debounce (ms) that marks a conversation "paused" →
+      # journal. number | { <channel>: number, default: number }. E30 recommends
+      # a short debounce (~3-5 min) — most turns have nothing new to journal.
       threshold_ms:
-        telegram: 1800000       # 30 min
-        email: 86400000         # 24 h
-        default: 1800000
+        telegram: 300000         # 5 min
+        email: 86400000          # 24 h (threads are async by nature)
+        default: 300000
+      # E30: hard ceiling (ms) since the last sweep, applied globally regardless
+      # of idle state — fires even during a continuously-active conversation.
+      # Unset disables this leg (idle-only, the pre-E30 default).
+      ceiling_ms: 1800000        # 30 min
       prompt: |
-        Our conversation has paused. Review it and update your memory files
-        (today's daily journal, MEMORY.md, and any relevant topic files) with
-        anything durable worth remembering. Do NOT message the user — this is
-        an internal journaling turn, not a reply.
+        Our conversation has paused (or it's been a while since the last sweep).
+        Review it and update your memory files (today's daily journal,
+        MEMORY.md, and any relevant topic files) with anything durable worth
+        remembering. Do NOT message the user — this is an internal journaling
+        turn, not a reply.
 ```
 
 | Key | Default | Purpose |
@@ -276,8 +325,9 @@ adapters:
 | `memory.index_file` | `MEMORY.md` | Index file loaded into every turn |
 | `memory.daily_subdir` | `daily` | Subdir of daily journal files `YYYY-MM-DD.md` |
 | `memory.journal_lookback_days` | `3` | Days of daily journal to load (today + previous N-1) |
-| `journaling.enabled` | `true` | Master switch for journaling-on-pause |
-| `journaling.threshold_ms` | `{ default: 1800000 }` | Per-channel idle gap before a paused conversation journals |
+| `journaling.enabled` | `true` | Master switch for journaling-on-pause-or-ceiling |
+| `journaling.threshold_ms` | `{ default: 1800000 }` | Per-channel idle debounce before a paused conversation journals (E30 recommends tightening this to ~3-5 min) |
+| `journaling.ceiling_ms` | unset (disabled) | Hard ceiling since the last sweep, applied globally regardless of idle state (E30; recommended ~20-30 min) |
 | `journaling.prompt` | see schema | Prompt sent on the silent journaling turn |
 
 ## Multi-instance deployments (E23)

@@ -20,6 +20,7 @@ All tools are registered via `registerAllTools()` in `src/mcp/tools/index.ts`.
 | `search_transcripts` | S7.3 | Full-text search across conversation transcripts |
 | `get_session` | S7.4 | Get session metadata and summary |
 | `list_sessions` | S7.4 | Browse recent sessions |
+| `get_transcript` | E35 | Get the full ordered message history for a session |
 | `react_to_message` | S7.5 | Send an emoji reaction to a message |
 | `create_telegram_topic` | E28 | Create a new forum topic in a Telegram group |
 
@@ -105,6 +106,8 @@ Send a message to any contact on any channel. Validates the channel exists (reso
 Priority values: `normal`, `high`, `urgent`.
 
 **`topic` (default `"general"`, E28):** to land a message in a specific Telegram forum topic instead of the group's General topic, pass the `topic` value returned by `create_telegram_topic` (a `"thread:<hash>"` id) — not the channel, and not a plain topic name. `schedule_message` accepts the same `topic` param for the same purpose. A `topic` with no matching thread record on that channel is rejected server-side rather than silently falling back to General.
+
+For a proactive send (not a reply to a message you just received), call `get_session` or `list_sessions` first and use the `topic` field it returns (E32) rather than guessing — it reflects where that conversation is actually threaded.
 
 **`reply_to` (E28):** when set, bus-core resolves it server-side to the referenced transcript's platform message ID and, on Telegram, turns it into a native reply quote (`reply_parameters`) — the agent never needs to know platform-specific ID formats. An unknown or foreign-chat `reply_to` is a silent no-op: the message still sends, just without a quote. **Replying to the latest inbound message in the conversation is also a no-op** — quoting the message a reply is obviously responding to would be visually redundant, so that case always sends as a plain message. Non-Telegram channels ignore it today.
 
@@ -287,6 +290,7 @@ Get details for a session — metadata plus any available AI summary. If no `ses
   "last_activity": "2026-04-12T10:30:00Z",
   "ended_at": null,
   "message_count": 15,
+  "topic": "general",
   "summary": {
     "summary": "Discussed weekend plans.",
     "model": "claude-opus-4-6",
@@ -295,6 +299,8 @@ Get details for a session — metadata plus any available AI summary. If no `ses
   }
 }
 ```
+
+`topic` (E32) is the conversation's topic (e.g. `"general"` or a Telegram forum `"thread:<hash>"`, E28), resolved via `conversation_registry`. Use it to target a proactive `send_message`/`schedule_message` at the same place this conversation is happening, instead of guessing — pass it as `send_message`'s `topic` param. `null` if the session's conversation has no matching `conversation_registry` row (shouldn't happen in practice).
 
 Returns `{ available: false }` if no session is found.
 
@@ -316,6 +322,41 @@ Browse recent sessions with their summaries.
   "count": 5
 }
 ```
+
+---
+
+## E35 — Full Transcript Lookup
+
+### `get_transcript`
+
+Get the full, ordered message-by-message transcript for a specific session — every inbound and outbound message, oldest first. Complements `search_transcripts` (keyword-driven, cross-session snippets, no surrounding context) and `get_session` (metadata + summary only, no message content) — use this when you already have a `session_id` (from `list_sessions`, `get_session`, or a memory file reference) and want the actual conversation.
+
+**Input:**
+```json
+{ "session_id": "uuid", "limit": 200, "since": "2026-04-01T00:00:00Z", "before": "2026-04-02T00:00:00Z" }
+```
+
+`limit` defaults to 200, max 1000 (higher than `list_sessions`'/`search_transcripts`' 100 — a single session's full transcript, not a fan-out across sessions, is the unit here). `since`/`before` are `created_at` cursors for paging through a long-running session.
+
+**Output:**
+```json
+{
+  "transcript": [
+    {
+      "message_id": "uuid",
+      "session_id": "uuid",
+      "channel": "telegram",
+      "contact_id": "contact:chris",
+      "direction": "inbound",
+      "body": "What's on my calendar today?",
+      "created_at": "2026-04-12T10:05:00.000Z"
+    }
+  ],
+  "count": 1
+}
+```
+
+A session with zero transcript rows returns `{ "transcript": [], "count": 0 }`, not an error. Returns `{ available: false }` if the `session_id` doesn't exist.
 
 ---
 

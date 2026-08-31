@@ -13,7 +13,9 @@ export function registerMessagingTools(server: McpServer, busBaseUrl: string): v
     'send_message',
     {
       description:
-        'Send a message to any contact on any channel. Use list_channels to discover available channels.',
+        'Send a message to any contact on any channel. Use list_channels to discover available channels. ' +
+        'For proactive sends (not replying to a message you just received), call get_session or ' +
+        'list_sessions first to check the current topic for that conversation rather than guessing one.',
       inputSchema: {
         to: z.string().min(1).describe('Recipient identifier (e.g. "contact:chris", "contact:alice")'),
         channel: z.string().min(1).describe('Target channel (e.g. "telegram", "bluebubbles")'),
@@ -23,7 +25,9 @@ export function registerMessagingTools(server: McpServer, busBaseUrl: string): v
           .optional()
           .default('general')
           .describe(
-            'Message topic (default: "general"). To target a specific Telegram forum topic ' +
+            'Message topic (default: "general"). Call get_session or list_sessions to look up the ' +
+              "session's current `topic` field rather than guessing — it reflects where the " +
+              'conversation is actually threaded. To target a specific Telegram forum topic ' +
               '(e.g. one created via create_telegram_topic), pass the `topic` value it returned ' +
               '(a "thread:<hash>" id) — not the channel or a plain topic name.',
           ),

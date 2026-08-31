@@ -45,6 +45,24 @@ export class SessionTracker {
   private journalingRunners = new Map<string, JournalingRunner>();
   /** conversation_id → { lastActivity seen, consecutive failures }. Re-armed when last_activity advances. */
   private journalingAttempts = new Map<string, { lastActivity: string; count: number }>();
+  /**
+   * E30 — conversation_ids with a journaling turn currently enqueued/running.
+   * `runner()` enqueues onto the same per-contact serialization queue as live
+   * turns, so two dispatches for the same conversation would never actually
+   * execute concurrently — but without this guard, a tick that lands while
+   * the first is still in flight would enqueue a redundant second one behind
+   * it. Checked before dispatch, cleared once the runner's promise settles
+   * (success or failure) so a genuinely stuck turn cannot suppress dispatch
+   * forever — MAX_JOURNALING_ATTEMPTS still bounds retries independently.
+   */
+  private journalingInFlight = new Set<string>();
+  /**
+   * E33 — whether the "no cc-headless instances/runners" no-op in
+   * dispatchJournaling() has already been warned about for the current
+   * occurrence of that condition. Edge-triggered: reset to false as soon as
+   * instances/runners are non-empty again, so a later recurrence re-warns.
+   */
+  private journalingConfigWarned = false;
 
   constructor(deps: {
     db: Database.Database;
@@ -114,10 +132,13 @@ export class SessionTracker {
   }
 
   /**
-   * E20/E23 — fire a silent journaling turn for each headless conversation that
-   * has paused (idle past the per-channel journaling threshold) and has not
-   * been journaled since its last activity. One journaling turn per pause;
-   * new activity advances last_activity past last_journaled_at and re-arms it.
+   * E20/E23/E30 — fire a silent journaling turn for each headless conversation
+   * that either (a) has paused (idle past the per-channel journaling
+   * threshold — the debounce leg) or (b) has gone too long since its last
+   * sweep regardless of idle state (the hard-ceiling leg, E30) — and has not
+   * been journaled since its last activity. One journaling turn per
+   * trigger; new activity advances last_activity past last_journaled_at and
+   * re-arms it.
    *
    * Each session is routed to the cc-headless instance that owns it
    * (`sessions.agent_id`, migration 011) — its own `journaling` config and its
@@ -133,7 +154,11 @@ export class SessionTracker {
    */
   private dispatchJournaling(): void {
     const instances = getCcHeadlessInstances(this.config);
-    if (instances.length === 0 || this.journalingRunners.size === 0) return;
+    if (instances.length === 0 || this.journalingRunners.size === 0) {
+      this.warnIfJournalingBlocked(instances.length === 0);
+      return;
+    }
+    this.journalingConfigWarned = false;
 
     const instanceByAgentId = new Map(instances.map((i) => [`agent:${i.agent_id}`, i]));
     const soleInstanceKey = instances.length === 1 ? `agent:${instances[0]!.agent_id}` : null;
@@ -160,7 +185,22 @@ export class SessionTracker {
 
       const thresholdMs = journalingThresholdForChannel(instCfg.journaling.threshold_ms, session.channel);
       const idleMs = now - new Date(session.last_activity).getTime();
-      if (idleMs < thresholdMs) continue;
+      const idleTriggered = idleMs >= thresholdMs;
+
+      // E30 hard ceiling: elapsed since the last sweep (or session start, if
+      // never journaled) regardless of idle state — catches long,
+      // continuously-active conversations that never go idle long enough to
+      // trip the debounce leg above.
+      const ceilingMs = instCfg.journaling.ceiling_ms;
+      const sinceSweepMs = now - new Date(session.last_journaled_at ?? session.started_at).getTime();
+      const ceilingTriggered = ceilingMs != null && sinceSweepMs >= ceilingMs;
+
+      if (!idleTriggered && !ceilingTriggered) continue;
+
+      // E30 overlap suppression: a sweep already in flight for this
+      // conversation suppresses a new trigger rather than queuing a
+      // redundant second one behind it.
+      if (this.journalingInFlight.has(session.conversation_id)) continue;
 
       // Reset the failure counter when new activity has occurred since last seen.
       let rec = this.journalingAttempts.get(session.conversation_id);
@@ -172,6 +212,7 @@ export class SessionTracker {
 
       // Fire-and-forget. Stamp last_journaled_at on success (or skip); on failure
       // leave it unchanged so a later tick retries, bounded by the attempt cap.
+      this.journalingInFlight.add(session.conversation_id);
       runner(session.conversation_id)
         .then(() => {
           this.journalingAttempts.delete(session.conversation_id);
@@ -187,8 +228,41 @@ export class SessionTracker {
               `(attempt ${current?.count ?? 1}):`,
             err,
           );
+        })
+        .finally(() => {
+          this.journalingInFlight.delete(session.conversation_id);
         });
     }
+  }
+
+  /**
+   * E33 — surfaces the dispatchJournaling() no-op path (no configured
+   * cc-headless instances, or none registered as runners) via a console.warn
+   * instead of leaving it silent. Only warns when at least one session is
+   * actually waiting on the sweep (would otherwise be a journaling
+   * candidate), and only once per occurrence of the condition —
+   * `journalingConfigWarned` is reset as soon as the condition clears.
+   */
+  private warnIfJournalingBlocked(noInstancesConfigured: boolean): void {
+    if (this.journalingConfigWarned) return;
+
+    const waiting = this.db
+      .prepare(
+        `SELECT COUNT(*) as count FROM sessions
+         WHERE ended_at IS NULL AND claude_session_id IS NOT NULL
+           AND (last_journaled_at IS NULL OR last_journaled_at < last_activity)`,
+      )
+      .get() as { count: number };
+    if (waiting.count === 0) return;
+
+    this.journalingConfigWarned = true;
+    const reason = noInstancesConfigured
+      ? 'no cc-headless instances configured'
+      : 'no journaling runners registered';
+    console.warn(
+      `[session-tracker] Journaling sweep is a no-op bus-wide (${reason}); ` +
+        `${waiting.count} session(s) waiting to be journaled.`,
+    );
   }
 
   /** Resolve the minimum message count required before a session can be closed, for a given channel. */

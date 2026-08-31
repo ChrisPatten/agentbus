@@ -148,7 +148,7 @@ for (const inst of getEmailInstances(config)) {
 // Dequeues contact-bound messages and dispatches to platform adapters.
 // Agent-bound messages (agent:*) stay in the queue for CC adapter to poll.
 
-const deliveryWorker = new DeliveryWorker({ queue, registry });
+const deliveryWorker = new DeliveryWorker({ queue, registry, db });
 
 // ── Memory system ─────────────────────────────────────────────────────────────
 // Summarizer calls the Claude API to extract memories from completed sessions.

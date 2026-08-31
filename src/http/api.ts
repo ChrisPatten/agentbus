@@ -55,6 +55,7 @@ import type { PipelineContext } from '../pipeline/types.js';
 import type Database from 'better-sqlite3';
 import type { CommandRegistry, SlashCommandContext } from '../commands/registry.js';
 import { createSafeDatabase } from '../db/safe-database.js';
+import { logOutboundTranscript } from '../pipeline/outbound-transcript.js';
 import { VERSION } from '../version.js';
 
 export interface HttpServerDeps {
@@ -317,7 +318,7 @@ export async function processInbound(
           id: randomUUID(),
           timestamp: new Date().toISOString(),
           channel: result.envelope.channel,
-          topic: 'command',
+          topic: result.envelope.topic,
           sender: 'system:bus',
           recipient: result.envelope.sender,
           reply_to: result.envelope.id,
@@ -336,27 +337,18 @@ export async function processInbound(
         // Marked with command_response:true so E8/E9 can exclude from memory processing.
         if (result.sessionId && result.conversationId) {
           try {
-            const now = new Date().toISOString();
             const contactId = result.envelope.sender.startsWith('contact:')
               ? result.envelope.sender.slice('contact:'.length)
               : result.envelope.sender;
-            deps.db
-              .prepare(
-                `INSERT INTO transcripts (id, message_id, conversation_id, session_id, created_at, channel, contact_id, direction, body, metadata)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, json(?))`,
-              )
-              .run(
-                randomUUID(),
-                responseEnvelope.id,
-                result.conversationId,
-                result.sessionId,
-                now,
-                result.envelope.channel,
-                contactId,
-                'outbound',
-                responseBody,
-                JSON.stringify({ command_response: true, command: commandName }),
-              );
+            logOutboundTranscript(deps.db, {
+              messageId: responseEnvelope.id,
+              conversationId: result.conversationId,
+              sessionId: result.sessionId,
+              channel: result.envelope.channel,
+              contactId,
+              body: responseBody,
+              metadata: { command_response: true, command: commandName },
+            });
           } catch (err) {
             console.error(`[inbound] Failed to log command response transcript: ${String(err)}`);
           }
@@ -750,9 +742,11 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     let sql = `
       SELECT s.id, s.conversation_id, s.channel, s.contact_id,
              s.started_at, s.last_activity, s.ended_at, s.message_count,
-             ss.summary, ss.model, ss.token_count, ss.created_at AS summary_created_at
+             ss.summary, ss.model, ss.token_count, ss.created_at AS summary_created_at,
+             cr.topic
       FROM sessions s
       LEFT JOIN session_summaries ss ON ss.session_id = s.id
+      LEFT JOIN conversation_registry cr ON cr.id = s.conversation_id
       WHERE 1=1
     `;
     const params: unknown[] = [];
@@ -786,6 +780,7 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
         model: string | null;
         token_count: number | null;
         summary_created_at: string | null;
+        topic: string | null;
       }>;
 
       const sessions = rows.map(({ summary, model, token_count, summary_created_at, ...s }) => ({
@@ -809,9 +804,11 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       .prepare(
         `SELECT s.id, s.conversation_id, s.channel, s.contact_id,
                 s.started_at, s.last_activity, s.ended_at, s.message_count,
-                ss.summary, ss.model, ss.token_count, ss.created_at AS summary_created_at
+                ss.summary, ss.model, ss.token_count, ss.created_at AS summary_created_at,
+                cr.topic
          FROM sessions s
          LEFT JOIN session_summaries ss ON ss.session_id = s.id
+         LEFT JOIN conversation_registry cr ON cr.id = s.conversation_id
          WHERE s.id = ?`
       )
       .get(id) as
@@ -828,6 +825,7 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
           model: string | null;
           token_count: number | null;
           summary_created_at: string | null;
+          topic: string | null;
         }
       | undefined;
 
@@ -844,6 +842,55 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     };
 
     return { ok: true, session };
+  });
+
+  // GET /api/v1/sessions/:id/transcript — full ordered message history for a
+  // session (E35). Unlike /api/v1/transcripts/search (FTS5, cross-session,
+  // relevance-ranked, DESC), this returns everything that happened in one
+  // specific session, oldest first — the natural reading order for a transcript.
+  server.get<{
+    Params: { id: string };
+    Querystring: { limit?: string; since?: string; before?: string };
+  }>('/api/v1/sessions/:id/transcript', (req, reply) => {
+    const { id } = req.params;
+    const { limit: limitStr, since, before } = req.query;
+
+    const session = db.prepare(`SELECT id FROM sessions WHERE id = ?`).get(id);
+    if (!session) {
+      return reply.status(404).send({ ok: false, error: 'Session not found' });
+    }
+
+    const parsedLimit = Math.max(1, Math.min(parseInt(limitStr ?? '200', 10) || 200, 1000));
+
+    let sql = `
+      SELECT message_id, session_id, channel, contact_id, direction, body, created_at
+      FROM transcripts
+      WHERE session_id = ?
+    `;
+    const params: unknown[] = [id];
+
+    if (since) {
+      sql += ` AND created_at > ?`;
+      params.push(since);
+    }
+    if (before) {
+      sql += ` AND created_at < ?`;
+      params.push(before);
+    }
+    sql += ` ORDER BY created_at ASC LIMIT ?`;
+    params.push(parsedLimit);
+
+    const transcript = db.prepare(sql).all(...params) as Array<{
+      message_id: string;
+      session_id: string;
+      channel: string;
+      contact_id: string;
+      direction: string;
+      body: string;
+      created_at: string;
+    }>;
+
+    return { ok: true, transcript, count: transcript.length };
   });
 
   // GET /api/v1/attachments/:id — resolve a stored attachment by id.

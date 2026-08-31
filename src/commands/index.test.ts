@@ -47,10 +47,9 @@ describe('createCommandSystem', () => {
     expect(names).toContain('pause');
     expect(names).toContain('resume');
     expect(names).toContain('sessions');
-    expect(names).toContain('replay');
-    expect(names).toContain('next');
-    expect(names).toContain('cancel');
-    expect(names).toContain('forget');
+    expect(names).toContain('schedule');
+    expect(names).toContain('clear');
+    expect(names).toContain('stop');
   });
 
   it('loads persisted pause state from database on startup', () => {

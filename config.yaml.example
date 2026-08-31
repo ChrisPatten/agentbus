@@ -43,9 +43,10 @@ adapters:
     webhook_port: 3002
   claude-code:
     poll_interval_ms: 1000
-  # Headless Claude Code adapter (E19/E20) — spawns `claude -p` per message
-  # batch instead of a persistent MCP session. See docs/CC_HEADLESS_ADAPTER.md
-  # and docs/MEMORY_MODEL.md. Uncomment to use instead of (or alongside) claude-code.
+  # Headless Claude Code adapter (E19/E20, memory-logging decoupled in E30) —
+  # spawns `claude -p` per message batch instead of a persistent MCP session.
+  # See docs/CC_HEADLESS_ADAPTER.md and docs/MEMORY_MODEL.md. Uncomment to use
+  # instead of (or alongside) claude-code.
   # cc-headless:
   #   agent_id: claude
   #   poll_interval_ms: 1000
@@ -62,6 +63,10 @@ adapters:
   #       - email*:    write a complete, well-structured reply — a greeting, your
   #                    full reasoning in clear sections, and a sign-off. Take the
   #                    space email affords; this is not a chat message.
+  #     Once you have replied, stop — a separate process handles memory-logging
+  #     later (E30). Exception: financial decisions/obligations, health/medical
+  #     facts, scheduling commitments, and safety/security-relevant account
+  #     events should still be logged immediately, in this turn, before you stop.
   #     @persona.md
   #     {{memories}}
   #   # E20: assemble the agent's own memory files into each turn (relative to working_dir)
@@ -70,18 +75,22 @@ adapters:
   #     index_file: MEMORY.md
   #     daily_subdir: daily
   #     journal_lookback_days: 3    # today + previous 2 days (0 = index only)
-  #   # E20: silent journaling turn when a conversation pauses (messages no one)
+  #   # E20/E30: silent journaling turn when a conversation pauses or a hard
+  #   # ceiling elapses (messages no one) — see docs/CC_HEADLESS_ADAPTER.md#memory-logging-e30
   #   journaling:
   #     enabled: true
-  #     threshold_ms:               # per-channel idle gap before journaling
-  #       telegram: 1800000         # 30 min
+  #     threshold_ms:               # per-channel idle debounce before journaling
+  #       telegram: 300000          # 5 min (E30: short debounce, most turns have nothing new)
   #       email: 86400000           # 24 h
-  #       default: 1800000
+  #       default: 300000
+  #     ceiling_ms: 1800000         # E30: hard ceiling since the last sweep, regardless
+  #                                 # of idle state (unset disables this leg)
   #     prompt: |
-  #       Our conversation has paused. Review it and update your memory files
-  #       (today's daily journal, MEMORY.md, and any relevant topic files) with
-  #       anything durable worth remembering. Do NOT message the user — this is
-  #       an internal journaling turn, not a reply.
+  #       Our conversation has paused (or it's been a while since the last sweep).
+  #       Review it and update your memory files (today's daily journal,
+  #       MEMORY.md, and any relevant topic files) with anything durable worth
+  #       remembering. Do NOT message the user — this is an internal journaling
+  #       turn, not a reply.
   #
   # Multi-instance form (E23) — named record, one entry per headless agent, same
   # per-instance schema as above. Each gets its own poll loop, working_dir, and
@@ -93,14 +102,14 @@ adapters:
   #     system_prompt: |
   #       You are Peggy...
   #     memory: { dir: memory, index_file: MEMORY.md, daily_subdir: daily, journal_lookback_days: 3 }
-  #     journaling: { enabled: true, threshold_ms: 1800000, prompt: "..." }
+  #     journaling: { enabled: true, threshold_ms: 300000, ceiling_ms: 1800000, prompt: "..." }
   #   pokeclaude:
   #     agent_id: pokeclaude
   #     working_dir: /home/pokeclaude
   #     system_prompt: |
   #       You are pokeclaude...
   #     memory: { dir: memory, index_file: MEMORY.md, daily_subdir: daily, journal_lookback_days: 3 }
-  #     journaling: { enabled: true, threshold_ms: 1800000, prompt: "..." }
+  #     journaling: { enabled: true, threshold_ms: 300000, ceiling_ms: 1800000, prompt: "..." }
 
 contacts:
   alice:

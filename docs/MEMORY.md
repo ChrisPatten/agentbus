@@ -190,19 +190,12 @@ time.
 Results are ordered by confidence DESC, then recency.
 
 ### Expiry and Forgetting
-- **`/forget <contact_id>`** — sets `superseded_by = 'manual_forget'` and
-  `expires_at = now()` on all active memories for that contact
+- **Manual forgetting** — the `/forget <contact_id>` command was removed
+  (vestigial now that this store is dormant by default, E20/E33 cleanup); to
+  soft-expire a contact's memories directly, run `UPDATE memories SET
+  superseded_by = 'manual_forget', expires_at = <now> WHERE contact_id = ?`
 - **Background sweep** — memories where `expires_at + 30 days < now()` are
   hard-deleted on each session tracker tick
-
----
-
-## Slash Commands
-
-| Command | Description |
-|---------|-------------|
-| `/forget <contact_id>` | Soft-expire all memories for a contact |
-| `/retry_summary <session_id>` | Re-queue a failed session for summarization |
 
 ---
 
@@ -278,8 +271,10 @@ signals that this session should not receive or contribute to long-term memory.
 
 1. Check `ANTHROPIC_API_KEY` is set and valid
 2. Check bus-core logs for `[summarizer]` errors
-3. Use `/retry_summary <session_id>` to manually re-trigger after fixing the issue
-4. If a session has `summary_attempts = 3`, use the command to reset it
+3. The `/retry_summary <session_id>` command was removed (vestigial, E20/E33
+   cleanup); to manually re-trigger after fixing the issue, run `UPDATE
+   sessions SET status = 'summarize_pending', summary_attempts = 0 WHERE id =
+   ?` and wait for the next session tracker tick
 
 ### Memory not showing in recall
 

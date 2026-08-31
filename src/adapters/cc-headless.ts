@@ -270,6 +270,27 @@ class HeadlessInstance {
     resumeId: string | null,
     contactId: string,
     onToolCall?: (call: { name: string; input: Record<string, unknown> }) => void,
+    /**
+     * E30 — fired exactly once, the moment a delivery tool call
+     * (`reply`/`send_message`) is first seen in the stream, *before* the
+     * child process necessarily exits. Lets callers (processBatch) unblock
+     * the per-contact queue as soon as the user has their answer instead of
+     * waiting on any trailing tool calls / process teardown — see
+     * `HeadlessInstance.enqueue` and docs/CC_HEADLESS_ADAPTER.md#memory-logging-e30.
+     */
+    onDelivered?: () => void,
+    /**
+     * E30 — fired exactly once, as soon as the claude session id is first
+     * seen in the stream (the earliest event, well before delivery). Lets
+     * `runClaudeTurn` persist it to the DB immediately instead of waiting
+     * for the process to close — needed because S30.4 now lets the next
+     * queued message for this contact start as soon as `onDelivered` fires,
+     * which can be before this function's promise resolves. Without early
+     * persistence, a rapid-fire second message on a brand-new conversation
+     * could read a stale/null `claude_session_id` and fail to `--resume` the
+     * session the first message just created.
+     */
+    onSessionId?: (id: string) => void,
   ): Promise<SpawnResult> {
     const args = [
       '-p', prompt,
@@ -328,6 +349,7 @@ class HeadlessInstance {
 
           if (event.session_id && !claudeSessionId) {
             claudeSessionId = event.session_id;
+            onSessionId?.(event.session_id);
           }
 
           // Watch assistant turns for tool calls: reply/send_message means the
@@ -338,10 +360,16 @@ class HeadlessInstance {
           // calling reply/send_message; once delivered, further tool calls
           // must not reopen the status trail the user already saw replaced
           // by their answer.
+          const wasDelivered = deliveredViaTool;
           const { reportable, delivered } = selectReportableCalls(extractToolCalls(event), deliveredViaTool);
           deliveredViaTool = delivered;
           for (const call of reportable) {
             onToolCall?.({ name: call.name, input: call.input });
+          }
+          // E30: fire the early-unblock signal on the transition to delivered,
+          // not on every subsequent event once already delivered.
+          if (!wasDelivered && deliveredViaTool) {
+            onDelivered?.();
           }
 
           if (event.type === 'result') {
@@ -484,6 +512,8 @@ class HeadlessInstance {
     prompt: string;
     resumeId: string | null;
     onToolCall?: (call: { name: string; input: Record<string, unknown> }) => void;
+    /** E30 — see `invokeClaude`'s `onDelivered` param. */
+    onDelivered?: () => void;
   }): Promise<SpawnResult> {
     const now = new Date();
     const ctx: PromptContext = {
@@ -505,15 +535,37 @@ class HeadlessInstance {
     const spPath = writeTmp(systemPromptText, '.txt');
     const mcpPath = writeTmp(JSON.stringify(buildMcpConfig()), '.json');
 
+    // E30 (S30.4): persist claude_session_id as soon as it's known, not just
+    // at the end. Once the queue can advance to the next message at delivery
+    // (before this process exits — see onDelivered below), a rapid-fire
+    // second message on a brand-new conversation must be able to --resume
+    // the session the first message just created rather than reading a
+    // stale/null value. Idempotent: the same value is written again (a
+    // no-op) once the turn actually completes.
+    const persistSessionId = (id: string): void => {
+      if (!opts.session) return;
+      try {
+        storeClaudeSessionId(opts.db, opts.session.id, id);
+      } catch (err) {
+        console.error(`[${this.label}] Failed to store claude_session_id for ${opts.session.id}:`, err);
+      }
+    };
+
     try {
-      const result = await this.invokeClaude(opts.prompt, spPath, mcpPath, opts.resumeId, opts.contactId, opts.onToolCall);
-      // Persist the claude_session_id so subsequent turns --resume the same one.
-      if (result.claudeSessionId && opts.session) {
-        try {
-          storeClaudeSessionId(opts.db, opts.session.id, result.claudeSessionId);
-        } catch (err) {
-          console.error(`[${this.label}] Failed to store claude_session_id for ${opts.session.id}:`, err);
-        }
+      const result = await this.invokeClaude(
+        opts.prompt,
+        spPath,
+        mcpPath,
+        opts.resumeId,
+        opts.contactId,
+        opts.onToolCall,
+        opts.onDelivered,
+        persistSessionId,
+      );
+      // Final persist covers the case where the session id changed (rare) or
+      // was only captured on the closing `result` event.
+      if (result.claudeSessionId) {
+        persistSessionId(result.claudeSessionId);
       }
       return result;
     } finally {
@@ -542,7 +594,22 @@ class HeadlessInstance {
     // the Stage-85 <memory> block in the user message to avoid double injection.
     const prompt = formatMessagesForSampling(envelopes, { includeMemoryContext: false });
 
-    const { resultText, deliveredViaTool, error, stoppedByUser } = await this.runClaudeTurn({
+    // E30 (S30.4): the per-contact queue (`enqueue`) should advance as soon
+    // as the user has their answer, not after the whole claude -p process
+    // exits — S30.1 already stops the *agent* from doing real work after
+    // replying, but nothing previously stopped this adapter from blocking
+    // the next queued message on the process's trailing teardown regardless.
+    // `delivered` resolves at the earlier of: (a) `onDelivered` firing mid-
+    // stream the moment a reply/send_message tool call is seen, or (b) the
+    // whole run settling — which covers the stdout-fallback, error, and
+    // stopped-by-user paths, none of which have anything for the queue to
+    // gain by waiting on since they have no delivery tool call to race.
+    let resolveDelivered: () => void;
+    const delivered = new Promise<void>((resolve) => {
+      resolveDelivered = resolve;
+    });
+
+    const runPromise = this.runClaudeTurn({
       db,
       session,
       contactId,
@@ -551,34 +618,56 @@ class HeadlessInstance {
       resumeId,
       onToolCall: (call) =>
         this.reportToolCall(channel, contactId, formatToolCallSummary(call.name, call.input), topic),
+      onDelivered: () => resolveDelivered(),
     });
+    // Settle `delivered` on any outcome so a run that never calls a delivery
+    // tool doesn't block the queue past its own completion. The rejection
+    // itself is handled below, not surfaced through `delivered`.
+    runPromise.then(
+      () => resolveDelivered(),
+      () => resolveDelivered(),
+    );
 
-    if (stoppedByUser) {
-      // `/stop` killed this turn. The source adapter (Telegram) has already
-      // finalized any open draft with a "Stopped by user" note — nothing
-      // further to deliver, and definitely not the normal error reply.
-      return;
-    }
+    await delivered;
 
-    // The agent owns delivery via the reply/send_message tools. Only the adapter
-    // steps in when the agent delivered nothing through a tool:
-    //   - on failure / no result → send the configured error_reply (no silence)
-    //   - otherwise → fall back to delivering the stdout result text
-    if (deliveredViaTool) {
-      if (error) {
-        console.error(`[${this.label}] claude reported an error for ${contactId} after delivering via tool: ${error}`);
-      }
-      return;
-    }
+    // Everything past this point — stdout-fallback delivery, error handling,
+    // and (inside runClaudeTurn) final session-id persistence — runs in the
+    // background and no longer blocks the next queued message for this
+    // contact. Errors here are logged, matching enqueue()'s own top-level
+    // catch for the pre-E30 behavior.
+    void runPromise
+      .then(async ({ resultText, deliveredViaTool, error, stoppedByUser }) => {
+        if (stoppedByUser) {
+          // `/stop` killed this turn. The source adapter (Telegram) has
+          // already finalized any open draft with a "Stopped by user" note —
+          // nothing further to deliver, and definitely not the normal error
+          // reply.
+          return;
+        }
 
-    if (error || !resultText) {
-      const detail = error ?? 'no result';
-      console.error(`[${this.label}] claude invocation failed for ${contactId}: ${detail}`);
-      await this.deliverResponse(first, this.buildErrorReply(detail));
-      return;
-    }
+        // The agent owns delivery via the reply/send_message tools. Only the
+        // adapter steps in when the agent delivered nothing through a tool:
+        //   - on failure / no result → send the configured error_reply (no silence)
+        //   - otherwise → fall back to delivering the stdout result text
+        if (deliveredViaTool) {
+          if (error) {
+            console.error(`[${this.label}] claude reported an error for ${contactId} after delivering via tool: ${error}`);
+          }
+          return;
+        }
 
-    await this.deliverResponse(first, resultText);
+        if (error || !resultText) {
+          const detail = error ?? 'no result';
+          console.error(`[${this.label}] claude invocation failed for ${contactId}: ${detail}`);
+          await this.deliverResponse(first, this.buildErrorReply(detail));
+          return;
+        }
+
+        await this.deliverResponse(first, resultText);
+      })
+      .catch((err: unknown) => {
+        console.error(`[${this.label}] Error finishing batch for ${contactId}:`, err);
+      });
   }
 
   // ── Silent journaling turn (E20) ─────────────────────────────────────────

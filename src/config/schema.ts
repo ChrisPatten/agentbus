@@ -202,6 +202,13 @@ const CcHeadlessAdapterSchema = z.object({
    * E20 — journaling on pause. When a conversation goes idle past the
    * per-channel threshold, the bus fires a silent `--resume` turn telling the
    * agent to update its memory files. Nothing is delivered to the user.
+   *
+   * E30 — this is also the debounced memory-sweep mechanism: `threshold_ms`
+   * is the idle-debounce leg (resets on every inbound message), and
+   * `ceiling_ms` is the hard-ceiling leg (fires even while a conversation
+   * stays continuously active, so a long uninterrupted chat still flushes
+   * periodically instead of deferring indefinitely). See
+   * docs/CC_HEADLESS_ADAPTER.md#memory-logging-e30.
    */
   journaling: z
     .object({
@@ -211,6 +218,10 @@ const CcHeadlessAdapterSchema = z.object({
        * Two forms (mirrors `memory.session_close_min_messages`):
        *   - number: applies to every channel
        *   - record: per-channel ms with a required `default` key
+       *
+       * E30 recommends a short debounce (~3-5 min) here — most turns have
+       * nothing new worth journaling, so this only needs to catch a real
+       * pause in the conversation, not every reply.
        */
       threshold_ms: z
         .union([
@@ -218,6 +229,15 @@ const CcHeadlessAdapterSchema = z.object({
           z.object({ default: z.number().int().positive() }).catchall(z.number().int().positive()),
         ])
         .default({ default: 1_800_000 }),
+      /**
+       * E30 — hard ceiling (ms) since the last sweep (or session start, if
+       * never journaled), applied globally across channels regardless of
+       * idle state. Ensures a continuously-active conversation still
+       * journals periodically instead of only on pause. Recommended
+       * ~20-30 min. Unset disables the ceiling leg entirely (idle-only
+       * behavior, the pre-E30 default).
+       */
+      ceiling_ms: z.number().int().positive().optional(),
       /** Prompt sent on the silent journaling turn. */
       prompt: z
         .string()

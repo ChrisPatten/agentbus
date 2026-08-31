@@ -101,6 +101,28 @@ describe('processInbound — slash command dispatch', () => {
     expect(sentEnvelope.payload.body).toContain('AgentBus status');
   });
 
+  it('preserves the originating forum topic on the command response envelope', async () => {
+    const { registry: commandRegistry, pauseSet } = createCommandSystem({
+      adapterRegistry, queue, db, config: stubConfig,
+    });
+
+    const message: InboundMessage = {
+      channel: 'telegram',
+      topic: 'thread:456',
+      sender: 'contact:chris',
+      payload: { type: 'text', body: '/status' },
+    };
+
+    const result = await processInbound(message, {
+      queue, pipeline, config: stubConfig, db,
+      registry: adapterRegistry, commandRegistry, pauseSet,
+    });
+
+    expect(result.ok).toBe(true);
+    const sentEnvelope = (telegramAdapter.send as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    expect(sentEnvelope.topic).toBe('thread:456');
+  });
+
   it('returns error for unknown commands', async () => {
     const { registry: commandRegistry, pauseSet } = createCommandSystem({
       adapterRegistry, queue, db, config: stubConfig,
@@ -224,6 +246,33 @@ describe('processInbound — slash command dispatch', () => {
 
     expect(result.ok).toBe(true);
     expect('reason' in result && result.reason).toBe('invalid_payload');
+  });
+
+  it('logs the command response to transcripts via the shared outbound helper (E31)', async () => {
+    const { registry: commandRegistry, pauseSet } = createCommandSystem({
+      adapterRegistry, queue, db, config: stubConfig,
+    });
+
+    const message: InboundMessage = {
+      channel: 'telegram',
+      sender: 'contact:chris',
+      payload: { type: 'text', body: '/status' },
+    };
+
+    const result = await processInbound(message, {
+      queue, pipeline, config: stubConfig, db,
+      registry: adapterRegistry, commandRegistry, pauseSet,
+    });
+
+    expect(result.ok).toBe(true);
+    const rows = db
+      .prepare(`SELECT * FROM transcripts WHERE direction = 'outbound'`)
+      .all() as Array<{ contact_id: string; channel: string; body: string; metadata: string }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.contact_id).toBe('chris');
+    expect(rows[0]!.channel).toBe('telegram');
+    expect(rows[0]!.body).toContain('AgentBus status');
+    expect(JSON.parse(rows[0]!.metadata)).toEqual({ command_response: true, command: 'status' });
   });
 
   it('catches handler errors and returns them as command response', async () => {

@@ -1,6 +1,19 @@
-# Memory Model (E20)
+# Memory Model (E20, extended in E30)
 
 How AgentBus handles memory for a single-user / single-agent personal assistant (the "Peggy" model), and why the bus's structured memory store is dormant.
+
+> **E30 changes:** journaling is no longer purely pause-triggered — a hard ceiling now fires the same sweep even during a continuously-active conversation, so memory-logging is fully decoupled from the reply-producing turn (which no longer does any post-reply tool work at all, high-stakes content excepted). See [CC_HEADLESS_ADAPTER.md → Memory Logging](./CC_HEADLESS_ADAPTER.md#memory-logging-e30).
+
+> **E31 changes:** `transcripts` now captures both directions. Inbound rows are
+> written by `transcript-log.ts` (Stage 80), unchanged. Outbound rows —
+> `reply`, `send_message`, `send_email`, and scheduled-message delivery — are
+> written by `DeliveryWorker.deliver()` (`src/core/delivery.ts`) on confirmed
+> `adapter.send()` success, plus the bus-scope slash-command bypass
+> (`src/http/api.ts`, e.g. `/status`). Both call the same insert helper
+> (`logOutboundTranscript` in `src/pipeline/outbound-transcript.ts`) so the SQL
+> can't drift between the two paths. A failed/dead-lettered send never
+> produces a row; an unresolvable conversation/session (no prior inbound
+> history for that contact+channel) is skipped rather than failing the send.
 
 ## The layered model
 
@@ -19,15 +32,31 @@ So E20 stops the bus from trying to **be** the memory store and makes it **orche
 | Durable knowledge (facts, preferences, plans) | **The agent's files** (`MEMORY.md`, topic files, daily journal) |
 | Loading those files into each turn's context | **The bus** — `assembleMemoryContext` (front-loads `MEMORY.md` + recent dailies) |
 | Recent conversation continuity | **Claude Code** — the resumed `claude_session_id`, bounded by auto-compaction |
-| Deciding when to capture durable knowledge | **The bus** — the journaling dispatcher fires on pause |
-| Actually writing the knowledge | **The agent** — the silent journaling turn edits its own files |
+| Deciding when to capture durable knowledge | **The bus** — the journaling dispatcher fires on pause or on a hard ceiling (E30) |
+| Actually writing the knowledge | **The agent** — the silent journaling turn edits its own files; high-stakes content (E30) is written inline in the reply-producing turn instead of waiting on the sweep |
 | What's due for journaling and when | **The bus** — `sessions` telemetry (`last_activity`, `last_journaled_at`, `claude_session_id`) |
 
 ## The two pillars
 
 1. **Headless context assembly** — an ephemeral one-shot `claude -p` can't be relied on to go read yesterday's journal on its own, so the bus assembles `MEMORY.md` + the most recent daily journal files into each turn's context. See [CC_HEADLESS_ADAPTER.md → Context assembly](./CC_HEADLESS_ADAPTER.md#context-assembly-memory-files-e20).
 
-2. **Journaling on pause** — the idle threshold is repurposed from a *teardown* signal into a *journaling* signal. When a conversation pauses, the bus fires a **silent** `--resume` journaling turn: the agent reviews the conversation and updates its files, sends the user nothing, and the session stays open. See [CC_HEADLESS_ADAPTER.md → Journaling on pause](./CC_HEADLESS_ADAPTER.md#journaling-on-pause-e20).
+2. **Journaling on pause or ceiling** — the idle threshold is repurposed from a *teardown* signal into a *journaling* signal. When a conversation pauses, the bus fires a **silent** `--resume` journaling turn: the agent reviews the conversation and updates its files, sends the user nothing, and the session stays open. E30 adds a hard ceiling alongside the idle debounce so a long, continuously-active conversation still flushes periodically instead of only on pause. See [CC_HEADLESS_ADAPTER.md → Memory Logging](./CC_HEADLESS_ADAPTER.md#memory-logging-e30).
+
+   **All-or-nothing dependency on `cc-headless` (E33).** The dispatcher
+   (`SessionTracker.dispatchJournaling()`, `src/memory/session-tracker.ts`) is
+   gated entirely on at least one configured *and* registered `cc-headless`
+   instance — if the config block is absent, or no instance has registered a
+   journaling runner, the sweep no-ops for **every** headless session
+   bus-wide on every tick, not just sessions tied to the missing instance.
+   Removing the last `cc-headless` instance (e.g. an operator swap to a
+   different Claude Code adapter) silently pauses the sweep. This is now
+   surfaced via a one-time `console.warn` (edge-triggered, not per-tick) the
+   moment the condition is detected with at least one session actually
+   waiting on the sweep — look for `[session-tracker] Journaling sweep is a
+   no-op bus-wide` if `last_journaled_at` looks stuck while `last_activity`
+   keeps advancing.
+
+3. **No memory work inside the reply-producing turn (E30)** — the turn that answers the user ends at `reply()`/`send_message()`; it no longer keeps running afterward to journal. That responsibility belongs entirely to the debounced sweep above, with one exception: financial, health, scheduling, or safety/security-relevant content is still captured immediately, inline, before the turn's process exits — see [CC_HEADLESS_ADAPTER.md → High-stakes immediate-logging exception](./CC_HEADLESS_ADAPTER.md#high-stakes-immediate-logging-exception-e30).
 
 ## Long-lived sessions
 

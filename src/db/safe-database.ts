@@ -5,7 +5,7 @@
  * statement. Prevents `.run()`, `.exec()`, and other write operations.
  *
  * Used in SlashCommandContext so plugin commands cannot mutate the database.
- * Built-in commands that need writes (e.g. /forget) access the real DB
+ * Built-in commands that need writes (e.g. /pause) access the real DB
  * through their closure over HandlerDeps.
  */
 import type Database from 'better-sqlite3';
