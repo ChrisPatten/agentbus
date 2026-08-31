@@ -844,6 +844,55 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     return { ok: true, session };
   });
 
+  // GET /api/v1/sessions/:id/transcript — full ordered message history for a
+  // session (E35). Unlike /api/v1/transcripts/search (FTS5, cross-session,
+  // relevance-ranked, DESC), this returns everything that happened in one
+  // specific session, oldest first — the natural reading order for a transcript.
+  server.get<{
+    Params: { id: string };
+    Querystring: { limit?: string; since?: string; before?: string };
+  }>('/api/v1/sessions/:id/transcript', (req, reply) => {
+    const { id } = req.params;
+    const { limit: limitStr, since, before } = req.query;
+
+    const session = db.prepare(`SELECT id FROM sessions WHERE id = ?`).get(id);
+    if (!session) {
+      return reply.status(404).send({ ok: false, error: 'Session not found' });
+    }
+
+    const parsedLimit = Math.max(1, Math.min(parseInt(limitStr ?? '200', 10) || 200, 1000));
+
+    let sql = `
+      SELECT message_id, session_id, channel, contact_id, direction, body, created_at
+      FROM transcripts
+      WHERE session_id = ?
+    `;
+    const params: unknown[] = [id];
+
+    if (since) {
+      sql += ` AND created_at > ?`;
+      params.push(since);
+    }
+    if (before) {
+      sql += ` AND created_at < ?`;
+      params.push(before);
+    }
+    sql += ` ORDER BY created_at ASC LIMIT ?`;
+    params.push(parsedLimit);
+
+    const transcript = db.prepare(sql).all(...params) as Array<{
+      message_id: string;
+      session_id: string;
+      channel: string;
+      contact_id: string;
+      direction: string;
+      body: string;
+      created_at: string;
+    }>;
+
+    return { ok: true, transcript, count: transcript.length };
+  });
+
   // GET /api/v1/attachments/:id — resolve a stored attachment by id.
   // Used by the fetch_attachment MCP tool to pull in inline email images on
   // demand. Returns the on-disk path so the (co-located) agent can read it.

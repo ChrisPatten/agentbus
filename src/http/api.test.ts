@@ -814,6 +814,124 @@ describe('GET /api/v1/sessions and GET /api/v1/sessions/:id', () => {
   });
 });
 
+describe('GET /api/v1/sessions/:id/transcript (E35)', () => {
+  let server: FastifyInstance;
+  let db: Database.Database;
+
+  beforeEach(async () => {
+    ({ server, db } = await makeServer());
+  });
+
+  afterEach(async () => {
+    await server.close();
+  });
+
+  function insertSession(id: string) {
+    db.prepare(
+      `INSERT INTO sessions (id, conversation_id, channel, contact_id, started_at, last_activity, message_count)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run(id, 'conv-1', 'telegram', 'contact:alice', new Date().toISOString(), new Date().toISOString(), 0);
+  }
+
+  function insertTranscript(sessionId: string, overrides: {
+    messageId?: string; direction?: string; body?: string; createdAt?: string;
+  } = {}) {
+    db.prepare(
+      `INSERT INTO transcripts (id, message_id, conversation_id, session_id, created_at, channel, contact_id, direction, body, metadata)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      randomUUID(),
+      overrides.messageId ?? randomUUID(),
+      'conv-1',
+      sessionId,
+      overrides.createdAt ?? new Date().toISOString(),
+      'telegram',
+      'contact:alice',
+      overrides.direction ?? 'inbound',
+      overrides.body ?? 'hello',
+      '{}'
+    );
+  }
+
+  it('returns 404 for an unknown session', async () => {
+    const res = await server.inject({ method: 'GET', url: '/api/v1/sessions/no-such-session/transcript' });
+    expect(res.statusCode).toBe(404);
+    const body = JSON.parse(res.body) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+  });
+
+  it('returns an empty array for a session with no transcript rows', async () => {
+    insertSession('s1');
+    const res = await server.inject({ method: 'GET', url: '/api/v1/sessions/s1/transcript' });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body) as { ok: boolean; transcript: unknown[]; count: number };
+    expect(body.ok).toBe(true);
+    expect(body.transcript).toEqual([]);
+    expect(body.count).toBe(0);
+  });
+
+  it('returns transcript rows in chronological (ASC) order, both directions', async () => {
+    insertSession('s1');
+    insertTranscript('s1', { direction: 'inbound', body: 'first', createdAt: '2026-01-01T00:00:00.000Z' });
+    insertTranscript('s1', { direction: 'outbound', body: 'second', createdAt: '2026-01-01T00:01:00.000Z' });
+    insertTranscript('s1', { direction: 'inbound', body: 'third', createdAt: '2026-01-01T00:02:00.000Z' });
+
+    const res = await server.inject({ method: 'GET', url: '/api/v1/sessions/s1/transcript' });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body) as {
+      transcript: Array<{ body: string; direction: string }>;
+      count: number;
+    };
+    expect(body.count).toBe(3);
+    expect(body.transcript.map((t) => t.body)).toEqual(['first', 'second', 'third']);
+    expect(body.transcript[1]!.direction).toBe('outbound');
+  });
+
+  it('does not mix in rows from another session', async () => {
+    insertSession('s1');
+    insertSession('s2');
+    insertTranscript('s1', { body: 'mine' });
+    insertTranscript('s2', { body: 'not mine' });
+
+    const res = await server.inject({ method: 'GET', url: '/api/v1/sessions/s1/transcript' });
+    const body = JSON.parse(res.body) as { transcript: Array<{ body: string }> };
+    expect(body.transcript).toHaveLength(1);
+    expect(body.transcript[0]!.body).toBe('mine');
+  });
+
+  it('truncates to ?limit=', async () => {
+    insertSession('s1');
+    for (let i = 0; i < 5; i++) {
+      insertTranscript('s1', { body: `msg-${i}`, createdAt: `2026-01-01T00:0${i}:00.000Z` });
+    }
+    const res = await server.inject({ method: 'GET', url: '/api/v1/sessions/s1/transcript?limit=2' });
+    const body = JSON.parse(res.body) as { transcript: Array<{ body: string }>; count: number };
+    expect(body.count).toBe(2);
+    expect(body.transcript.map((t) => t.body)).toEqual(['msg-0', 'msg-1']);
+  });
+
+  it('filters by ?since= and ?before= cursors', async () => {
+    insertSession('s1');
+    insertTranscript('s1', { body: 'early', createdAt: '2026-01-01T00:00:00.000Z' });
+    insertTranscript('s1', { body: 'middle', createdAt: '2026-01-01T00:05:00.000Z' });
+    insertTranscript('s1', { body: 'late', createdAt: '2026-01-01T00:10:00.000Z' });
+
+    const sinceRes = await server.inject({
+      method: 'GET',
+      url: '/api/v1/sessions/s1/transcript?since=2026-01-01T00:00:00.000Z',
+    });
+    const sinceBody = JSON.parse(sinceRes.body) as { transcript: Array<{ body: string }> };
+    expect(sinceBody.transcript.map((t) => t.body)).toEqual(['middle', 'late']);
+
+    const beforeRes = await server.inject({
+      method: 'GET',
+      url: '/api/v1/sessions/s1/transcript?before=2026-01-01T00:10:00.000Z',
+    });
+    const beforeBody = JSON.parse(beforeRes.body) as { transcript: Array<{ body: string }> };
+    expect(beforeBody.transcript.map((t) => t.body)).toEqual(['early', 'middle']);
+  });
+});
+
 describe('GET /api/v1/attachments/:id', () => {
   let server: FastifyInstance;
   let db: Database.Database;

@@ -10,6 +10,16 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+### Added
+- **`get_transcript` MCP tool (E35).** New `GET /api/v1/sessions/:id/transcript`
+  endpoint and matching `get_transcript` tool return the full, ordered
+  message-by-message history for a specific session — every inbound and
+  outbound row from `transcripts`, oldest first, paginated via
+  `limit`/`since`/`before`. Complements `search_transcripts` (keyword-driven,
+  cross-session snippets) and `get_session` (metadata + summary only) — until
+  now there was no tool-level way to read a full session's transcript, only a
+  raw DB query.
+
 ### Removed
 - **Vestigial slash commands.** Removed `/replay`, `/next`, `/cancel`
   (paginated transcript playback — `get_session`/`search_transcripts` are the
