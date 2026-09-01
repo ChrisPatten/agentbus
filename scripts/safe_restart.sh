@@ -32,6 +32,37 @@
 
 set -uo pipefail
 
+# Process-tree-kill note: bus-core spawns each Claude Code agent session as a
+# child process (see ecosystem.config.cjs — "Only agent connectors ... run as
+# separate processes, spawned by their respective runtimes"), so a Bash tool
+# call running this script is a *descendant* of bus-core. pm2 restarts kill
+# the whole process tree of the process they manage by default (walking
+# parent-child PID relationships), which would kill this script itself the
+# instant restart_bus_core() tears down the old bus-core process — before
+# the health-check/rollback/notify logic below ever gets to run, and before
+# the durable wake-up schedule created just above it can even be trusted to
+# be the only thing that survives. To avoid that, re-exec ourselves into a
+# new session before doing anything else and let the original invocation
+# exit immediately: once the parent that forked us exits, the OS reparents
+# us to launchd (pid 1), breaking the parent-chain that a tree-kill walk
+# would otherwise follow down from bus-core. (Not `setsid` — that binary
+# isn't shipped on macOS; `python3 os.setsid()` does the same thing and
+# python3 is already a dependency of this script for JSON handling.) Do
+# this exactly once (guarded by SAFE_RESTART_DETACHED) — everything below
+# this block runs unchanged in the detached copy, logging to the same
+# LOG_FILE as before; only the original foreground invocation's own stdout
+# mirroring is lost, since it now exits immediately after handing off.
+if [ -z "${SAFE_RESTART_DETACHED:-}" ]; then
+  export SAFE_RESTART_DETACHED=1
+  python3 -c '
+import os, sys
+os.setsid()
+os.execvp(sys.argv[1], sys.argv[1:])
+' "$0" "$@" </dev/null >/dev/null 2>&1 &
+  disown
+  exit 0
+fi
+
 cd "$(dirname "$0")/.." || exit 1
 REPO_ROOT="$(pwd)"
 LOG_DIR="$REPO_ROOT/logs/safe_restart"
