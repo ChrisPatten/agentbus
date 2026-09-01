@@ -71,6 +71,16 @@ export class CommandRegistry {
   private readonly commands = new Map<string, CommandDefinition>();
 
   /**
+   * Pending "check the next message from this sender" captures, keyed by
+   * `${channel}:${sender}`. Generic (command name + validator closure) so
+   * any command can register one, not just /torrent (E36).
+   */
+  private readonly followUps = new Map<
+    string,
+    { command: string; validate: (body: string) => boolean; expiresAt: number }
+  >();
+
+  /**
    * Register a command.
    * Throws if a command with the same name is already registered.
    */
@@ -79,6 +89,42 @@ export class CommandRegistry {
       throw new Error(`Command "${command.name}" is already registered`);
     }
     this.commands.set(command.name, command);
+  }
+
+  /**
+   * Register a pending follow-up capture for the very next message from
+   * `(channel, sender)`. Overwrites any existing entry for that key —
+   * latest registration wins, it does not stack.
+   */
+  registerFollowUp(
+    channel: string,
+    sender: string,
+    command: string,
+    validate: (body: string) => boolean,
+    ttlMs: number,
+  ): void {
+    this.followUps.set(`${channel}:${sender}`, {
+      command,
+      validate,
+      expiresAt: Date.now() + ttlMs,
+    });
+  }
+
+  /**
+   * Consume the pending follow-up for `(channel, sender)`, if any.
+   * Single-shot: always deletes on read, whether or not the entry has
+   * expired, so a second call immediately after always returns null.
+   */
+  consumeFollowUp(
+    channel: string,
+    sender: string,
+  ): { command: string; validate: (body: string) => boolean } | null {
+    const key = `${channel}:${sender}`;
+    const entry = this.followUps.get(key);
+    if (!entry) return null;
+    this.followUps.delete(key);
+    if (Date.now() >= entry.expiresAt) return null;
+    return { command: entry.command, validate: entry.validate };
   }
 
   /**

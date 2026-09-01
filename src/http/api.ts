@@ -199,6 +199,72 @@ export interface InboundAbort {
 }
 
 /**
+ * Send a bus-command response directly via the originating adapter (bypassing
+ * the outbound queue) and log it to transcripts. Shared by the normal
+ * slash-command dispatch path, the follow-up-capture path (E36), and
+ * `/torrent`'s out-of-band completion notification (E36, `src/index.ts`) —
+ * a later, detached send using the same mechanics but a different trigger —
+ * so the send+log logic can't drift between call sites.
+ */
+export async function sendCommandResponse(
+  deps: { db: Database.Database; registry?: AdapterRegistry },
+  result: { envelope: MessageEnvelope; sessionId: string | null; conversationId: string | null },
+  commandName: string,
+  responseBody: string,
+  extraMetadata: Record<string, unknown> = {},
+): Promise<void> {
+  const originAdapter = deps.registry?.lookupPrimaryByChannel(result.envelope.channel);
+  const adapterId = originAdapter?.id ?? 'unknown';
+
+  if (!originAdapter) {
+    console.warn(`[inbound] No adapter found for channel "${result.envelope.channel}" — command response not sent`);
+    return;
+  }
+
+  const metadata = { command_response: true, command: commandName, ...extraMetadata };
+
+  const responseEnvelope: MessageEnvelope = {
+    id: randomUUID(),
+    timestamp: new Date().toISOString(),
+    channel: result.envelope.channel,
+    topic: result.envelope.topic,
+    sender: 'system:bus',
+    recipient: result.envelope.sender,
+    reply_to: result.envelope.id,
+    priority: 'normal',
+    payload: { type: 'text', body: responseBody },
+    metadata,
+  };
+
+  try {
+    await originAdapter.send(responseEnvelope);
+  } catch (err) {
+    console.error(`[inbound] Failed to send command response via ${adapterId}: ${String(err)}`);
+  }
+
+  // Log command response to transcripts for auditability.
+  // Marked with command_response:true so E8/E9 can exclude from memory processing.
+  if (result.sessionId && result.conversationId) {
+    try {
+      const contactId = result.envelope.sender.startsWith('contact:')
+        ? result.envelope.sender.slice('contact:'.length)
+        : result.envelope.sender;
+      logOutboundTranscript(deps.db, {
+        messageId: responseEnvelope.id,
+        conversationId: result.conversationId,
+        sessionId: result.sessionId,
+        channel: result.envelope.channel,
+        contactId,
+        body: responseBody,
+        metadata,
+      });
+    } catch (err) {
+      console.error(`[inbound] Failed to log command response transcript: ${String(err)}`);
+    }
+  }
+}
+
+/**
  * Process an inbound message through the pipeline and enqueue the results.
  *
  * Extracted from the POST /api/v1/inbound handler so that both the HTTP
@@ -272,6 +338,53 @@ export async function processInbound(
     return { ok: true, queued: false, reason: ctx.abortReason ?? 'pipeline_abort' };
   }
 
+  // ── Follow-up capture check (post-pipeline, pre slash-command dispatch) ──
+  // A plain-text, non-slash-command message is checked against any pending
+  // follow-up capture registered for this sender (E36, e.g. /torrent asking
+  // "What's the magnet link?"). If one is pending and the message validates,
+  // it's routed straight to the target command's handler — short-circuiting
+  // before agent fan-out — exactly like a normal bus-command invocation.
+  // consumeFollowUp always deletes on read (single-shot), so whether or not
+  // it matches, the capture is gone after this check either way.
+  if (!result.isSlashCommand && result.envelope.payload.type === 'text' && deps.commandRegistry) {
+    const followUp = deps.commandRegistry.consumeFollowUp(result.envelope.channel, result.envelope.sender);
+    if (followUp) {
+      const body = result.envelope.payload.body;
+      if (followUp.validate(body)) {
+        const cmd = deps.commandRegistry.lookup(followUp.command);
+        if (cmd && cmd.scope === 'bus') {
+          const originAdapter = deps.registry?.lookupPrimaryByChannel(result.envelope.channel);
+          const cmdCtx: SlashCommandContext = {
+            channel: result.envelope.channel,
+            sender: result.envelope.sender,
+            adapterId: originAdapter?.id ?? 'unknown',
+            argsRaw: body.trim(),
+            envelope: result.envelope,
+            db: createSafeDatabase(deps.db),
+            config: deps.config,
+          };
+
+          let responseBody: string | undefined;
+          try {
+            const response = await cmd.handler([body.trim()], cmdCtx);
+            responseBody = response.body;
+          } catch (err) {
+            responseBody = `Command error: ${String(err)}`;
+          }
+
+          if (responseBody !== undefined) {
+            await sendCommandResponse(deps, result, followUp.command, responseBody);
+          }
+
+          return { ok: true, queued: false, reason: 'command_handled' };
+        }
+      }
+      // No match (validate() failed, or the target command is missing/not
+      // bus-scope) — fall through to normal pipeline processing below,
+      // exactly as if no follow-up had ever been registered.
+    }
+  }
+
   // ── Slash command dispatch (post-pipeline) ───────────────────────────────
   // Slash commands are handled here, after all pipeline stages have run
   // (including transcript-log at Stage 80). Responses bypass the outbound
@@ -312,51 +425,7 @@ export async function processInbound(
     // scope: 'agent' falls through to normal fan-out enqueue below
 
     if (responseBody !== undefined) {
-      // Send response directly via the originating adapter (bypass queue)
-      if (originAdapter) {
-        const responseEnvelope: MessageEnvelope = {
-          id: randomUUID(),
-          timestamp: new Date().toISOString(),
-          channel: result.envelope.channel,
-          topic: result.envelope.topic,
-          sender: 'system:bus',
-          recipient: result.envelope.sender,
-          reply_to: result.envelope.id,
-          priority: 'normal',
-          payload: { type: 'text', body: responseBody },
-          metadata: { command_response: true, command: commandName },
-        };
-
-        try {
-          await originAdapter.send(responseEnvelope);
-        } catch (err) {
-          console.error(`[inbound] Failed to send command response via ${adapterId}: ${String(err)}`);
-        }
-
-        // Log command response to transcripts for auditability.
-        // Marked with command_response:true so E8/E9 can exclude from memory processing.
-        if (result.sessionId && result.conversationId) {
-          try {
-            const contactId = result.envelope.sender.startsWith('contact:')
-              ? result.envelope.sender.slice('contact:'.length)
-              : result.envelope.sender;
-            logOutboundTranscript(deps.db, {
-              messageId: responseEnvelope.id,
-              conversationId: result.conversationId,
-              sessionId: result.sessionId,
-              channel: result.envelope.channel,
-              contactId,
-              body: responseBody,
-              metadata: { command_response: true, command: commandName },
-            });
-          } catch (err) {
-            console.error(`[inbound] Failed to log command response transcript: ${String(err)}`);
-          }
-        }
-      } else {
-        console.warn(`[inbound] No adapter found for channel "${result.envelope.channel}" — command response not sent`);
-      }
-
+      await sendCommandResponse(deps, result, commandName, responseBody);
       return { ok: true, queued: false, reason: 'command_handled' };
     }
   }

@@ -72,3 +72,62 @@ describe('CommandRegistry', () => {
     expect(names).toEqual(['aaa', 'zzz']);
   });
 });
+
+describe('CommandRegistry follow-up capture (E36)', () => {
+  it('consumeFollowUp returns the registered command/validate pair', () => {
+    const reg = new CommandRegistry();
+    const validate = (body: string) => body.startsWith('magnet:');
+    reg.registerFollowUp('telegram', 'contact:chris', 'torrent', validate, 60_000);
+    const result = reg.consumeFollowUp('telegram', 'contact:chris');
+    expect(result).not.toBeNull();
+    expect(result!.command).toBe('torrent');
+    expect(result!.validate).toBe(validate);
+  });
+
+  it('consumeFollowUp is single-shot — a second call returns null', () => {
+    const reg = new CommandRegistry();
+    reg.registerFollowUp('telegram', 'contact:chris', 'torrent', () => true, 60_000);
+    expect(reg.consumeFollowUp('telegram', 'contact:chris')).not.toBeNull();
+    expect(reg.consumeFollowUp('telegram', 'contact:chris')).toBeNull();
+  });
+
+  it('consumeFollowUp returns null when nothing was registered', () => {
+    const reg = new CommandRegistry();
+    expect(reg.consumeFollowUp('telegram', 'contact:chris')).toBeNull();
+  });
+
+  it('consumeFollowUp returns null once the TTL has expired, and still deletes the entry', () => {
+    vi.useFakeTimers();
+    try {
+      const reg = new CommandRegistry();
+      reg.registerFollowUp('telegram', 'contact:chris', 'torrent', () => true, 1_000);
+      vi.advanceTimersByTime(1_001);
+      expect(reg.consumeFollowUp('telegram', 'contact:chris')).toBeNull();
+      // Re-registering after the expired read proves the entry was actually deleted, not just skipped.
+      reg.registerFollowUp('telegram', 'contact:chris', 'torrent', () => true, 60_000);
+      expect(reg.consumeFollowUp('telegram', 'contact:chris')).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not collide across different (channel, sender) keys', () => {
+    const reg = new CommandRegistry();
+    reg.registerFollowUp('telegram', 'contact:chris', 'torrent', () => true, 60_000);
+    reg.registerFollowUp('telegram', 'contact:alice', 'other', () => true, 60_000);
+    const chris = reg.consumeFollowUp('telegram', 'contact:chris');
+    const alice = reg.consumeFollowUp('telegram', 'contact:alice');
+    expect(chris!.command).toBe('torrent');
+    expect(alice!.command).toBe('other');
+  });
+
+  it('re-registering the same key before consumption overwrites (latest wins)', () => {
+    const reg = new CommandRegistry();
+    reg.registerFollowUp('telegram', 'contact:chris', 'first', () => true, 60_000);
+    reg.registerFollowUp('telegram', 'contact:chris', 'second', () => true, 60_000);
+    const result = reg.consumeFollowUp('telegram', 'contact:chris');
+    expect(result!.command).toBe('second');
+    // Only one entry ever existed for the key — confirmed by the single consume above
+    // already returning the latest, plus the single-shot test elsewhere covering delete-on-read.
+  });
+});

@@ -10,6 +10,29 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+### Added
+- **Slash-command follow-up capture + `/torrent` completion notification (E36).**
+  `CommandRegistry` gains a generic `registerFollowUp`/`consumeFollowUp`
+  primitive: any bus command can ask "check the very next message from this
+  sender" without building its own stateful tracking. It's keyed by
+  `channel:sender`, single-shot (deletes on read whether or not it matches),
+  and TTL-guarded. `processInbound` (`src/http/api.ts`) checks pending
+  follow-ups on plain-text messages before the normal slash-command dispatch
+  block; a match routes straight to the target command's handler and never
+  reaches agent fan-out, while a miss (or expiry) falls through to the
+  pipeline exactly as before. `/torrent` with no argument now asks **"What's
+  the magnet link? 🧲"** and captures the next message (a 10-minute TTL)
+  instead of returning a usage error — send a bare `magnet:...` link right
+  after and the download starts, same as the direct-argument form. `/torrent`
+  also now reports back when a download finishes (or fails, with the exit
+  code and a pointer to `logs/torrents/`) in the same channel/topic it was
+  started from, regardless of which form kicked it off — previously nothing
+  ever reported completion for a spawn that can run anywhere from seconds to
+  hours. The send-response + transcript-log logic used by all three call
+  sites (normal slash dispatch, follow-up dispatch, and the out-of-band
+  completion notification) is now a single shared `sendCommandResponse`
+  helper in `src/http/api.ts` instead of duplicated inline logic.
+
 ## [0.11.0] - 2026-08-31
 
 ### Added

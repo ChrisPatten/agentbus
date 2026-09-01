@@ -118,6 +118,56 @@ If nothing is running for the sender, or the headless adapter isn't running at a
 
 **Reaches journaling turns too.** A silent background journaling turn (fired on session close, or by `/clear`) runs through the same per-contact queue as normal turns, so a stuck journaling turn blocks new messages exactly like a stuck normal turn would. `/stop` can cancel either kind — it doesn't matter which one is currently occupying the contact's turn slot.
 
+### `/torrent [magnet-link]`
+
+A custom command (registered in `src/index.ts` via `createTorrentCommand`
+in `src/commands/torrent.ts`, not part of the built-in registry) that
+downloads a magnet link to iCloud Books. It has two equivalent forms:
+
+```
+/torrent magnet:?xt=urn:btih:...
+-> Download started. File will appear in iCloud Books when complete.
+
+/torrent
+-> What's the magnet link? 🧲
+magnet:?xt=urn:btih:...
+-> Download started. File will appear in iCloud Books when complete.
+```
+
+Sending `/torrent` with no argument (or a bogus one) no longer returns a
+usage error — it asks for the link and captures your *very next* message.
+If that message is a bare magnet link (starts with `magnet:`), it's routed
+straight to the `/torrent` handler and never reaches the agent as an
+ordinary conversational turn. If it's anything else, the capture is
+consumed (one-shot) and the message proceeds normally — no error, no stuck
+state. The capture also expires after 10 minutes if you go quiet.
+
+Whichever form starts the download, `/torrent` reports back in the same
+channel/topic once the (possibly long-running) download finishes — a
+success message, or a failure message with the exit code and a pointer to
+`logs/torrents/` — so there's no need to ask or check logs yourself.
+
+### Follow-up capture (for command authors)
+
+The mechanism `/torrent` uses above — "check the next message from this
+sender for X" — is generic, not `/torrent`-specific. `CommandRegistry`
+exposes:
+
+```typescript
+registerFollowUp(channel, sender, command, validate, ttlMs): void
+consumeFollowUp(channel, sender): { command: string; validate: (body: string) => boolean } | null
+```
+
+`registerFollowUp` stores a single pending capture for `(channel, sender)`
+(overwriting any existing one — latest wins). The bus checks
+`consumeFollowUp` on every plain-text, non-slash-command message *before*
+normal slash-command dispatch; it always deletes on read (single-shot), so
+whether or not `validate(body)` passes, the capture is gone after one
+check. On a match, the target command's handler runs with `[body]` as its
+args — the same response-send + transcript-log path as a normal command
+invocation. Any future command can call `registerFollowUp` for its own
+"what's the value?" prompt-and-capture flow.
+
 ---
 
 ## How Command Dispatch Works
