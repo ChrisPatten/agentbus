@@ -4,6 +4,9 @@ Feature ideas and future work that hasn't been scoped into an epic yet. Promote 
 
 ## Ideas
 
+### ~~Route Pebble ring voice notes to a dedicated Telegram group topic~~ → promoted to E37 (backlog 2026-08-31)
+See `_bmad-output/epics/E37-pebble-relay-topic-routing.md`. Turned out smaller than first framed: ring messages already arrive on a distinct `channel: 'pebble'` before the existing Stage 25 channel-relay rule re-submits them onto `telegram:peggy` — no detection mechanism was actually missing. The real gap is that `RelayTargetSchema` has no `topic` field to pin on the re-submitted envelope, and `channel-relay.ts` doesn't forward one. Small, generic fix (2 stories).
+
 ### Tools component: script-backed MCP tools + macOS TCC permissions carrier
 User writes a script (any language) that optionally accepts parameters and returns output, then declares it in config to expose it as an MCP tool callable by agents. The bus wraps the script, handles invocation, and returns output. Config controls which agents can call which tools (per-tool agent allowlist). Secondary role: act as a long-lived process that holds macOS TCC grants (Calendar, Contacts, Reminders, etc.) so agents can invoke sensitive system operations through it without each needing their own TCC authorization. Needs a spike covering: config schema for tool declarations, parameter passing/output capture, per-agent allowlisting, and TCC entitlement strategy.
 
