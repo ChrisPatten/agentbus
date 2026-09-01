@@ -10,3 +10,4 @@ dist/
 config.yaml
 *.bak.*
 *.bak
+logs/

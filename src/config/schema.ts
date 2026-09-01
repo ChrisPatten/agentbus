@@ -252,6 +252,23 @@ const CcHeadlessAdapterSchema = z.object({
 });
 
 /**
+ * Shared config fragment for logging raw incoming webhook requests to disk —
+ * a debugging/audit aid, off by default, since request bodies may contain
+ * sensitive content. Reusable by any webhook route (see logWebhookRequest in
+ * src/http/webhook-log.ts), not pebble-specific — a future webhook adapter
+ * can embed this same schema in its own config block.
+ */
+const WebhookLoggingConfigSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    /** Base directory; each webhook gets its own `<dir>/<webhook>/<YYYY-MM-DD>.jsonl` file. */
+    dir: z.string().default('logs/webhooks'),
+  })
+  .prefault({});
+
+export type WebhookLoggingConfig = z.infer<typeof WebhookLoggingConfigSchema>;
+
+/**
  * Pebble Ring webhook channel — receive-only HTTP ingress (no host/port/
  * instance fields; there is nothing to poll or connect to). A pure toggle.
  */
@@ -259,6 +276,8 @@ const PebbleAdapterSchema = z.object({
   enabled: z.boolean().default(true),
   /** Multipart body-size guard for POST /api/v1/webhooks/pebble. Voice transcripts are short text. */
   max_body_bytes: z.number().int().positive().default(65536),
+  /** Log raw incoming webhook requests to disk for debugging/audit (E38). */
+  logging: WebhookLoggingConfigSchema,
 });
 
 const AdaptersConfigSchema = z.object({

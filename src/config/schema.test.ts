@@ -308,6 +308,19 @@ describe('AppConfigSchema — pebble (E25)', () => {
     expect(parsed.adapters.pebble?.max_body_bytes).toBe(65536);
   });
 
+  it('defaults adapters.pebble.logging to disabled with logs/webhooks as the base dir (E38)', () => {
+    const parsed = AppConfigSchema.parse({ ...base, adapters: { pebble: {} } });
+    expect(parsed.adapters.pebble?.logging).toEqual({ enabled: false, dir: 'logs/webhooks' });
+  });
+
+  it('allows overriding adapters.pebble.logging (E38)', () => {
+    const parsed = AppConfigSchema.parse({
+      ...base,
+      adapters: { pebble: { logging: { enabled: true, dir: '/var/log/agentbus-webhooks' } } },
+    });
+    expect(parsed.adapters.pebble?.logging).toEqual({ enabled: true, dir: '/var/log/agentbus-webhooks' });
+  });
+
   it('allows adapters.pebble to be omitted entirely', () => {
     const parsed = AppConfigSchema.parse(base);
     expect(parsed.adapters.pebble).toBeUndefined();

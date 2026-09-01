@@ -6,6 +6,9 @@
  * route-resolve, transcript-log) → queue.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import type { FastifyInstance } from 'fastify';
 import { runMigrations } from '../db/schema.js';
@@ -204,5 +207,109 @@ describe('POST /api/v1/webhooks/pebble', () => {
     });
 
     expect(res.statusCode).toBe(404);
+  });
+
+  describe('raw request logging (E38)', () => {
+    let logDir: string;
+
+    beforeEach(() => {
+      logDir = mkdtempSync(join(tmpdir(), 'pebble-webhook-log-'));
+    });
+
+    afterEach(() => {
+      rmSync(logDir, { recursive: true, force: true });
+    });
+
+    function readLogLines(): Array<Record<string, unknown>> {
+      const filePath = join(logDir, 'pebble', `${new Date().toISOString().slice(0, 10)}.jsonl`);
+      return readFileSync(filePath, 'utf-8')
+        .trim()
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+    }
+
+    it('is disabled by default: no log directory is created for a valid request', async () => {
+      ({ server, queue } = await makeServer(makeConfig()));
+
+      await server.inject({
+        method: 'POST',
+        url: '/api/v1/webhooks/pebble',
+        headers: {
+          authorization: 'Bearer tok-chris',
+          'content-type': `multipart/form-data; boundary=${BOUNDARY}`,
+        },
+        payload: multipartBody({ transcription: 'buy oat milk', recordedAt: '1735000000', client: 'ring' }),
+      });
+
+      expect(existsSync(join(logDir, 'pebble'))).toBe(false);
+    });
+
+    it('logs a line for a successful request when enabled', async () => {
+      ({ server, queue } = await makeServer(
+        makeConfig({
+          adapters: { pebble: { enabled: true, max_body_bytes: 65536, logging: { enabled: true, dir: logDir } } },
+        } as Partial<AppConfig>),
+      ));
+
+      const res = await server.inject({
+        method: 'POST',
+        url: '/api/v1/webhooks/pebble',
+        headers: {
+          authorization: 'Bearer tok-chris',
+          'content-type': `multipart/form-data; boundary=${BOUNDARY}`,
+        },
+        payload: multipartBody({ transcription: 'buy oat milk', recordedAt: '1735000000', client: 'ring' }),
+      });
+
+      expect(res.statusCode).toBe(200);
+      const lines = readLogLines();
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toMatchObject({ webhook: 'pebble', ok: true, status: 200, reason: 'ok' });
+    });
+
+    it('logs a line for a rejected request (bad bearer token) when enabled', async () => {
+      ({ server, queue } = await makeServer(
+        makeConfig({
+          adapters: { pebble: { enabled: true, max_body_bytes: 65536, logging: { enabled: true, dir: logDir } } },
+        } as Partial<AppConfig>),
+      ));
+
+      const res = await server.inject({
+        method: 'POST',
+        url: '/api/v1/webhooks/pebble',
+        headers: {
+          authorization: 'Bearer not-a-real-token',
+          'content-type': `multipart/form-data; boundary=${BOUNDARY}`,
+        },
+        payload: multipartBody({ transcription: 'hello', recordedAt: '1735000000', client: 'ring' }),
+      });
+
+      expect(res.statusCode).toBe(401);
+      const lines = readLogLines();
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toMatchObject({ webhook: 'pebble', ok: false, status: 401, reason: 'unauthorized' });
+    });
+
+    it('writes to a date-based file path', async () => {
+      ({ server, queue } = await makeServer(
+        makeConfig({
+          adapters: { pebble: { enabled: true, max_body_bytes: 65536, logging: { enabled: true, dir: logDir } } },
+        } as Partial<AppConfig>),
+      ));
+
+      await server.inject({
+        method: 'POST',
+        url: '/api/v1/webhooks/pebble',
+        headers: {
+          authorization: 'Bearer tok-chris',
+          'content-type': `multipart/form-data; boundary=${BOUNDARY}`,
+        },
+        payload: multipartBody({ transcription: 'buy oat milk', recordedAt: '1735000000', client: 'ring' }),
+      });
+
+      const expectedPath = join(logDir, 'pebble', `${new Date().toISOString().slice(0, 10)}.jsonl`);
+      expect(existsSync(expectedPath)).toBe(true);
+    });
   });
 });

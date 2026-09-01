@@ -56,6 +56,7 @@ import type Database from 'better-sqlite3';
 import type { CommandRegistry, SlashCommandContext } from '../commands/registry.js';
 import { createSafeDatabase } from '../db/safe-database.js';
 import { logOutboundTranscript } from '../pipeline/outbound-transcript.js';
+import { logWebhookRequest } from './webhook-log.js';
 import { VERSION } from '../version.js';
 
 export interface HttpServerDeps {
@@ -1436,9 +1437,27 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     }
 
     server.post('/api/v1/webhooks/pebble', async (req, reply) => {
+      // Best-effort raw-request logging (E38), off by default — see
+      // adapters.pebble.logging. Never affects the actual response.
+      const logRequest = (ok: boolean, status: number, reason: string, extra: Record<string, unknown> = {}) =>
+        logWebhookRequest(pebbleConfig.logging, {
+          webhook: 'pebble',
+          ok,
+          status,
+          reason,
+          raw: {
+            headers: {
+              'content-type': req.headers['content-type'],
+              'content-length': req.headers['content-length'],
+            },
+            ...extra,
+          },
+        });
+
       // Body-size guard before the multipart parser does any work.
       const contentLength = Number(req.headers['content-length'] ?? 0);
       if (contentLength > pebbleConfig.max_body_bytes) {
+        logRequest(false, 413, 'body_too_large');
         return reply.status(413).send({ ok: false, error: 'Request body too large' });
       }
 
@@ -1450,10 +1469,12 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       const contactId = token ? contactIdByToken.get(token) : undefined;
       if (!contactId) {
         console.log('[http:pebble] rejected — missing or unrecognized bearer token');
+        logRequest(false, 401, 'unauthorized');
         return reply.status(401).send({ ok: false, error: 'Unauthorized' });
       }
 
       if (!req.isMultipart()) {
+        logRequest(false, 400, 'not_multipart');
         return reply.status(400).send({ ok: false, error: 'Content-Type must be multipart/form-data' });
       }
 
@@ -1467,11 +1488,13 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       } catch (err) {
         const statusCode = (err as { statusCode?: number }).statusCode ?? 400;
         console.log(`[http:pebble] rejected — multipart parse error: ${(err as Error).message}`);
+        logRequest(false, statusCode, 'multipart_parse_error', { error: (err as Error).message });
         return reply.status(statusCode).send({ ok: false, error: 'Malformed multipart body' });
       }
 
       const transcription = fields['transcription'];
       if (!transcription || transcription.trim() === '') {
+        logRequest(false, 400, 'missing_transcription', { fields });
         return reply
           .status(400)
           .send({ ok: false, error: 'transcription field is required and must be non-empty' });
@@ -1482,6 +1505,7 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       const recordedAtRaw = fields['recordedAt'];
       const recordedAtSeconds = recordedAtRaw ? Number(recordedAtRaw) : NaN;
       if (!recordedAtRaw || !Number.isFinite(recordedAtSeconds)) {
+        logRequest(false, 400, 'invalid_recordedAt', { fields });
         return reply
           .status(400)
           .send({ ok: false, error: 'recordedAt field is required and must be a unix epoch number' });
@@ -1522,6 +1546,8 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
           pauseSet: deps.pauseSet,
         },
       );
+
+      logRequest(true, 200, 'ok', { contactId, fields });
 
       if (result.queued) {
         console.log(`[http:pebble] queued id=${result.id} enqueued_count=${result.enqueued_count}`);
