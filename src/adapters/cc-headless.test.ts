@@ -458,3 +458,172 @@ describe('queue responsiveness — advance on delivery, not process exit (E30 / 
     expect(turn2Spawned!.t).toBeLessThan(turn1Closed!.t);
   });
 });
+
+describe('turn cost persistence (E39)', () => {
+  const singleInstanceConfig: AppConfig = {
+    ...stubConfig,
+    adapters: {
+      'cc-headless': {
+        agent_id: 'peggy',
+        poll_interval_ms: 15,
+        system_prompt: 'You are Peggy.',
+        claude_bin: 'claude',
+        error_reply: 'err',
+        error_passthrough: false,
+        memory: { dir: 'memory', index_file: 'MEMORY.md', daily_subdir: 'daily', journal_lookback_days: 3 },
+        journaling: { enabled: true, threshold_ms: 1_800_000, prompt: 'journal' },
+      },
+    },
+  } as unknown as AppConfig;
+
+  let realDb: InstanceType<typeof RealDatabase>;
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  function makeFakeChild() {
+    const child = new EventEmitter() as EventEmitter & {
+      stdout: PassThrough;
+      stderr: PassThrough;
+      kill: ReturnType<typeof vi.fn>;
+    };
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.kill = vi.fn();
+    return child;
+  }
+
+  function writeEvent(stream: PassThrough, obj: unknown): void {
+    stream.write(JSON.stringify(obj) + '\n');
+  }
+
+  function pendingResponse(messages: unknown[]): Response {
+    return { ok: true, json: async () => ({ ok: true, messages }) } as unknown as Response;
+  }
+
+  function makeEnvelope(id: string, sender: string) {
+    return { id, sender, channel: 'telegram', topic: undefined, body: `msg ${id}` };
+  }
+
+  function turnCostRows() {
+    return realDb.prepare(`SELECT * FROM turn_costs`).all() as Array<{
+      agent_id: string | null;
+      session_id: string | null;
+      cost_usd: number;
+      input_tokens: number | null;
+      output_tokens: number | null;
+      num_turns: number | null;
+    }>;
+  }
+
+  /** Scripts the poll fetch to hand out exactly one pending message, then none. */
+  function setupOneMessagePoll() {
+    let pendingCall = 0;
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      const u = String(url);
+      if (u.includes('/messages/pending')) {
+        pendingCall += 1;
+        if (pendingCall === 1) return Promise.resolve(pendingResponse([makeEnvelope('m1', 'contact:alice')]));
+        return Promise.resolve(pendingResponse([]));
+      }
+      if (u.includes('/ack')) return Promise.resolve({ ok: true, json: async () => ({}) } as unknown as Response);
+      if (u.includes('/typing') || u.includes('/tool-status')) {
+        return Promise.resolve({ ok: true, json: async () => ({}) } as unknown as Response);
+      }
+      if (u.includes('/api/v1/messages') && init?.method === 'POST') {
+        return Promise.resolve({ ok: true, json: async () => ({}) } as unknown as Response);
+      }
+      return Promise.resolve(pendingResponse([]));
+    });
+  }
+
+  beforeEach(() => {
+    vi.resetModules();
+    realDb = new RealDatabase(':memory:');
+    runMigrations(realDb);
+
+    currentConfig = singleInstanceConfig;
+    spawnMock.mockReset();
+
+    fetchMock = vi.fn();
+    global.fetch = fetchMock as unknown as typeof fetch;
+  });
+
+  afterEach(async () => {
+    const { stopHeadless } = await import('./cc-headless.js');
+    stopHeadless();
+    realDb.close();
+    vi.restoreAllMocks();
+  });
+
+  it('persists cost/usage/turn count from a successful result event (S39.2/S39.3)', async () => {
+    setupOneMessagePoll();
+    const child = makeFakeChild();
+    spawnMock.mockImplementation(() => child as unknown as import('node:child_process').ChildProcess);
+
+    const { startHeadless } = await import('./cc-headless.js');
+    startHeadless(realDb as unknown as Database.Database);
+    await new Promise((r) => setTimeout(r, 30));
+
+    writeEvent(child.stdout, {
+      type: 'result',
+      session_id: 'sess-1',
+      result: 'hi',
+      total_cost_usd: 0.0522612,
+      usage: { input_tokens: 100, output_tokens: 50 },
+      num_turns: 1,
+    });
+    child.emit('close', 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const rows = turnCostRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      agent_id: 'agent:peggy',
+      cost_usd: 0.0522612,
+      input_tokens: 100,
+      output_tokens: 50,
+      num_turns: 1,
+    });
+  });
+
+  it('still records partial cost data when the result event reports is_error', async () => {
+    setupOneMessagePoll();
+    const child = makeFakeChild();
+    spawnMock.mockImplementation(() => child as unknown as import('node:child_process').ChildProcess);
+
+    const { startHeadless } = await import('./cc-headless.js');
+    startHeadless(realDb as unknown as Database.Database);
+    await new Promise((r) => setTimeout(r, 30));
+
+    writeEvent(child.stdout, {
+      type: 'result',
+      session_id: 'sess-1',
+      is_error: true,
+      result: 'boom',
+      total_cost_usd: 0.01,
+      usage: { input_tokens: 10, output_tokens: 5 },
+      num_turns: 1,
+    });
+    child.emit('close', 1);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const rows = turnCostRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.cost_usd).toBe(0.01);
+  });
+
+  it('writes no row when the result event carries no cost data (defensive — no fabricated 0)', async () => {
+    setupOneMessagePoll();
+    const child = makeFakeChild();
+    spawnMock.mockImplementation(() => child as unknown as import('node:child_process').ChildProcess);
+
+    const { startHeadless } = await import('./cc-headless.js');
+    startHeadless(realDb as unknown as Database.Database);
+    await new Promise((r) => setTimeout(r, 30));
+
+    writeEvent(child.stdout, { type: 'result', session_id: 'sess-1', result: 'hi' });
+    child.emit('close', 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    expect(turnCostRows()).toHaveLength(0);
+  });
+});

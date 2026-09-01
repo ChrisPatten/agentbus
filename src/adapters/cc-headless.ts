@@ -69,6 +69,32 @@ function storeClaudeSessionId(db: Database.Database, sessionId: string, claudeId
   db.prepare(`UPDATE sessions SET claude_session_id = ? WHERE id = ?`).run(claudeId, sessionId);
 }
 
+/** E39 — persist one turn's cost/usage/turn-count to turn_costs, keyed by agent. */
+function recordTurnCost(
+  db: Database.Database,
+  opts: {
+    agentId: string;
+    sessionId: string | null;
+    costUsd: number;
+    inputTokens: number | null;
+    outputTokens: number | null;
+    numTurns: number | null;
+  },
+): void {
+  db.prepare(
+    `INSERT INTO turn_costs (agent_id, session_id, ts, cost_usd, input_tokens, output_tokens, num_turns)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    opts.agentId,
+    opts.sessionId,
+    new Date().toISOString(),
+    opts.costUsd,
+    opts.inputTokens,
+    opts.outputTokens,
+    opts.numTurns,
+  );
+}
+
 /**
  * Resolve the conversation_id for a batch from the first message's transcript
  * row — the authoritative value Stage 70 computed. Falls back to deriving it
@@ -141,6 +167,13 @@ interface SpawnResult {
    * failure needing an error reply — the Telegram adapter already finalized
    * any open draft with a "Stopped by user" note. */
   stoppedByUser: boolean;
+  /** E39 — from the `result` event's `total_cost_usd`. Null when the event
+   * never carried cost data (e.g. the process was killed by `/stop` before a
+   * `result` event arrived), so callers can skip recording a fabricated 0. */
+  totalCostUsd: number | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  numTurns: number | null;
 }
 
 /** MCP tool names (namespaced by the server key) that deliver to the user. */
@@ -329,6 +362,10 @@ class HeadlessInstance {
       let deliveredViaTool = false;
       let errorOutput = '';
       let spawnError: string | null = null;
+      let totalCostUsd: number | null = null;
+      let inputTokens: number | null = null;
+      let outputTokens: number | null = null;
+      let numTurns: number | null = null;
 
       child.stderr?.on('data', (chunk: Buffer) => {
         errorOutput += chunk.toString();
@@ -345,6 +382,10 @@ class HeadlessInstance {
             is_error?: boolean;
             subtype?: string;
             message?: { content?: Array<{ type?: string; name?: string; input?: unknown }> };
+            /** E39 — only present on the terminal `result` event. */
+            total_cost_usd?: number;
+            usage?: { input_tokens?: number; output_tokens?: number };
+            num_turns?: number;
           };
 
           if (event.session_id && !claudeSessionId) {
@@ -380,6 +421,13 @@ class HeadlessInstance {
             }
             // Always capture final session_id from result event
             if (event.session_id) claudeSessionId = event.session_id;
+            // E39: capture cost/usage regardless of is_error — an errored
+            // result event still typically carries partial cost data for the
+            // tokens actually spent.
+            if (typeof event.total_cost_usd === 'number') totalCostUsd = event.total_cost_usd;
+            if (typeof event.usage?.input_tokens === 'number') inputTokens = event.usage.input_tokens;
+            if (typeof event.usage?.output_tokens === 'number') outputTokens = event.usage.output_tokens;
+            if (typeof event.num_turns === 'number') numTurns = event.num_turns;
           }
         } catch {
           // Non-JSON lines (rare) — ignore
@@ -396,14 +444,26 @@ class HeadlessInstance {
         const wasStopped = this.stoppedByUser.delete(trackingId);
 
         if (wasStopped) {
-          resolvePromise({ claudeSessionId, resultText: null, deliveredViaTool, error: null, stoppedByUser: true });
+          resolvePromise({
+            claudeSessionId, resultText: null, deliveredViaTool, error: null, stoppedByUser: true,
+            totalCostUsd, inputTokens, outputTokens, numTurns,
+          });
         } else if (spawnError) {
-          resolvePromise({ claudeSessionId, resultText: null, deliveredViaTool, error: spawnError, stoppedByUser: false });
+          resolvePromise({
+            claudeSessionId, resultText: null, deliveredViaTool, error: spawnError, stoppedByUser: false,
+            totalCostUsd, inputTokens, outputTokens, numTurns,
+          });
         } else if (code !== 0 && resultText === null) {
           const detail = errorOutput.slice(-500).trim() || `exit code ${code}`;
-          resolvePromise({ claudeSessionId, resultText: null, deliveredViaTool, error: detail, stoppedByUser: false });
+          resolvePromise({
+            claudeSessionId, resultText: null, deliveredViaTool, error: detail, stoppedByUser: false,
+            totalCostUsd, inputTokens, outputTokens, numTurns,
+          });
         } else {
-          resolvePromise({ claudeSessionId, resultText, deliveredViaTool, error: null, stoppedByUser: false });
+          resolvePromise({
+            claudeSessionId, resultText, deliveredViaTool, error: null, stoppedByUser: false,
+            totalCostUsd, inputTokens, outputTokens, numTurns,
+          });
         }
       });
     });
@@ -551,6 +611,24 @@ class HeadlessInstance {
       }
     };
 
+    // E39: persist the turn's cost, if the result event carried one. Skipped
+    // entirely (not written as a fabricated 0) when totalCostUsd is null.
+    const recordCost = (result: SpawnResult): void => {
+      if (result.totalCostUsd === null) return;
+      try {
+        recordTurnCost(opts.db, {
+          agentId: this.agentId,
+          sessionId: opts.session?.id ?? null,
+          costUsd: result.totalCostUsd,
+          inputTokens: result.inputTokens,
+          outputTokens: result.outputTokens,
+          numTurns: result.numTurns,
+        });
+      } catch (err) {
+        console.error(`[${this.label}] Failed to record turn cost:`, err);
+      }
+    };
+
     try {
       const result = await this.invokeClaude(
         opts.prompt,
@@ -567,6 +645,7 @@ class HeadlessInstance {
       if (result.claudeSessionId) {
         persistSessionId(result.claudeSessionId);
       }
+      recordCost(result);
       return result;
     } finally {
       cleanTmp(spPath, mcpPath);
