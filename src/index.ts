@@ -17,8 +17,7 @@
  *   8. Register SIGTERM/SIGINT handlers for graceful shutdown
  */
 import { mkdirSync } from 'node:fs';
-import { resolve, join } from 'node:path';
-import { spawn } from 'node:child_process';
+import { resolve } from 'node:path';
 import { loadConfig } from './config/loader.js';
 import { getTelegramInstances, getEmailInstances } from './config/schema.js';
 import { getDb, closeDb } from './db/client.js';
@@ -42,6 +41,7 @@ import { EmailAdapter } from './adapters/email.js';
 import { startHeadless, stopHeadless } from './adapters/cc-headless.js';
 import { DeliveryWorker } from './core/delivery.js';
 import { createCommandSystem } from './commands/index.js';
+import { createTorrentCommand } from './commands/torrent.js';
 import { Summarizer } from './memory/summarizer.js';
 import { SessionTracker } from './memory/session-tracker.js';
 import { Scheduler } from './scheduler/scheduler.js';
@@ -81,28 +81,7 @@ const { registry: commandRegistry, pauseSet, headlessControl } = createCommandSy
 
 // ── Custom commands ───────────────────────────────────────────────────────────
 
-commandRegistry.register({
-  name: 'torrent',
-  description: 'Download a magnet link to iCloud Books',
-  usage: '/torrent <magnet-link>',
-  scope: 'bus',
-  handler: async (args) => {
-    const magnet = args[0];
-    if (!magnet || !magnet.startsWith('magnet:')) {
-      return { body: 'Usage: /torrent <magnet-link>\nMagnet link must start with "magnet:"' };
-    }
-    const script = join(
-      process.env['HOME'] ?? '/Users/chrispatten',
-      'workspace/peggy-claude-code/scripts/torrent_to_books.sh',
-    );
-    const child = spawn('/bin/bash', [script, magnet], {
-      detached: true,
-      stdio: 'ignore',
-    });
-    child.unref();
-    return { body: `Download started. File will appear in iCloud Books when complete.` };
-  },
-});
+commandRegistry.register(createTorrentCommand({ commandRegistry, db, registry }));
 
 const pipeline = new PipelineEngine();
 pipeline.use({ slot: 10, name: 'normalize',        stage: normalize });

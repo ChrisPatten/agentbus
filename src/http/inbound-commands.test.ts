@@ -275,6 +275,110 @@ describe('processInbound — slash command dispatch', () => {
     expect(JSON.parse(rows[0]!.metadata)).toEqual({ command_response: true, command: 'status' });
   });
 
+  it('routes a matching follow-up message straight to the target command, short-circuiting fan-out (E36)', async () => {
+    const { registry: commandRegistry, pauseSet } = createCommandSystem({
+      adapterRegistry, queue, db, config: stubConfig,
+    });
+    commandRegistry.register({
+      name: 'torrent',
+      description: 'Download a magnet link',
+      usage: '/torrent <magnet-link>',
+      scope: 'bus',
+      handler: async (args) => ({ body: `Got magnet: ${args[0]}` }),
+    });
+    commandRegistry.registerFollowUp(
+      'telegram',
+      'contact:chris',
+      'torrent',
+      (body) => body.trim().startsWith('magnet:'),
+      60_000,
+    );
+
+    const message: InboundMessage = {
+      channel: 'telegram',
+      sender: 'contact:chris',
+      payload: { type: 'text', body: 'magnet:?xt=urn:btih:abc123' },
+    };
+
+    const result = await processInbound(message, {
+      queue, pipeline, config: stubConfig, db,
+      registry: adapterRegistry, commandRegistry, pauseSet,
+    });
+
+    expect(result.ok).toBe(true);
+    expect('reason' in result && result.reason).toBe('command_handled');
+    expect(telegramAdapter.send).toHaveBeenCalledTimes(1);
+    const sentBody = (telegramAdapter.send as ReturnType<typeof vi.fn>).mock.calls[0]![0].payload.body;
+    expect(sentBody).toBe('Got magnet: magnet:?xt=urn:btih:abc123');
+
+    // Never reached the agent fan-out queue for this turn.
+    const pending = queue.dequeue('agent:claude', undefined, 1);
+    expect(pending).toHaveLength(0);
+  });
+
+  it('falls through to normal pipeline processing when the follow-up message does not validate (E36)', async () => {
+    const { registry: commandRegistry, pauseSet } = createCommandSystem({
+      adapterRegistry, queue, db, config: stubConfig,
+    });
+    commandRegistry.register({
+      name: 'torrent',
+      description: 'Download a magnet link',
+      usage: '/torrent <magnet-link>',
+      scope: 'bus',
+      handler: async () => ({ body: 'should not be called' }),
+    });
+    commandRegistry.registerFollowUp(
+      'telegram',
+      'contact:chris',
+      'torrent',
+      (body) => body.trim().startsWith('magnet:'),
+      60_000,
+    );
+
+    const message: InboundMessage = {
+      channel: 'telegram',
+      sender: 'contact:chris',
+      payload: { type: 'text', body: 'not a magnet link' },
+    };
+
+    const result = await processInbound(message, {
+      queue, pipeline, config: stubConfig, db,
+      registry: adapterRegistry, commandRegistry, pauseSet,
+    });
+
+    expect(result.ok).toBe(true);
+    expect('queued' in result && result.queued).toBe(true);
+    expect(telegramAdapter.send).not.toHaveBeenCalled();
+
+    // Single-shot: the follow-up is gone even though it didn't match.
+    expect(commandRegistry.consumeFollowUp('telegram', 'contact:chris')).toBeNull();
+
+    const pending = queue.dequeue('agent:claude', undefined, 1);
+    expect(pending).toHaveLength(1);
+    expect((pending[0]!.envelope.payload as { body: string }).body).toBe('not a magnet link');
+  });
+
+  it('proceeds through the normal pipeline unchanged when no follow-up is registered (E36 regression)', async () => {
+    const { registry: commandRegistry, pauseSet } = createCommandSystem({
+      adapterRegistry, queue, db, config: stubConfig,
+    });
+
+    const message: InboundMessage = {
+      channel: 'telegram',
+      sender: 'contact:chris',
+      payload: { type: 'text', body: 'just a normal message' },
+    };
+
+    const result = await processInbound(message, {
+      queue, pipeline, config: stubConfig, db,
+      registry: adapterRegistry, commandRegistry, pauseSet,
+    });
+
+    expect(result.ok).toBe(true);
+    expect('queued' in result && result.queued).toBe(true);
+    expect(telegramAdapter.send).not.toHaveBeenCalled();
+  });
+
   it('catches handler errors and returns them as command response', async () => {
     const { registry: commandRegistry, pauseSet } = createCommandSystem({
       adapterRegistry, queue, db, config: stubConfig,
