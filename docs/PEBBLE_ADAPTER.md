@@ -58,6 +58,9 @@ adapters:
   pebble:
     enabled: true          # default true when this block is present
     max_body_bytes: 65536   # default 64 KiB — voice transcripts are short text
+    logging:
+      enabled: false        # default false — see "Raw request logging" below
+      dir: logs/webhooks    # default; each webhook gets its own <dir>/<webhook>/<YYYY-MM-DD>.jsonl file
 
 contacts:
   chris:
@@ -166,6 +169,34 @@ Retried/duplicate webhook deliveries of the same memo (same `transcription` +
 `recordedAt` + sender, within `pipeline.dedup_window_ms`) are dropped by
 Stage 30 (`dedup`) exactly like any other channel — at most one message is
 ever delivered.
+
+---
+
+## Raw request logging (E38)
+
+For debugging a misbehaving proxy or an unexpected device payload, set
+`adapters.pebble.logging.enabled: true` to append one JSON line per request —
+success *and* rejection — to `<dir>/pebble/<YYYY-MM-DD>.jsonl` (one file per
+day, `dir` defaults to `logs/webhooks`):
+
+```json
+{"timestamp":"2026-09-01T03:14:07.123Z","webhook":"pebble","ok":true,"status":200,"reason":"ok","raw":{"headers":{"content-type":"multipart/form-data; boundary=...","content-length":"142"},"contactId":"chris","fields":{"transcription":"buy oat milk","recordedAt":"1735000000","client":"ring"}}}
+```
+
+- **Off by default** — request bodies (voice transcriptions) may contain
+  sensitive content, so this is opt-in.
+- **Every outcome is logged**, not just failures: `ok` distinguishes a
+  successfully-queued request from a rejection, and `reason` gives a
+  machine-readable cause (`unauthorized`, `body_too_large`, `not_multipart`,
+  `multipart_parse_error`, `missing_transcription`, `invalid_recordedAt`, or
+  `ok`) matching the error-response table above.
+- **Best-effort, never blocking.** A write failure (e.g. an unwritable `dir`)
+  is caught and logged to the console with `console.error` — it never fails
+  or delays the actual webhook response.
+- **Reusable mechanism, not pebble-specific.** The underlying helper
+  (`logWebhookRequest` in `src/http/webhook-log.ts`) and its config shape
+  (`{ enabled, dir }`) are generic — any future webhook route can adopt the
+  same `logging` block in its own adapter config and call the same helper.
 
 ---
 

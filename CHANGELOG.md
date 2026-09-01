@@ -11,6 +11,20 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 ## [Unreleased]
 
 ### Added
+- **Configurable raw webhook request logging (E38).** New `logWebhookRequest`
+  helper (`src/http/webhook-log.ts`) appends one JSON line per incoming
+  webhook request — success *and* rejection — to
+  `<dir>/<webhook>/<YYYY-MM-DD>.jsonl`, useful for debugging a misbehaving
+  proxy or unexpected device payload without needing to reproduce the issue
+  live. Off by default (request bodies may contain sensitive content) and
+  best-effort — a write failure is logged to the console and never affects
+  the actual webhook response. Wired into the Pebble webhook via a new
+  `adapters.pebble.logging: { enabled, dir }` config block (defaults:
+  `enabled: false`, `dir: logs/webhooks`), logging both outcomes (auth
+  failure, malformed multipart, missing/invalid fields, or a successful
+  enqueue) with a machine-readable `reason`. The helper and its config shape
+  are generic, not pebble-specific — any future webhook route can reuse the
+  same mechanism.
 - **Slash-command follow-up capture + `/torrent` completion notification (E36).**
   `CommandRegistry` gains a generic `registerFollowUp`/`consumeFollowUp`
   primitive: any bus command can ask "check the very next message from this
