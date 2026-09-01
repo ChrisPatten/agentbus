@@ -13,6 +13,7 @@ Slash commands let you operate AgentBus from any connected channel without SSH a
 | `/sessions [channel] [--limit N]` | List recent sessions | `/sessions telegram --limit 5` |
 | `/clear` | Start a fresh session; journal the previous one in the background | `/clear` |
 | `/stop` | Cancel the current in-flight turn | `/stop` |
+| `/cost` | Show day/week/month API cost for this agent | `/cost` |
 
 ### `/status`
 
@@ -117,6 +118,27 @@ If nothing is running for the sender, or the headless adapter isn't running at a
 **No result is delivered for a stopped turn.** Once killed, the turn does not fall back to the configured `error_reply` — the cancellation confirmation (finalized draft, or the fallback message above) is the only feedback. On Telegram, the persistent typing indicator is also stopped immediately as part of cancelling — it does not keep blinking for its usual 2-minute safety timeout after the turn has already been killed.
 
 **Reaches journaling turns too.** A silent background journaling turn (fired on session close, or by `/clear`) runs through the same per-contact queue as normal turns, so a stuck journaling turn blocks new messages exactly like a stuck normal turn would. `/stop` can cancel either kind — it doesn't matter which one is currently occupying the contact's turn slot.
+
+### `/cost`
+
+Reports the calling agent's API spend, broken down as day (since local midnight)/week (rolling 7 days)/calendar-month-to-date, summed from a new `turn_costs` table (E39). `HeadlessInstance.invokeClaude()` (`src/adapters/cc-headless.ts`) already parses `claude -p`'s `total_cost_usd`/`usage`/`num_turns` from each turn's terminal stream-json `result` event — this command is the first thing to actually read that data back out, instead of discarding it.
+
+```
+/cost
+-> Today: $0.42
+This week: $3.87
+This month: $12.05
+```
+
+**Resolves "the agent it's called for" the same way `/stop` does:** it looks up the sender's active session on the originating channel and takes its `agent_id`, falling back to the sole registered `cc-headless` instance when the session predates `agent_id` tracking (migration 011) or there is no active session at all. If the agent still can't be resolved (no session, and either zero or more than one registered instance), it replies:
+```
+/cost
+-> Could not determine which agent to report cost for.
+```
+
+**Cost is recorded per turn, not estimated.** A new `turn_costs` row is written after every `claude -p` invocation that produced a `total_cost_usd` — including a turn that errored out partway through, since Claude Code's `result` event still typically reports the cost of the tokens actually spent. A turn whose `result` event carries no cost data at all (e.g. killed by `/stop` before responding) writes no row, rather than a fabricated `$0`.
+
+**Day one isn't all zeros.** `scripts/backfill_turn_costs.ts` is a one-time, manually-run operator script (`npx tsx scripts/backfill_turn_costs.ts`) that seeds `turn_costs` from each configured `cc-headless` instance's existing `~/.claude/projects/<encoded-working-dir>/*.jsonl` transcripts, so historical spend shows up instead of a cold start at zero. It is not run automatically on startup — see the script's header comment for the (coarser than live-capture) approximation it makes.
 
 ### `/torrent [magnet-link]`
 

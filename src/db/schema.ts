@@ -79,6 +79,11 @@ function loadMigrations(): Migration[] {
       description: 'Scheduled items stale_after_ms + dead_letter status',
       sql: readFileSync(join(migrationsDir, '013_scheduled_items_stale_after_ms.sql'), 'utf-8'),
     },
+    {
+      version: 14,
+      description: 'turn_costs table',
+      sql: readFileSync(join(migrationsDir, '014_turn_costs.sql'), 'utf-8'),
+    },
   ];
 }
 

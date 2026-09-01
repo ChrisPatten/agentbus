@@ -11,6 +11,16 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 ## [Unreleased]
 
 ### Added
+- **`/cost` command — per-agent API cost tracking (E39).** Every `claude -p`
+  turn's cost/token/turn-count data (previously parsed and discarded by
+  `HeadlessInstance.invokeClaude()`) is now persisted to a new `turn_costs`
+  table (migration `014_turn_costs.sql`), keyed by `agent_id`. The new bus-scope
+  `/cost` command resolves the calling sender's agent the same way `/stop`
+  does and replies with day (since local midnight)/week (rolling 7 days)/
+  calendar-month-to-date spend. A one-time, manually-run
+  `scripts/backfill_turn_costs.ts` seeds historical cost from each configured
+  `cc-headless` instance's existing `~/.claude/projects/*/*.jsonl` transcripts.
+  See [docs/SLASH_COMMANDS.md](docs/SLASH_COMMANDS.md#cost).
 - **Durable post-restart wake-up via scheduled one-shot + staleness dead-letter (E40).**
   `POST /api/v1/schedules` and the `schedule_message` MCP tool gain an optional
   `stale_after_ms` field (positive integer milliseconds, `type: 'once'` only —
