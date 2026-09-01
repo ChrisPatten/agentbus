@@ -1347,6 +1347,45 @@ describe('Schedule CRUD endpoints', () => {
     expect(res.statusCode).toBe(400);
   });
 
+  it('creates a once schedule with stale_after_ms', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/schedules',
+      payload: {
+        type: 'once',
+        fire_at: futureAt,
+        channel: 'telegram',
+        sender: 'contact:chris',
+        payload_body: 'Wake up',
+        stale_after_ms: 45 * 60 * 1000,
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const body = JSON.parse(res.body) as { ok: boolean; id: string };
+    const row = db.prepare(`SELECT stale_after_ms FROM scheduled_items WHERE id = ?`).get(body.id) as {
+      stale_after_ms: number;
+    };
+    expect(row.stale_after_ms).toBe(45 * 60 * 1000);
+  });
+
+  it('rejects stale_after_ms set alongside type: cron', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/schedules',
+      payload: {
+        type: 'cron',
+        cron_expr: '0 8 * * 1-5',
+        channel: 'telegram',
+        sender: 'contact:chris',
+        payload_body: 'Morning briefing',
+        stale_after_ms: 60_000,
+      },
+    });
+    expect(res.statusCode).toBe(400);
+    const body = JSON.parse(res.body) as { ok: false; error: string };
+    expect(body.error).toMatch(/stale_after_ms/i);
+  });
+
   // ── GET /api/v1/schedules ─────────────────────────────────────────────────
 
   it('lists schedules filtered by status', async () => {

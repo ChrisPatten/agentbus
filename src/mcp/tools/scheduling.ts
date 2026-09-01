@@ -30,6 +30,7 @@ interface ScheduleRow {
   created_by: string;
   fire_count: number;
   max_fires: number | null;
+  stale_after_ms: number | null;
   status: string;
   last_fired_at: string | null;
 }
@@ -55,7 +56,10 @@ export function registerScheduleTools(server: McpServer, busBaseUrl: string): vo
     {
       description:
         'Schedule a message to be delivered on a channel at a future time or on a recurring cron schedule. ' +
-        'The message will appear to the agent as if the specified sender sent it on that channel.',
+        'The message will appear to the agent as if the specified sender sent it on that channel. ' +
+        'For one-shot schedules, an optional stale_after_ms sets a staleness ceiling: if the schedule ' +
+        'goes unfired for longer than that (e.g. waiting on a process restart that never happens in time), ' +
+        'it dead-letters instead of firing a confusingly late message.',
       inputSchema: {
         type: z
           .enum(['once', 'cron'])
@@ -98,9 +102,32 @@ export function registerScheduleTools(server: McpServer, busBaseUrl: string): vo
           .positive()
           .optional()
           .describe('Maximum number of times to fire (for cron schedules). Null/omitted = unlimited.'),
+        stale_after_ms: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe(
+            'Only valid when type=once. Staleness ceiling in milliseconds: if the schedule is still ' +
+              'unfired more than this long after fire_at, it dead-letters instead of firing late. ' +
+              'Omitted = no staleness limit (fires no matter how overdue).',
+          ),
       },
     },
-    async ({ type, prompt, channel, sender, cron_expr, fire_at, timezone, topic, priority, label, max_fires }) => {
+    async ({
+      type,
+      prompt,
+      channel,
+      sender,
+      cron_expr,
+      fire_at,
+      timezone,
+      topic,
+      priority,
+      label,
+      max_fires,
+      stale_after_ms,
+    }) => {
       try {
         const res = await fetch(`${busBaseUrl}/api/v1/schedules`, {
           method: 'POST',
@@ -117,6 +144,7 @@ export function registerScheduleTools(server: McpServer, busBaseUrl: string): vo
             priority,
             label,
             max_fires,
+            stale_after_ms,
             created_by: 'agent',
           }),
         });

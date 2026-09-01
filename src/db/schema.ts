@@ -74,6 +74,11 @@ function loadMigrations(): Migration[] {
       description: 'Generic thread store',
       sql: readFileSync(join(migrationsDir, '012_threads.sql'), 'utf-8'),
     },
+    {
+      version: 13,
+      description: 'Scheduled items stale_after_ms + dead_letter status',
+      sql: readFileSync(join(migrationsDir, '013_scheduled_items_stale_after_ms.sql'), 'utf-8'),
+    },
   ];
 }
 

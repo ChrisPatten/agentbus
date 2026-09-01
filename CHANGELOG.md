@@ -11,6 +11,21 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 ## [Unreleased]
 
 ### Added
+- **Durable post-restart wake-up via scheduled one-shot + staleness dead-letter (E40).**
+  `POST /api/v1/schedules` and the `schedule_message` MCP tool gain an optional
+  `stale_after_ms` field (positive integer milliseconds, `type: 'once'` only —
+  rejected with `400` on `type: 'cron'`): if a one-shot schedule is still
+  unfired more than `stale_after_ms` after its `fire_at`, `Scheduler.tick()`
+  marks it `status: dead_letter` instead of firing a confusingly-late message.
+  Schedules without `stale_after_ms` (every existing use case) are completely
+  unaffected. `scripts/safe_restart.sh` now creates one of these wake-ups
+  (10s out, 45-minute staleness ceiling, targeting the channel/topic that
+  triggered the restart via new `--notify-channel`/`--notify-topic` args) right
+  before each restart attempt while bus-core is still confirmed healthy — this
+  survives even if the script itself is killed immediately after kicking off
+  the restart. The existing live `notify_peggy()` curl-to-`/api/v1/inbound`
+  call remains as a belt-and-suspenders transition. See
+  [docs/SCHEDULING.md](docs/SCHEDULING.md#staleness--dead-lettering-e40).
 - **Configurable raw webhook request logging (E38).** New `logWebhookRequest`
   helper (`src/http/webhook-log.ts`) appends one JSON line per incoming
   webhook request — success *and* rejection — to
