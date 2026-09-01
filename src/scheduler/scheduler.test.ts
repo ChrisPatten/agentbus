@@ -77,7 +77,8 @@ function insertItem(
     created_by?: string;
     fire_count?: number;
     max_fires?: number | null;
-    status?: 'active' | 'paused' | 'cancelled' | 'completed';
+    stale_after_ms?: number | null;
+    status?: 'active' | 'paused' | 'cancelled' | 'completed' | 'dead_letter';
   } = {},
 ): string {
   const id = opts.id ?? `sched-${Math.random().toString(36).slice(2)}`;
@@ -85,8 +86,9 @@ function insertItem(
   db.prepare(
     `INSERT INTO scheduled_items
        (id, type, cron_expr, timezone, fire_at, channel, sender, payload_body,
-        topic, priority, label, created_at, created_by, fire_count, max_fires, status)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?)`,
+        topic, priority, label, created_at, created_by, fire_count, max_fires,
+        stale_after_ms, status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?, ?)`,
   ).run(
     id,
     opts.type ?? 'once',
@@ -102,6 +104,7 @@ function insertItem(
     opts.created_by ?? 'http',
     opts.fire_count ?? 0,
     opts.max_fires ?? null,
+    opts.stale_after_ms ?? null,
     opts.status ?? 'active',
   );
   return id;
@@ -135,6 +138,46 @@ describe('Scheduler.tick()', () => {
     expect(row!['status']).toBe('completed');
     expect(row!['fire_count']).toBe(1);
     expect(row!['last_fired_at']).toBeTruthy();
+  });
+
+  it('dead-letters a once-item overdue beyond its stale_after_ms ceiling', async () => {
+    const fireAt = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(); // 2h ago
+    const id = insertItem(db, { type: 'once', fire_at: fireAt, stale_after_ms: 30 * 60 * 1000 }); // 30m ceiling
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const scheduler = new Scheduler(makeDeps(db, processInbound as ProcessInboundFn));
+
+    await scheduler.tick();
+
+    expect(processInbound).not.toHaveBeenCalled();
+    const row = getItem(db, id);
+    expect(row!['status']).toBe('dead_letter');
+    expect(row!['last_fired_at']).toBeNull();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('dead-lettered'));
+    warnSpy.mockRestore();
+  });
+
+  it('fires a once-item overdue by more than 2 hours when stale_after_ms is not set (regression)', async () => {
+    const fireAt = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(); // 2h ago
+    const id = insertItem(db, { type: 'once', fire_at: fireAt });
+    const scheduler = new Scheduler(makeDeps(db, processInbound as ProcessInboundFn));
+
+    await scheduler.tick();
+
+    expect(processInbound).toHaveBeenCalledOnce();
+    const row = getItem(db, id);
+    expect(row!['status']).toBe('completed');
+  });
+
+  it('fires a once-item overdue by less than its stale_after_ms ceiling', async () => {
+    const fireAt = new Date(Date.now() - 5 * 60 * 1000).toISOString(); // 5m ago
+    const id = insertItem(db, { type: 'once', fire_at: fireAt, stale_after_ms: 30 * 60 * 1000 }); // 30m ceiling
+    const scheduler = new Scheduler(makeDeps(db, processInbound as ProcessInboundFn));
+
+    await scheduler.tick();
+
+    expect(processInbound).toHaveBeenCalledOnce();
+    const row = getItem(db, id);
+    expect(row!['status']).toBe('completed');
   });
 
   it('skips items that are not yet due', async () => {

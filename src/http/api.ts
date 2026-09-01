@@ -1199,6 +1199,7 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       label: z.string().optional(),
       created_by: z.string().default('http'),
       max_fires: z.number().int().positive().optional(),
+      stale_after_ms: z.number().int().positive().optional(),
     })
     .refine(
       (d) => {
@@ -1207,7 +1208,10 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
         return false;
       },
       { message: 'cron schedules require cron_expr; once schedules require fire_at' },
-    );
+    )
+    .refine((d) => !(d.type === 'cron' && d.stale_after_ms !== undefined), {
+      message: 'stale_after_ms is only valid on type: once schedules',
+    });
 
   const SchedulePatchSchema = z.object({
     label: z.string().optional(),
@@ -1257,8 +1261,9 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     db.prepare(
       `INSERT INTO scheduled_items
          (id, type, cron_expr, timezone, fire_at, channel, sender, payload_body,
-          topic, priority, label, created_at, created_by, fire_count, max_fires, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'active')`,
+          topic, priority, label, created_at, created_by, fire_count, max_fires,
+          stale_after_ms, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'active')`,
     ).run(
       id,
       data.type,
@@ -1274,6 +1279,7 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       now,
       data.created_by,
       data.max_fires ?? null,
+      data.stale_after_ms ?? null,
     );
 
     return reply.status(201).send({ ok: true, id, fire_at: fireAt });

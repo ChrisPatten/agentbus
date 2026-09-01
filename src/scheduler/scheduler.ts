@@ -172,6 +172,20 @@ export class Scheduler {
 
   /** Fire a single scheduled item through the inbound pipeline. */
   private async fireItem(item: ScheduledItem): Promise<void> {
+    if (item.type === 'once' && item.stale_after_ms != null) {
+      const overdueMs = Date.now() - new Date(item.fire_at).getTime();
+      if (overdueMs > item.stale_after_ms) {
+        this.db
+          .prepare(`UPDATE scheduled_items SET status = 'dead_letter' WHERE id = ?`)
+          .run(item.id);
+        console.warn(
+          `[scheduler] Schedule ${item.id.slice(0, 8)} dead-lettered — ` +
+            `${overdueMs}ms overdue exceeds stale_after_ms ceiling of ${item.stale_after_ms}ms`,
+        );
+        return;
+      }
+    }
+
     const result = await this.processInbound(
       {
         channel: item.channel,

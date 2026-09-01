@@ -16,5 +16,7 @@ export interface ScheduledItem {
   last_fired_at: string | null;
   fire_count: number;
   max_fires: number | null;
-  status: 'active' | 'paused' | 'cancelled' | 'completed';
+  /** Only meaningful for type='once'. Null = no staleness limit (fire no matter how overdue). */
+  stale_after_ms: number | null;
+  status: 'active' | 'paused' | 'cancelled' | 'completed' | 'dead_letter';
 }
