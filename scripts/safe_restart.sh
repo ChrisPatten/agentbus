@@ -148,8 +148,8 @@ is_bus_core_reachable() {
   [ -n "$resp" ] && echo "$resp" | /usr/bin/grep -q '"ok":true'
 }
 
-# Creates a durable one-shot wake-up schedule (E40) targeting the resolved
-# notify channel/topic, fire_at = now + 10s, stale_after_ms = 45 minutes.
+# Creates a durable one-shot wake-up schedule (E40) targeting system:peggy,
+# fire_at = now + 10s, stale_after_ms = 45 minutes.
 # This is the fallback that survives even if this script (or the tool call
 # running it) is killed immediately after triggering the restart — see
 # docs/SCHEDULING.md's "Worked example: durable post-restart wake-up".
@@ -162,22 +162,22 @@ create_wakeup_schedule() {
   fi
 
   local payload
-  payload="$(python3 - "$NOTIFY_CHANNEL" "$NOTIFY_TOPIC" "$context" "$WAKEUP_STALE_AFTER_MS" <<'PYEOF'
+  payload="$(python3 - "$context" "$WAKEUP_STALE_AFTER_MS" <<'PYEOF'
 import json, sys
 from datetime import datetime, timedelta, timezone
 
-channel, topic, context, stale_after_ms = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+context, stale_after_ms = sys.argv[1], int(sys.argv[2])
 fire_at = (datetime.now(timezone.utc) + timedelta(seconds=10)).strftime('%Y-%m-%dT%H:%M:%SZ')
 body = (
-    f"Restarting bus-core to pick up a config/code change ({context}). "
-    "I'll follow up here once it's back."
+    f"[bus-core restart initiated] ({context}). "
+    "Monitoring health and will report once it comes back."
 )
 print(json.dumps({
     "type": "once",
     "fire_at": fire_at,
-    "channel": channel,
-    "topic": topic,
-    "sender": "contact:chris",
+    "channel": "system:peggy",
+    "topic": "general",
+    "sender": "safe-restart",
     "payload_body": body,
     "stale_after_ms": stale_after_ms,
 }))
@@ -196,7 +196,7 @@ except Exception:
 " 2>/dev/null)"
 
   if [ -n "$sched_id" ]; then
-    log "Created durable wake-up schedule $sched_id (channel=$NOTIFY_CHANNEL topic=$NOTIFY_TOPIC, $context)."
+    log "Created durable wake-up schedule $sched_id (system:peggy, $context)."
   else
     log "WARNING: failed to create durable wake-up schedule ($context). Response: $resp"
   fi
