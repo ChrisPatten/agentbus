@@ -237,6 +237,63 @@ List all registered adapters and their capabilities. Used by the `list_channels`
 
 ---
 
+## Model Overrides
+
+Runtime model overrides for `cc-headless` spawns, stored in `headless_model_overrides` (migration `015_headless_model_overrides.sql`). Let an agent change which model a headless spawn uses without editing `config.yaml` or restarting the adapter — see [CC_HEADLESS_ADAPTER.md](./CC_HEADLESS_ADAPTER.md#runtime-model-overrides) for resolution order and the `set_headless_model`/`get_headless_model`/`list_headless_model`/`delete_headless_model` MCP tools that wrap these routes.
+
+### `POST /api/v1/model-overrides`
+
+Set or update a model override for a `(schedule_id, agent_id)` scope. Both are optional — omit both for a global default. Upserts: an existing override for the same scope is replaced.
+
+**Body:**
+```json
+{ "model": "claude-3-5-opus-20241022", "schedule_id": null, "agent_id": "claude", "priority": 0 }
+```
+
+**Response (201):**
+```json
+{
+  "ok": true,
+  "id": 3,
+  "override": {
+    "id": 3,
+    "schedule_id": null,
+    "agent_id": "claude",
+    "model": "claude-3-5-opus-20241022",
+    "priority": 0,
+    "created_at": "2026-09-11T10:00:00.000Z",
+    "updated_at": "2026-09-11T10:00:00.000Z"
+  }
+}
+```
+
+**Response (400):** `{ "ok": false, "error": "model is required and must be a non-empty string" }`
+
+### `GET /api/v1/model-overrides`
+
+List all overrides, ordered by specificity (`schedule_id`+`agent_id` > `agent_id` > `schedule_id` > global), then `priority` desc, then `updated_at` desc.
+
+**Response (200):**
+```json
+{ "ok": true, "count": 1, "overrides": [ { "id": 3, "schedule_id": null, "agent_id": "claude", "model": "claude-3-5-opus-20241022", "priority": 0, "created_at": "...", "updated_at": "..." } ] }
+```
+
+### `DELETE /api/v1/model-overrides`
+
+Delete one override by scope, or every override.
+
+**Query params:**
+
+| Param | Description |
+|---|---|
+| `schedule_id` | Delete override(s) matching this schedule |
+| `agent_id` | Delete override(s) matching this agent |
+| `all=true` | Delete every override, ignoring `schedule_id`/`agent_id` (irreversible) |
+
+**Response (200):** `{ "ok": true, "deleted_count": 1, "message": "Deleted 1 override(s) for schedule_id=undefined, agent_id=claude" }`
+
+---
+
 ## Sessions
 
 ### `GET /api/v1/sessions`

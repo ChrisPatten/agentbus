@@ -11,6 +11,21 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 ## [Unreleased]
 
 ### Added
+- **Runtime model overrides for headless Claude spawns.** New
+  `headless_model_overrides` table (migration
+  `015_headless_model_overrides.sql`) lets an agent change which model a
+  `cc-headless` spawn uses — scoped to an agent, a schedule, or global —
+  without editing `config.yaml` or restarting the adapter.
+  `HeadlessInstance.invokeClaude()` resolves the model via
+  `resolveModelOverride()` (`src/adapters/model-override-loader.ts`) on every
+  spawn, in specificity order (`schedule_id`+`agent_id` > `agent_id` >
+  `schedule_id` > global), before falling back to `adapters.cc-headless.model`.
+  Managed via `POST`/`GET`/`DELETE /api/v1/model-overrides` and the new
+  `set_headless_model`/`get_headless_model`/`list_headless_model`/
+  `delete_headless_model` MCP tools. Note: `schedule_id` is not yet threaded
+  through from scheduled turns, so only agent-scoped and global overrides take
+  effect today. See
+  [docs/CC_HEADLESS_ADAPTER.md](docs/CC_HEADLESS_ADAPTER.md#runtime-model-overrides).
 - **`/cost` command — per-agent API cost tracking (E39).** Every `claude -p`
   turn's cost/token/turn-count data (previously parsed and discarded by
   `HeadlessInstance.invokeClaude()`) is now persisted to a new `turn_costs`

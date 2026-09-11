@@ -63,7 +63,22 @@ claude -p "<formatted_prompt>" \
   [--resume <claude_session_id>]
 ```
 
-`--model` is only passed when `adapters.cc-headless.model` is set. Without it, the invocation falls back to whatever the `claude` CLI resolves on its own — its built-in default, or a `"model"` key in `working_dir`'s `.claude/settings.json`. Setting `model` in `config.yaml` is the explicit, per-agent way to pin it.
+`--model` is only passed when a model is resolved for the invocation. Resolution order: the `headless_model_overrides` table (see below) takes precedence, then `adapters.cc-headless.model` from `config.yaml`, then unset — which falls back to whatever the `claude` CLI resolves on its own (its built-in default, or a `"model"` key in `working_dir`'s `.claude/settings.json`).
+
+### Runtime model overrides
+
+`headless_model_overrides` (migration `015_headless_model_overrides.sql`) lets an agent change the model a headless spawn uses without editing `config.yaml` or restarting the adapter. `HeadlessInstance.invokeClaude()` calls `resolveModelOverride()` (`src/adapters/model-override-loader.ts`) on every spawn, which checks the table in specificity order and returns the first match:
+
+1. `(schedule_id, agent_id)` — most specific
+2. `agent_id` only
+3. `schedule_id` only
+4. global (`schedule_id` and `agent_id` both `NULL`)
+
+Ties within a scope break on `priority` (higher wins), then `updated_at` (most recent wins). A match here overrides `config.yaml`'s `model`; no match falls through to it.
+
+Overrides are managed via `POST`/`GET`/`DELETE /api/v1/model-overrides` (see [HTTP_API.md](./HTTP_API.md#model-overrides)) or the `set_headless_model` / `get_headless_model` / `list_headless_model` / `delete_headless_model` MCP tools (see [MCP_TOOLS.md](./MCP_TOOLS.md#model-overrides)).
+
+`agent_id` is passed on every spawn (`this.agentId`). `schedule_id` is not currently threaded through from scheduled turns — schedule-scoped overrides can be written and listed, but nothing will match them yet; only agent-scoped and global overrides take effect today.
 
 `--verbose` is required by the Claude CLI whenever `--print`/`-p` is combined with `--output-format stream-json`; without it the invocation fails fast with `When using --print, --output-format=stream-json requires --verbose`. It does not change the emitted JSONL event stream the adapter parses.
 

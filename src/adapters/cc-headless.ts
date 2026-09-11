@@ -36,6 +36,7 @@ import { assembleMemoryContext, formatLocalDate } from './memory-context.js';
 import type { MessageEnvelope } from '../types/envelope.js';
 import { formatMessagesForSampling } from './cc.js';
 import { formatToolCallSummary } from './tool-call-summary.js';
+import { resolveModelOverride } from './model-override-loader.js';
 
 const configPath = process.env['AGENTBUS_CONFIG'] ?? resolve(process.cwd(), 'config.yaml');
 const config = loadConfig(configPath);
@@ -324,6 +325,7 @@ class HeadlessInstance {
      * session the first message just created.
      */
     onSessionId?: (id: string) => void,
+    opts?: { db?: Database.Database; scheduleId?: string | null; agentId?: string | null },
   ): Promise<SpawnResult> {
     const args = [
       '-p', prompt,
@@ -333,8 +335,21 @@ class HeadlessInstance {
       '--mcp-config', mcpConfigPath,
       '--system-prompt-file', systemPromptPath,
     ];
-    if (this.cfg.model) {
-      args.push('--model', this.cfg.model);
+
+    // Resolve model: check overrides first, then fall back to config
+    let model = this.cfg.model;
+    if (opts?.db) {
+      const overrideModel = resolveModelOverride(opts.db, opts.scheduleId, opts.agentId);
+      if (overrideModel) {
+        model = overrideModel;
+        console.error(
+          `[${this.label}] Model override applied: ${overrideModel} (schedule=${opts.scheduleId}, agent=${opts.agentId})`,
+        );
+      }
+    }
+
+    if (model) {
+      args.push('--model', model);
     }
     if (resumeId) {
       args.push('--resume', resumeId);
@@ -639,6 +654,11 @@ class HeadlessInstance {
         opts.onToolCall,
         opts.onDelivered,
         persistSessionId,
+        {
+          db: opts.db,
+          agentId: this.agentId,
+          scheduleId: undefined, // TODO: pass schedule_id when available from scheduled turns
+        },
       );
       // Final persist covers the case where the session id changed (rare) or
       // was only captured on the closing `result` event.

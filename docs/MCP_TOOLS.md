@@ -23,6 +23,10 @@ All tools are registered via `registerAllTools()` in `src/mcp/tools/index.ts`.
 | `get_transcript` | E35 | Get the full ordered message history for a session |
 | `react_to_message` | S7.5 | Send an emoji reaction to a message |
 | `create_telegram_topic` | E28 | Create a new forum topic in a Telegram group |
+| `set_headless_model` | — | Set a runtime model override for headless Claude spawns |
+| `get_headless_model` | — | Get the active model override for a scope |
+| `list_headless_model` | — | List all active model overrides |
+| `delete_headless_model` | — | Delete a specific override, or all overrides |
 
 ---
 
@@ -412,6 +416,67 @@ Pass the returned `topic` value as `topic` on a later `send_message`/`schedule_m
 **Output (missing admin rights — an error, not a graceful `success: false`):**
 ```
 Error: This bot lacks "Manage Topics" admin rights in this group. In Telegram: open the group, go to the member list, select this bot, "Edit Admin Rights", and enable "Manage Topics".
+```
+
+---
+
+## Model Overrides
+
+Registered by `registerModelOverrideTools()` (`src/mcp/tools/model-overrides.ts`) on every MCP server — thin fetch wrappers over `/api/v1/model-overrides` (see [HTTP_API.md](./HTTP_API.md#model-overrides)). They let an agent change which model a `cc-headless` spawn uses without touching `config.yaml`; see [CC_HEADLESS_ADAPTER.md](./CC_HEADLESS_ADAPTER.md#runtime-model-overrides) for resolution order.
+
+### `set_headless_model`
+
+Set or update a model override. `model` is required; `schedule_id`/`agent_id` scope it (omit both for a global default). `priority` (default `0`) breaks ties within the same scope.
+
+**Input:**
+```json
+{ "model": "claude-3-5-opus-20241022", "agent_id": "claude" }
+```
+
+**Output:**
+```json
+{ "ok": true, "id": 3, "model": "claude-3-5-opus-20241022", "scope": "agent=claude", "message": "Model override set to claude-3-5-opus-20241022 (agent=claude)" }
+```
+
+### `get_headless_model`
+
+Get the model that would currently be resolved for a scope, following the same specificity order as a real spawn.
+
+**Input:**
+```json
+{ "agent_id": "claude" }
+```
+
+**Output:**
+```json
+{ "ok": true, "model": "claude-3-5-opus-20241022", "scope": "agent" }
+```
+
+If nothing matches: `{ "ok": true, "model": null, "message": "No override found; using config default model" }`.
+
+### `list_headless_model`
+
+List all active overrides, ordered by specificity then priority/recency.
+
+**Input:** none
+
+**Output:**
+```json
+{ "ok": true, "count": 1, "overrides": [{ "id": 3, "scope": "agent=claude", "model": "claude-3-5-opus-20241022", "priority": 0, "created_at": "...", "updated_at": "..." }] }
+```
+
+### `delete_headless_model`
+
+Delete one override by scope, or pass `all: true` to clear every override (irreversible).
+
+**Input:**
+```json
+{ "agent_id": "claude" }
+```
+
+**Output:**
+```json
+{ "ok": true, "deleted_count": 1, "message": "Deleted 1 override(s) for schedule_id=undefined, agent_id=claude" }
 ```
 
 ---

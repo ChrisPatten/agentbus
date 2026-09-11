@@ -1426,6 +1426,140 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     return result;
   });
 
+  // ── Headless Model Override endpoints ──────────────────────────────────────
+  //
+  // POST   /api/v1/model-overrides       — Set a model override
+  // GET    /api/v1/model-overrides       — List all overrides
+  // DELETE /api/v1/model-overrides       — Delete a specific override or all
+  //
+  // Used by agents to manage runtime model selections for headless Claude spawns.
+
+  interface ModelOverrideRow {
+    id: number;
+    schedule_id: string | null;
+    agent_id: string | null;
+    model: string;
+    priority: number;
+    created_at: string;
+    updated_at: string;
+  }
+
+  // POST /api/v1/model-overrides — Set or update a model override
+  server.post<{ Body: { model: string; schedule_id?: string | null; agent_id?: string | null; priority?: number } }>(
+    '/api/v1/model-overrides',
+    async (req, reply) => {
+      try {
+        const { model, schedule_id, agent_id, priority } = req.body;
+
+        if (!model || typeof model !== 'string' || model.trim().length === 0) {
+          return reply.status(400).send({ ok: false, error: 'model is required and must be a non-empty string' });
+        }
+
+        const now = new Date().toISOString();
+        const p = priority ?? 0;
+
+        db.prepare(
+          `INSERT INTO headless_model_overrides (schedule_id, agent_id, model, priority, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(schedule_id, agent_id) DO UPDATE SET
+             model = excluded.model,
+             priority = excluded.priority,
+             updated_at = excluded.updated_at`,
+        ).run(schedule_id ?? null, agent_id ?? null, model, p, now, now);
+
+        const row = db
+          .prepare(
+            `SELECT id, schedule_id, agent_id, model, priority, created_at, updated_at
+             FROM headless_model_overrides
+             WHERE schedule_id IS ? AND agent_id IS ? AND model = ?
+             ORDER BY updated_at DESC LIMIT 1`,
+          )
+          .get(schedule_id ?? null, agent_id ?? null, model) as ModelOverrideRow | undefined;
+
+        return reply.status(201).send({
+          ok: true,
+          id: row?.id,
+          override: row,
+        });
+      } catch (err) {
+        console.error('[http:model-overrides] POST failed:', err);
+        return reply.status(500).send({ ok: false, error: 'Failed to set model override' });
+      }
+    }
+  );
+
+  // GET /api/v1/model-overrides — List all model overrides
+  server.get('/api/v1/model-overrides', async (_req, reply) => {
+    try {
+      const rows = db
+        .prepare(
+          `SELECT id, schedule_id, agent_id, model, priority, created_at, updated_at
+           FROM headless_model_overrides
+           ORDER BY
+             CASE
+               WHEN schedule_id IS NOT NULL AND agent_id IS NOT NULL THEN 1
+               WHEN agent_id IS NOT NULL THEN 2
+               WHEN schedule_id IS NOT NULL THEN 3
+               ELSE 4
+             END,
+             priority DESC,
+             updated_at DESC`,
+        )
+        .all() as ModelOverrideRow[];
+
+      return reply.send({
+        ok: true,
+        overrides: rows,
+        count: rows.length,
+      });
+    } catch (err) {
+      console.error('[http:model-overrides] GET failed:', err);
+      return reply.status(500).send({ ok: false, error: 'Failed to list model overrides' });
+    }
+  });
+
+  // DELETE /api/v1/model-overrides — Delete a specific override or all overrides
+  server.delete<{ Querystring: { schedule_id?: string; agent_id?: string; all?: string } }>(
+    '/api/v1/model-overrides',
+    async (req, reply) => {
+      try {
+        const { schedule_id, agent_id, all } = req.query;
+
+        if (all === 'true') {
+          const result = db.prepare(`DELETE FROM headless_model_overrides`).run();
+          return reply.send({
+            ok: true,
+            deleted_count: result.changes,
+            message: `Cleared ${result.changes} model override(s)`,
+          });
+        }
+
+        if (!schedule_id && !agent_id) {
+          return reply.status(400).send({
+            ok: false,
+            error: 'Provide schedule_id or agent_id to delete, or pass all=true to clear all',
+          });
+        }
+
+        const result = db
+          .prepare(
+            `DELETE FROM headless_model_overrides
+             WHERE schedule_id IS ? AND agent_id IS ?`,
+          )
+          .run(schedule_id ?? null, agent_id ?? null);
+
+        return reply.send({
+          ok: true,
+          deleted_count: result.changes,
+          message: `Deleted ${result.changes} override(s) for schedule_id=${schedule_id}, agent_id=${agent_id}`,
+        });
+      } catch (err) {
+        console.error('[http:model-overrides] DELETE failed:', err);
+        return reply.status(500).send({ ok: false, error: 'Failed to delete model override' });
+      }
+    }
+  );
+
   // POST /api/v1/webhooks/pebble — Pebble Ring voice-memo ingestion (E25).
   //
   // The bearer token IS the sender's identity: it is looked up directly

@@ -84,6 +84,11 @@ function loadMigrations(): Migration[] {
       description: 'turn_costs table',
       sql: readFileSync(join(migrationsDir, '014_turn_costs.sql'), 'utf-8'),
     },
+    {
+      version: 15,
+      description: 'headless_model_overrides table',
+      sql: readFileSync(join(migrationsDir, '015_headless_model_overrides.sql'), 'utf-8'),
+    },
   ];
 }
 
