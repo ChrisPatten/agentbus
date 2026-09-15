@@ -1,6 +1,6 @@
 # Scheduling
 
-E18 adds time-based message delivery to AgentBus. A scheduled item fires a message into the inbound pipeline at a specific time or on a recurring cron schedule. The agent sees the message as if the configured contact sent it on the configured channel and responds normally. The platform adapter (e.g. Telegram) delivers the agent's reply proactively — the user never typed anything.
+A scheduled item fires a message into the inbound pipeline at a specific time or on a recurring cron schedule. The agent sees the message as if the configured contact sent it on the configured channel and responds normally. The platform adapter (e.g. Telegram) delivers the agent's reply proactively — the user never typed anything.
 
 ## Config-defined schedules
 
@@ -71,7 +71,7 @@ The scheduler uses **at-least-once** delivery. `processInbound()` is called befo
 - **Once schedules** (`type: once`): best-effort-once. A crash during firing may cause a duplicate. If exact-once semantics are critical, design prompts to be idempotent.
 - **Cron schedules** (`type: cron`): intended to be periodic; the occasional duplicate is benign for most use cases.
 
-### Staleness / dead-lettering (E40)
+### Staleness and dead-lettering
 
 Because the scheduler's due-item query is simply `fire_at <= now`, a one-shot schedule fires on the very first tick after the process comes back up — even if it was overdue by hours or days. That's exactly what makes the scheduler useful as a durable post-restart wake-up (see below), but it also means an overdue item fires no matter how stale, unless bounded.
 
@@ -132,7 +132,7 @@ For a one-shot:
 }
 ```
 
-`stale_after_ms` (optional, positive integer milliseconds) is only valid on `type: once` — see [Staleness / dead-lettering](#staleness--dead-lettering-e40) above. Sending it alongside `type: cron` returns `400`.
+`stale_after_ms` (optional, positive integer milliseconds) is only valid on `type: once` — see [Staleness and dead-lettering](#staleness-and-dead-lettering) above. Sending it alongside `type: cron` returns `400`.
 
 Response: `201 { "ok": true, "id": "<uuid>", "fire_at": "<ISO UTC>" }`
 
@@ -200,7 +200,8 @@ Create a one-shot or recurring schedule.
 |---|---|---|---|
 | `status` | string | `"active"` | Filter by status |
 | `channel` | string | — | Filter by channel |
-| `limit` | integer | 20 | Max results |
+| `created_by` | string | — | Filter by creator: `agent`, `config`, `http`, or a custom value |
+| `limit` | integer | 20 | Max results (max 200) |
 
 ### `cancel_schedule`
 

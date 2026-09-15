@@ -50,7 +50,7 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
   survives even if the script itself is killed immediately after kicking off
   the restart. The existing live `notify_peggy()` curl-to-`/api/v1/inbound`
   call remains as a belt-and-suspenders transition. See
-  [docs/SCHEDULING.md](docs/SCHEDULING.md#staleness--dead-lettering-e40).
+  [docs/SCHEDULING.md](docs/SCHEDULING.md#staleness-and-dead-lettering).
 - **Configurable raw webhook request logging (E38).** New `logWebhookRequest`
   helper (`src/http/webhook-log.ts`) appends one JSON line per incoming
   webhook request — success *and* rejection — to
@@ -86,6 +86,21 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
   sites (normal slash dispatch, follow-up dispatch, and the out-of-band
   completion notification) is now a single shared `sendCommandResponse`
   helper in `src/http/api.ts` instead of duplicated inline logic.
+
+### Changed
+- **Documentation pass for accuracy and completeness.** `README.md`,
+  `docs/HTTP_API.md`, `docs/CC_ADAPTER.md`, `docs/PLUGIN_AUTHORING.md`,
+  `docs/DEPLOYMENT.md`, `docs/MEMORY.md`, and `docs/VERSIONING.md` are
+  rewritten to match the code: single-process architecture with in-process
+  adapters, the real route list (routes that were never built are removed),
+  `POST /api/v1/messages` documented as the outbound enqueue and
+  `POST /api/v1/inbound` as the pipeline entry, the polling MCP adapter's
+  channel-notification mechanism, and the fact that no plugin loader exists.
+  Adds `docs/README.md` as an index. Epic tags are dropped from headings
+  (anchors updated here and across `docs/`), `config.yaml.example` and
+  `.env.example` are aligned with the schema (BlueBubbles removed, headless
+  adapter and scheduler sections added), and the homepage architecture copy
+  no longer claims four separate processes.
 
 ## [0.11.0] - 2026-08-31
 
@@ -140,7 +155,7 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
   One documented exception: financial, health, scheduling, and
   safety/security-relevant content is still logged immediately, inline, in
   the reply-producing turn — see
-  [docs/CC_HEADLESS_ADAPTER.md](docs/CC_HEADLESS_ADAPTER.md#memory-logging-e30).
+  [docs/CC_HEADLESS_ADAPTER.md](docs/CC_HEADLESS_ADAPTER.md#memory-logging).
 
 ### Changed
 - `send_message`'s tool description now points agents at `get_session`/
@@ -203,7 +218,7 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
   other common tools get a small fixed template; anything else falls back to
   a generic line. Subagent internals never surface — an `Agent` call always
   renders as one line. See
-  [docs/TELEGRAM_ADAPTER.md](docs/TELEGRAM_ADAPTER.md#live-tool-call-status-stream-e29).
+  [docs/TELEGRAM_ADAPTER.md](docs/TELEGRAM_ADAPTER.md#live-tool-call-status-stream).
 - **`/stop` slash command.** Cancels the sender's in-flight `claude -p` turn
   on a headless (`cc-headless`) agent — hard-kills the running child process
   with `SIGKILL` rather than waiting it out (`SIGTERM` let the CLI catch the
@@ -236,7 +251,7 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
   <sender>: "<text>"]` context, never forking the session. No new
   authorization mechanism — the existing sender allowlist already gates
   groups exactly like DMs. See
-  [docs/TELEGRAM_ADAPTER.md](docs/TELEGRAM_ADAPTER.md#group-topics--replies-e28).
+  [docs/TELEGRAM_ADAPTER.md](docs/TELEGRAM_ADAPTER.md#group-topics-and-replies).
 
 ### Changed
 - **Generalized per-thread session storage (E27).** Email's bespoke
@@ -328,7 +343,7 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
   a session so journaling-on-pause and `/clear` route to the correct agent;
   sessions with no `agent_id` (pre-migration, or single-instance deployments)
   fall back to the sole configured instance. See
-  [docs/CC_HEADLESS_ADAPTER.md](docs/CC_HEADLESS_ADAPTER.md#multi-instance-deployments-e23).
+  [docs/CC_HEADLESS_ADAPTER.md](docs/CC_HEADLESS_ADAPTER.md#multi-instance-deployments).
 
 ## [0.7.0] - 2026-07-01
 

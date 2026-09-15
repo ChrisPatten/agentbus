@@ -69,13 +69,13 @@ pipeline:
     - match:
         channel: telegram:peggy
       target:
-        adapterId: claude-code
+        adapterId: cc-headless
         recipientId: agent:peggy
 
     - match:
         channel: telegram:jarvis
       target:
-        adapterId: claude-code
+        adapterId: cc-headless
         recipientId: agent:jarvis
 ```
 
@@ -119,7 +119,7 @@ There is no separate `allowed_sender_ids` config — the contacts map is the sou
 
 ---
 
-## Inbound Flow
+## Inbound flow
 
 1. `getUpdates` subscribes to `message` and `message_reaction_updated` updates from Telegram
 2. For each `message` update:
@@ -138,9 +138,9 @@ There is no separate `allowed_sender_ids` config — the contacts map is the sou
      - `payload.target_message_id`: `"{chat_id}:{message_id}"` of the reacted-to message
      - Same metadata fields as regular messages (`telegram_chat_id`, `telegram_message_id`, `platform_message_id`)
 4. The inbound pipeline's contact-resolve stage maps the raw user ID to `contact:{id}`
-5. Route-resolve routes the message to the CC adapter
+5. Route-resolve routes the message to the agent named in `pipeline.routes`
 
-The CC adapter renders reaction payloads as:
+The Claude Code adapters render reaction payloads as:
 - Added: `[reacted 👍 to message {chat_id}:{msg_id}]`
 - Removed: `[removed reaction 👍 to message {chat_id}:{msg_id}]`
 
@@ -150,13 +150,13 @@ The CC adapter renders reaction payloads as:
 
 **Loop supervision:** The inbound loop runs under a `supervise()` wrapper. If the loop throws unexpectedly, the crash is logged and the loop is restarted after 5 seconds. The adapter's `stop()` method interrupts sleeping loops immediately via `AbortController`.
 
-**Typing indicator:** The typing loop does not start when the message is received — it starts when the CC adapter confirms the message was delivered to the agent (via `POST /api/v1/adapters/telegram/typing`). This prevents the indicator from firing for messages that are queued but never reach an active Claude Code session. Once started, the loop resends `sendChatAction('typing')` every 4 seconds until `send()` is called for that chat, or the 2-minute safety timeout expires. Only one loop runs per chat at a time.
+**Typing indicator:** The typing loop does not start when the message is received — it starts when the agent adapter confirms the message was delivered to the agent (via `POST /api/v1/adapters/telegram/typing`). This prevents the indicator from firing for messages that are queued but never reach an active Claude Code session. Once started, the loop resends `sendChatAction('typing')` every 4 seconds until `send()` is called for that chat, or the 2-minute safety timeout expires. Only one loop runs per chat at a time.
 
 **Reactions:** Inbound messages include `platform_message_id` in metadata, encoded as `"{chat_id}:{message_id}"`. The `react()` method parses this string and calls `sendReaction` with the emoji. Input emoji are normalised by stripping variation selectors (U+FE0F) before the API call. If the emoji is not in Telegram's supported reaction set, it is sent as a plain text message to the chat instead — reactions never fail silently or throw for an unsupported emoji.
 
 ---
 
-## Outbound Flow
+## Outbound flow
 
 Outbound delivery is handled by the bus-core delivery worker, which calls `adapter.send(envelope)` directly:
 
@@ -173,7 +173,7 @@ Outbound delivery is handled by the bus-core delivery worker, which calls `adapt
 
 ---
 
-## Group Topics & Replies (E28)
+## Group topics and replies
 
 A topic-enabled Telegram **group** (a supergroup with Forum Topics turned on)
 becomes its own channel, distinct from any member's DM — and each forum topic
@@ -352,7 +352,7 @@ group-specific authorization code.
 
 ---
 
-## Live Tool-Call Status Stream (E29)
+## Live tool-call status stream
 
 While a headless agent works on a turn, `TelegramAdapter` surfaces its tool
 calls live as a single evolving message, replaced by the final answer once
@@ -427,16 +427,9 @@ crash-recovery/orphan-cleanup exists for this today.
 
 ---
 
-## Slash Commands
+## Slash commands
 
-At startup, the adapter calls `setMyCommands` to register a menu of slash commands in Telegram:
-
-| Command | Description |
-|---|---|
-| `/status` | Check AgentBus status |
-| `/help` | Show available commands |
-
-This causes Telegram to display autocomplete suggestions when users type `/` in the bot chat. The full bus-scope command list comes from the `CommandRegistry`, not the abbreviated table above.
+At startup, bus-core passes every bus-scope command in the `CommandRegistry` (see [SLASH_COMMANDS.md](SLASH_COMMANDS.md)) to the adapter, which registers them with `setMyCommands`. Telegram then shows them as autocomplete suggestions when a user types `/`. Commands whose name or description fails Telegram's validation (`[a-z0-9_]{1,32}`, description 3 to 256 characters) are skipped with a warning rather than failing the whole registration.
 
 **Command scopes.** Telegram resolves a chat's command menu by scope precedence — `chat` (a specific chat) > `all_private_chats` > `all_group_chats` > `default`. The adapter writes the command list to **both** the `default` scope and the `all_private_chats` scope. Writing only `default` is a known footgun: a stale `all_private_chats` set (commonly left behind by BotFather, e.g. `/start`, `/help`, `/status`) **shadows** the default list in 1:1 chats, so newly registered commands never appear in autocomplete. Setting `all_private_chats` explicitly on every startup keeps the private-chat menu in sync with the live registry. The startup log confirms the list Telegram returns for the `all_private_chats` scope — i.e. what you will actually see.
 
@@ -447,14 +440,14 @@ This causes Telegram to display autocomplete suggestions when users type `/` in 
 | Capability | Supported |
 |---|---|
 | Typing indicator | Yes — persistent loop, stays active while agent works |
-| Live tool-call status stream | Yes — see [Live Tool-Call Status Stream](#live-tool-call-status-stream-e29) |
+| Live tool-call status stream | Yes — see [Live tool-call status stream](#live-tool-call-status-stream) |
 | Read receipts | No |
 | Slash command registration | Yes (`setMyCommands`) |
 | Reactions | Yes (`sendReaction` with emoji) |
 | Message splitting | Yes (chunks <=4096 chars) |
 | Markdown formatting | Yes (`parse_mode: "Markdown"`) |
-| Group forum topics | Yes — see [Group Topics & Replies](#group-topics--replies-e28) |
-| Reply-to-message (native quote) | Yes — see [Group Topics & Replies](#group-topics--replies-e28) |
+| Group forum topics | Yes — see [Group topics and replies](#group-topics-and-replies) |
+| Reply-to-message (native quote) | Yes — see [Group topics and replies](#group-topics-and-replies) |
 
 ---
 

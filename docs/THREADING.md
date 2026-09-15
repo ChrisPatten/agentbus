@@ -1,13 +1,12 @@
-# Thread-scoped sessions (E27)
+# Thread-scoped sessions
 
 Some channels have a native notion of a **thread** — a persistent
 sub-conversation distinct from the channel's main conversation (an email
 thread, a Telegram forum topic, …). AgentBus gives each thread its own
 long-lived session by mapping it onto a reserved topic and persisting a small
-amount of per-thread reply state. This mechanism is channel-agnostic; email
-(E21) is its first user, and it was generalized here specifically so a second
-channel — Telegram forum topics (E28) — can adopt it with **no schema
-change**.
+amount of per-thread reply state. The mechanism is channel-agnostic: email and
+Telegram forum topics both use it, and a new channel can adopt it with **no
+schema change**.
 
 The mechanism has three layers, two of them fully generic:
 
@@ -26,7 +25,7 @@ in the adapter, since only the adapter understands the channel's protocol.
   chat, so two different groups could otherwise collide on the same topic id.
   Unlike email, this only applies to *groups* — a Telegram forum topic has no
   DM equivalent (DM Threaded Mode was evaluated and retired; see
-  [TELEGRAM_ADAPTER.md](./TELEGRAM_ADAPTER.md#group-topics--replies-e28)).
+  [TELEGRAM_ADAPTER.md](./TELEGRAM_ADAPTER.md#group-topics-and-replies)).
 
 ## 2. Topic mapping (generic)
 

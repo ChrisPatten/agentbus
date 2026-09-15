@@ -120,9 +120,9 @@ curl -X POST https://your-agentbus-host/api/v1/webhooks/pebble \
 { "ok": true, "queued": true, "id": "...", "enqueued_count": 1 }
 ```
 
-**Response (200) — not queued** (e.g. deduped as a retried delivery):
+**Response (200) — not queued** (for example, deduped as a retried delivery):
 ```json
-{ "ok": true, "queued": false, "reason": "duplicate" }
+{ "ok": true, "queued": false, "reason": "Aborted at stage \"dedup\"" }
 ```
 
 **Error responses:**
@@ -172,7 +172,7 @@ ever delivered.
 
 ---
 
-## Raw request logging (E38)
+## Raw request logging
 
 For debugging a misbehaving proxy or an unexpected device payload, set
 `adapters.pebble.logging.enabled: true` to append one JSON line per request —

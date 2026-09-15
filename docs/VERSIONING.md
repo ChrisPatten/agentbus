@@ -1,49 +1,40 @@
 # Versioning
 
-AgentBus uses [Semantic Versioning](https://semver.org/) (`MAJOR.MINOR.PATCH`).
+AgentBus uses [Semantic Versioning](https://semver.org/).
 
-- **MAJOR** — incompatible/breaking changes (config schema breaks, DB migration
-  that isn't backward compatible, removed HTTP/MCP surface).
-- **MINOR** — backward-compatible features (new adapter, new tool, new endpoint).
-- **PATCH** — backward-compatible bug fixes only.
+| Bump | When |
+|---|---|
+| MAJOR | Breaking change: config schema break, non-backward-compatible migration, removed HTTP or MCP surface |
+| MINOR | Backward-compatible feature: new adapter, tool, endpoint, or config option |
+| PATCH | Backward-compatible bug fixes only |
 
-## Single source of truth
+Before 1.0.0 a minor bump may carry a breaking change. Say so explicitly in the changelog.
 
-`package.json` `version` is authoritative. Runtime code reads it via
-`src/version.ts` (exported `VERSION`), which `/api/v1/health` reports. Never
-hardcode a version string elsewhere — import `VERSION` instead.
+## Source of truth
+
+`package.json` `version` is authoritative. `src/version.ts` exports it as `VERSION`, which `GET /api/v1/health` reports. Never hardcode a version string elsewhere.
+
+## While working
+
+Add a bullet under `## [Unreleased]` in `CHANGELOG.md` for every user-facing change (Added, Changed, Fixed, Removed). Do not bump `package.json` or create tags on a feature branch.
 
 ## Cutting a release
 
-1. **Update the changelog.** Move the relevant items from `## [Unreleased]` in
-   [CHANGELOG.md](../CHANGELOG.md) into a new `## [x.y.z] - YYYY-MM-DD` section,
-   and update the compare links at the bottom. Commit it.
-2. **Review the homepage.** If this release changes the pitch, feature list,
-   or quick start steps, update `site/index.html` to match and commit it
-   alongside the changelog. Version/license/last-commit badges on the page
-   are live shields.io badges — they update automatically and need no edits.
-   See [GITHUB_PAGES.md](GITHUB_PAGES.md).
-3. **Run the release script** for the bump type. This runs the test suite
-   (`preversion`), bumps `package.json`, commits, and creates an annotated git
-   tag `vX.Y.Z`:
+The tag must land on `main`, so the release is split across the merge.
+
+1. **On the feature branch, before merging.** Propose the next version and its rationale from the `[Unreleased]` entries and get it confirmed. Move those entries under a dated `## [x.y.z] - YYYY-MM-DD` heading and update the compare links at the bottom of `CHANGELOG.md`. If the release changes the pitch, feature list, or quick start, update `site/index.html` too ([GITHUB_PAGES.md](GITHUB_PAGES.md)). Commit with the branch. Do not run `npm version` here; a squash merge would strand the tag.
+2. **On `main`, after merging.** Run the release script for the bump type. It runs the test suite (`preversion`), bumps `package.json`, commits, and creates the annotated tag `vX.Y.Z`:
 
    ```bash
-   npm run release:patch   # 0.1.0 -> 0.1.1
-   npm run release:minor   # 0.1.0 -> 0.2.0
-   npm run release:major   # 0.1.0 -> 1.0.0
+   npm run release:patch   # 0.11.0 -> 0.11.1
+   npm run release:minor   # 0.11.0 -> 0.12.0
+   npm run release:major   # 0.11.0 -> 1.0.0
    ```
 
-4. **Push** the commit and the tag:
+3. Push the commit and the tag:
 
    ```bash
    git push && git push --tags
    ```
 
-## Notes
-
-- `preversion` runs `vitest run`; a failing suite aborts the release before
-  anything is bumped or tagged.
-- `npm version` refuses to run with a dirty working tree — commit the changelog
-  (step 1) first.
-- Pre-1.0.0 (`0.y.z`): minor bumps may carry breaking changes per SemVer's
-  initial-development clause; call those out clearly in the changelog.
+`npm version` refuses to run with a dirty working tree, and a failing test suite aborts the release before anything is bumped.
