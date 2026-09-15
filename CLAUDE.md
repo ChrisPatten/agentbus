@@ -65,3 +65,5 @@ See `sprint-status.yaml` for current epic and phase.
 ## Ideas and Backlog
 
 The "raw" backlog is kept in `_bmad-output/backlog.md`. Anything to be actually worked MUST be created as formal epic before implementing.
+
+Maintenance and cleanup items from code review live in `_bmad-output/maintenance-backlog.md`, ranked P0–P3. Batch related items into a maintenance epic before picking them up.
