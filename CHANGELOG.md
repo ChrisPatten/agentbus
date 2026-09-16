@@ -10,6 +10,8 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-09-16
+
 ### Added
 - **Siri channel spike (E42).** New `siri` channel adapter
   (`src/adapters/siri.ts`) and `POST /api/v1/siri/ask` /
@@ -574,7 +576,8 @@ Baseline release. Core bus, pipeline, adapters, memory, scheduling.
 - Built-in slash commands + plugin command registry. (E6)
 - Scheduled messages (cron + one-shot) via background scheduler. (E18)
 
-[Unreleased]: https://github.com/ChrisPatten/agentbus/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/ChrisPatten/agentbus/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/ChrisPatten/agentbus/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/ChrisPatten/agentbus/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/ChrisPatten/agentbus/compare/v0.8.0...v0.10.0
 [0.8.0]: https://github.com/ChrisPatten/agentbus/compare/v0.7.1...v0.8.0
