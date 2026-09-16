@@ -5,7 +5,7 @@ bmad_status:
   planning: complete
   architecture: complete
   implementation: in-progress
-current_epic: E23
+current_epic: E42
 epics:
   E1:
     status: complete
@@ -658,4 +658,138 @@ epics:
       S35.1: complete  # GET /api/v1/sessions/:id/transcript endpoint (src/http/api.ts)
       S35.2: complete  # get_transcript MCP tool (src/mcp/tools/sessions.ts)
       S35.3: complete  # Tests + docs/MCP_TOOLS.md + CHANGELOG
-last_updated: 2026-08-31  # Backfilled E31 (outbound transcript logging), E32 (session topic exposure), E33 (journaling sweep warning), E34 (tool-call status Markdown escaping) — all complete, none tracked here at implementation time; added E35 (complete). current_epic (E23) left as-is — S23.5 still genuinely pending operator sign-off; picking the next active epic among the backlog entries above is an open call for the operator, not inferred here.
+  E36:
+    status: complete
+    completed: 2026-08-31
+    notes: >
+      Slash-command follow-up capture + /torrent completion notification.
+      CommandRegistry.registerFollowUp/consumeFollowUp (single-shot, TTL) and a
+      pre-dispatch check in processInbound; /torrent with no argument asks for
+      the magnet link and captures the next message. Merged to dev 2026-08-31
+      (fccff0e); backfilled here 2026-09-15.
+    stories:
+      S36.1: complete  # CommandRegistry follow-up capture primitive
+      S36.2: complete  # Dispatch hook in processInbound + shared sendCommandResponse
+      S36.3: complete  # /torrent no-arg prompt + capture (src/commands/torrent.ts)
+      S36.4: complete  # Tests + docs/SLASH_COMMANDS.md + CHANGELOG
+      S36.5: complete  # /torrent completion notification
+  E37:
+    status: pending
+    notes: >
+      Pebble relay topic routing — RelayTargetSchema.topic + channel-relay
+      forwarding. Epic written 2026-09-01; not started.
+  E38:
+    status: complete
+    completed: 2026-08-31
+    notes: >
+      Configurable raw webhook request logging: logWebhookRequest
+      (src/http/webhook-log.ts) + adapters.pebble.logging. Merged to dev
+      2026-08-31 (caa6fcf); backfilled here 2026-09-15.
+    stories:
+      S38.1: complete  # Generic helper + WebhookLoggingConfigSchema
+      S38.2: complete  # Wired into the Pebble webhook + docs
+  E39:
+    status: complete
+    completed: 2026-09-01
+    notes: >
+      /cost command + turn_costs table (migration 014) + backfill script.
+      Merged to dev 2026-09-01 (14872df); backfilled here 2026-09-15.
+  E40:
+    status: complete
+    completed: 2026-09-01
+    notes: >
+      Durable post-restart wake-up: stale_after_ms on one-shot schedules +
+      safe_restart.sh scheduled wake-up. Merged to dev 2026-09-01 (531f8c2);
+      backfilled here 2026-09-15.
+  E41:
+    status: pending
+    notes: >
+      codex-headless adapter. Epic written 2026-09-14; not started.
+  E42:
+    status: complete
+    completed: 2026-09-15
+    notes: >
+      Siri Bridge spike (POC-1): SiriAdapter (in-memory waiters, src/adapters/siri.ts)
+      + POST /api/v1/siri/ask and GET /api/v1/siri/health (src/http/siri-routes.ts)
+      + adapters.siri / contacts.*.platforms.siri.token schema + scripts/siri-probe.ts
+      and scripts/siri-gate0-latency.ts. Numbering: the planning package arrived as
+      E36–E41 and was renumbered to E42–E47 to avoid colliding with the epics above.
+      Live on the bus 2026-09-15 with the route to the claude-code MCP adapter
+      (cc-headless is disabled pending a working API key, so the fast-lane run is
+      deferred). Gate 0/1 numbers and decisions in
+      _bmad-output/planning-artifacts/siri-bridge/spike-results.md.
+    stories:
+      S42.1: complete  # Gate 0 — prerequisites + historical Peggy turn latency (scripts/siri-gate0-latency.ts)
+      S42.2: complete  # Config schema: adapters.siri + contacts.*.platforms.siri.token
+      S42.3: complete  # SiriAdapter + POST /api/v1/siri/ask (+ GET /api/v1/siri/health)
+      S42.4: complete  # Peggy prompt contract (CLAUDE.md siri rule + cc-headless template) + route + tailscale serve path mount on the live bus
+      S42.5: complete  # scripts/siri-probe.ts + Gate 1 run 1 (runs 2/3 deferred: cc-headless disabled)
+  E43:
+    status: pending
+    notes: >
+      Production `siri` channel: migration siri_requests, late-reply long-poll,
+      dedup join, rate limiting, fallback re-delivery (outbound enqueue, ADR-7),
+      health/history endpoints, docs/SIRI_ADAPTER.md finalised. HTTP contract
+      frozen in siri-bridge/architecture.md §4.
+    stories:
+      S43.1: pending  # Finalise config schema + startup validation
+      S43.2: pending  # Migration + durable request store
+      S43.3: pending  # GET /api/v1/siri/replies/:request_id long-poll + claim
+      S43.4: pending  # Dedup join + rate limiting + idempotent request_id
+      S43.5: pending  # Fallback re-delivery of late replies
+      S43.6: pending  # Health, history, single-request endpoints + /status line
+      S43.7: pending  # Docs, tailscale serve runbook, tests, CHANGELOG, version proposal
+  E44:
+    status: in-progress
+    notes: >
+      Peggy iOS app POC (apps/ios/Peggy, XcodeGen, Swift 6, iOS 26 deployment
+      target): AskPeggyIntent + App Shortcut "Ask Peggy", BusClient, UserDefaults
+      settings with Test connection, 19 XCTest tests green on the iPhone 17 Pro
+      simulator (Xcode 26.0.1). AppIntentsTesting and LongRunningIntent are not in
+      the iOS 26 SDK — deviations recorded in spike-results.md. S44.5 (on-device
+      Gate 2) is the operator's: install from Xcode with a signing team, then run
+      the checklist in apps/ios/Peggy/README.md.
+    stories:
+      S44.1: complete  # SDK verification spike (iOS 26 SDK; Xcode 27 not installed)
+      S44.2: complete  # Project scaffold with XcodeGen + apps/ios/Peggy/CLAUDE.md
+      S44.3: complete  # AskPeggyIntent + PeggyShortcuts + BusClient (+ XCTest dialog coverage)
+      S44.4: complete  # Minimal Settings screen + Test connection
+      S44.5: pending   # On-device validation + Gate 2 measurements (operator, needs a signing team / Xcode 27 for iOS 27 devices)
+  E45:
+    status: pending
+    notes: >
+      MVP hardening: Keychain, background late-reply fetch → local notification,
+      SwiftData history, full test suite, bus.delivery_poll_ms + /status siri line,
+      LongRunningIntent spike, TestFlight/signing, 7-day soak (Gate 3).
+    stories:
+      S45.1: pending  # Keychain + settings hardening
+      S45.2: pending  # Late-reply hand-off: background URLSession + local notification
+      S45.3: pending  # History (SwiftData) + pull-to-refresh
+      S45.4: pending  # Test suite completion + speech sanitiser
+      S45.5: pending  # Bus tuning: bus.delivery_poll_ms + /status siri line (+ optional fast lane)
+      S45.6: pending  # Spike: LongRunningIntent hand-off variant
+      S45.7: pending  # TestFlight/signing + 7-day soak (Gate 3)
+  E46:
+    status: pending
+    notes: >
+      Peggy as a Siri AI source: Messages app-schema domain (Peggy = messagePerson;
+      all five schemas), transcript sync from the bus, MessageEntity IndexedEntity
+      semantic index, entity-annotated reply notifications, optional APNs.
+    stories:
+      S46.1: pending  # Entities: PeggyPersonEntity, ConversationEntity, MessageEntity (+ IndexedEntity)
+      S46.2: pending  # The five Messages schema intents
+      S46.3: pending  # Transcript sync from the bus
+      S46.4: pending  # Semantic index maintenance
+      S46.5: pending  # Notifications with entity annotations
+      S46.6: pending  # Optional: APNs push for new Peggy messages
+      S46.7: pending  # Validation: one-shot NL + five recall questions
+  E47:
+    status: pending
+    notes: >
+      Peggy's memory files as a Siri source — spike-gated (semantic Q&A over
+      non-Messages entities unverified). GET /api/v1/agents/:agent_id/memory export.
+    stories:
+      S47.1: pending  # Bus: read-only memory export endpoint
+      S47.2: pending  # App spike: note entities and semantic recall
+      S47.3: pending  # If passed: production indexing + refresh
+last_updated: 2026-09-15  # Backfilled E36, E38, E39, E40 (complete, merged to dev 2026-08-31/09-01) and E37, E41 (pending, epic files only). Added the Siri Bridge package E42–E47 (renumbered from E36–E41 on arrival to avoid the collision): E42 complete, E44 in-progress (S44.5 on-device is the operator's), E43/E45/E46/E47 pending. current_epic → E42/E44; E23's S23.5 still pending operator sign-off.

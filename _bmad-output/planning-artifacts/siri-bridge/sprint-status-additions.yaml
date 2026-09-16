@@ -1,0 +1,83 @@
+# Merge into root sprint-status.yaml: append the epic entries under `epics:` and set
+# `current_epic: E42`. Story keys match the epic files. Statuses start as `pending`.
+# Keep the existing `last_updated` convention (update the date + note on merge).
+
+current_epic: E42
+
+epics:
+  E42:
+    status: pending
+    notes: >
+      Siri Bridge spike (POC-1): thin `siri` channel adapter + POST /api/v1/siri/ask
+      + scripts/siri-probe.ts. Purpose is a numeric Gate 0/Gate 1 decision in
+      _bmad-output/planning-artifacts/siri-bridge/spike-results.md before any iOS work.
+    stories:
+      S42.1: pending  # Gate 0 — prerequisites + historical Peggy turn latency (SQL over transcripts)
+      S42.2: pending  # Config schema: adapters.siri (subset) + contacts.*.platforms.siri.token
+      S42.3: pending  # SiriAdapter (in-memory waiters) + POST /api/v1/siri/ask (src/adapters/siri.ts, src/http/siri-routes.ts)
+      S42.4: pending  # Peggy prompt contract (siri* branch) + pipeline.routes entry on the live bus
+      S42.5: pending  # scripts/siri-probe.ts + Gate 1 measurement
+  E43:
+    status: pending
+    notes: >
+      Production `siri` channel: migration 013 siri_requests, late-reply long-poll,
+      dedup join, rate limiting, fallback re-delivery (outbound enqueue, ADR-7),
+      health/history endpoints, docs/SIRI_ADAPTER.md. HTTP contract frozen in
+      siri-bridge/architecture.md §4.
+    stories:
+      S43.1: pending  # Finalise config schema + startup validation
+      S43.2: pending  # Migration 013 + durable request store
+      S43.3: pending  # GET /api/v1/siri/replies/:request_id long-poll + claim
+      S43.4: pending  # Dedup join + rate limiting + idempotent request_id
+      S43.5: pending  # Fallback re-delivery of late replies
+      S43.6: pending  # Health, history, single-request endpoints + /status line
+      S43.7: pending  # Docs, tailscale serve runbook, tests, CHANGELOG, version proposal
+  E44:
+    status: pending
+    notes: >
+      Peggy iOS app POC (apps/ios/Peggy, XcodeGen): AskPeggyIntent + App Shortcut
+      "Ask Peggy", minimal settings, on-device Gate 2 measurements (Siri cutoff via
+      adapters.siri.debug_delay_ms, Siri AI one-shot, surfaces, overhead).
+    stories:
+      S44.1: pending  # SDK verification spike (exact App Intents signatures in Xcode 27)
+      S44.2: pending  # Project scaffold with XcodeGen + apps/ios/Peggy/CLAUDE.md
+      S44.3: pending  # AskPeggyIntent + PeggyShortcuts + BusClient (+ AppIntentsTesting)
+      S44.4: pending  # Minimal Settings screen + Test connection
+      S44.5: pending  # On-device validation + Gate 2 measurements
+  E45:
+    status: pending
+    notes: >
+      MVP hardening: Keychain, background late-reply fetch → local notification,
+      SwiftData history, full test suite, bus.delivery_poll_ms + /status siri line,
+      LongRunningIntent spike, TestFlight/signing, 7-day soak (Gate 3).
+    stories:
+      S45.1: pending  # Keychain + settings hardening
+      S45.2: pending  # Late-reply hand-off: background URLSession + local notification
+      S45.3: pending  # History (SwiftData) + pull-to-refresh
+      S45.4: pending  # Test suite completion + speech sanitiser
+      S45.5: pending  # Bus tuning: bus.delivery_poll_ms + /status siri line (+ optional fast lane)
+      S45.6: pending  # Spike: LongRunningIntent hand-off variant
+      S45.7: pending  # TestFlight/signing + 7-day soak (Gate 3)
+  E46:
+    status: pending
+    notes: >
+      Peggy as a Siri AI source: Messages app-schema domain (Peggy = messagePerson;
+      all five schemas), transcript sync from the bus, MessageEntity IndexedEntity
+      semantic index, entity-annotated reply notifications, optional APNs.
+    stories:
+      S46.1: pending  # Entities: PeggyPersonEntity, ConversationEntity, MessageEntity (+ IndexedEntity)
+      S46.2: pending  # The five Messages schema intents
+      S46.3: pending  # Transcript sync from the bus
+      S46.4: pending  # Semantic index maintenance
+      S46.5: pending  # Notifications with entity annotations
+      S46.6: pending  # Optional: APNs push for new Peggy messages
+      S46.7: pending  # Validation: one-shot NL + five recall questions
+  E47:
+    status: pending
+    notes: >
+      Peggy's memory files as a Siri source — spike-gated (semantic Q&A over
+      non-Messages entities unverified). GET /api/v1/agents/:agent_id/memory export.
+    stories:
+      S47.1: pending  # Bus: read-only memory export endpoint
+      S47.2: pending  # App spike: note entities and semantic recall
+      S47.3: pending  # If passed: production indexing + refresh
