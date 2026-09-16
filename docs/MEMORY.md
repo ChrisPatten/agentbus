@@ -1,289 +1,100 @@
-# Memory System (E8)
+# Structured memory store (legacy)
 
-The memory system gives the agent continuity across sessions. Every conversation
-is durably logged, idle sessions are automatically closed, and Claude extracts
-structured memories from completed sessions for future recall.
+The structured memory store extracts facts from completed sessions into SQLite and injects them into later conversations. It is **dormant by default**: `memory.structured_extraction` is `false`, so the summarizer writes nothing and no context is injected. The agent's own files are the memory system. See [MEMORY_MODEL.md](MEMORY_MODEL.md).
 
----
+Enable it only for a persistent Claude Code session on the polling MCP adapter that has no memory files of its own. Nothing here applies to headless sessions, which are long-lived and journal to files instead.
 
-## Architecture Overview
+## How it works
 
 ```
-Inbound message
-      │
-      ▼
 Stage 80 (transcript-log)
-  ├── Writes transcripts row
-  ├── Creates / extends / closes session (idle threshold)
-  └── Sets ctx.sessionId
-      │
-      ▼ (async, background)
-SessionTracker (every 60s)
-  ├── Detects sessions idle past threshold → sets ended_at + status='summarize_pending'
-  ├── Triggers Summarizer.summarize(sessionId)
-  ├── Retries status='summarize_failed' sessions (up to 3 attempts)
-  └── Hard-deletes memories expired >30 days
-      │
-      ▼
-Summarizer
-  ├── Fetches transcript rows for session
-  ├── Applies token budget guard (truncates oldest messages if > 80% of context)
-  ├── Calls Claude API with system prompt requesting JSON SummaryResult
-  ├── Writes session_summaries row
-  ├── Inserts memory rows (with supersession of same contact+category)
-  └── Sets session status='summarized' (or 'summarize_failed' on error)
+  writes the transcript row; creates, extends, or closes the session
+
+SessionTracker (every memory.summarizer_interval_ms)
+  closes sessions idle past session_idle_threshold_ms (polling-adapter sessions only)
+  runs the on_session_close hook
+  calls Summarizer.summarize() for each closed session; retries failures up to 3 times
+  hard-deletes memories expired more than 30 days ago
+
+Summarizer (only when structured_extraction is true)
+  sends the transcript to the Claude API and parses a JSON SummaryResult
+  writes session_summaries and memories rows; supersedes the previous memory
+    for the same contact, category, and channel
+  marks the session summarized or summarize_failed
+
+Stage 85 (memory-inject)
+  on the first message of a new session, attaches recent session summaries for
+    the same contact and channel as metadata.memory_context
 ```
 
----
-
-## Database Tables
-
-### sessions (updated in E8)
-
-New columns added by migration 003:
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `status` | TEXT | `active` \| `summarize_pending` \| `summarized` \| `summarize_failed` |
-| `summary_attempts` | INTEGER | Count of summarization attempts (max 3 before giving up) |
-
-### memories
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | TEXT | UUID primary key |
-| `session_id` | TEXT | Source session (nullable — manual memories have no session) |
-| `contact_id` | TEXT | Contact this memory is about |
-| `category` | TEXT | `preference` \| `fact` \| `plan` \| `relationship` \| `work` \| `health` \| `general` |
-| `content` | TEXT | The fact itself |
-| `confidence` | REAL | 0.0–1.0 score |
-| `source` | TEXT | `summarizer` \| `manual` \| `system` |
-| `created_at` | TEXT | ISO 8601 creation timestamp |
-| `expires_at` | TEXT | Soft expiry (NULL = never expires) |
-| `superseded_by` | TEXT | UUID of the newer memory, or `manual_forget`, or NULL (= active) |
-
-Full-text search is available via the `memories_fts` virtual table.
-
-### session_summaries
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `summary` | TEXT | JSON-encoded `SummaryResult` (summary, key_topics, decisions, open_questions, participants, memories) |
-| `model` | TEXT | Claude model used for summarization |
-| `token_count` | INTEGER | Total input + output tokens consumed |
-
----
+Requires `ANTHROPIC_API_KEY` in `.env`. Without it the bus starts, sessions still close, and summarization is skipped.
 
 ## Configuration
 
 ```yaml
 memory:
-  summarizer_interval_ms: 60000       # How often the session tracker runs (ms)
-  session_idle_threshold_ms: 1800000  # Inactivity window before closing a session (ms, default 30m)
-  context_window_hours: 48            # Context window for E9 injection (hours)
-  claude_api_model: claude-sonnet-4-6 # Model used for summarization
-  summary_max_tokens: 8192            # Max tokens for the summarization API response
-  session_close_min_messages: 0       # Min messages before a session is eligible for idle-expiration (default: 0)
-  on_session_close: ""                # Optional shell command to run when a session closes (see below)
-  memory_inject_exclude: []           # Channels to skip Stage 85 memory injection entirely (see below)
+  structured_extraction: false        # true enables the summarizer and injection
+  summarizer_interval_ms: 60000       # session tracker tick
+  session_idle_threshold_ms: 1800000  # idle gap that closes a polling-adapter session
+  session_close_min_messages: 0       # number, or per-channel map; sessions below it stay open
+  on_session_close: ""                # shell command, or per-channel map
+  context_window_hours: 48            # how far back memory-inject looks for summaries
+  claude_api_model: claude-sonnet-4-6
+  summary_max_tokens: 8192
+  memory_inject_exclude: []           # channels that never receive injected context
 ```
 
-### `on_session_close` hook
+### `on_session_close`
 
-Run a shell command whenever a session is closed due to inactivity.
-Executed via `/bin/sh -c`, so shell syntax, pipes, and `&&` chains work.
+Runs through `/bin/sh -c` when the tracker closes an idle session. A string runs for every channel; a map runs only for the listed channels. The command receives `AGENTBUS_SESSION_ID`, `AGENTBUS_CHANNEL`, `AGENTBUS_CONTACT_ID`, and `AGENTBUS_MESSAGE_COUNT`. A hook failure is logged and never blocks closing.
 
-Accepts two forms:
-
-**Global** — runs for every channel:
-```yaml
-memory:
-  on_session_close: "tmux send-keys -t my-pane '/clear' Enter"
-```
-
-**Per-channel** — only runs for the listed channels; unlisted channels are skipped:
 ```yaml
 memory:
   on_session_close:
     claude-code: "tmux send-keys -t pane-cc '/clear' Enter"
-    telegram:    "tmux send-keys -t pane-tg '/clear' Enter"
 ```
-
-The following environment variables are set for the duration of the command:
-
-| Variable | Example |
-|---|---|
-| `AGENTBUS_SESSION_ID` | `a1b2c3d4-...` |
-| `AGENTBUS_CHANNEL` | `claude-code` |
-| `AGENTBUS_CONTACT_ID` | `contact:alice` |
-| `AGENTBUS_MESSAGE_COUNT` | `12` |
-
-Hook failures are logged but never block session closing or summarization.
 
 ### `session_close_min_messages`
 
-Minimum number of messages a session must contain before it is eligible for
-idle-expiration. Sessions below the threshold are left open even after
-`session_idle_threshold_ms` has elapsed. Default is `0` (no guard).
-
-Note: `message_count` starts at `1` when a session is created (the opening
-message counts). Setting `session_close_min_messages: 1` therefore makes every
-session — including single-message interactions like scheduled briefs — eligible
-for idle-expiration and the `on_session_close` hook.
-
-Accepts the same two forms as `on_session_close`:
-
-**Global** — applies to all channels:
-```yaml
-memory:
-  session_close_min_messages: 1
-```
-
-**Per-channel** — channels not listed default to `0`:
-```yaml
-memory:
-  session_close_min_messages:
-    claude-code: 1
-    telegram: 3
-```
+A session must have at least this many messages before idle expiration closes it and fires the hook. `message_count` starts at 1, so a value of `1` makes every session eligible. Accepts a number or a per-channel map; unlisted channels default to 0. Channel names match exactly: `telegram` does not match `telegram:peggy`.
 
 ### `memory_inject_exclude`
 
-List of channel names for which Stage 85 (memory injection) is completely skipped. Use this
-for agents that manage their own memory context independently (e.g. pokeclaude).
+Channels for which Stage 85 is skipped entirely, for agents that manage their own context.
 
-```yaml
-memory:
-  memory_inject_exclude:
-    - telegram:pokeclaude
-```
+## Tables
 
-The check is O(1) — the list is compiled into a `Set` at startup. Sessions on excluded channels
-still generate and store memories normally; only the context injection at session start is
-suppressed.
+`sessions` gains `status` (`active`, `summarize_pending`, `summarized`, `summarize_failed`) and `summary_attempts` in migration 003.
 
----
+| Table | Purpose |
+|---|---|
+| `memories` | One row per extracted or manually logged fact: `contact_id`, `category` (`preference`, `fact`, `plan`, `relationship`, `work`, `health`, `general`), `content`, `confidence`, `source`, `channel`, `expires_at`, `superseded_by` |
+| `memories_fts` | FTS5 index over `memories.content` |
+| `session_summaries` | One row per summarized session: JSON `summary`, `model`, `token_count` |
 
-Requires `ANTHROPIC_API_KEY` in `.env`. If the key is missing, the bus starts
-normally but summarization is disabled (sessions are still tracked and closed).
+A new memory for the same contact, category, and channel supersedes the previous one. Recall returns only rows with `superseded_by IS NULL` and no past `expires_at`. Memories with `channel = NULL` are visible on every channel.
 
----
+## Interfaces
 
-## Memory Lifecycle
+- HTTP: `GET /api/v1/memories/recall` and `POST /api/v1/memories` ([HTTP_API.md](HTTP_API.md#memories-legacy)).
+- MCP: `recall_memory` and `log_memory` ([MCP_TOOLS.md](MCP_TOOLS.md#legacy-memory-store)). Both are registered on every server and marked legacy in their descriptions.
 
-### Creation
-Memories are created two ways:
-1. **Summarizer** — automatically after a session ends (source: `summarizer`)
-2. **`log_memory` MCP tool** — manually by the agent (source: `manual`)
+## Injected context format
 
-### Supersession
-When a new memory is inserted for the same `(contact_id, category)` pair, the
-previous active memory is automatically superseded: `superseded_by` is set to
-the new memory's ID. Only one active memory per contact+category exists at a
-time.
-
-### Recall
-`recall_memory` returns only:
-- Memories where `superseded_by IS NULL` (not replaced)
-- Memories where `expires_at IS NULL OR expires_at > now()` (not expired)
-
-Results are ordered by confidence DESC, then recency.
-
-### Expiry and Forgetting
-- **Manual forgetting** — the `/forget <contact_id>` command was removed
-  (vestigial now that this store is dormant by default, E20/E33 cleanup); to
-  soft-expire a contact's memories directly, run `UPDATE memories SET
-  superseded_by = 'manual_forget', expires_at = <now> WHERE contact_id = ?`
-- **Background sweep** — memories where `expires_at + 30 days < now()` are
-  hard-deleted on each session tracker tick
-
----
-
-## MCP Tools
-
-| Tool | Description |
-|------|-------------|
-| `recall_memory` | FTS search over active memories (see MCP_TOOLS.md) |
-| `log_memory` | Manually insert a memory (see MCP_TOOLS.md) |
-
----
-
-## Context Injection (E9)
-
-On the **first message of a new session**, the bus automatically injects remembered context
-into the envelope so the agent starts each conversation with continuity.
-
-### What gets injected
-
-| Source | Query | Time scope |
-|--------|-------|-----------|
-| **Memories** | Active memories for the contact scoped to the current channel (plus any NULL-channel global memories) | All time (no cutoff — memories have their own lifecycle) |
-| **Session summaries** | Recent session summaries for the contact on the same channel | `context_window_hours` (default 48h) |
-
-Nothing is injected if both queries return empty results.
-
-### Channel scoping
-
-Memories are scoped to the channel on which they were created. A contact may interact with
-multiple agents via different channels (e.g. `telegram` and `claude-code`); each agent only
-sees memories from its own channel, preventing cross-agent contamination.
-
-Memories created via the `POST /api/v1/memories` API with no `channel` field are **global** —
-they are visible on all channels. Use this for facts that apply regardless of which agent is
-talking to the contact.
-
-### Format
-
-The context block is attached to `envelope.metadata.memory_context` and prepended to the
-channel notification received by Claude Code:
+When Stage 85 finds summaries, it sets `envelope.metadata.memory_context`, which the polling adapter prepends to the channel notification:
 
 ```
 <memory contact="alice">
-## Known facts
-- [preference] Prefers dark mode (confidence: 0.95)
-- [work] Senior engineer at Acme Corp (confidence: 0.90)
-
 ## Recent conversations
-- claude-code (Apr 12, 14:30 - 15:45): Discussed deployment strategy for the new API.
+- telegram (Apr 12, 14:30 - 15:45): Discussed deployment strategy for the new API.
 </memory>
-
-New message from contact:alice via claude-code [id:msg-001]:
-Hello, I had a question about...
 ```
 
-### Configuration
-
-```yaml
-memory:
-  context_window_hours: 48  # How far back session summaries are retrieved (hours)
-```
-
-### Opt-out and E15 (Temp Chat)
-
-Sessions started with `/temp` (E15, backlog) will skip context injection — the temp flag
-signals that this session should not receive or contribute to long-term memory.
-
----
+The block is capped at 4,000 characters; the oldest summaries are dropped first. The headless adapter ignores `memory_context` because it assembles memory files into the system prompt instead.
 
 ## Troubleshooting
 
-### Summarization keeps failing
-
-1. Check `ANTHROPIC_API_KEY` is set and valid
-2. Check bus-core logs for `[summarizer]` errors
-3. The `/retry_summary <session_id>` command was removed (vestigial, E20/E33
-   cleanup); to manually re-trigger after fixing the issue, run `UPDATE
-   sessions SET status = 'summarize_pending', summary_attempts = 0 WHERE id =
-   ?` and wait for the next session tracker tick
-
-### Memory not showing in recall
-
-1. Check the memory isn't superseded: `SELECT * FROM memories WHERE contact_id = ?`
-2. Check it isn't expired: `expires_at` should be NULL or in the future
-3. Check the FTS index is up to date: restart with `--rebuild-fts`
-
-### Session not closing
-
-The SessionTracker closes sessions idle past `session_idle_threshold_ms`. If a
-session stays open indefinitely, verify the tracker is running (check logs for
-`[session-tracker]` entries every `summarizer_interval_ms`).
+- **Summarization keeps failing.** Check `ANTHROPIC_API_KEY` and `[summarizer]` log lines. To retry a session by hand: `UPDATE sessions SET status = 'summarize_pending', summary_attempts = 0 WHERE id = ?`.
+- **A memory does not appear in recall.** Check `superseded_by` and `expires_at` on the row. Rebuild FTS with `--rebuild-fts` if the index is stale.
+- **A session never closes.** Only sessions with `claude_session_id IS NULL` close on idle. Confirm `[session-tracker]` lines appear every `summarizer_interval_ms`.
+- **Forgetting a contact's memories.** `UPDATE memories SET superseded_by = 'manual_forget', expires_at = <now> WHERE contact_id = ?`.

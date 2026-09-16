@@ -1,504 +1,185 @@
-# AgentBus MCP Tool Surface
+# MCP tools
 
-Tools registered on the MCP server by the Claude Code adapter (`src/adapters/cc.ts`). These are the verbs the agent uses to interact with AgentBus.
+The tools an agent can call. They are registered on the MCP server in `src/adapters/cc.ts` by `registerAllTools()` (polling mode) or `registerHeadlessTools()` (tools-only mode for `claude -p`); the only difference is that headless mode omits `get_adapter_status`. Every tool is a thin HTTP client for bus-core. The logic lives in the routes listed in [HTTP_API.md](HTTP_API.md).
 
-All tools are registered via `registerAllTools()` in `src/mcp/tools/index.ts`.
+Errors come back as `{ "content": [{ "type": "text", "text": "Error: ..." }], "isError": true }`. Expected non-success outcomes (a channel that cannot react, a missing session) return `success: false` or `available: false` without `isError`.
 
----
+## Tool index
 
-## Tool Index
+| Tool | Purpose | Registered when |
+|---|---|---|
+| `reply` | Reply to a message by its bus ID | Always |
+| `send_message` | Send to any contact on any channel | Always |
+| `send_email` | Start a new email thread to an allowlisted address | An email adapter is configured |
+| `react_to_message` | Emoji reaction on a message | Always |
+| `create_telegram_topic` | Create a forum topic in a Telegram group | A Telegram adapter is configured |
+| `list_channels` | Adapters and their capabilities | Always |
+| `get_session`, `list_sessions` | Session metadata and topic | Always |
+| `get_transcript` | Full ordered transcript for one session | Always |
+| `search_transcripts` | Full-text search across transcripts | Always |
+| `fetch_attachment` | Resolve an attachment ID to a file path | Always |
+| `schedule_message`, `list_schedules`, `cancel_schedule` | Scheduled messages | Always |
+| `set_headless_model`, `get_headless_model`, `list_headless_model`, `delete_headless_model` | Runtime model overrides for headless spawns | Always |
+| `recall_memory`, `log_memory` | Legacy structured memory store | Always; dormant unless `memory.structured_extraction` |
+| `get_adapter_status` | Health of the polling MCP adapter | Polling mode only |
 
-| Tool | Epic | Description |
-|------|------|-------------|
-| `reply` | E2 | Reply to a message by its bus ID |
-| `get_adapter_status` | E2 | Inspect CC adapter health |
-| `list_channels` | S7.1 | Discover available channels and adapter capabilities |
-| `send_message` | S7.2 | Send a message to any contact on any channel |
-| `send_email` | E21 | Start a new email thread to an allowlisted address |
-| `recall_memory` | S7.3/E8 | Search the memory store for facts about contacts |
-| `log_memory` | S7.3/E8 | Record a fact explicitly |
-| `search_transcripts` | S7.3 | Full-text search across conversation transcripts |
-| `get_session` | S7.4 | Get session metadata and summary |
-| `list_sessions` | S7.4 | Browse recent sessions |
-| `get_transcript` | E35 | Get the full ordered message history for a session |
-| `react_to_message` | S7.5 | Send an emoji reaction to a message |
-| `create_telegram_topic` | E28 | Create a new forum topic in a Telegram group |
-| `set_headless_model` | — | Set a runtime model override for headless Claude spawns |
-| `get_headless_model` | — | Get the active model override for a scope |
-| `list_headless_model` | — | List all active model overrides |
-| `delete_headless_model` | — | Delete a specific override, or all overrides |
-
----
-
-## Core Tools (E2)
+## Messaging
 
 ### `reply`
 
-Reply to a message. Looks up the original by message ID, swaps sender/recipient, and posts to AgentBus.
+Fetches the original message, swaps sender and recipient, and posts the reply on the same channel and topic.
 
-**Input:**
-```json
-{ "message_id": "uuid", "body": "Your reply text" }
-```
-
-**Output:**
-```json
-{ "success": true, "outbound_message_id": "uuid" }
-```
-
----
-
-### `get_adapter_status`
-
-Return the health state of the CC adapter itself (bus connectivity, poll state).
-
-**Input:** none
-
-**Output:**
-```json
-{
-  "status": "healthy",
-  "bus_reachable": true,
-  "last_poll_at": "2026-04-12T10:00:00.000Z",
-  "consecutive_failures": 0
-}
-```
-
----
-
-## S7.1 — Channel Discovery
-
-### `list_channels`
-
-List all adapters registered with bus-core and their capabilities. Use this before calling `send_message` to confirm a channel exists.
-
-**Input:** none
-
-**Output:**
-```json
-[
-  {
-    "id": "telegram",
-    "name": "telegram",
-    "channels": ["telegram"],
-    "capabilities": { "send": true, "react": true, "typing": true, "channels": ["telegram"] }
-  }
-]
-```
-
----
-
-## S7.2 — Outbound Messaging
+Input: `{ "message_id": "<bus id from [id:...]>", "body": "..." }`
+Output: `{ "success": true, "outbound_message_id": "<uuid>" }`
 
 ### `send_message`
 
-Send a message to any contact on any channel. Validates the channel exists (resolved the same way real delivery is — `GET /api/v1/adapters/resolve`, which also recognizes a dynamically-derived channel like a Telegram group, E28).
+Sends to any contact on any channel. Validates the channel through `GET /api/v1/adapters/resolve`, so a dynamically derived channel such as a Telegram group resolves correctly.
 
-**Input:**
-```json
-{
-  "to": "contact:chris",
-  "channel": "telegram",
-  "body": "Your message text",
-  "topic": "general",
-  "reply_to": "optional-msg-uuid",
-  "priority": "normal",
-  "metadata": {}
-}
-```
+| Field | Required | Notes |
+|---|---|---|
+| `to` | yes | `contact:<id>` |
+| `channel` | yes | For example `telegram:peggy` or `telegram:peggy:group:-100123` |
+| `body` | yes | |
+| `topic` | no | Default `general`. To target a Telegram forum topic, pass the `thread:<hash>` value from `create_telegram_topic` or from the session's `topic` field. A thread topic with no stored thread record fails at delivery |
+| `reply_to` | no | Bus message ID. On Telegram this becomes a native quote unless it is the latest inbound message in the conversation |
+| `priority` | no | `normal`, `high`, or `urgent` |
+| `metadata` | no | Free-form object |
 
-Priority values: `normal`, `high`, `urgent`.
+For a proactive send, call `get_session` or `list_sessions` first and use the `topic` it returns rather than guessing.
 
-**`topic` (default `"general"`, E28):** to land a message in a specific Telegram forum topic instead of the group's General topic, pass the `topic` value returned by `create_telegram_topic` (a `"thread:<hash>"` id) — not the channel, and not a plain topic name. `schedule_message` accepts the same `topic` param for the same purpose. A `topic` with no matching thread record on that channel is rejected server-side rather than silently falling back to General.
-
-For a proactive send (not a reply to a message you just received), call `get_session` or `list_sessions` first and use the `topic` field it returns (E32) rather than guessing — it reflects where that conversation is actually threaded.
-
-**`reply_to` (E28):** when set, bus-core resolves it server-side to the referenced transcript's platform message ID and, on Telegram, turns it into a native reply quote (`reply_parameters`) — the agent never needs to know platform-specific ID formats. An unknown or foreign-chat `reply_to` is a silent no-op: the message still sends, just without a quote. **Replying to the latest inbound message in the conversation is also a no-op** — quoting the message a reply is obviously responding to would be visually redundant, so that case always sends as a plain message. Non-Telegram channels ignore it today.
-
-**Output:**
-```json
-{ "success": true, "message_id": "uuid", "queued_at": "2026-04-12T10:00:00.000Z" }
-```
-
----
+Output: `{ "success": true, "message_id": "<uuid>" }`
 
 ### `send_email`
 
-Start a **new** email thread to the user (as opposed to `reply`, which threads into a
-message the agent received). Use it to reach out proactively over email.
+Starts a new email thread, as opposed to `reply`, which threads into a received message. Sends on the first configured email channel. `to` defaults to the first allowlisted address in `contacts[*].platforms.email.address`; any other `to` must also be on that allowlist or nothing is sent. `body` is Markdown and renders as HTML. See [EMAIL_ADAPTER.md](EMAIL_ADAPTER.md#agent-initiated-email-send_email-tool).
 
-The tool is registered only when an email adapter is configured (see
-[EMAIL_ADAPTER.md](EMAIL_ADAPTER.md)). It sends on the first configured email channel
-(`email`, or `email:<name>` for a named instance).
-
-**Recipient allowlist.** `to` is optional and defaults to the **first** allowlisted
-address — the addresses under `contacts[*].platforms.email.address`, in config order.
-An explicit `to` is accepted only if it is on that allowlist (matched
-case-insensitively); any other address is rejected and **nothing is sent**. This is the
-same allowlist the inbound adapter enforces, so the agent can never email an arbitrary
-recipient. The adapter re-checks the allowlist on send as defense in depth.
-
-**Subject.** `subject` is optional and sets the email's subject line; it defaults to
-*Message from your assistant*.
-
-**Markdown.** `body` is Markdown — it renders as formatted HTML (headings, tables,
-lists, links, code blocks), with the raw Markdown kept as the plain-text fallback.
-Plain prose works too. See [EMAIL_ADAPTER.md](EMAIL_ADAPTER.md#rich-text-rendering).
-
-**Input:**
-```json
-{
-  "body": "Your message text",
-  "to": "chris@example.com",
-  "subject": "Weekly status"
-}
-```
-
-**Output:**
-```json
-{ "success": true, "message_id": "uuid", "to": "chris@example.com" }
-```
-
-**Rejected recipient:**
-```json
-{ "error": "Refusing to send: \"evil@attacker.com\" is not on the email allowlist. Allowed addresses: chris@example.com" }
-```
-
----
-
-## S7.3/E8 — Memory Tools
-
-### `recall_memory`
-
-Full-text search over the active memory store. Returns memories ordered by confidence DESC.
-Memories that are expired or superseded are excluded automatically.
-
-**Input:**
-```json
-{
-  "query": "search text",
-  "contact_id": "contact:chris",
-  "category": "preference",
-  "limit": 10
-}
-```
-
-`category` values: `preference`, `fact`, `plan`, `relationship`, `work`, `health`, `general`
-
-**Output:**
-```json
-{
-  "memories": [
-    {
-      "id": "uuid",
-      "contact_id": "contact:chris",
-      "category": "preference",
-      "content": "Prefers tea over coffee",
-      "confidence": 0.95,
-      "source": "summarizer",
-      "created_at": "2026-04-12T10:00:00Z",
-      "expires_at": null
-    }
-  ],
-  "count": 1
-}
-```
-
-Returns `{ available: false }` if the memory system is not initialized.
-
----
-
-### `log_memory`
-
-Record a fact explicitly to the memory store. Supersedes any existing active memory
-for the same `(contact_id, category)` pair.
-
-**Input:**
-```json
-{
-  "contact_id": "contact:chris",
-  "content": "Prefers tea over coffee",
-  "category": "preference",
-  "confidence": 0.9,
-  "source": "manual",
-  "expires_at": "2026-12-31T00:00:00Z"
-}
-```
-
-`category` and `expires_at` are optional (defaults: `general`, no expiry).
-
-**Output:**
-```json
-{
-  "ok": true,
-  "id": "new-memory-uuid",
-  "superseded": "old-memory-uuid-or-null"
-}
-```
-
-Returns `{ available: false }` if the memory system is not initialized.
-
----
-
-### `search_transcripts`
-
-Full-text search across conversation transcripts using FTS5. Fully functional.
-
-**Input:**
-```json
-{ "query": "calendar appointment", "channel": "telegram", "since": "2026-04-01T00:00:00Z", "limit": 10 }
-```
-
-**Output:**
-```json
-{
-  "results": [
-    {
-      "message_id": "uuid",
-      "session_id": "uuid",
-      "channel": "telegram",
-      "contact_id": "contact:chris",
-      "direction": "inbound",
-      "body": "What's on my calendar today?",
-      "created_at": "2026-04-12T10:05:00.000Z"
-    }
-  ],
-  "count": 1
-}
-```
-
-Returns `{ available: false }` if the FTS5 table is not initialized.
-
----
-
-## S7.4 — Session Tools
-
-### `get_session`
-
-Get details for a session — metadata plus any available AI summary. If no `session_id` is provided, returns the most recent session.
-
-**Input:**
-```json
-{ "session_id": "optional-uuid" }
-```
-
-**Output:**
-```json
-{
-  "session_id": "uuid",
-  "id": "uuid",
-  "conversation_id": "hash",
-  "channel": "telegram",
-  "contact_id": "contact:chris",
-  "started_at": "2026-04-12T10:00:00Z",
-  "last_activity": "2026-04-12T10:30:00Z",
-  "ended_at": null,
-  "message_count": 15,
-  "topic": "general",
-  "summary": {
-    "summary": "Discussed weekend plans.",
-    "model": "claude-opus-4-6",
-    "token_count": 320,
-    "created_at": "2026-04-12T10:45:00Z"
-  }
-}
-```
-
-`topic` (E32) is the conversation's topic (e.g. `"general"` or a Telegram forum `"thread:<hash>"`, E28), resolved via `conversation_registry`. Use it to target a proactive `send_message`/`schedule_message` at the same place this conversation is happening, instead of guessing — pass it as `send_message`'s `topic` param. `null` if the session's conversation has no matching `conversation_registry` row (shouldn't happen in practice).
-
-Returns `{ available: false }` if no session is found.
-
----
-
-### `list_sessions`
-
-Browse recent sessions with their summaries.
-
-**Input:**
-```json
-{ "channel": "telegram", "contact_id": "contact:chris", "since": "2026-04-01T00:00:00Z", "limit": 20 }
-```
-
-**Output:**
-```json
-{
-  "sessions": [ /* array of session objects (same shape as get_session) */ ],
-  "count": 5
-}
-```
-
----
-
-## E35 — Full Transcript Lookup
-
-### `get_transcript`
-
-Get the full, ordered message-by-message transcript for a specific session — every inbound and outbound message, oldest first. Complements `search_transcripts` (keyword-driven, cross-session snippets, no surrounding context) and `get_session` (metadata + summary only, no message content) — use this when you already have a `session_id` (from `list_sessions`, `get_session`, or a memory file reference) and want the actual conversation.
-
-**Input:**
-```json
-{ "session_id": "uuid", "limit": 200, "since": "2026-04-01T00:00:00Z", "before": "2026-04-02T00:00:00Z" }
-```
-
-`limit` defaults to 200, max 1000 (higher than `list_sessions`'/`search_transcripts`' 100 — a single session's full transcript, not a fan-out across sessions, is the unit here). `since`/`before` are `created_at` cursors for paging through a long-running session.
-
-**Output:**
-```json
-{
-  "transcript": [
-    {
-      "message_id": "uuid",
-      "session_id": "uuid",
-      "channel": "telegram",
-      "contact_id": "contact:chris",
-      "direction": "inbound",
-      "body": "What's on my calendar today?",
-      "created_at": "2026-04-12T10:05:00.000Z"
-    }
-  ],
-  "count": 1
-}
-```
-
-A session with zero transcript rows returns `{ "transcript": [], "count": 0 }`, not an error. Returns `{ available: false }` if the `session_id` doesn't exist.
-
----
-
-## S7.5 — Reactions
+Input: `{ "body": "...", "to"?: "chris@example.com", "subject"?: "Weekly status" }`
+Output: `{ "success": true, "message_id": "<uuid>", "to": "chris@example.com" }`
 
 ### `react_to_message`
 
-Send an emoji reaction to a message. Only works on channels that support reactions (`react: true` in adapter capabilities). Returns a graceful `success: false` (not an error) for unsupported channels.
+Input: `{ "message_id": "<bus id>", "emoji": "👍" }`
+Output: `{ "success": true, "emoji": "👍", "message_id": "..." }`, or `{ "success": false, "reason": "Reactions not supported on channel: email" }` on a channel without reactions.
 
-**Telegram emoji handling:** Telegram supports a specific set of ~74 reaction emoji. Any emoji not in that set is sent as a plain text message to the chat instead of a reaction bubble — the intent still lands, just in a different form. Variation selectors (U+FE0F) are stripped automatically before sending.
-
-**Input:**
-```json
-{ "message_id": "bus-msg-uuid", "emoji": "👍" }
-```
-
-**Output (success):**
-```json
-{ "success": true, "emoji": "👍", "message_id": "bus-msg-uuid" }
-```
-
-**Output (unsupported channel — not an error):**
-```json
-{ "success": false, "reason": "Reactions not supported on channel: claude-code-channels" }
-```
-
----
-
-## E28 — Telegram Group Topics
+Telegram accepts a fixed set of about 74 reaction emoji. Anything else is sent as a plain text message instead. Variation selectors are stripped automatically.
 
 ### `create_telegram_topic`
 
-Create a new forum topic in a Telegram group the bot has been added to. Group-only — not available for a contact's DM channel (DM Threaded Mode is retired, see [TELEGRAM_ADAPTER.md](./TELEGRAM_ADAPTER.md#group-topics--replies-e28)). Only registered when a Telegram adapter is configured.
+Creates a forum topic in a Telegram group the bot belongs to and starts a brand-new session for it. Requires the bot to have "Manage Topics" admin rights; the tool checks first and returns an error naming the fix. See [TELEGRAM_ADAPTER.md](TELEGRAM_ADAPTER.md#group-topics-and-replies).
 
-This always starts a **brand-new session** for the topic — a fresh forum topic has no prior conversation to inherit.
+Input: `{ "channel": "telegram:peggy:group:-100123", "name": "Trip planning", "context"?: "Track the May trip here" }`
+Output: `{ "topic": "thread:ab12cd34ef56ab12", "message_thread_id": 42, "name": "Trip planning" }`
 
-Requires the bot to have "Manage Topics" admin rights in the target group — verified before creating the topic, so a missing right returns a clear, actionable error naming the exact fix instead of an opaque API rejection.
+`context`, when given, is injected once into the agent's first turn on the topic. Pass the returned `topic` to `send_message` or `schedule_message` to target the thread.
 
-**Input:**
-```json
-{ "channel": "telegram:group:-100123456789", "name": "Wanda prep", "context": "Track Wanda birthday planning here" }
-```
+## Discovery and history
 
-`channel` is the group's channel id, as seen on `channel`/`metadata` of any inbound message from that group. `context` is optional — when given, it's injected into the agent's *first* turn on this topic only (consumed once, the moment the first real message lands on it), letting the agent explain why the topic exists or what it should track.
+### `list_channels`
 
-**Output (success):**
-```json
-{ "topic": "thread:ab12cd34ef56ab12", "message_thread_id": 42, "name": "Wanda prep" }
-```
+Output: the array from `GET /api/v1/adapters`: `[{ "id", "name", "channels", "capabilities" }]`.
 
-Pass the returned `topic` value as `topic` on a later `send_message`/`schedule_message` call to target this thread specifically.
+### `get_session`
 
-**Output (missing admin rights — an error, not a graceful `success: false`):**
-```
-Error: This bot lacks "Manage Topics" admin rights in this group. In Telegram: open the group, go to the member list, select this bot, "Edit Admin Rights", and enable "Manage Topics".
-```
+Input: `{ "session_id"?: "<uuid>" }`. Without an ID, returns the most recently started session.
 
----
+Output: `{ "session_id", "id", "conversation_id", "channel", "contact_id", "started_at", "last_activity", "ended_at", "message_count", "topic", "summary" }`. `contact_id` is the bare ID (`chris`). `topic` is where the conversation is threaded (`general` or `thread:<hash>`). `summary` is `null` unless the legacy summarizer ran. An unknown ID returns `{ "available": false, "reason": "..." }`.
 
-## Model Overrides
+### `list_sessions`
 
-Registered by `registerModelOverrideTools()` (`src/mcp/tools/model-overrides.ts`) on every MCP server — thin fetch wrappers over `/api/v1/model-overrides` (see [HTTP_API.md](./HTTP_API.md#model-overrides)). They let an agent change which model a `cc-headless` spawn uses without touching `config.yaml`; see [CC_HEADLESS_ADAPTER.md](./CC_HEADLESS_ADAPTER.md#runtime-model-overrides) for resolution order.
+Input: `{ "channel"?, "contact_id"?: "chris", "since"?: "<ISO 8601>", "limit"?: 20 }` (max 100).
+Output: `{ "sessions": [...], "count": n }`, newest first.
+
+### `get_transcript`
+
+Every message in one session, oldest first. Use it when a session ID from `list_sessions` or a memory file needs the actual conversation.
+
+Input: `{ "session_id": "<uuid>", "limit"?: 200, "since"?, "before"? }` (`limit` max 1000).
+Output: `{ "transcript": [{ "message_id", "session_id", "channel", "contact_id", "direction", "body", "created_at" }], "count": n }`. An empty session returns an empty array. An unknown ID returns `{ "available": false }`.
+
+### `search_transcripts`
+
+FTS5 keyword search across every session, newest first.
+
+Input: `{ "query": "calendar appointment", "channel"?, "since"?, "limit"?: 10 }` (max 100).
+Output: `{ "results": [<same row shape as get_transcript>], "count": n }`.
+
+### `fetch_attachment`
+
+Resolves an attachment ID (from an `[Inline image available … fetch_attachment(id="…")]` hint) to its path. See [ATTACHMENTS.md](ATTACHMENTS.md).
+
+Input: `{ "id": "<uuid>" }`
+Output: `{ "id", "local_path", "mime_type", "original_filename" }`, or an error if the attachment is unknown or expired.
+
+## Scheduling
+
+See [SCHEDULING.md](SCHEDULING.md) for semantics and the cron format.
+
+### `schedule_message`
+
+| Field | Required | Notes |
+|---|---|---|
+| `type` | yes | `once` or `cron` |
+| `prompt` | yes | Text delivered as if `sender` typed it |
+| `channel`, `sender` | yes | For example `telegram:peggy` and `contact:chris` |
+| `fire_at` | if `once` | ISO 8601, in the future |
+| `cron_expr` | if `cron` | For example `0 8 * * 1-5` |
+| `timezone` | no | IANA name, default `UTC` |
+| `topic`, `priority`, `label`, `max_fires` | no | |
+| `stale_after_ms` | no | `once` only. Dead-letter instead of firing if overdue by more than this |
+
+Output: `{ "ok": true, "id", "fire_at", "label" }`. Schedules created here have `created_by: agent`.
+
+### `list_schedules`
+
+Input: `{ "status"?: "active", "channel"?, "created_by"?, "limit"?: 20 }`. `status` is one of `active`, `paused`, `cancelled`, or `completed`; `limit` max 200.
+Output: `{ "schedules": [...], "count": n }`.
+
+### `cancel_schedule`
+
+Input: `{ "id": "<uuid>" }`. Output: `{ "ok": true, "id" }`.
+
+## Model overrides
+
+Change which model `cc-headless` passes to `claude -p` without editing config. Resolution order: schedule and agent, agent only, schedule only, global. `agent_id` is the full recipient ID, for example `agent:claude`. See [CC_HEADLESS_ADAPTER.md](CC_HEADLESS_ADAPTER.md#runtime-model-overrides).
+
+Two limitations, both tracked in `_bmad-output/maintenance-backlog.md`: schedule-scoped overrides can be stored but never apply, and `set_headless_model` fails because the server route returns `500`.
 
 ### `set_headless_model`
 
-Set or update a model override. `model` is required; `schedule_id`/`agent_id` scope it (omit both for a global default). `priority` (default `0`) breaks ties within the same scope.
-
-**Input:**
-```json
-{ "model": "claude-3-5-opus-20241022", "agent_id": "claude" }
-```
-
-**Output:**
-```json
-{ "ok": true, "id": 3, "model": "claude-3-5-opus-20241022", "scope": "agent=claude", "message": "Model override set to claude-3-5-opus-20241022 (agent=claude)" }
-```
+Input: `{ "model": "sonnet", "schedule_id"?, "agent_id"?: "agent:claude", "priority"?: 0 }`
+Output: `{ "ok": true, "id", "model", "scope": "agent=agent:claude", "message" }`
 
 ### `get_headless_model`
 
-Get the model that would currently be resolved for a scope, following the same specificity order as a real spawn.
-
-**Input:**
-```json
-{ "agent_id": "claude" }
-```
-
-**Output:**
-```json
-{ "ok": true, "model": "claude-3-5-opus-20241022", "scope": "agent" }
-```
-
-If nothing matches: `{ "ok": true, "model": null, "message": "No override found; using config default model" }`.
+Input: `{ "schedule_id"?, "agent_id"? }`
+Output: `{ "ok": true, "model": "sonnet", "scope": "agent" }`, or `{ "ok": true, "model": null, "message": "No override found; using config default model" }`.
 
 ### `list_headless_model`
 
-List all active overrides, ordered by specificity then priority/recency.
-
-**Input:** none
-
-**Output:**
-```json
-{ "ok": true, "count": 1, "overrides": [{ "id": 3, "scope": "agent=claude", "model": "claude-3-5-opus-20241022", "priority": 0, "created_at": "...", "updated_at": "..." }] }
-```
+Output: `{ "ok": true, "overrides": [{ "id", "scope", "model", "priority", "created_at", "updated_at" }], "count": n }`.
 
 ### `delete_headless_model`
 
-Delete one override by scope, or pass `all: true` to clear every override (irreversible).
+Input: `{ "schedule_id"?, "agent_id"? }` deletes one scope; `{ "all": true }` deletes every override.
+Output: `{ "ok": true, "deleted_count": n, "message" }`.
 
-**Input:**
-```json
-{ "agent_id": "claude" }
-```
+## Legacy memory store
 
-**Output:**
-```json
-{ "ok": true, "deleted_count": 1, "message": "Deleted 1 override(s) for schedule_id=undefined, agent_id=claude" }
-```
+Dormant unless `memory.structured_extraction` is true. The file-based memory model replaces it. See [MEMORY.md](MEMORY.md).
 
----
+### `recall_memory`
 
-## Error Response Shape
+Input: `{ "query": "...", "contact_id"?, "category"?, "limit"?: 10 }`. `limit` max 50; categories are `preference`, `fact`, `plan`, `relationship`, `work`, `health`, and `general`.
+Output: `{ "memories": [...], "count": n }`.
 
-All tools return errors as:
-```json
-{
-  "content": [{ "type": "text", "text": "Error: description of problem" }],
-  "isError": true
-}
-```
+### `log_memory`
 
-Capability errors (channel doesn't support reactions) return `success: false` without `isError: true` — they are expected outcomes, not failures.
+Input: `{ "contact_id": "chris", "content": "...", "category"?: "general", "confidence"?: 0.9, "source"?: "manual", "expires_at"? }`
+Output: `{ "ok": true, "id", "superseded": "<old id>" | null }`.
 
----
+## Polling adapter only
 
-## Implementation Notes
+### `get_adapter_status`
 
-- Tools are thin HTTP clients — all complex logic (DB queries, capability checks, adapter calls) lives in bus-core HTTP endpoints
-- `recall_memory` and `log_memory` are fully functional (E8) — they call bus-core HTTP endpoints backed by FTS5
-- `search_transcripts` is fully functional — `transcripts_fts` FTS5 table exists in the E1 schema
-- Platform message IDs for `react_to_message` are stored in `transcripts.metadata.platform_message_id` by adapters during inbound processing
-- `create_telegram_topic` follows the same pattern — `src/mcp/tools/telegram.ts` is a thin fetch wrapper; the admin-rights check, `createForumTopic` call, and thread-store upsert all live in `TelegramAdapter.createTopic()`, reached via `POST /api/v1/adapters/:id/topics`
+Output: `{ "status": "healthy" | "degraded" | "disconnected", "bus_reachable", "last_poll_at", "consecutive_failures" }`. See [CC_ADAPTER.md](CC_ADAPTER.md).

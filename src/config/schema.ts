@@ -51,6 +51,18 @@ const ContactPlatformsSchema = z.object({
       token: z.string().min(1),
     })
     .optional(),
+  siri: z
+    .object({
+      /**
+       * Bearer token the Peggy iOS app sends on `POST /api/v1/siri/ask` as
+       * `Authorization: Bearer <token>` (E42). Same identity model as pebble:
+       * the token resolves straight to this contact, unknown tokens are a hard
+       * 401. It is a send-as-contact credential, so it must be long and random
+       * (≥ 16 chars; `openssl rand -hex 24` is the documented way to mint one).
+       */
+      token: z.string().min(16),
+    })
+    .optional(),
 });
 
 /** A named contact that can send messages to the bus. */
@@ -280,6 +292,52 @@ const PebbleAdapterSchema = z.object({
   logging: WebhookLoggingConfigSchema,
 });
 
+/**
+ * Optional re-delivery of a late Siri reply on another channel (E43). Rendered
+ * with the shared `{{var}}` renderer; `{{body}}` is Peggy's reply and
+ * `{{question}}` the original ask. Accepted by the schema today so the config
+ * shape is stable; the adapter acts on it from E43.
+ */
+const SiriFallbackSchema = z.object({
+  channel: z.string().min(1),
+  template: z.string().default('Re your Siri question "{{question}}":\n{{body}}'),
+});
+
+/**
+ * Siri channel adapter (E42 spike, E43 production) — a bidirectional HTTP
+ * channel for the Peggy iOS app: `POST /api/v1/siri/ask` submits a question
+ * through the normal pipeline and holds the connection open until the agent's
+ * reply is delivered to `SiriAdapter.send()`, or `reply_timeout_ms` elapses.
+ * Identity comes from `contacts.*.platforms.siri.token` (E25 pattern). See
+ * docs/SIRI_ADAPTER.md.
+ */
+export const SiriAdapterSchema = z.object({
+  enabled: z.boolean().default(true),
+  /** Server-side cap on how long an ask (or a late-reply poll) may wait. Siri gives an intent ~30 s. */
+  reply_timeout_ms: z.number().int().min(1000).max(60000).default(25000),
+  /** E43 — retention of durable request/reply records. Accepted, not yet acted on. */
+  late_reply_ttl_ms: z.number().int().positive().default(86_400_000),
+  /** JSON body-size guard for the ask endpoint. Questions are short text. */
+  max_body_bytes: z.number().int().positive().default(8192),
+  /** E43 — per-token rate limits. Accepted, not yet enforced. */
+  rate_limit: z
+    .object({
+      per_minute: z.number().int().positive().default(20),
+      max_in_flight: z.number().int().positive().default(4),
+    })
+    .prefault({}),
+  /** E43 — late-reply re-delivery. Accepted, not yet acted on. */
+  fallback: SiriFallbackSchema.optional(),
+  /**
+   * E44 only — artificial delay (ms) before `POST /ask` responds, used to find
+   * Siri's real wait cutoff on device. The adapter refuses to start when this
+   * is > 0 and NODE_ENV=production.
+   */
+  debug_delay_ms: z.number().int().nonnegative().default(0),
+});
+
+export type SiriAdapterConfig = z.infer<typeof SiriAdapterSchema>;
+
 const AdaptersConfigSchema = z.object({
   telegram: z.union([TelegramAdapterSchema, z.record(z.string(), TelegramAdapterSchema)]).optional(),
   email: z.union([EmailAdapterSchema, z.record(z.string(), EmailAdapterSchema)]).optional(),
@@ -287,6 +345,7 @@ const AdaptersConfigSchema = z.object({
   'claude-code': ClaudeCodeAdapterSchema.optional(),
   'cc-headless': z.union([CcHeadlessAdapterSchema, z.record(z.string(), CcHeadlessAdapterSchema)]).optional(),
   pebble: PebbleAdapterSchema.optional(),
+  siri: SiriAdapterSchema.optional(),
 });
 
 const MemoryConfigSchema = z.object({
@@ -530,21 +589,24 @@ export const AppConfigSchema = z.object({
       }
     }
 
-    // Pebble bearer tokens double as sender identity — a token shared by two
-    // contacts would make sender resolution ambiguous, so duplicates are rejected.
-    const byToken = new Map<string, string>();
-    for (const [key, contact] of Object.entries(contacts)) {
-      const token = contact.platforms.pebble?.token;
-      if (!token) continue;
-      const owner = byToken.get(token);
-      if (owner) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: `Duplicate pebble token — also used by contact "${owner}"`,
-          path: [key, 'platforms', 'pebble', 'token'],
-        });
-      } else {
-        byToken.set(token, key);
+    // Pebble and Siri bearer tokens double as sender identity — a token shared
+    // by two contacts would make sender resolution ambiguous, so duplicates are
+    // rejected per platform.
+    for (const platform of ['pebble', 'siri'] as const) {
+      const byToken = new Map<string, string>();
+      for (const [key, contact] of Object.entries(contacts)) {
+        const token = contact.platforms[platform]?.token;
+        if (!token) continue;
+        const owner = byToken.get(token);
+        if (owner) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `Duplicate ${platform} token — also used by contact "${owner}"`,
+            path: [key, 'platforms', platform, 'token'],
+          });
+        } else {
+          byToken.set(token, key);
+        }
       }
     }
   }),

@@ -1,297 +1,214 @@
-# AgentBus Deployment Guide
+# Deployment
 
-Deploying AgentBus. The system runs as a single pm2-managed process (`bus-core`) with platform adapters (Telegram, BlueBubbles) running in-process. Agent connectors (Claude Code) are separate processes spawned by their respective runtimes. Most operational tasks can be done via `make` targets or pm2 directly.
-
----
+bus-core runs as one pm2-managed process. Platform adapters (Telegram, email, the Pebble webhook) and the headless Claude Code adapter run inside it. The only separate process is the MCP server that `claude -p`, or an interactive Claude Code session, spawns.
 
 ## Prerequisites
 
-- Node.js 20+ and npm installed
-- pm2 (installed as a dev dependency — no global install needed)
-- A Telegram bot token (from @BotFather)
-- BlueBubbles server running and accessible on the local network
-- `config.yaml` and `.env` populated (see below)
+- Node.js 20 or later and npm.
+- The `claude` CLI on `PATH`, if you use the `cc-headless` adapter.
+- Credentials for the channels you enable: a Telegram bot token from @BotFather, an IMAP/SMTP app-specific password for email.
+- pm2 is a dev dependency. No global install is needed.
 
----
+## First-time setup
 
-## First-Time Setup
+1. Install dependencies:
 
-### 1. Install dependencies
+   ```bash
+   cd /path/to/agentbus
+   npm install
+   ```
 
-```bash
-cd /path/to/agentbus
-npm install
-```
+2. Create the config files:
 
-### 2. Configure secrets
+   ```bash
+   cp .env.example .env
+   cp config.yaml.example config.yaml
+   ```
 
-Copy the example files and fill in your credentials:
+   `.env` holds secrets only and is never committed:
 
-```bash
-cp .env.example .env
-cp config.yaml.example config.yaml
-```
+   ```
+   TELEGRAM_BOT_TOKEN=...
+   ICLOUD_APP_PW=...          # only if you enable the email adapter
+   ANTHROPIC_API_KEY=...      # only if memory.structured_extraction is true
+   ```
 
-**`.env`** — secrets only, never committed:
-```
-TELEGRAM_BOT_TOKEN=your-telegram-bot-token
-BLUEBUBBLES_PASSWORD=your-bluebubbles-server-password
-CLAUDE_API_KEY=your-anthropic-api-key
-```
+   `config.yaml` references them as `${VAR_NAME}`. A minimal headless deployment:
 
-**`config.yaml`** — references secrets via `${VAR_NAME}` substitution:
-```yaml
-bus:
-  http_port: 3000
-  # host: 127.0.0.1        # default — loopback only. See "Exposing bus-core
-  #                         # to a reverse proxy" below before changing this.
-  db_path: /Users/you/.agentbus/agentbus.db
-  log_level: info
+   ```yaml
+   bus:
+     http_port: 3000
+     db_path: ~/.agentbus/agentbus.db
 
-adapters:
-  telegram:
-    token: ${TELEGRAM_BOT_TOKEN}
-    poll_timeout: 30
-  bluebubbles:
-    server_url: http://192.168.1.x:1234
-    webhook_port: 3002
-  claude-code:
-    poll_interval_ms: 1000
+   adapters:
+     telegram:
+       token: ${TELEGRAM_BOT_TOKEN}
+     cc-headless:
+       agent_id: claude
+       working_dir: /home/you/agent      # where the agent's CLAUDE.md and memory/ live
+       system_prompt: |
+         You are a helpful assistant for {{contact_id}} on {{channel}}. Today is {{date}}.
+         Deliver every user-facing message with the `reply` tool, using the [id:<id>] shown.
+         {{memories}}
 
-contacts:
-  chris:
-    id: chris
-    displayName: Chris
-    platforms:
-      telegram:
-        userId: 123456789
-      bluebubbles:
-        handle: "+15551234567"
+   contacts:
+     chris:
+       id: chris
+       displayName: Chris
+       platforms:
+         telegram:
+           userId: 123456789
 
-memory:
-  summarizer_interval_ms: 60000
-  session_idle_threshold_ms: 1800000   # 30 minutes
-  context_window_hours: 48
-  claude_api_model: claude-opus-4-6
-```
+   pipeline:
+     routes:
+       - match: { channel: telegram }
+         target: { adapterId: cc-headless, recipientId: agent:claude }
+   ```
 
-### 3. Create log and data directories
+   `config.yaml.example` documents every option. A leading `~` in any path value expands to your home directory.
 
-```bash
-mkdir -p ~/.agentbus/logs
-mkdir -p ~/.agentbus/data   # or wherever db_path points
-```
+3. Run once in the foreground to create the database and apply migrations, then stop it with Ctrl+C:
 
-### 4. Initialize the database
+   ```bash
+   npx tsx src/index.ts
+   ```
 
-Run bus-core once to create the SQLite file and run migrations:
+4. Start under pm2 and save the process list:
 
-```bash
-npx tsx src/index.ts
-# Ctrl+C once you see "bus-core ready"
-```
+   ```bash
+   make start
+   ```
 
-### 5. Start with pm2
+5. To restart after a reboot, run pm2's startup hook once and execute the command it prints:
 
-```bash
-make start     # starts both processes and saves the process list
-```
+   ```bash
+   ./node_modules/.bin/pm2 startup
+   ```
 
-To survive reboots, run pm2's startup hook once:
+## Daily operations
 
-```bash
-./node_modules/.bin/pm2 startup
-# run the printed command (e.g. sudo env PATH=... pm2 startup systemd)
-```
-
-After that, processes auto-restart after a reboot with no manual intervention.
-
----
-
-## Daily Operations
-
-Makefile targets cover the common cases:
-
-| Command | What it does |
-|---------|-------------|
-| `make start` | Start (or restart) `bus-core`, save process list |
+| Target | What it does |
+|---|---|
+| `make start` | Start or restart `bus-core` under pm2 and save the process list |
 | `make stop` | Stop and remove `bus-core` from pm2 |
-| `make restart` | Restart `bus-core` (use after config changes) |
-| `make status` | Detailed status for `bus-core` |
-| `make logs` | Tail the `bus-core` process log |
+| `make restart` | Restart `bus-core`. Use after config changes |
+| `make status` | `pm2 describe bus-core` |
+| `make logs` | Tail the `bus-core` log |
+| `make dev` | Run in the foreground with `AGENTBUS_CONFIG` |
+| `make debug-payloads` | Run in the foreground and log raw Telegram updates without forwarding them |
+| `make kill` | Kill a foreground `src/index.ts` process |
+| `make help` | List targets |
 
-`status` and `restart` use `pm2 describe bus-core`, which scopes to this
-process — the pm2 daemon is shared across every project on the machine, so
-plain `pm2 status`/`pm2 list` would show unrelated processes too. Note that
-`pm2 describe` also prints a "Divergent env variables from local env" table
-when your shell env differs from the process env; this can include secrets
-(e.g. API keys) in plaintext in your terminal.
+`AGENTBUS_CONFIG=/path/to/config.yaml` overrides the config location for every target.
 
-For lower-level pm2 operations, use `./node_modules/.bin/pm2` directly:
+`pm2 describe` scopes output to this process; the pm2 daemon is shared across every project on the machine. Its "Divergent env variables" table can print secrets to your terminal.
 
-```bash
-./node_modules/.bin/pm2 show bus-core          # detailed info for one process
-./node_modules/.bin/pm2 logs bus-core          # tail one process
-./node_modules/.bin/pm2 logs --lines 200 bus-core
-./node_modules/.bin/pm2 restart bus-core       # restart one process
-```
+Log files: `~/.agentbus/logs/bus-core-out.log` and `~/.agentbus/logs/bus-core-error.log`.
 
-Log files: `~/.agentbus/logs/{name}-out.log` and `~/.agentbus/logs/{name}-error.log`
+### Safe restart
 
----
+`scripts/safe_restart.sh [--notify-channel <channel>] [--notify-topic <topic>]` restarts bus-core from a detached process, waits for `/api/v1/health` to report healthy, and rolls back to `main` if it does not. Before restarting it creates a one-shot schedule with a 45-minute staleness ceiling, so the agent reports back in the conversation that asked for the restart even if the script itself is killed. Logs go to `logs/safe_restart/<timestamp>.log`. The script header describes the full sequence.
 
-## Startup Order
+## Configuration changes
 
-pm2 starts bus-core, which in turn starts all platform adapters in-process. The Telegram adapter's inbound loop begins polling immediately after the HTTP server is ready. If the Telegram API is unreachable, the inbound loop backs off exponentially and retries automatically.
+Edit `config.yaml` or `.env`, then `make restart`. There is no live reload.
 
----
+## Startup order
 
-## Configuration Changes
-
-After editing `config.yaml` or `.env`:
-
-```bash
-make restart
-```
-
-Changes take effect on the next restart. No reload mechanism exists yet.
-
----
+bus-core loads config, opens SQLite and runs migrations, starts the HTTP server, then starts adapters, the delivery worker, headless instances, the session tracker, the attachment sweeper, and the scheduler. If Telegram or IMAP is unreachable, the adapter backs off and retries; startup does not fail.
 
 ## Exposing bus-core to a reverse proxy
 
-By default `bus-core` binds `127.0.0.1` — reachable only from processes on
-this same machine (this is how the `claude-code` and `cc-headless` adapters
-talk to it). A webhook-based channel whose sender lives on another device
-(e.g. a Pebble Ring proxy, or any reverse proxy running on a different host)
-cannot reach a loopback-only port — the connection is refused at the OS
-level regardless of firewall rules.
+By default bus-core binds `127.0.0.1`, reachable only from processes on the same machine. A webhook sender on another device (for example a Pebble Ring proxy) cannot reach a loopback-only port.
 
-If your reverse proxy (nginx, Nginx Proxy Manager, Caddy, …) runs:
+If your reverse proxy (nginx, Caddy, Nginx Proxy Manager) runs:
 
-- **On this same machine** (including a Docker Desktop for Mac container,
-  which can reach loopback-bound host ports via `host.docker.internal`) —
-  no change needed.
-- **On a different machine on your LAN** — set `bus.host: 0.0.0.0` in
-  `config.yaml` and `make restart`. This makes bus-core reachable from
-  anywhere on the LAN that can route to this machine's IP, on
-  `bus.http_port`. `127.0.0.1`-bound local callers keep working unchanged —
-  `0.0.0.0` still accepts loopback connections.
+- **On this machine**, including a Docker Desktop for Mac container reaching host ports through `host.docker.internal`: no change is needed.
+- **On another machine on your LAN**: set `bus.host: 0.0.0.0` in `config.yaml` and `make restart`. Loopback callers keep working.
 
-**Before widening `bus.host`:** every HTTP route becomes reachable from the
-LAN, not just the one your proxy is meant to expose — most routes have no
-per-request auth of their own (a webhook channel like Pebble is the
-exception; it gates on its own bearer token). Set `bus.auth_token` as well
-if anything besides your intended proxy path could reach this port, and
-point the reverse proxy at only the specific path(s) you mean to expose
-(e.g. `/api/v1/webhooks/pebble`) rather than the whole host — most reverse
-proxies support per-path routing to different upstreams or access rules.
+Before widening `bus.host`, note that every route becomes reachable from the LAN, and most routes have no auth of their own (the Pebble webhook's bearer token is the exception). Set `bus.auth_token` as well, and point the proxy at only the paths you mean to expose, such as `/api/v1/webhooks/pebble`.
 
----
+## Exposing the Siri endpoint on your tailnet
 
-## FTS Index Recovery
+The Peggy iOS app reaches `POST /api/v1/siri/ask` over Tailscale. Mount only that path prefix on the Mac's tailnet HTTPS listener, so the phone gets a valid certificate and cannot reach any other bus route:
 
-If the FTS search index becomes out of sync (e.g., after restoring from backup):
+```bash
+tailscale serve --bg --https=443 --set-path /api/v1/siri http://127.0.0.1:3000/api/v1/siri
+tailscale serve status
+```
+
+The app's base URL is `https://<hostname>.<tailnet>.ts.net`. Turn on Tailscale's *Connect on demand* on the phone so Siri-triggered asks work on cellular. `bus.host` does not need to change. See [SIRI_ADAPTER.md](SIRI_ADAPTER.md).
+
+## FTS index recovery
+
+If transcript search returns stale results, for example after restoring the database from a backup, rebuild the FTS5 indexes:
 
 ```bash
 ./node_modules/.bin/pm2 stop bus-core
 AGENTBUS_CONFIG=/path/to/config.yaml npx tsx src/index.ts --rebuild-fts
+# wait for "bus-core ready", then press Ctrl+C
 ./node_modules/.bin/pm2 start bus-core
 ```
 
-The `--rebuild-fts` flag rebuilds all FTS5 indices from source tables and then exits. The process should not stay running — let pm2 start it normally afterward.
+The flag rebuilds the indexes during startup and then continues into normal operation. It does not exit on its own.
 
----
+## Rotating secrets
 
-## Rotating Secrets
+1. Update the value in `.env`.
+2. `make restart`. Adapters read tokens at startup only.
 
-### Telegram bot token
+## Dead letters
 
-1. Get new token from @BotFather
-2. Update `.env`: `TELEGRAM_BOT_TOKEN=new-token`
-3. `make restart` (Telegram adapter runs in-process with bus-core)
+Messages that cannot be delivered move from `message_queue` to the `dead_letter` table with a `reason`. There is no retry endpoint or slash command. Inspect and requeue by hand:
 
-The adapter reads the token at startup; no db changes needed.
-
-### Claude API key
-
-1. Rotate at console.anthropic.com
-2. Update `.env`: `CLAUDE_API_KEY=new-key`
-3. `./node_modules/.bin/pm2 restart bus-core` (the summarizer uses it)
-
----
-
-## Dead Letter Management
-
-Dead-lettered messages are messages that could not be delivered after all retries. They accumulate in the `dead_letter` table and expire automatically after 24 hours.
-
-**Via slash command** (from Telegram or iMessage):
-```
-/dead-letter          # list recent dead-lettered messages
-/dead-letter retry <message_id>   # re-enqueue a specific message
-```
-
-**Via REST API** (see `docs/HTTP_API.md`):
 ```bash
-curl http://localhost:3000/api/v1/dead-letter
-curl -X POST http://localhost:3000/api/v1/dead-letter/<id>/retry
+sqlite3 ~/.agentbus/agentbus.db \
+  "SELECT created_at, reason, substr(payload,1,120) FROM dead_letter ORDER BY created_at DESC LIMIT 20"
 ```
 
----
+`GET /api/v1/messages/:id` still returns a dead-lettered message by its original ID. Rows are kept indefinitely.
 
-## Mac Mini Reboot Recovery
+## Reboot recovery
 
-After a hard reboot (power loss, OS update):
+If `pm2 startup` was configured, bus-core restarts automatically. Verify with `make status`. If it did not come back, run `make start`, then run the `pm2 startup` command again.
 
-1. pm2 auto-restarts all processes if `pm2 startup` was run during setup
-2. Verify with `make status` — all processes should be `online` within ~30s
-3. If any process is `errored`, check `./node_modules/.bin/pm2 logs <name>` for the cause
+## Incident runbook
 
-If pm2 startup was never set up, processes won't auto-start. Fix:
-```bash
-make start
-./node_modules/.bin/pm2 startup   # run the printed command as root
-```
+### Delivery failures
 
----
+Symptom: replies stop arriving, or the `dead_letter` table grows.
 
-## Incident Runbook
+1. `make logs` and look for `[delivery]`, `[telegram]`, or `[email]` errors.
+2. `curl http://localhost:3000/api/v1/health` to check adapter status.
+3. If Telegram is rate limiting, wait, then `make restart`.
+4. Inspect the `dead_letter` table (above) for the failure reason.
 
-### Dead letter spike
+### Headless turns fail or hang
 
-**Symptom:** `/status` reports many dead-lettered messages, or delivery is silently failing.
+Symptom: users receive the `error_reply` text, or nothing.
 
-1. `make logs` — look for repeated errors in the delivery worker or adapter
-2. Check adapter health: `curl http://localhost:3000/api/v1/health`
-3. If Telegram is rate-limiting, wait and restart: `make restart`
-4. Inspect dead letters: `/dead-letter` from any channel
-5. Retry recoverable messages: `/dead-letter retry <id>`
-6. Messages that fail 3 retries require manual investigation
+1. `make logs` and look for `[cc-headless]` lines. Set `error_passthrough: true` temporarily to see the raw failure in the reply.
+2. Confirm `claude` runs from a shell as the pm2 user and that `working_dir` exists.
+3. Send `/stop` from the affected chat to kill a stuck turn, or `/clear` to start a fresh session.
+
+### bus-core won't start
+
+Symptom: pm2 shows `errored` and keeps restarting.
+
+1. `./node_modules/.bin/pm2 logs bus-core --lines 50`. The cause is usually config validation.
+2. Common causes: a `${VAR}` in `config.yaml` missing from `.env`, port 3000 in use (`lsof -i :3000`), an invalid instance name, or a duplicate token.
+3. Run in the foreground for the full error: `AGENTBUS_CONFIG=./config.yaml npx tsx src/index.ts`.
+
+### Journaling never runs
+
+Symptom: `last_journaled_at` on headless sessions stays stale while `last_activity` advances.
+
+Look for `[session-tracker] Journaling sweep is a no-op bus-wide` in the logs. It means no `cc-headless` instance is configured or registered. See [MEMORY_MODEL.md](MEMORY_MODEL.md).
 
 ### Summarizer not running
 
-**Symptom:** `memory.last_summarizer_run` is stale in the health response, or context injection at session start returns no summaries.
+Only relevant when `memory.structured_extraction: true`. Check for `[summarizer]` errors in the logs. The usual cause is a missing or invalid `ANTHROPIC_API_KEY`.
 
-1. `./node_modules/.bin/pm2 logs bus-core` — look for errors in the summarizer loop
-2. Most common cause: invalid or expired Claude API key
-3. Verify: `curl https://api.anthropic.com/v1/models -H "x-api-key: $CLAUDE_API_KEY"`
-4. Rotate the key if needed (see above), then `pm2 restart bus-core`
+### Claude Code MCP adapter not connecting
 
-### Bus-core won't start
-
-**Symptom:** `pm2 status` shows bus-core `errored` and it keeps restarting.
-
-1. `./node_modules/.bin/pm2 logs bus-core --lines 50` — most likely a config validation error
-2. Common causes:
-   - `config.yaml` references an env var not set in `.env`
-   - `db_path` directory doesn't exist
-   - Port 3000 already in use (`lsof -i :3000`)
-3. Run manually for full error output: `AGENTBUS_CONFIG=./config.yaml npx tsx src/index.ts`
-
-### Claude Code adapter not connecting
-
-The claude-code-adapter is **not managed by pm2** — it's spawned by Claude Code via MCP. If tools aren't working in a Claude Code session:
-
-1. Check Claude Code's MCP server config (`~/.claude/mcp.json` or equivalent)
-2. Verify bus-core is running: `curl http://localhost:3000/api/v1/health`
-3. Start a new Claude Code session (the adapter process is per-session)
+The MCP server is spawned by Claude Code, not pm2. Check the project's `.mcp.json`, confirm bus-core is healthy, and start a new Claude Code session. See [CC_ADAPTER.md](CC_ADAPTER.md).

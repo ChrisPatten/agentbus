@@ -1,145 +1,85 @@
-# Claude Code Adapter
+# Claude Code MCP adapter
 
-The `cc` adapter (`src/adapters/cc.ts`) is an MCP server that runs as a subprocess of Claude Code. It bridges the AgentBus message pipeline to a Claude Code agent using the MCP protocol over stdio.
+`src/adapters/cc.ts` is an MCP server that Claude Code spawns over stdio. It registers the AgentBus tool set (see [MCP_TOOLS.md](MCP_TOOLS.md)) and talks to bus-core only through the HTTP API. It runs in one of two modes.
 
-## How It Works
+| Mode | When | What it does |
+|---|---|---|
+| Tools only (`AGENTBUS_TOOLS_ONLY=true`) | Spawned by the headless adapter for every `claude -p` turn | Registers the headless tool subset and serves tool calls. No polling |
+| Polling (default) | A persistent, interactive Claude Code session lists the adapter in `.mcp.json` | Polls bus-core for messages addressed to the agent and injects them into the session as channel notifications |
 
-1. Claude Code launches the adapter as an MCP server (configured in `.mcp.json`).
-2. The adapter polls the bus HTTP API for messages addressed to the configured agent ID (e.g. `agent:claude`).
-3. When messages arrive, the adapter wakes Claude Code using `sampling/createMessage`, delivering the message content as a new user turn.
-4. Claude Code processes the message and calls the `reply` MCP tool to send a response back through the bus.
+The headless adapter ([CC_HEADLESS_ADAPTER.md](CC_HEADLESS_ADAPTER.md)) is the primary agent runtime. Polling mode remains for operators who keep a long-lived Claude Code session open. Sessions on that path close on idle and can fire the `on_session_close` hook (see [MEMORY.md](MEMORY.md)).
 
-## Proactive Delivery
+All logging goes to stderr. stdout is the MCP protocol stream.
 
-The adapter uses the `claude/channel` MCP extension to initiate new Claude Code turns autonomously — no human prompt required.
+## Environment variables
 
-### Mechanism
+| Variable | Default | Purpose |
+|---|---|---|
+| `AGENTBUS_CONFIG` | `./config.yaml` | Config file. The `.env` next to it is loaded too |
+| `AGENTBUS_AGENT_ID` | `claude` | Recipient to poll for (`agent:<id>`). Polling mode only |
+| `AGENTBUS_TOOLS_ONLY` | unset | `true` selects tools-only mode |
 
-The server declares `experimental: { 'claude/channel': {} }` in its capabilities. When inbound messages arrive, the adapter emits a `notifications/claude/channel` notification with the formatted message as `content`. Claude Code automatically wraps it in a `<channel>` tag (source set from the server name) and injects it as a new turn:
+The only config field this process reads is `adapters.claude-code.poll_interval_ms` (default `1000`). The schema also accepts `sampling_max_tokens` and `plugin`, but nothing reads them.
+
+## Polling mode
+
+Each poll calls `GET /api/v1/messages/pending?agent=<id>&limit=10`, acknowledges every message with `POST /api/v1/messages/:id/ack`, formats the acknowledged batch into one text block, and emits a `notifications/claude/channel` notification. Claude Code wraps the text in a `<channel source="...">` tag and starts a new turn; no human prompt is needed. The adapter then calls `POST /api/v1/adapters/<channel>/typing` for each message so the source platform shows activity. Email channels are skipped.
+
+After three consecutive poll failures the interval backs off to 5 seconds and `get_adapter_status` reports `degraded`; after ten it reports `disconnected`. A successful poll resets both.
+
+### Message format
 
 ```
-<channel source="agentbus-claude-code" ts="2026-04-10T12:00:00.000Z">
-New message from contact:alice via telegram [id:msg-abc123]:
-Hey, how are you?
-</channel>
+New message from contact:alice via telegram:peggy at 2026-09-14T10:00 [id:msg-abc123]:
+What's the weather like?
+
+New message from contact:bob via email at 10:02 [id:msg-def456]:
+[Replying to Alice: "see attached"]
+Here is the document
+[File: /tmp/agentbus/claude/3f1a.pdf — report.pdf]
 ```
 
-No capability negotiation is needed — the notification fires unconditionally on every inbound message batch.
+- Messages in one poll are separated by a blank line. The first carries a full timestamp, later ones the time only.
+- A reaction renders as `[reacted 👍 to message 555:42]` or `[removed reaction 👍 to message 555:42]`.
+- A quoted reply renders as a `[Replying to <name>: "<text>"]` line before the body.
+- Attachments append `[Image: <path>]` and `[File: <path> — <name>]` lines; inline email images append a `fetch_attachment` hint. See [ATTACHMENTS.md](ATTACHMENTS.md).
+- One-shot context from `create_telegram_topic` is prepended to a topic's first message.
+- In polling mode only, the legacy `<memory>` block from the memory-inject stage is prepended when a new session starts and summaries exist.
 
-### Required flag
+The agent replies with `reply(message_id="<id>", body="...")`. The tool resolves channel and recipient from the original message.
 
-During the research preview, custom channels must be declared via `--dangerously-load-development-channels`. Start Claude Code with:
+### Setup
+
+Add the server to the Claude Code project's `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "agentbus": {
+      "command": "npx",
+      "args": ["tsx", "/abs/path/to/agentbus/src/adapters/cc.ts"],
+      "env": { "AGENTBUS_CONFIG": "/abs/path/to/config.yaml", "AGENTBUS_AGENT_ID": "claude" }
+    }
+  }
+}
+```
+
+Channel notifications are a Claude Code preview feature and must be enabled when the session starts:
 
 ```bash
 claude --permission-mode auto --dangerously-load-development-channels server:agentbus
 ```
 
-where `server:agentbus` matches the key name in `.mcp.json`.
+`server:agentbus` matches the key in `.mcp.json`. Add a note to the agent's `CLAUDE.md` describing the message format and the `reply` tool so it responds reliably.
 
-### Message Format
+## Tools-only mode
 
-Each `createMessage` call delivers a user turn with this format:
+The headless adapter writes a temporary MCP config that launches this file with `AGENTBUS_TOOLS_ONLY=true` and passes it to `claude -p --mcp-config`. `registerHeadlessTools()` in `src/mcp/tools/index.ts` registers every tool except `get_adapter_status`, which has no meaning without a poll loop. The process exits when the `claude -p` turn ends.
 
-```
-New message from {sender} via {channel} [id:{message_id}]:
-{body}
-```
-
-Multiple messages in a single poll batch are concatenated as separate paragraphs (separated by a blank line) in one user turn.
-
-### Serialization Queue
-
-Only one `createMessage` call is in-flight at a time. If messages arrive while a call is pending, they are queued and delivered sequentially after the current call completes. The queue has no maximum depth — no messages are ever dropped.
-
-Queue state is logged at every enqueue and drain step for observability.
-
-### Error Handling
-
-If `createMessage` fails (client rejection, timeout, network error), the error is logged at `error` level and the queue continues draining. Messages are **not** removed from `messageBuffer` on failure — they remain retrievable via the `get_pending_messages` tool for manual recovery.
-
-## Configuring Your Agent
-
-This section describes what the agent (e.g., a Claude Code instance) needs to know to participate in the AgentBus message loop.
-
-### How Messages Arrive
-
-When a message is delivered to the agent, the adapter emits a `notifications/claude/channel` event, which Claude Code injects as a new turn — no human input required. The turn delivered to the agent looks like this:
-
-```
-<channel source="agentbus" ts="2026-04-10T12:00:00.000Z">
-New message from contact:alice via telegram [id:msg-abc123]:
-What's the weather like?
-</channel>
-```
-
-For a batch of messages arriving in the same poll cycle, each message is separated by a blank line inside the `<channel>` wrapper:
-
-```
-New message from contact:alice via telegram [id:msg-001]:
-First message here.
-
-New message from contact:bob via bluebubbles [id:msg-002]:
-Second message here.
-```
-
-### Responding to a Message
-
-Extract the `id` value from the bracketed `[id:...]` tag and pass it to the `reply` MCP tool:
-
-```
-reply(message_id="msg-abc123", body="The weather is sunny and 72°F.")
-```
-
-The `reply` tool routes the response back through the originating channel automatically. You do not need to specify the channel explicitly.
-
-### Token Budget
-
-The `maxTokens` for the turn is set by `sampling_max_tokens` in `config.yaml` (default: 8192). Keep responses within this budget. For long responses, consider summarizing rather than exhausting the limit.
-
-### Adding This to Your Agent's Instructions
-
-Add a note to your agent's system prompt or `CLAUDE.md` describing the AgentBus message format so it recognizes messages reliably. Example:
-
-> Messages from AgentBus arrive as a new user turn. Each message includes a sender, channel, and bracketed message ID (e.g., `[id:msg-abc123]`). Always call `reply` with that message ID to send a response.
-
-### Fallback: Manual Polling
-
-If the client does not declare the `sampling` capability (older Claude Code version), messages accumulate in the buffer and are **not** pushed automatically. In this case:
-
-- The adapter logs: `sampling capability not declared by client — falling back to sendLoggingMessage`
-- Messages must be retrieved manually by calling the `get_pending_messages` tool
-- A `/loop` skill or human trigger can be used to poll periodically as a stopgap
-
-## Configuration
-
-In `config.yaml` under `adapters.claude-code`:
-
-| Field | Default | Description |
-|-------|---------|-------------|
-| `poll_interval_ms` | `1000` | How often to poll the bus for pending messages (milliseconds) |
-| `sampling_max_tokens` | `8192` | `maxTokens` value passed to `sampling/createMessage` |
-| `plugin` | — | Optional plugin script path |
-
-## Registered MCP Tools
-
-| Tool | Description |
-|------|-------------|
-| `reply` | Send a reply back to the originating channel |
-| `get_pending_messages` | Retrieve buffered messages manually (fallback path) |
-| `get_adapter_status` | Check adapter health and bus connectivity |
-
-## Fallback Path
-
-When sampling is unavailable (older Claude Code version or capability not declared), a human or a `/loop` skill can trigger `get_pending_messages` manually to retrieve and process buffered messages.
-
-## Running
+## Running by hand
 
 ```bash
 AGENTBUS_CONFIG=/path/to/config.yaml npx tsx src/adapters/cc.ts
 ```
 
-In production, Claude Code launches this automatically via the `.mcp.json` server definition.
-
-## Alternative: Headless Adapter
-
-For deployments that don't want a persistent Claude Code session, see **[CC_HEADLESS_ADAPTER.md](CC_HEADLESS_ADAPTER.md)** — an in-process adapter that spawns `claude -p` per message batch with session continuity via `--resume`.
+Useful for checking that the server starts. In normal operation Claude Code or the headless adapter spawns it.

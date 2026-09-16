@@ -12,6 +12,8 @@
  * POST /api/v1/inbound                   — Inbound pipeline entry point.
  * POST /api/v1/webhooks/pebble           — Pebble Ring voice-memo webhook (E25).
  *                                          Only registered when adapters.pebble.enabled.
+ * POST /api/v1/siri/ask                  — Siri channel ask (E42, src/http/siri-routes.ts).
+ * GET  /api/v1/siri/health                 Only registered when adapters.siri.enabled.
  *
  * Authentication
  * ──────────────
@@ -57,6 +59,8 @@ import type { CommandRegistry, SlashCommandContext } from '../commands/registry.
 import { createSafeDatabase } from '../db/safe-database.js';
 import { logOutboundTranscript } from '../pipeline/outbound-transcript.js';
 import { logWebhookRequest } from './webhook-log.js';
+import { registerSiriRoutes } from './siri-routes.js';
+import type { SiriAdapter } from '../adapters/siri.js';
 import { VERSION } from '../version.js';
 
 export interface HttpServerDeps {
@@ -69,6 +73,11 @@ export interface HttpServerDeps {
   commandRegistry?: CommandRegistry;
   /** Optional — set of adapter IDs currently paused; mutated by /pause and /resume */
   pauseSet?: Set<string>;
+  /**
+   * Optional — the registered Siri channel adapter (E42). When present and
+   * `config.adapters.siri.enabled`, the `/api/v1/siri/*` routes are mounted.
+   */
+  siri?: SiriAdapter;
 }
 
 const MessagePayloadSchema = z.discriminatedUnion('type', [
@@ -1695,6 +1704,27 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
         console.log(`[http:pebble] not queued reason=${result.reason}`);
       }
       return result;
+    });
+  }
+
+  // /api/v1/siri/* — Siri channel (E42). Mirrors the Pebble block: mounted only
+  // when configured, per-contact bearer token as identity. The adapter is the
+  // send() target that completes the waiting request — see src/adapters/siri.ts.
+  if (config.adapters.siri?.enabled && deps.siri) {
+    registerSiriRoutes(server, {
+      config,
+      registry,
+      siri: deps.siri,
+      submitInbound: (message) =>
+        processInbound(message, {
+          queue,
+          pipeline,
+          config,
+          db,
+          registry,
+          commandRegistry: deps.commandRegistry,
+          pauseSet: deps.pauseSet,
+        }),
     });
   }
 

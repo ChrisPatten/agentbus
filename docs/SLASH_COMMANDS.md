@@ -2,7 +2,7 @@
 
 Slash commands let you operate AgentBus from any connected channel without SSH access. Type a command in any adapter (Telegram, iMessage, etc.) and the bus responds directly.
 
-## Command Reference
+## Command reference
 
 | Command | Description | Example |
 |---------|-------------|---------|
@@ -32,7 +32,7 @@ Queue:
   dead_letter: 0
 ```
 
-If an adapter is paused it shows `[PAUSED]` next to its name.
+If an adapter is paused it shows `[PAUSED]` next to its name. The `dead_letter` line counts `message_queue` rows with that status; dead-lettered messages are moved to a separate table, so it is always 0.
 
 ### `/help [command]`
 
@@ -109,7 +109,7 @@ If nothing is running for the sender, or the headless adapter isn't running at a
 -> No active turn to stop.
 ```
 
-**Telegram-only side effect:** if the source channel is Telegram and a live tool-call status draft is open (see [TELEGRAM_ADAPTER.md](./TELEGRAM_ADAPTER.md#live-tool-call-status-stream-e29)), `/stop` appends a "Stopped by user" line to it and finalizes it in place — the message persists in the chat as-is rather than being silently abandoned or later overwritten. **That finalized line is the only confirmation you get** — `/stop` sends no separate reply in this case, to avoid showing the same "stopped" information twice. On any other channel (or when no draft was open, e.g. the turn hadn't made a tool call yet), `/stop` falls back to a plain text confirmation instead:
+**Telegram-only side effect:** if the source channel is Telegram and a live tool-call status draft is open (see [TELEGRAM_ADAPTER.md](./TELEGRAM_ADAPTER.md#live-tool-call-status-stream)), `/stop` appends a "Stopped by user" line to it and finalizes it in place — the message persists in the chat as-is rather than being silently abandoned or later overwritten. **That finalized line is the only confirmation you get** — `/stop` sends no separate reply in this case, to avoid showing the same "stopped" information twice. On any other channel (or when no draft was open, e.g. the turn hadn't made a tool call yet), `/stop` falls back to a plain text confirmation instead:
 ```
 /stop
 -> Stopped the current turn.
@@ -142,9 +142,11 @@ This month: $12.05
 
 ### `/torrent [magnet-link]`
 
-A custom command (registered in `src/index.ts` via `createTorrentCommand`
-in `src/commands/torrent.ts`, not part of the built-in registry) that
-downloads a magnet link to iCloud Books. It has two equivalent forms:
+An operator-specific custom command (registered in `src/index.ts` via
+`createTorrentCommand` in `src/commands/torrent.ts`, not part of the built-in
+set) that downloads a magnet link to iCloud Books by running a script outside
+this repository. It is documented here mainly as the worked example for the
+follow-up capture mechanism below. It has two equivalent forms:
 
 ```
 /torrent magnet:?xt=urn:btih:...
@@ -192,7 +194,7 @@ invocation. Any future command can call `registerFollowUp` for its own
 
 ---
 
-## How Command Dispatch Works
+## How command dispatch works
 
 Commands are intercepted **after the full pipeline runs** (including transcript logging at Stage 80). This means:
 
@@ -203,17 +205,17 @@ Commands are intercepted **after the full pipeline runs** (including transcript 
 5. For unknown commands, a friendly error is returned the same way.
 6. Command responses are logged to transcripts with `metadata.command_response: true` so the memory system (E8/E9) can exclude them from summarization.
 
-### Telegram Group Chats
+### Telegram group chats
 
 Telegram sends commands with a `@botname` suffix in group chats (e.g. `/status@MyBot`). The slash command parser strips this suffix automatically, so commands work identically in private chats and groups.
 
-### Plugin Security
+### Command security
 
 Command handlers receive a **read-only database wrapper** (`SafeDatabase`) via `ctx.db`. This wrapper exposes only `.prepare().get()` and `.prepare().all()` -- write operations (`.run()`, `.exec()`) are not available. Built-in commands that need write access (e.g. `/pause`, `/schedule cancel`) use the real database handle through their internal dependency injection.
 
 ---
 
-## Adding Custom Commands (Plugin API)
+## Adding custom commands
 
 Any code with access to the `CommandRegistry` instance can register additional commands:
 
@@ -238,8 +240,8 @@ The registry throws if a command name is already taken, preventing accidental ov
 
 ---
 
-## Adapter Autocomplete
+## Adapter autocomplete
 
-At startup, bus-core calls `registerCommands()` on each adapter that declares `capabilities.registerCommands: true`. The Telegram adapter uses Telegram's `setMyCommands` API, which displays commands as autocomplete suggestions in the chat input. BlueBubbles (E4) will no-op gracefully when it's implemented.
+At startup, bus-core calls `registerCommands()` on each adapter that declares `capabilities.registerCommands: true`. The Telegram adapter uses Telegram's `setMyCommands` API, which displays commands as autocomplete suggestions in the chat input. Email and the Pebble webhook do not register commands.
 
 **Telegram command scopes.** Telegram picks a chat's command menu by scope precedence (`chat` > `all_private_chats` > `all_group_chats` > `default`). The adapter writes the list to **both** the `default` and `all_private_chats` scopes — writing only `default` lets a stale `all_private_chats` set (often `/start, /help, /status` from BotFather) permanently shadow the live list in 1:1 chats. See [TELEGRAM_ADAPTER.md](./TELEGRAM_ADAPTER.md#slash-commands).

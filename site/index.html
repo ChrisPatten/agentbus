@@ -49,11 +49,12 @@
 
     <section id="architecture" class="architecture">
       <div class="wrap">
-        <h2>Four processes, one HTTP boundary</h2>
+        <h2>One process, one HTTP boundary</h2>
         <p class="section-lede">
-          Every adapter is a separate process that talks to the core over
-          <code>localhost</code> HTTP — never by importing bus-core directly.
-          That keeps each channel pluggable and independently restartable.
+          Platform adapters run inside bus-core. The agent side stays on the
+          other side of a <code>localhost</code> HTTP API — the only separate
+          process is the MCP server Claude Code spawns — so channels stay
+          pluggable and the agent runtime stays swappable.
         </p>
         <div class="diagram">
           <div class="node node-core">
@@ -65,20 +66,20 @@
           </div>
           <div class="node-row">
             <div class="node">
-              <strong>claude-code-adapter</strong>
-              <span>MCP server over stdio</span>
+              <strong>cc-headless adapter</strong>
+              <span>claude -p per batch, session resume</span>
             </div>
             <div class="node">
-              <strong>telegram-adapter</strong>
-              <span>Bot API, long-poll</span>
+              <strong>telegram adapter</strong>
+              <span>Bot API, long-poll, forum topics</span>
             </div>
             <div class="node">
               <strong>email &amp; pebble adapters</strong>
               <span>IMAP · voice-memo webhook</span>
             </div>
-            <div class="node node-planned">
-              <strong>bluebubbles-adapter</strong>
-              <span>iMessage (planned)</span>
+            <div class="node">
+              <strong>claude-code MCP server</strong>
+              <span>separate process over stdio</span>
             </div>
           </div>
         </div>
@@ -105,8 +106,10 @@
           <div class="card">
             <h3>Threaded, persistent memory</h3>
             <p>A generic per-thread session store (shared by email and
-            Telegram) plus transcript logging and summarization, so context
-            survives across sessions and channels.</p>
+            Telegram) plus file-based memory: the agent's own MEMORY.md and
+            daily journals load into every turn and are updated by a silent
+            journaling sweep, so context survives across sessions and
+            channels.</p>
           </div>
           <div class="card">
             <h3>Slash commands</h3>
@@ -141,8 +144,8 @@ cp config.yaml.example config.yaml
 cp .env.example .env
 # edit config.yaml and .env with your credentials
 
-npx tsx src/index.ts        # run bus-core
-npx tsx src/adapters/cc.ts   # run the Claude Code adapter</code></pre>
+npx tsx src/index.ts        # run bus-core in the foreground
+make start                  # or run it under pm2</code></pre>
         <p class="section-lede">
           See the <a href="https://github.com/ChrisPatten/agentbus#readme">README</a>
           for full configuration details, and

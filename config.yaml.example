@@ -1,132 +1,133 @@
+# AgentBus configuration reference. Copy to config.yaml and edit.
+# Secrets are referenced as ${VAR_NAME} and resolved from .env at startup.
+# A leading ~ in any path value expands to your home directory.
+
 bus:
   http_port: 3000
-  db_path: ./data/agentbus.db
-  log_level: info
+  # host: 127.0.0.1           # default: loopback only. 0.0.0.0 exposes every route to the LAN;
+  #                           # set auth_token if you do that. See docs/DEPLOYMENT.md.
+  # auth_token: ${BUS_TOKEN}  # if set, every request except /api/v1/health needs X-Bus-Token
+  db_path: ~/.agentbus/agentbus.db
+  log_level: info             # accepted, but not yet applied to log output
 
 adapters:
-  # Single-bot form (adapter id: "telegram", channel: "telegram"):
+  # ── Telegram — docs/TELEGRAM_ADAPTER.md ──────────────────────────────────────
+  # Single-bot form (adapter id and channel: "telegram"):
   telegram:
     token: ${TELEGRAM_BOT_TOKEN}
-    poll_timeout: 30
-  #
-  # Multi-bot form (adapter ids: "telegram:peggy", "telegram:jarvis"):
+    poll_timeout: 30          # long-poll timeout in seconds
+  # Multi-bot form (ids "telegram:peggy", "telegram:jarvis"):
   # telegram:
   #   peggy:
   #     token: ${TELEGRAM_BOT_TOKEN_PEGGY}
   #   jarvis:
   #     token: ${TELEGRAM_BOT_TOKEN_JARVIS}
-  #
-  # Email adapter (E21) — IMAP IDLE inbound + SMTP outbound. Each email thread
-  # becomes its own long-lived session. Defaults target iCloud; set host/port for
-  # any provider. iCloud needs an app-specific password. See docs/EMAIL_ADAPTER.md.
-  #
-  # Single-account form (adapter id "email", channel "email"):
+
+  # ── Email (IMAP IDLE inbound, SMTP outbound) — docs/EMAIL_ADAPTER.md ─────────
+  # Defaults target iCloud. Each email thread becomes its own long-lived session.
   # email:
   #   imap:
-  #     host: imap.mail.me.com      # iCloud default
-  #     user: peggy@icloud.com
-  #     password: ${ICLOUD_APP_PW}  # app-specific password, NOT the Apple ID password
+  #     host: imap.mail.me.com
+  #     port: 993
+  #     user: assistant@icloud.com
+  #     password: ${ICLOUD_APP_PW}   # app-specific password, not the Apple ID password
   #     mailbox: INBOX
   #   smtp:
-  #     host: smtp.mail.me.com      # iCloud default
-  #     from: Peggy <peggy@icloud.com>   # defaults to imap.user
-  #   require_auth: true            # drop SPF/DKIM/DMARC failures (anti-spoofing)
-  #
-  # Multi-account form (adapter ids "email:peggy", "email:work"):
+  #     host: smtp.mail.me.com
+  #     port: 587
+  #     from: Assistant <assistant@icloud.com>   # defaults to imap.user
+  #   require_auth: true             # drop mail that fails SPF/DKIM/DMARC for its From domain
+  # Multi-account form (ids "email:peggy", "email:work"):
   # email:
   #   peggy:
   #     imap: { user: peggy@icloud.com, password: ${ICLOUD_APP_PW_PEGGY} }
   #   work:
   #     imap: { host: imap.fastmail.com, user: me@work.com, password: ${FASTMAIL_PW} }
-  bluebubbles:
-    server_url: http://localhost:1234
-    webhook_port: 3002
-  claude-code:
+
+  # ── Pebble Ring voice-memo webhook — docs/PEBBLE_ADAPTER.md ──────────────────
+  # pebble:
+  #   enabled: true
+  #   max_body_bytes: 65536
+  #   logging:
+  #     enabled: false               # log every raw request to <dir>/pebble/<date>.jsonl
+  #     dir: logs/webhooks
+
+  # ── Siri channel (Peggy iOS app) — docs/SIRI_ADAPTER.md ──────────────────────
+  # POST /api/v1/siri/ask holds the request open until the agent's reply arrives.
+  # siri:
+  #   enabled: true
+  #   reply_timeout_ms: 25000        # server-side cap on how long an ask waits (1000-60000)
+  #   max_body_bytes: 8192
+  #   debug_delay_ms: 0              # device testing only; refused when NODE_ENV=production
+
+  # ── Headless Claude Code (primary agent runtime) — docs/CC_HEADLESS_ADAPTER.md ─
+  # Spawns `claude -p` per message batch and resumes the session on later turns.
+  cc-headless:
+    agent_id: claude
     poll_interval_ms: 1000
-  # Headless Claude Code adapter (E19/E20, memory-logging decoupled in E30) —
-  # spawns `claude -p` per message batch instead of a persistent MCP session.
-  # See docs/CC_HEADLESS_ADAPTER.md and docs/MEMORY_MODEL.md. Uncomment to use
-  # instead of (or alongside) claude-code.
-  # cc-headless:
-  #   agent_id: claude
-  #   poll_interval_ms: 1000
-  #   claude_bin: claude
-  #   working_dir: /home/agent      # cwd for claude -p → selects the CLAUDE.md hierarchy
-  #   error_reply: "Sorry — I hit an error processing that. Please try again."
-  #   error_passthrough: false      # append raw failure detail to error_reply
-  #   system_prompt: |
-  #     You are a helpful assistant for {{contact_id}} on {{channel}}.
-  #     Today is {{date}}.
-  #     Deliver every user-facing message by calling the `reply` tool ([id:<id>]).
-  #     Match your length and formality to the channel:
-  #       - telegram*: reply briefly and conversationally (1–3 sentences).
-  #       - email*:    write a complete, well-structured reply — a greeting, your
-  #                    full reasoning in clear sections, and a sign-off. Take the
-  #                    space email affords; this is not a chat message.
-  #     Once you have replied, stop — a separate process handles memory-logging
-  #     later (E30). Exception: financial decisions/obligations, health/medical
-  #     facts, scheduling commitments, and safety/security-relevant account
-  #     events should still be logged immediately, in this turn, before you stop.
-  #     @persona.md
-  #     {{memories}}
-  #   # E20: assemble the agent's own memory files into each turn (relative to working_dir)
-  #   memory:
-  #     dir: memory
-  #     index_file: MEMORY.md
-  #     daily_subdir: daily
-  #     journal_lookback_days: 3    # today + previous 2 days (0 = index only)
-  #   # E20/E30: silent journaling turn when a conversation pauses or a hard
-  #   # ceiling elapses (messages no one) — see docs/CC_HEADLESS_ADAPTER.md#memory-logging-e30
-  #   journaling:
-  #     enabled: true
-  #     threshold_ms:               # per-channel idle debounce before journaling
-  #       telegram: 300000          # 5 min (E30: short debounce, most turns have nothing new)
-  #       email: 86400000           # 24 h
-  #       default: 300000
-  #     ceiling_ms: 1800000         # E30: hard ceiling since the last sweep, regardless
-  #                                 # of idle state (unset disables this leg)
-  #     prompt: |
-  #       Our conversation has paused (or it's been a while since the last sweep).
-  #       Review it and update your memory files (today's daily journal,
-  #       MEMORY.md, and any relevant topic files) with anything durable worth
-  #       remembering. Do NOT message the user — this is an internal journaling
-  #       turn, not a reply.
-  #
-  # Multi-instance form (E23) — named record, one entry per headless agent, same
-  # per-instance schema as above. Each gets its own poll loop, working_dir, and
-  # journaling config, fully isolated from the others. See docs/CC_HEADLESS_ADAPTER.md.
+    claude_bin: claude
+    # model: sonnet                  # --model for claude -p; unset defers to the CLI default
+    working_dir: ~/agent             # cwd for claude -p: selects the CLAUDE.md hierarchy and memory dir
+    error_reply: "Sorry — I hit an error processing that. Please try again."
+    error_passthrough: false         # append the raw failure detail to error_reply
+    system_prompt: |
+      You are a helpful assistant for {{contact_id}} on {{channel}}.
+      Today is {{date}}.
+      Deliver every user-facing message by calling the `reply` tool with the
+      message id shown as [id:<id>]. Do not put your answer only in plain text.
+      Match your length to the channel: brief on telegram*, complete and
+      structured on email*.
+      Once you have replied, stop. A separate journaling process updates your
+      memory files later. Exception: log financial decisions, health facts,
+      scheduling commitments, and security-relevant account events immediately.
+      {{memories}}
+    memory:                          # memory files, relative to working_dir
+      dir: memory
+      index_file: MEMORY.md
+      daily_subdir: daily
+      journal_lookback_days: 3       # today plus the previous 2 days (0 = index only)
+    journaling:                      # silent memory-update turn on pause or ceiling
+      enabled: true
+      threshold_ms:                  # idle debounce per channel; a number, or a map with `default`
+        telegram: 300000             # 5 min
+        email: 86400000              # 24 h
+        default: 300000
+      ceiling_ms: 1800000            # hard ceiling since the last sweep; unset disables it
+      prompt: |
+        Our conversation has paused. Review it and update your memory files
+        (today's daily journal, MEMORY.md, and any relevant topic files) with
+        anything durable worth remembering. Do NOT message the user.
+  # Multi-instance form: one entry per headless agent, same fields as above.
   # cc-headless:
   #   peggy:
   #     agent_id: peggy
-  #     working_dir: /home/peggy
+  #     working_dir: ~/peggy
   #     system_prompt: |
   #       You are Peggy...
-  #     memory: { dir: memory, index_file: MEMORY.md, daily_subdir: daily, journal_lookback_days: 3 }
-  #     journaling: { enabled: true, threshold_ms: 300000, ceiling_ms: 1800000, prompt: "..." }
   #   pokeclaude:
   #     agent_id: pokeclaude
-  #     working_dir: /home/pokeclaude
+  #     working_dir: ~/pokeclaude
   #     system_prompt: |
   #       You are pokeclaude...
-  #     memory: { dir: memory, index_file: MEMORY.md, daily_subdir: daily, journal_lookback_days: 3 }
-  #     journaling: { enabled: true, threshold_ms: 300000, ceiling_ms: 1800000, prompt: "..." }
+
+  # ── Claude Code MCP adapter, polling mode (persistent session) — docs/CC_ADAPTER.md
+  # claude-code:
+  #   poll_interval_ms: 1000
 
 contacts:
   alice:
-    id: alice
+    id: alice                        # must equal the map key
     displayName: Alice
     platforms:
       telegram:
         userId: 123456789
-        username: alice_example
-      bluebubbles:
-        handle: "+15551234567"
-      # Email allowlist — only mail from these addresses (case-insensitive)
-      # resolves to this contact; anything else is dropped. String or list.
-      email:
-        address:
-          - alice@example.com
-          - alice@work.com
+      # email:                       # inbound allowlist; a string or a list
+      #   address:
+      #     - alice@example.com
+      # pebble:
+      #   token: "long-random-bearer-token"   # identifies this contact on the Pebble webhook
+      # siri:
+      #   token: ${SIRI_TOKEN_ALICE}          # identifies this contact on /api/v1/siri; >= 16 chars, `openssl rand -hex 24`
 
 topics:
   - general
@@ -135,48 +136,54 @@ topics:
   - personal
 
 memory:
+  structured_extraction: false       # legacy summarizer and memories store; see docs/MEMORY.md
   summarizer_interval_ms: 60000
   session_idle_threshold_ms: 1800000
   context_window_hours: 48
-  claude_api_model: claude-opus-4-6
-  # E20: the structured memory store (memories / session_summaries) is dormant by
-  # default — the agent's own files are the source of truth (see docs/MEMORY_MODEL.md).
-  # Set true to restore legacy summarizer extraction for MCP-adapter deployments.
-  structured_extraction: false
+  claude_api_model: claude-sonnet-4-6
 
-# Per-agent settings, keyed by recipient id (e.g. "agent:claude").
-# See docs/ATTACHMENTS.md for the full inbound-image flow.
+# Per-agent settings keyed by recipient id — docs/ATTACHMENTS.md
 agents:
   "agent:claude":
-    # Inbound images from Telegram are downloaded here. The directory is
-    # created at startup if missing. Files are deleted after ttl_seconds
-    # (default: 3600) by the attachment sweeper.
     media:
-      download_path: /tmp/agentbus/claude
+      download_path: /tmp/agentbus/claude   # inbound images and files; created at startup
       ttl_seconds: 3600
 
 pipeline:
+  dedup_window_ms: 30000
+  drop_unrouted: false               # true drops messages that match no route
+  # topic_rules:                     # first match wins; keyword list and/or regex
+  #   - topic: code
+  #     keywords: [bug, deploy, PR]
+  # urgency_keywords: [urgent, asap, emergency, critical]
+  # vip_contacts: [alice]
   routes:
-    # Route all telegram messages to the claude-code agent:
     - match:
         channel: telegram
       target:
-        adapterId: claude-code
+        adapterId: cc-headless
         recipientId: agent:claude
-    # Multi-bot routing example (uncomment if using named telegram instances):
-    # - match:
-    #     channel: telegram:peggy
-    #   target:
-    #     adapterId: claude-code
-    #     recipientId: agent:peggy
-    # - match:
-    #     channel: telegram:jarvis
-    #   target:
-    #     adapterId: claude-code
-    #     recipientId: agent:jarvis
-    # Email routing — send mail to the (headless) agent so it can reply in-thread:
-    # - match:
-    #     channel: email
-    #   target:
-    #     adapterId: cc-headless
-    #     recipientId: agent:claude
+    # - match: { channel: email }
+    #   target: { adapterId: cc-headless, recipientId: agent:claude }
+    # - match: { channel: pebble }
+    #   target: { adapterId: cc-headless, recipientId: agent:claude }
+    # - match: { channel: siri }
+    #   target: { adapterId: cc-headless, recipientId: agent:claude }
+  # relays:                          # re-submit on another channel — docs/CHANNEL_RELAY.md
+  #   - match: { channel: pebble, sender: "contact:alice" }
+  #     target:
+  #       channel: telegram
+  #       template: "Voice note:\n{{body}}"
+
+scheduler:
+  tick_interval_ms: 30000
+  enabled: true
+
+# schedules:                         # config-managed schedules — docs/SCHEDULING.md
+#   - id: morning_briefing
+#     cron: "0 8 * * 1-5"
+#     timezone: America/New_York
+#     channel: telegram
+#     sender: contact:alice
+#     prompt: "Summarize anything notable on my agenda today."
+#     label: Morning briefing

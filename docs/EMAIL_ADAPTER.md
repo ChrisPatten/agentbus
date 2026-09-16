@@ -87,7 +87,7 @@ same mailbox twice is rejected at startup.
 
 ---
 
-## Identity & anti-spoofing
+## Identity and anti-spoofing
 
 Two independent gates protect the agent's inbox:
 
@@ -141,7 +141,7 @@ Two independent gates protect the agent's inbox:
 
 ---
 
-## Threading & sessions
+## Threading and sessions
 
 Each email **thread** maps to its own long-lived session. The adapter derives a
 stable **thread key** from the message headers:
@@ -172,10 +172,9 @@ Two pipeline stages cooperate with the reserved prefix (`THREAD_TOPIC_PREFIX` in
 - `priority-score` does **not** award the non-general topic bonus for a `thread:`
   topic — it's a routing key, not a classification.
 
-The topic-derivation and storage mechanism here is generic, shared with any
-other channel that needs per-thread sessions — see
-[THREADING.md](./THREADING.md) for the full picture; email is just its first
-(and so far only) user.
+The topic-derivation and storage mechanism here is generic and shared with any
+channel that needs per-thread sessions. Email and Telegram forum topics both use
+it. See [THREADING.md](./THREADING.md) for the full picture.
 
 ### Reply threading state
 
@@ -362,8 +361,9 @@ adapters:
   appears only when a message has no text *and* no HTML part. Inbound file
   attachments **are** downloaded (see [ATTACHMENTS.md](./ATTACHMENTS.md));
   outbound attachments are out of scope.
-- **Trust the receiving server.** The anti-spoof check relies on the mailbox
-  server's `Authentication-Results` header.
+- **Anti-spoofing needs DNS.** When the receiving server stamps no usable
+  `Authentication-Results` header, the DKIM fallback performs DNS TXT lookups.
+  Without outbound DNS, `require_auth: true` drops such mail.
 - **One mailbox per instance.** Watching multiple folders requires multiple
   instances.
 
