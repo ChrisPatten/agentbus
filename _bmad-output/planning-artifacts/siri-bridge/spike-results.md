@@ -48,7 +48,7 @@ curl -s -X POST http://127.0.0.1:3000/api/v1/siri/ask \
   -d '{"text":"What day of the week is it today?","wait_ms":25000}'
 ```
 
-Result: `status: answered`, reply `"Tuesday, September 15th."`, `queued_ms: 13`, `answered_ms: 4270` — one `reply`, spoken-style, no markdown, even though the running Peggy session predates the CLAUDE.md rule (it takes effect on her next context rebuild). Transcripts show the `siri` conversation with its own `conversation_id`.
+Result: `status: answered`, reply `"Tuesday, September 15th."`, `queued_ms: 13`, `answered_ms: 4270` — one `reply`, spoken-style, no markdown, even though the running Peggy session predates the CLAUDE.md rule (it takes effect on her next context rebuild). Transcripts show the `siri` conversation with its own `conversation_id` (after the probe: 21 inbound + 21 outbound rows, one conversation, one session; zero conversation ids shared with any `telegram*` row). Deviation from S42.4 AC4: `sessions.agent_id` is empty for the `siri` session — only `cc-headless` stamps `agent_id` (E23); the claude-code MCP path never has. Not Siri-specific; noted, not fixed here.
 
 ## Gate 1 — end-to-end probe (E42 / S42.5)
 
@@ -56,14 +56,16 @@ Run format: `npx tsx scripts/siri-probe.ts --n 20 --mix trivial:8,memory:8,tool:
 
 | Run | Date | Config (instance / model / poll_ms / lookback) | n | timeouts | p50 answered_ms | p95 answered_ms | max | CSV |
 |---|---|---|---|---|---|---|---|---|
-| 1 | | peggy / default / 1000 / 3 | | | | | | |
-| 2 | | peggy / default / 250 / 3 | | | | | | |
-| 3 | | peggy-siri / <fast model> / 250 / 1 | | | | | | |
+| 1 | 2026-09-15 21:48 ET | peggy on the **claude-code MCP adapter** (persistent Claude Code session in tmux; `adapters.claude-code.poll_interval_ms: 1000`; DeliveryWorker tick 1000 ms) / the session's model / n/a / n/a | 20 | 0 | **3011** | **13045** | 15039 | `~/.agentbus/siri-probe-2026-09-16T01-48-52-161Z.csv` |
+| 2 | — | peggy / default / 250 / 3 | | | | | | not run: `poll_interval_ms` here belongs to the disabled cc-headless instance; the MCP adapter's own poll interval is read at its process start (Peggy's session), so changing it means restarting Peggy — deferred to E45 S45.5 |
+| 3 | — | peggy-siri / <fast model> / 250 / 1 | | | | | | not run: cc-headless disabled since 2026-09-11 (rotated API key); run when it is re-enabled |
 
-Cold-start breakdown (from cc-headless logs, one representative trivial ask): spawn→init event ___ ms; init→first assistant event ___ ms; first→`reply` tool call ___ ms.
+Per class, run 1: trivial n=8 p50 3021 / p95 4026 / max 4026 ms; memory n=8 p50 3006 / p95 3022 / max 3022 ms; tool n=4 p50 13036 / p95 15039 / max 15039 ms (calendar, weather, mail, next meeting). `queued_ms` 10–46 ms on every ask. All 20 replies were one short spoken-style sentence with no markdown.
 
-Decision: ☐ pass ☐ pass with fast lane ☐ async-first pivot
-Rationale:
+Cold-start breakdown: **not applicable on the MCP path** — there is no `claude -p` spawn; Peggy's session is already warm. The ~3.0 s floor on trivial and memory asks decomposes as: cc.ts poll interval (≤ 1 s) + Peggy's turn (~1 s) + DeliveryWorker tick (≤ 1 s, fixed `POLL_INTERVAL_MS`). Tool asks add 4–12 s of tool use on top. The two polling legs are the E45 knobs (`bus.delivery_poll_ms`, `adapters.claude-code.poll_interval_ms`); together they could take the floor to ~1.5 s. Record the cc-headless spawn→init→first-assistant→`reply` breakdown (implementation-plan §3) when that runtime is back.
+
+Decision: ☑ pass ☐ pass with fast lane ☐ async-first pivot
+Rationale: p50 3.0 s ≤ 12 s, p95 13.0 s ≤ 25 s, 0/20 timeouts ≤ 1/20 — every Gate 1 threshold met on the first run with the existing routing and no tuning, so the Gate 0 "fast lane required" flag is retired for the MCP runtime: the historical p50 of ~20 s was dominated by Telegram-side delivery and tool-heavy turns, not by the bus path. Caveats for the record: (a) this is the persistent-session runtime; if Peggy moves back to cc-headless the spawn cold start returns and run 3 becomes relevant again; (b) the worst tool ask (15 s) leaves only ~5–10 s of headroom under a 20–25 s wait budget — the E44 Gate 2 cutoff sweep decides the app's default `waitBudget`; (c) the probe ran with no concurrent Telegram traffic, so per-contact serialization was not exercised. Proceed to E44.
 
 ## Gate 2 — on-device Siri behaviour (E44 / S44.5)
 

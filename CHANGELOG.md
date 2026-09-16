@@ -11,6 +11,28 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 ## [Unreleased]
 
 ### Added
+- **Siri channel spike (E42).** New `siri` channel adapter
+  (`src/adapters/siri.ts`) and `POST /api/v1/siri/ask` /
+  `GET /api/v1/siri/health` routes (`src/http/siri-routes.ts`), mounted only
+  when `adapters.siri.enabled`. An ask is submitted through the normal inbound
+  pipeline and the HTTP request is held open until the agent's `reply` is
+  delivered to the adapter's `send()` (or `reply_timeout_ms` elapses, in which
+  case the response is `status: pending` and the ask stays queued). Identity is
+  a per-contact bearer token (`contacts.*.platforms.siri.token`, ≥ 16 chars,
+  duplicates rejected at load), the same model as Pebble. Config schema gains
+  `adapters.siri` (`reply_timeout_ms`, `max_body_bytes`, `debug_delay_ms`, plus
+  the E43 keys accepted but not yet acted on). Two measurement scripts:
+  `scripts/siri-gate0-latency.ts` (historical time-to-first-reply from
+  transcripts) and `scripts/siri-probe.ts` (live asks with p50/p95 and a CSV).
+  See [docs/SIRI_ADAPTER.md](docs/SIRI_ADAPTER.md).
+- **Peggy iOS app proof of concept (E44).** New `apps/ios/Peggy` (XcodeGen
+  project, Swift 6, SwiftUI, App Intents): an `Ask Peggy` App Shortcut whose
+  `AskPeggyIntent` runs in the background, posts the question to the bus over
+  Tailscale, and returns the reply as Siri dialog; a Settings screen for the
+  bus URL, token, and wait budget with a "Test connection" check against
+  `GET /api/v1/siri/health`; and XCTest coverage for every dialog outcome
+  through a mocked bus client. Tokens live in `UserDefaults` for the POC
+  (Keychain is E45). See `apps/ios/Peggy/README.md`.
 - **Runtime model overrides for headless Claude spawns.** New
   `headless_model_overrides` table (migration
   `015_headless_model_overrides.sql`) lets an agent change which model a

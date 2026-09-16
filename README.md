@@ -50,7 +50,7 @@ Imports between `.ts` files must use the `.js` extension (`"module": "NodeNext"`
 
 - [DEPLOYMENT.md](docs/DEPLOYMENT.md): install, run, and operate bus-core.
 - [CC_HEADLESS_ADAPTER.md](docs/CC_HEADLESS_ADAPTER.md): the agent runtime, system prompt, memory files, and journaling.
-- [TELEGRAM_ADAPTER.md](docs/TELEGRAM_ADAPTER.md), [EMAIL_ADAPTER.md](docs/EMAIL_ADAPTER.md), [PEBBLE_ADAPTER.md](docs/PEBBLE_ADAPTER.md): the channels.
+- [TELEGRAM_ADAPTER.md](docs/TELEGRAM_ADAPTER.md), [EMAIL_ADAPTER.md](docs/EMAIL_ADAPTER.md), [PEBBLE_ADAPTER.md](docs/PEBBLE_ADAPTER.md), [SIRI_ADAPTER.md](docs/SIRI_ADAPTER.md): the channels.
 - [HTTP_API.md](docs/HTTP_API.md) and [MCP_TOOLS.md](docs/MCP_TOOLS.md): the API surface.
 
 ## Project layout

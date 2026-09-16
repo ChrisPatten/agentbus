@@ -128,6 +128,17 @@ If your reverse proxy (nginx, Caddy, Nginx Proxy Manager) runs:
 
 Before widening `bus.host`, note that every route becomes reachable from the LAN, and most routes have no auth of their own (the Pebble webhook's bearer token is the exception). Set `bus.auth_token` as well, and point the proxy at only the paths you mean to expose, such as `/api/v1/webhooks/pebble`.
 
+## Exposing the Siri endpoint on your tailnet
+
+The Peggy iOS app reaches `POST /api/v1/siri/ask` over Tailscale. Mount only that path prefix on the Mac's tailnet HTTPS listener, so the phone gets a valid certificate and cannot reach any other bus route:
+
+```bash
+tailscale serve --bg --https=443 --set-path /api/v1/siri http://127.0.0.1:3000/api/v1/siri
+tailscale serve status
+```
+
+The app's base URL is `https://<hostname>.<tailnet>.ts.net`. Turn on Tailscale's *Connect on demand* on the phone so Siri-triggered asks work on cellular. `bus.host` does not need to change. See [SIRI_ADAPTER.md](SIRI_ADAPTER.md).
+
 ## FTS index recovery
 
 If transcript search returns stale results, for example after restoring the database from a backup, rebuild the FTS5 indexes:

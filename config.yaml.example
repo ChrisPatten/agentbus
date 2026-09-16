@@ -52,6 +52,14 @@ adapters:
   #     enabled: false               # log every raw request to <dir>/pebble/<date>.jsonl
   #     dir: logs/webhooks
 
+  # ── Siri channel (Peggy iOS app) — docs/SIRI_ADAPTER.md ──────────────────────
+  # POST /api/v1/siri/ask holds the request open until the agent's reply arrives.
+  # siri:
+  #   enabled: true
+  #   reply_timeout_ms: 25000        # server-side cap on how long an ask waits (1000-60000)
+  #   max_body_bytes: 8192
+  #   debug_delay_ms: 0              # device testing only; refused when NODE_ENV=production
+
   # ── Headless Claude Code (primary agent runtime) — docs/CC_HEADLESS_ADAPTER.md ─
   # Spawns `claude -p` per message batch and resumes the session on later turns.
   cc-headless:
@@ -118,6 +126,8 @@ contacts:
       #     - alice@example.com
       # pebble:
       #   token: "long-random-bearer-token"   # identifies this contact on the Pebble webhook
+      # siri:
+      #   token: ${SIRI_TOKEN_ALICE}          # identifies this contact on /api/v1/siri; >= 16 chars, `openssl rand -hex 24`
 
 topics:
   - general
@@ -156,6 +166,8 @@ pipeline:
     # - match: { channel: email }
     #   target: { adapterId: cc-headless, recipientId: agent:claude }
     # - match: { channel: pebble }
+    #   target: { adapterId: cc-headless, recipientId: agent:claude }
+    # - match: { channel: siri }
     #   target: { adapterId: cc-headless, recipientId: agent:claude }
   # relays:                          # re-submit on another channel — docs/CHANNEL_RELAY.md
   #   - match: { channel: pebble, sender: "contact:alice" }

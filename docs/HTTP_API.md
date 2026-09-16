@@ -23,6 +23,8 @@ Set `bus.host: 0.0.0.0` to accept connections from other hosts, for example a re
 | GET | `/api/v1/health` | Liveness, adapter health, queue counts |
 | POST | `/api/v1/inbound` | Submit an inbound message to the pipeline |
 | POST | `/api/v1/webhooks/pebble` | Pebble Ring voice-memo ingress (when configured) |
+| POST | `/api/v1/siri/ask` | Siri ask: submit a question and wait for the agent's reply (when configured) |
+| GET | `/api/v1/siri/health` | Siri channel reachability and routing check (when configured) |
 | GET | `/api/v1/messages/pending` | Dequeue messages for a recipient |
 | POST | `/api/v1/messages/:id/ack` | Acknowledge or dead-letter a dequeued message |
 | POST | `/api/v1/messages` | Enqueue an outbound message |
@@ -104,6 +106,10 @@ Responses (both `200`):
 ### `POST /api/v1/webhooks/pebble`
 
 Registered only when `adapters.pebble.enabled` is true. See [PEBBLE_ADAPTER.md](PEBBLE_ADAPTER.md) for the contract and error table.
+
+### `POST /api/v1/siri/ask` and `GET /api/v1/siri/health`
+
+Registered only when `adapters.siri.enabled` is true. The ask route submits a question through the pipeline and holds the request open until the agent's reply is delivered to the `siri` adapter, or the wait elapses. Both routes authenticate with a per-contact bearer token. See [SIRI_ADAPTER.md](SIRI_ADAPTER.md) for the contract and error table.
 
 ## Messages
 

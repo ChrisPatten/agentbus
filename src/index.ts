@@ -38,6 +38,7 @@ import { createTranscriptLog } from './pipeline/stages/transcript-log.js';
 import { createMemoryInject } from './pipeline/stages/memory-inject.js';
 import { TelegramAdapter } from './adapters/telegram.js';
 import { EmailAdapter } from './adapters/email.js';
+import { SiriAdapter } from './adapters/siri.js';
 import { startHeadless, stopHeadless } from './adapters/cc-headless.js';
 import { DeliveryWorker } from './core/delivery.js';
 import { createCommandSystem } from './commands/index.js';
@@ -97,7 +98,14 @@ pipeline.use({ slot: 70, name: 'route-resolve',    stage: createRouteResolve(con
 pipeline.use({ slot: 80, name: 'transcript-log',   stage: createTranscriptLog(db, config), critical: false });
 pipeline.use({ slot: 85, name: 'memory-inject',    stage: createMemoryInject(db, config),  critical: false });
 
-const httpServer = await createHttpServer({ queue, registry, config, pipeline, db, commandRegistry, pauseSet });
+// ── Siri channel (E42) ───────────────────────────────────────────────────────
+// Registered before the HTTP server is built because the /api/v1/siri routes
+// complete their long-poll through this adapter's send(). Started and stopped
+// with the other platform adapters below.
+const siri = config.adapters.siri?.enabled ? new SiriAdapter(config.adapters.siri) : undefined;
+if (siri) registry.register(siri);
+
+const httpServer = await createHttpServer({ queue, registry, config, pipeline, db, commandRegistry, pauseSet, siri });
 
 // ── Platform adapter registration ────────────────────────────────────────────
 // Platform adapters run in-process. They are instantiated from config,
