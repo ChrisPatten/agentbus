@@ -3,12 +3,12 @@
 name: Peggy
 options:
   bundleIdPrefix: com.chrispatten
-  # The build Mac has Xcode 26.0.1 / the iOS 26.0 SDK today. Everything the POC
-  # uses (IntentModes, supportedModes, IntentDialog(full:supporting:)) is iOS 26
-  # API. Raise to 27.0 when Xcode 27 is installed (spike-results.md, SDK verification).
+  # iOS 27 / Xcode 27 (the target the architecture assumes). Everything the POC
+  # uses is available from iOS 26, so 26.0 would also work; 27 keeps the door open
+  # for LongRunningIntent (E45) and matches AppIntentsTesting in PeggyTests.
   deploymentTarget:
-    iOS: "26.0"
-  xcodeVersion: "26.0"
+    iOS: "27.0"
+  xcodeVersion: "27.0"
   createIntermediateGroups: true
   generateEmptyDirectories: false
 settings:
@@ -55,6 +55,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.chrispatten.peggy.tests
+        GENERATE_INFOPLIST_FILE: YES
 schemes:
   Peggy:
     build:

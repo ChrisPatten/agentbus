@@ -18,9 +18,8 @@ xcodebuild -project Peggy.xcodeproj -scheme Peggy \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro' test
 ```
 
-Requirements on the Mac: Xcode 26.0.1 or newer with the iOS 26 simulator
-runtime. The project targets iOS 26.0 today; installing on an iPhone running
-iOS 27 needs Xcode 27.
+Requirements on the Mac: Xcode 27 with the iOS 27 simulator runtime
+(`xcodebuild -downloadPlatform iOS`). The project targets iOS 27.0.
 
 ## Install on your iPhone
 
@@ -37,7 +36,8 @@ iOS 27 needs Xcode 27.
    - Bus token: only if `bus.auth_token` is set in `config.yaml`.
    - Wait for a reply: leave at 20 s until the Gate 2 sweep says otherwise.
 4. Tap **Test connection**. Expected: "Connected · routed to agent:peggy
-   (online) · bus 0.11.0".
+   (external) · bus 0.11.0" — `external` is the claude-code MCP connector, which
+   runs outside the bus process.
 5. Say **"Hey Siri, ask Peggy"**. Siri asks "What would you like to ask
    Peggy?", you answer, and Siri speaks her reply. Also try "Ask Peggy what
    day it is" in one breath to see whether Siri fills the question directly.
@@ -89,7 +89,8 @@ Peggy/Networking/                   BusClient (actor), BusModels (DTOs mirroring
 Peggy/Storage/Settings.swift        UserDefaults-backed settings (POC; Keychain in E45)
 Peggy/Speech/SpeechSanitizer.swift  Markdown → spoken prose
 Peggy/Views/SettingsView.swift      Setup screen with Test connection, Siri tip, Shortcuts link
-PeggyTests/                         AskPeggyIntentTests, BusClientTests, SpeechSanitizerTests, MockBusClient
+PeggyTests/                         AskPeggyIntentTests (dialog outcomes), AskPeggyIntentFrameworkTests (AppIntentsTesting),
+                                    BusClientTests, SpeechSanitizerTests, MockBusClient
 ```
 
 ## Known limitations of the POC

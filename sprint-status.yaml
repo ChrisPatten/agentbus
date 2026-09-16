@@ -744,9 +744,10 @@ epics:
     notes: >
       Peggy iOS app POC (apps/ios/Peggy, XcodeGen, Swift 6, iOS 26 deployment
       target): AskPeggyIntent + App Shortcut "Ask Peggy", BusClient, UserDefaults
-      settings with Test connection, 19 XCTest tests green on the iPhone 17 Pro
-      simulator (Xcode 26.0.1). AppIntentsTesting and LongRunningIntent are not in
-      the iOS 26 SDK — deviations recorded in spike-results.md. S44.5 (on-device
+      settings with Test connection. Built first against Xcode 26.0.1 / iOS 26, then
+      moved to Xcode 27.0 / iOS 27 (deployment target 27.0) on 2026-09-16: 20 tests
+      on the iPhone 17 Pro iOS 27 simulator, 19 pass, 1 skipped (AppIntentsTesting
+      session is cancelled under xcodebuild — recorded in spike-results.md). S44.5 (on-device
       Gate 2) is the operator's: install from Xcode with a signing team, then run
       the checklist in apps/ios/Peggy/README.md.
     stories:
