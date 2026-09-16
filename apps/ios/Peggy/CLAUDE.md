@@ -6,8 +6,8 @@ Companion app for AgentBus's `siri` channel. Spec: `_bmad-output/planning-artifa
 brew install xcodegen                      # once
 xcodegen generate                          # regenerates Peggy.xcodeproj (git-ignored) from project.yml
 xcodebuild -project Peggy.xcodeproj -scheme Peggy -destination 'generic/platform=iOS' build
-xcodebuild -project Peggy.xcodeproj -scheme Peggy -destination 'platform=iOS Simulator,name=iPhone 17 Pro' test
-export DEVELOPMENT_TEAM=XXXXXXXXXX          # before xcodegen; never commit a team id
+xcodebuild -project Peggy.xcodeproj -scheme Peggy -destination 'platform=iOS Simulator,name=iPhone 16 Pro Max,OS=27.0' test
+export DEVELOPMENT_TEAM=ABCDE12345          # your 10-char Team ID, before xcodegen; never commit it (README: Finding your Team ID)
 
 Add `CODE_SIGNING_ALLOWED=NO` to a build or test command when no signing team is set up (simulator and generic builds do not need one).
 

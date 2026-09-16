@@ -12,24 +12,61 @@ history, TestFlight) is E45.
 ```bash
 brew install xcodegen                                   # once
 cd apps/ios/Peggy
-export DEVELOPMENT_TEAM=XXXXXXXXXX                      # your Apple team id, only for device builds
+export DEVELOPMENT_TEAM=ABCDE12345                      # your 10-character Apple Team ID (see below)
 xcodegen generate                                       # writes Peggy.xcodeproj (git-ignored)
 xcodebuild -project Peggy.xcodeproj -scheme Peggy \
-  -destination 'platform=iOS Simulator,name=iPhone 17 Pro' test
+  -destination 'platform=iOS Simulator,name=iPhone 16 Pro Max,OS=27.0' test
 ```
 
 Requirements on the Mac: Xcode 27 with the iOS 27 simulator runtime
-(`xcodebuild -downloadPlatform iOS`). The project targets iOS 27.0.
+(`xcodebuild -downloadPlatform iOS`). The project targets iOS 27.0. Create
+the simulator once if it does not exist:
 
-## Install on your iPhone
+```bash
+xcrun simctl create "iPhone 16 Pro Max" "iPhone 16 Pro Max" com.apple.CoreSimulator.SimRuntime.iOS-27-0
+```
+
+### Finding your Team ID
+
+`DEVELOPMENT_TEAM` is the 10-character alphanumeric Team ID, for example
+`ABCDE12345`. It is not secret (it ships inside every app's entitlements),
+but it is personal, so it is read from the environment rather than committed.
+Where to read yours:
+
+- Xcode → Settings → Accounts → select your Apple ID → the team list shows
+  the ID next to each team name. A free Apple ID shows one "Personal Team".
+- Or [developer.apple.com/account](https://developer.apple.com/account) →
+  Membership details → Team ID (paid accounts).
+
+Put it in your shell profile so `xcodegen generate` always picks it up:
+
+```bash
+echo 'export DEVELOPMENT_TEAM=ABCDE12345' >> ~/.zshrc
+```
+
+If you generate without it, the project still builds for the simulator; you
+just pick the team in Xcode before the first device install.
+
+## Install on your iPhone 16 Pro Max
+
+The iPhone 16 Pro Max on iOS 27 supports Siri AI, so both the classic App
+Shortcut path and the Siri AI one-shot test in Gate 2 apply.
 
 1. `open Peggy.xcodeproj`, select the **Peggy** target → *Signing &
-   Capabilities*, and pick your team (a free Apple ID works for a personal
-   device). If you exported `DEVELOPMENT_TEAM` before `xcodegen generate` this
-   is already set.
-2. Plug in the phone (or pair it over Wi-Fi), pick it as the run destination,
-   and press Run once. Trust the developer certificate on the phone under
-   *Settings → General → VPN & Device Management* if iOS asks.
+   Capabilities*, and confirm the team (a free Apple ID works for a personal
+   device). If you exported `DEVELOPMENT_TEAM` before `xcodegen generate` it
+   is already filled in.
+2. Plug in the phone (or pair it over Wi-Fi), choose **iPhone 16 Pro Max**
+   as the run destination, and press Run once. Turn on *Developer Mode* under
+   *Settings → Privacy & Security* if iOS asks, and trust the developer
+   certificate under *Settings → General → VPN & Device Management*.
+   From the command line, once signing is set up:
+
+   ```bash
+   xcrun devicectl list devices                          # copy the phone's identifier
+   xcodebuild -project Peggy.xcodeproj -scheme Peggy \
+     -destination 'platform=iOS,id=<identifier>' -allowProvisioningUpdates build
+   ```
 3. Open the app and fill in **Settings**:
    - Bus URL: `https://<mac>.<tailnet>.ts.net` (see "Expose the bus" below).
    - Siri token: the value of `SIRI_TOKEN_CHRIS` in the bus's `.env`.
