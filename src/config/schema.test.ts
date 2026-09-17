@@ -3,6 +3,7 @@ import {
   AppConfigSchema,
   getTelegramInstances,
   getCcHeadlessInstances,
+  getCcPoolInstances,
   journalingThresholdForChannel,
 } from './schema.js';
 import type { AppConfig, CcHeadlessAdapterConfig } from './schema.js';
@@ -177,6 +178,134 @@ describe('getCcHeadlessInstances', () => {
       memory: {},
     });
     expect(() => getCcHeadlessInstances(config)).toThrow(/Invalid cc-headless instance name/);
+  });
+});
+
+describe('getCcPoolInstances', () => {
+  function configWith(pool: unknown): AppConfig {
+    const base = makeConfig(undefined);
+    return { ...base, adapters: { ...base.adapters, 'cc-pool': pool } } as unknown as AppConfig;
+  }
+
+  it('returns empty array when cc-pool is not configured', () => {
+    expect(getCcPoolInstances(configWith(undefined))).toEqual([]);
+  });
+
+  it('single-instance form returns one entry with name=null', () => {
+    const config = AppConfigSchema.parse({
+      bus: { db_path: ':memory:' },
+      adapters: {
+        'cc-pool': {
+          agent_id: 'peggy',
+          tmux_session: 'peggy-pool',
+          claude_bin: '/usr/local/bin/claude',
+        },
+      },
+      memory: {},
+    });
+    const instances = getCcPoolInstances(config);
+    expect(instances).toHaveLength(1);
+    expect(instances[0]!.name).toBeNull();
+    expect(instances[0]!.agent_id).toBe('peggy');
+    expect(instances[0]!.tmux_session).toBe('peggy-pool');
+    expect(instances[0]!.panes).toBe(2);
+    expect(instances[0]!.growth).toBe('fixed');
+  });
+
+  it('named-record form returns one entry per key with correct names', () => {
+    const config = AppConfigSchema.parse({
+      bus: { db_path: ':memory:' },
+      adapters: {
+        'cc-pool': {
+          peggy: { agent_id: 'peggy', tmux_session: 'peggy-pool', claude_bin: '/usr/local/bin/claude' },
+          jarvis: { agent_id: 'jarvis', tmux_session: 'jarvis-pool', claude_bin: '/usr/local/bin/claude' },
+        },
+      },
+      memory: {},
+    });
+    const instances = getCcPoolInstances(config);
+    expect(instances).toHaveLength(2);
+    const peggy = instances.find((i) => i.name === 'peggy');
+    const jarvis = instances.find((i) => i.name === 'jarvis');
+    expect(peggy?.agent_id).toBe('peggy');
+    expect(jarvis?.agent_id).toBe('jarvis');
+  });
+
+  it('throws on duplicate agent_id across instances', () => {
+    const config = AppConfigSchema.parse({
+      bus: { db_path: ':memory:' },
+      adapters: {
+        'cc-pool': {
+          peggy: { agent_id: 'shared', tmux_session: 'peggy-pool', claude_bin: '/usr/local/bin/claude' },
+          jarvis: { agent_id: 'shared', tmux_session: 'jarvis-pool', claude_bin: '/usr/local/bin/claude' },
+        },
+      },
+      memory: {},
+    });
+    expect(() => getCcPoolInstances(config)).toThrow(/Duplicate cc-pool agent_id/);
+    expect(() => getCcPoolInstances(config)).toThrow(/"jarvis"/);
+  });
+
+  it('throws on duplicate tmux_session across instances', () => {
+    const config = AppConfigSchema.parse({
+      bus: { db_path: ':memory:' },
+      adapters: {
+        'cc-pool': {
+          peggy: { agent_id: 'peggy', tmux_session: 'shared-session', claude_bin: '/usr/local/bin/claude' },
+          jarvis: { agent_id: 'jarvis', tmux_session: 'shared-session', claude_bin: '/usr/local/bin/claude' },
+        },
+      },
+      memory: {},
+    });
+    expect(() => getCcPoolInstances(config)).toThrow(/Duplicate cc-pool tmux_session/);
+    expect(() => getCcPoolInstances(config)).toThrow(/"jarvis"/);
+  });
+
+  it('throws on invalid instance name', () => {
+    const config = AppConfigSchema.parse({
+      bus: { db_path: ':memory:' },
+      adapters: {
+        'cc-pool': {
+          'My Pool': { agent_id: 'a', tmux_session: 'a-pool', claude_bin: '/usr/local/bin/claude' },
+        },
+      },
+      memory: {},
+    });
+    expect(() => getCcPoolInstances(config)).toThrow(/Invalid cc-pool instance name/);
+  });
+
+  it('throws when claude_bin is not an absolute path', () => {
+    expect(() =>
+      AppConfigSchema.parse({
+        bus: { db_path: ':memory:' },
+        adapters: {
+          'cc-pool': {
+            agent_id: 'peggy',
+            tmux_session: 'peggy-pool',
+            claude_bin: 'claude',
+          },
+        },
+        memory: {},
+      }),
+    ).toThrow();
+  });
+
+  it("throws when growth is 'fixed' and max_panes is below panes", () => {
+    const config = AppConfigSchema.parse({
+      bus: { db_path: ':memory:' },
+      adapters: {
+        'cc-pool': {
+          agent_id: 'peggy',
+          tmux_session: 'peggy-pool',
+          claude_bin: '/usr/local/bin/claude',
+          panes: 4,
+          growth: 'fixed',
+          max_panes: 2,
+        },
+      },
+      memory: {},
+    });
+    expect(() => getCcPoolInstances(config)).toThrow(/max_panes/);
   });
 });
 

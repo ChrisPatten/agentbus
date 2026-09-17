@@ -89,6 +89,11 @@ function loadMigrations(): Migration[] {
       description: 'headless_model_overrides table',
       sql: readFileSync(join(migrationsDir, '015_headless_model_overrides.sql'), 'utf-8'),
     },
+    {
+      version: 16,
+      description: 'Pool leases (interactive Claude Code session pool)',
+      sql: readFileSync(join(migrationsDir, '016_pool_leases.sql'), 'utf-8'),
+    },
   ];
 }
 
