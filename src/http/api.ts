@@ -505,7 +505,7 @@ export async function processInbound(
 // ── HTTP server ──────────────────────────────────────────────────────────────
 
 export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyInstance> {
-  const { queue, registry, pipeline, config, db } = deps;
+  const { queue, registry, pipeline, config, db, poolManagers } = deps;
   const server = Fastify({ logger: false });
 
   // Pebble webhook fields are plain text (transcription/recordedAt/client) — no
@@ -565,6 +565,44 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
         dead_letter: counts['dead_letter'] ?? 0,
       },
     };
+  });
+
+  // GET /api/v1/pool?pool=<name> — cc-pool pane leases + parked-queue depth
+  // (E48 S48.8). `conversation_id` is the raw hash here — a human-readable
+  // contact/channel/topic per pane would require joining against
+  // sessions/transcripts by conversation_id, which is out of scope for this
+  // route (the /pool command is where that lookup would be cheap to add
+  // per-row, if ever wanted).
+  server.get<{ Querystring: { pool?: string } }>('/api/v1/pool', async (req, reply) => {
+    if (!poolManagers || poolManagers.size === 0) {
+      return { ok: true, pools: [] };
+    }
+    const filter = req.query.pool; // e.g. "agent:peggy" — matches a poolManagers key
+    const entries = filter
+      ? [...poolManagers.entries()].filter(([key]) => key === filter)
+      : [...poolManagers.entries()];
+    if (filter && entries.length === 0) {
+      return reply.status(404).send({ ok: false, error: `No cc-pool instance for "${filter}"` });
+    }
+    const pools = entries.map(([key, manager]) => {
+      const panes = manager.leaseStore.list(manager.poolId);
+      const parked = manager.parkedStatus();
+      return {
+        pool_id: manager.poolId,
+        agent_id: key,
+        panes: panes.map((p) => ({
+          pane_id: p.pane_id,
+          agent_id: p.agent_id,
+          state: p.state,
+          conversation_id: p.conversation_id,
+          claude_session_id: p.claude_session_id,
+          leased_at: p.leased_at,
+          last_activity_at: p.last_activity_at,
+        })),
+        parked: { count: parked.count, oldest_parked_at: parked.oldestParkedAt },
+      };
+    });
+    return { ok: true, pools };
   });
 
   // GET /api/v1/messages/pending

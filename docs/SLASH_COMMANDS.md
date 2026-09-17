@@ -14,6 +14,7 @@ Slash commands let you operate AgentBus from any connected channel without SSH a
 | `/clear` | Start a fresh session; journal the previous one in the background | `/clear` |
 | `/stop` | Cancel the current in-flight turn | `/stop` |
 | `/cost` | Show day/week/month API cost for this agent | `/cost` |
+| `/pool [pool-agent-id]` | Show cc-pool pane leases and parked-queue depth | `/pool peggy` |
 
 ### `/status`
 
@@ -30,9 +31,14 @@ Queue:
   processing: 0
   delivered:  142
   dead_letter: 0
+
+Pool:
+  pool peggy: 3/4 leased, 1 parked
 ```
 
 If an adapter is paused it shows `[PAUSED]` next to its name. The `dead_letter` line counts `message_queue` rows with that status; dead-lettered messages are moved to a separate table, so it is always 0.
+
+The `Pool:` section (E48) is one line per configured `cc-pool` instance — `<leased pane count>/<total pane count> leased`, plus a `, N parked` clause when that pool's parked-message queue is non-empty. It is omitted entirely, header included, on any deployment with no `cc-pool` instances configured — `/status`'s output there is unchanged from before this section existed. See [`/pool`](#pool-pool-agent-id) for the per-pane breakdown.
 
 ### `/help [command]`
 
@@ -139,6 +145,34 @@ This month: $12.05
 **Cost is recorded per turn, not estimated.** A new `turn_costs` row is written after every `claude -p` invocation that produced a `total_cost_usd` — including a turn that errored out partway through, since Claude Code's `result` event still typically reports the cost of the tokens actually spent. A turn whose `result` event carries no cost data at all (e.g. killed by `/stop` before responding) writes no row, rather than a fabricated `$0`.
 
 **Day one isn't all zeros.** `scripts/backfill_turn_costs.ts` is a one-time, manually-run operator script (`npx tsx scripts/backfill_turn_costs.ts`) that seeds `turn_costs` from each configured `cc-headless` instance's existing `~/.claude/projects/<encoded-working-dir>/*.jsonl` transcripts, so historical spend shows up instead of a cold start at zero. It is not run automatically on startup — see the script's header comment for the (coarser than live-capture) approximation it makes.
+
+### `/pool [pool-agent-id]`
+
+Renders pane leases and parked-queue depth for each configured `cc-pool` instance (E48) as plain text — the same data as [`GET /api/v1/pool`](HTTP_API.md#pool), for reading from chat instead of curl. Registered in `src/index.ts` via `createPoolCommand` in `src/commands/pool.ts`, the same pattern as `/cost`.
+
+```
+/pool
+-> Pool peggy (agent:peggy) — 2 panes
+     peggy-pool-1: leased  conv=a3f9c21e  idle=12s
+     peggy-pool-2: free
+     parked: 1 (oldest 42s)
+```
+
+With no `cc-pool` instances configured at all:
+```
+/pool
+-> No cc-pool instances configured.
+```
+
+An optional first argument narrows the output to one pool, matched against either the bare (`peggy`) or `agent:`-prefixed (`agent:peggy`) form of its logical agent id:
+```
+/pool peggy
+-> Pool peggy (agent:peggy) — 2 panes
+     ...
+```
+A name that matches no configured pool replies `No cc-pool instance for "<name>".` instead of silently showing nothing.
+
+Each pane line shows its state, then `conv=<first 8 hex chars of conversation_id>` when the pane is bound to a conversation, then `idle=<age>` when it has a recorded `last_activity_at` — both are omitted for a `free` pane, which has neither. The trailing `parked: N` line adds `(oldest <age>)` only when `N > 0`.
 
 ### `/torrent [magnet-link]`
 

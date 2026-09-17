@@ -1,12 +1,15 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { randomUUID } from 'node:crypto';
 import Database from 'better-sqlite3';
 import { runMigrations } from '../db/schema.js';
 import { createBuiltinCommands, createHelpHandler } from './handlers.js';
 import { CommandRegistry } from './registry.js';
 import type { SlashCommandContext } from './registry.js';
-import type { AppConfig } from '../config/schema.js';
+import type { AppConfig, CcPoolInstanceConfig } from '../config/schema.js';
 import type { MessageEnvelope } from '../types/envelope.js';
 import { createSafeDatabase } from '../db/safe-database.js';
+import { MessageQueue } from '../core/queue.js';
+import { PoolManager } from '../pool/pool-manager.js';
 
 function makeDb() {
   const db = new Database(':memory:');
@@ -96,14 +99,57 @@ function makeQueue(counts: Record<string, number> = {}) {
   };
 }
 
-function makeDeps(overrides: { db?: Database.Database; adapters?: Array<{ id: string; status?: string; maxMessageLength?: number }>; pauseSet?: Set<string>; counts?: Record<string, number> } = {}) {
+function makeDeps(overrides: {
+  db?: Database.Database;
+  adapters?: Array<{ id: string; status?: string; maxMessageLength?: number }>;
+  pauseSet?: Set<string>;
+  counts?: Record<string, number>;
+  poolManagers?: Map<string, PoolManager>;
+} = {}) {
   const db = overrides.db ?? makeDb();
   return {
     adapterRegistry: makeAdapterRegistry(overrides.adapters ?? []) as never,
     queue: makeQueue(overrides.counts) as never,
     pauseSet: overrides.pauseSet ?? new Set<string>(),
     db,
+    poolManagers: overrides.poolManagers,
   };
+}
+
+/** Mirrors pool-manager.test.ts's own makeCfg — a fully-populated CcPoolInstanceConfig fixture. */
+function makeCfg(overrides: Partial<CcPoolInstanceConfig> = {}): CcPoolInstanceConfig {
+  return {
+    name: null,
+    agent_id: 'peggy',
+    tmux_session: 'peggy-pool',
+    panes: 2,
+    growth: 'fixed',
+    max_panes: 2,
+    claude_bin: '/usr/local/bin/claude',
+    model: undefined,
+    working_dir: '/work/dir',
+    launch_args: [],
+    poll_interval_ms: 1000,
+    system_prompt: undefined,
+    lease: { idle_evict_ms: 1_800_000, hard_idle_ms: 21_600_000, park_timeout_ms: 300_000 },
+    on_evict: 'clear',
+    launch_ack_delay_ms: 500,
+    launch_ack_max_attempts: 3,
+    launch_ack_pattern: 'experimental',
+    pane_env: {},
+    ...overrides,
+  };
+}
+
+/** A no-op PaneLauncher stub — these tests only exercise leaseStore/parkedStatus
+ *  reads, never launch()/release(), so a fake is enough (mirrors pool-manager.test.ts). */
+function makeFakePaneLauncher() {
+  return { launch: async () => {}, release: async () => {} };
+}
+
+function makePoolManager(db: Database.Database, cfgOverrides: Partial<CcPoolInstanceConfig> = {}): PoolManager {
+  const cfg = makeCfg(cfgOverrides);
+  return new PoolManager({ cfg, db, busBaseUrl: 'http://127.0.0.1:3000', paneLauncher: makeFakePaneLauncher() });
 }
 
 describe('command handlers', () => {
@@ -124,6 +170,83 @@ describe('command handlers', () => {
       const status = commands.find((c) => c.name === 'status')!;
       const result = await status.handler([], makeCtx(deps.db));
       expect(result.body).toContain('[PAUSED]');
+    });
+
+    // E48 S48.8 — Pool: section.
+    it('has no Pool: section when poolManagers is absent (regression: unchanged for non-pool deployments)', async () => {
+      const deps = makeDeps({ adapters: [{ id: 'telegram', status: 'healthy' }] });
+      const commands = createBuiltinCommands(deps);
+      const status = commands.find((c) => c.name === 'status')!;
+      const result = await status.handler([], makeCtx(deps.db));
+      expect(result.body).not.toContain('Pool:');
+    });
+
+    it('has no Pool: section when poolManagers is an empty Map', async () => {
+      const deps = makeDeps({ adapters: [{ id: 'telegram', status: 'healthy' }], poolManagers: new Map() });
+      const commands = createBuiltinCommands(deps);
+      const status = commands.find((c) => c.name === 'status')!;
+      const result = await status.handler([], makeCtx(deps.db));
+      expect(result.body).not.toContain('Pool:');
+    });
+
+    it('shows a Pool: section with leased/total/parked counts when pools are configured', async () => {
+      const db = makeDb();
+      const manager = makePoolManager(db, { agent_id: 'peggy', panes: 4, max_panes: 4 });
+      manager.leaseStore.seedPanes('peggy', [
+        { paneId: 'peggy-pool:1', agentId: 'agent:peggy-pool-1' },
+        { paneId: 'peggy-pool:2', agentId: 'agent:peggy-pool-2' },
+        { paneId: 'peggy-pool:3', agentId: 'agent:peggy-pool-3' },
+        { paneId: 'peggy-pool:4', agentId: 'agent:peggy-pool-4' },
+      ]);
+      for (const conv of ['conv-1', 'conv-2', 'conv-3']) {
+        const acquired = manager.leaseStore.acquire('peggy', conv, {
+          poolAgentId: 'peggy',
+          panes: 4,
+          maxPanes: 4,
+          growth: 'fixed',
+          idleEvictMs: 1_800_000,
+        });
+        if (acquired.kind !== 'bound') throw new Error(`test setup: expected "bound", got "${acquired.kind}"`);
+        manager.leaseStore.confirmReady('peggy', acquired.lease.pane_id);
+      }
+      const queue = new MessageQueue(db);
+      queue.enqueue({
+        id: randomUUID(),
+        timestamp: new Date().toISOString(),
+        channel: 'telegram',
+        topic: 'general',
+        sender: 'contact:bob',
+        recipient: manager.parkedRecipientId(),
+        reply_to: null,
+        priority: 'normal',
+        payload: { type: 'text', body: 'hi' },
+        metadata: {},
+      } satisfies MessageEnvelope);
+
+      const deps = makeDeps({ db, poolManagers: new Map([['agent:peggy', manager]]) });
+      const commands = createBuiltinCommands(deps);
+      const status = commands.find((c) => c.name === 'status')!;
+      const result = await status.handler([], makeCtx(deps.db));
+
+      expect(result.body).toContain('Pool:');
+      expect(result.body).toContain('pool peggy: 3/4 leased, 1 parked');
+    });
+
+    it('omits the ", N parked" clause when nothing is parked', async () => {
+      const db = makeDb();
+      const manager = makePoolManager(db, { agent_id: 'peggy', panes: 2, max_panes: 2 });
+      manager.leaseStore.seedPanes('peggy', [
+        { paneId: 'peggy-pool:1', agentId: 'agent:peggy-pool-1' },
+        { paneId: 'peggy-pool:2', agentId: 'agent:peggy-pool-2' },
+      ]);
+
+      const deps = makeDeps({ db, poolManagers: new Map([['agent:peggy', manager]]) });
+      const commands = createBuiltinCommands(deps);
+      const status = commands.find((c) => c.name === 'status')!;
+      const result = await status.handler([], makeCtx(deps.db));
+
+      expect(result.body).toContain('pool peggy: 0/2 leased');
+      expect(result.body).not.toContain('parked');
     });
   });
 

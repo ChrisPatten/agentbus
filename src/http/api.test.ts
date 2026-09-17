@@ -8,10 +8,12 @@ import { AdapterRegistry } from '../core/registry.js';
 import type { AdapterInstance } from '../core/registry.js';
 import { createHttpServer } from './api.js';
 import { PipelineEngine } from '../pipeline/engine.js';
-import type { AppConfig } from '../config/schema.js';
+import type { AppConfig, CcPoolInstanceConfig } from '../config/schema.js';
 import { LeaseStore } from '../pool/lease-store.js';
 import { computeConversationId } from '../pipeline/conversation-id.js';
 import type { AcquireResult } from '../pool/types.js';
+import { PoolManager } from '../pool/pool-manager.js';
+import type { MessageEnvelope } from '../types/envelope.js';
 
 function makeDb(): Database.Database {
   const db = new Database(':memory:');
@@ -34,12 +36,21 @@ const stubConfig = {
   pipeline: { dedup_window_ms: 30000, drop_unrouted: false, topic_rules: [], priority_weights: { base_score: 0, topic_bonus: 40, vip_sender_bonus: 20, urgency_keyword_bonus: 15 }, urgency_keywords: [], vip_contacts: [], routes: [] },
 } as unknown as AppConfig;
 
-async function makeServer(): Promise<{ server: FastifyInstance; queue: MessageQueue; db: Database.Database; registry: AdapterRegistry }> {
+async function makeServer(
+  opts: { poolManagers?: Map<string, PoolManager> } = {},
+): Promise<{ server: FastifyInstance; queue: MessageQueue; db: Database.Database; registry: AdapterRegistry }> {
   const db = makeDb();
   const queue = new MessageQueue(db);
   const registry = new AdapterRegistry();
   const pipeline = new PipelineEngine(); // no-op pipeline for existing tests
-  const server = await createHttpServer({ queue, registry, config: stubConfig, pipeline, db });
+  const server = await createHttpServer({
+    queue,
+    registry,
+    config: stubConfig,
+    pipeline,
+    db,
+    poolManagers: opts.poolManagers,
+  });
   return { server, queue, db, registry };
 }
 
@@ -1744,5 +1755,178 @@ describe('Schedule CRUD endpoints', () => {
       payload: { label: 'X' },
     });
     expect(res.statusCode).toBe(404);
+  });
+});
+
+// ── GET /api/v1/pool (E48 S48.8) ─────────────────────────────────────────────
+
+describe('GET /api/v1/pool', () => {
+  /** Mirrors pool-manager.test.ts's own makeCfg — a fully-populated CcPoolInstanceConfig fixture. */
+  function makeCfg(overrides: Partial<CcPoolInstanceConfig> = {}): CcPoolInstanceConfig {
+    return {
+      name: null,
+      agent_id: 'peggy',
+      tmux_session: 'peggy-pool',
+      panes: 2,
+      growth: 'fixed',
+      max_panes: 2,
+      claude_bin: '/usr/local/bin/claude',
+      model: undefined,
+      working_dir: '/work/dir',
+      launch_args: [],
+      poll_interval_ms: 1000,
+      system_prompt: undefined,
+      lease: { idle_evict_ms: 1_800_000, hard_idle_ms: 21_600_000, park_timeout_ms: 300_000 },
+      on_evict: 'clear',
+      launch_ack_delay_ms: 500,
+      launch_ack_max_attempts: 3,
+      launch_ack_pattern: 'experimental',
+      pane_env: {},
+      ...overrides,
+    };
+  }
+
+  /** A no-op PaneLauncher stub — these tests only exercise leaseStore/parkedStatus
+   *  reads, never launch()/release(), so a fake is enough (mirrors pool-manager.test.ts). */
+  function makeFakePaneLauncher() {
+    return { launch: async () => {}, release: async () => {} };
+  }
+
+  function makeManager(db: Database.Database, cfgOverrides: Partial<CcPoolInstanceConfig> = {}): PoolManager {
+    const cfg = makeCfg(cfgOverrides);
+    return new PoolManager({ cfg, db, busBaseUrl: 'http://127.0.0.1:3000', paneLauncher: makeFakePaneLauncher() });
+  }
+
+  /** A minimal MessageEnvelope parked under `recipient` (normally a pool's parkedRecipientId()). */
+  function parkEnvelope(conversationId: string, recipient: string): MessageEnvelope {
+    return {
+      id: randomUUID(),
+      timestamp: new Date().toISOString(),
+      channel: 'telegram',
+      topic: 'general',
+      sender: 'contact:bob',
+      recipient,
+      reply_to: null,
+      priority: 'normal',
+      payload: { type: 'text', body: 'hello' },
+      metadata: { conversation_id: conversationId },
+    };
+  }
+
+  let server: FastifyInstance;
+
+  afterEach(async () => {
+    await server.close();
+  });
+
+  it('returns { ok: true, pools: [] } when no poolManagers are configured', async () => {
+    ({ server } = await makeServer());
+
+    const res = await server.inject({ method: 'GET', url: '/api/v1/pool' });
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ ok: true, pools: [] });
+  });
+
+  it('returns pane rows with correct shape/values for one configured pool with mixed pane states', async () => {
+    const fixtureDb = makeDb();
+    const manager = makeManager(fixtureDb);
+    manager.leaseStore.seedPanes('peggy', [
+      { paneId: 'peggy-pool:1', agentId: 'agent:peggy-pool-1' },
+      { paneId: 'peggy-pool:2', agentId: 'agent:peggy-pool-2' },
+    ]);
+    const acquired = manager.leaseStore.acquire('peggy', 'conv-a', {
+      poolAgentId: 'peggy',
+      panes: 2,
+      maxPanes: 2,
+      growth: 'fixed',
+      idleEvictMs: 1_800_000,
+    });
+    if (acquired.kind !== 'bound') throw new Error(`test setup: expected "bound", got "${acquired.kind}"`);
+    manager.leaseStore.confirmReady('peggy', acquired.lease.pane_id);
+
+    const poolManagers = new Map([['agent:peggy', manager]]);
+    ({ server } = await makeServer({ poolManagers }));
+
+    const res = await server.inject({ method: 'GET', url: '/api/v1/pool' });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body) as {
+      ok: boolean;
+      pools: Array<{
+        pool_id: string;
+        agent_id: string;
+        panes: Array<{ pane_id: string; agent_id: string; state: string; conversation_id: string | null }>;
+        parked: { count: number; oldest_parked_at: string | null };
+      }>;
+    };
+    expect(body.ok).toBe(true);
+    expect(body.pools).toHaveLength(1);
+    const pool = body.pools[0]!;
+    expect(pool.pool_id).toBe('peggy');
+    expect(pool.agent_id).toBe('agent:peggy');
+    expect(pool.panes).toHaveLength(2);
+
+    const leasedPane = pool.panes.find((p) => p.pane_id === 'peggy-pool:1')!;
+    expect(leasedPane.state).toBe('leased');
+    expect(leasedPane.agent_id).toBe('agent:peggy-pool-1');
+    expect(leasedPane.conversation_id).toBe('conv-a');
+
+    const freePane = pool.panes.find((p) => p.pane_id === 'peggy-pool:2')!;
+    expect(freePane.state).toBe('free');
+    expect(freePane.conversation_id).toBeNull();
+
+    expect(pool.parked).toEqual({ count: 0, oldest_parked_at: null });
+  });
+
+  it('?pool= narrows the result to the matching pool', async () => {
+    const fixtureDb = makeDb();
+    const peggy = makeManager(fixtureDb, { agent_id: 'peggy', tmux_session: 'peggy-pool' });
+    const otherbot = makeManager(fixtureDb, { agent_id: 'otherbot', tmux_session: 'otherbot-pool' });
+    peggy.leaseStore.seedPanes('peggy', [{ paneId: 'peggy-pool:1', agentId: 'agent:peggy-pool-1' }]);
+    otherbot.leaseStore.seedPanes('otherbot', [{ paneId: 'otherbot-pool:1', agentId: 'agent:otherbot-pool-1' }]);
+    const poolManagers = new Map([
+      ['agent:peggy', peggy],
+      ['agent:otherbot', otherbot],
+    ]);
+    ({ server } = await makeServer({ poolManagers }));
+
+    const res = await server.inject({ method: 'GET', url: '/api/v1/pool?pool=agent:peggy' });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body) as { ok: boolean; pools: Array<{ pool_id: string }> };
+    expect(body.pools).toHaveLength(1);
+    expect(body.pools[0]!.pool_id).toBe('peggy');
+  });
+
+  it('?pool= for a nonexistent pool returns 404', async () => {
+    const fixtureDb = makeDb();
+    const manager = makeManager(fixtureDb);
+    manager.leaseStore.seedPanes('peggy', [{ paneId: 'peggy-pool:1', agentId: 'agent:peggy-pool-1' }]);
+    const poolManagers = new Map([['agent:peggy', manager]]);
+    ({ server } = await makeServer({ poolManagers }));
+
+    const res = await server.inject({ method: 'GET', url: '/api/v1/pool?pool=agent:ghost' });
+    expect(res.statusCode).toBe(404);
+    const body = JSON.parse(res.body) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain('agent:ghost');
+  });
+
+  it('reflects parked count and oldest-parked timestamp', async () => {
+    const fixtureDb = makeDb();
+    const manager = makeManager(fixtureDb);
+    manager.leaseStore.seedPanes('peggy', [{ paneId: 'peggy-pool:1', agentId: 'agent:peggy-pool-1' }]);
+    const fixtureQueue = new MessageQueue(fixtureDb);
+    fixtureQueue.enqueue(parkEnvelope('conv-parked-1', manager.parkedRecipientId()));
+    fixtureQueue.enqueue(parkEnvelope('conv-parked-2', manager.parkedRecipientId()));
+
+    const poolManagers = new Map([['agent:peggy', manager]]);
+    ({ server } = await makeServer({ poolManagers }));
+
+    const res = await server.inject({ method: 'GET', url: '/api/v1/pool' });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body) as {
+      pools: Array<{ parked: { count: number; oldest_parked_at: string | null } }>;
+    };
+    expect(body.pools[0]!.parked.count).toBe(2);
+    expect(body.pools[0]!.parked.oldest_parked_at).not.toBeNull();
   });
 });

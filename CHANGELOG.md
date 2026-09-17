@@ -10,6 +10,17 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+### Added
+- **cc-pool observability (E48 S48.8).** `GET /api/v1/pool` (optionally
+  filtered with `?pool=<agent id>`) returns pane leases and parked-queue
+  depth for each configured `cc-pool` instance. A new `/pool [pool-agent-id]`
+  bus command (`src/commands/pool.ts`) renders the same data as plain text.
+  `/status` gains a `Pool:` section (one `pool <id>: leased/total leased[, N
+  parked]` line per configured pool), omitted entirely on deployments with no
+  `cc-pool` instances configured. See
+  [docs/HTTP_API.md](docs/HTTP_API.md#pool) and
+  [docs/SLASH_COMMANDS.md](docs/SLASH_COMMANDS.md#pool-pool-agent-id).
+
 ## [0.12.0] - 2026-09-16
 
 ### Added
