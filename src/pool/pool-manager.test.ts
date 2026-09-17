@@ -594,6 +594,46 @@ describe('PoolManager', () => {
     });
   });
 
+  describe('parkedStatus', () => {
+    /** Local to this describe block (the drainParked suite's own
+     *  makeManagerWithQueue is scoped to that describe, not accessible here) —
+     *  same construction pattern, trimmed to what these tests need. */
+    function makeManagerWithQueue(cfgOverrides: Partial<CcPoolInstanceConfig> = {}) {
+      const db = makeDb();
+      const cfg = makeCfg({ panes: 1, ...cfgOverrides });
+      const paneLauncher = makeFakeLauncher();
+      const queue = new MessageQueue(db);
+      const manager = new PoolManager({ cfg, db, busBaseUrl: 'http://127.0.0.1:3000', paneLauncher, queue });
+      return { manager, queue };
+    }
+
+    it('nothing parked: count 0, oldestParkedAt null', () => {
+      const { manager } = makeManager({ panes: 1 });
+      expect(manager.parkedStatus()).toEqual({ count: 0, oldestParkedAt: null });
+    });
+
+    it('reports count and the oldest created_at among parked rows, read-only (no dequeue side effect)', () => {
+      const { manager, queue } = makeManagerWithQueue();
+      queue.enqueue({ ...parkEnvelope('conv-A'), recipient: manager.parkedRecipientId() });
+      queue.enqueue({ ...parkEnvelope('conv-B'), recipient: manager.parkedRecipientId() });
+
+      const status = manager.parkedStatus();
+
+      expect(status.count).toBe(2);
+      expect(typeof status.oldestParkedAt).toBe('string');
+      // Read-only: both rows are still pending and dequeue-able afterward —
+      // parkedStatus() must not have flipped them to 'processing'.
+      expect(queue.dequeue(manager.parkedRecipientId(), undefined, 10)).toHaveLength(2);
+    });
+
+    it('only counts this pool\'s own parked bucket, not another pool\'s', () => {
+      const { manager, queue } = makeManagerWithQueue({ agent_id: 'poolone' });
+      queue.enqueue({ ...parkEnvelope('conv-A'), recipient: 'agent:pooltwo__parked' });
+
+      expect(manager.parkedStatus()).toEqual({ count: 0, oldestParkedAt: null });
+    });
+  });
+
   describe('start/stop', () => {
     afterEach(() => {
       vi.useRealTimers();

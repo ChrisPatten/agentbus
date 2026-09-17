@@ -371,6 +371,25 @@ export class PoolManager {
   }
 
   /**
+   * Read-only snapshot of the parked queue — for observability (S48.8's
+   * `/pool` command and `GET /api/v1/pool` route), NOT for draining.
+   * Deliberately a raw query against `db` rather than
+   * `MessageQueue.dequeue()`, which mutates matched rows to `processing` —
+   * unsafe to call from a status view. `MessageQueue` has no read-only
+   * "peek" equivalent, so this stays a small local query here rather than
+   * adding one to `src/core/queue.ts`.
+   */
+  parkedStatus(): { count: number; oldestParkedAt: string | null } {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS count, MIN(created_at) AS oldest
+         FROM message_queue WHERE recipient = ? AND status = 'pending'`,
+      )
+      .get(this.parkedRecipientId()) as { count: number; oldest: string | null };
+    return { count: row.count, oldestParkedAt: row.oldest };
+  }
+
+  /**
    * Mirrors (does not import) `getActiveSession()`'s query shape in
    * src/adapters/cc-headless.ts, trimmed to the columns this module needs.
    */
