@@ -98,6 +98,16 @@ Effort: S (under an hour), M (an afternoon), L (a day or more).
   global override can only be removed with `all=true`. Enforce one global row
   (or allow `scope=global` on delete) once the P0 item lands.
 
+- [ ] **`buildMcpConfig()` doesn't set `AGENTBUS_AGENT_ID` for its spawned tools-only MCP subset.** (S)
+  `src/adapters/cc-headless.ts:143-157` builds the `claude -p` child's MCP env
+  with `AGENTBUS_TOOLS_ONLY`/`AGENTBUS_CONFIG` but never `AGENTBUS_AGENT_ID`,
+  so `send_message`/`send_email` from a headless instance still can't
+  identify their real sender even after E48/S48.6's fix to the
+  tool-registration plumbing (threading `agentId` through
+  `registerHeadlessTools`/`registerMessagingTools`/`registerEmailTool`).
+  Fixing `cc-headless.ts` to pass its own `this.agentId` (stripped to bare
+  form) into that env block would close it.
+
 ## P2: Dead code and unused surface area
 
 - [ ] **Config fields that nothing reads.** (S)

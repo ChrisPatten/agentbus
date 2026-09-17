@@ -307,6 +307,32 @@ describe('LeaseStore', () => {
       expect(store.findByAgent('peggy-pool', 'agent:peggy-pool-2')).toBeNull();
     });
 
+    it('findByAgentAnyPool finds a row for its agent_id with no pool_id filter', () => {
+      const db = makeDb();
+      const store = new LeaseStore(db);
+      store.seedPanes('peggy-pool', [{ paneId: 'peggy-pool:1', agentId: 'agent:peggy-pool-1' }]);
+
+      expect(store.findByAgentAnyPool('agent:peggy-pool-1')?.pane_id).toBe('peggy-pool:1');
+    });
+
+    it('findByAgentAnyPool returns null when no row matches', () => {
+      const db = makeDb();
+      const store = new LeaseStore(db);
+      store.seedPanes('peggy-pool', [{ paneId: 'peggy-pool:1', agentId: 'agent:peggy-pool-1' }]);
+
+      expect(store.findByAgentAnyPool('agent:no-such-agent')).toBeNull();
+    });
+
+    it("findByAgentAnyPool does not collide two different pools' distinct agent ids", () => {
+      const db = makeDb();
+      const store = new LeaseStore(db);
+      store.seedPanes('peggy-pool', [{ paneId: 'peggy-pool:1', agentId: 'agent:peggy-pool-1' }]);
+      store.seedPanes('jarvis-pool', [{ paneId: 'jarvis-pool:1', agentId: 'agent:jarvis-pool-1' }]);
+
+      expect(store.findByAgentAnyPool('agent:peggy-pool-1')?.pane_id).toBe('peggy-pool:1');
+      expect(store.findByAgentAnyPool('agent:jarvis-pool-1')?.pane_id).toBe('jarvis-pool:1');
+    });
+
     it('findByConversation finds the current row for a conversation, or null', () => {
       const db = makeDb();
       const store = new LeaseStore(db);

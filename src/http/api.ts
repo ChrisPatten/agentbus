@@ -64,6 +64,8 @@ import type { SiriAdapter } from '../adapters/siri.js';
 import { VERSION } from '../version.js';
 import { recordAgentPoll, getLastPollAt } from './agent-liveness.js';
 import { toBareAgentId } from '../pool/types.js';
+import { LeaseStore } from '../pool/lease-store.js';
+import { computeConversationId } from '../pipeline/conversation-id.js';
 
 export interface HttpServerDeps {
   queue: MessageQueue;
@@ -629,11 +631,16 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     // already obvious what a reply is responding to — so it's sent as a plain
     // message instead of a native reply in that case.
     const metadata: Record<string, unknown> = { ...data.metadata };
+    // Captured alongside the reply_to lookup below so the E48 (S48.6)
+    // stale-pane guard further down can reuse this same query result instead
+    // of re-running it.
+    let replyToConversationId: string | null = null;
     if (data.reply_to) {
       const transcript = db
         .prepare(`SELECT conversation_id, metadata FROM transcripts WHERE message_id = ? LIMIT 1`)
         .get(data.reply_to) as { conversation_id: string; metadata: string } | undefined;
       if (transcript) {
+        replyToConversationId = transcript.conversation_id;
         const latestInbound = db
           .prepare(
             `SELECT message_id FROM transcripts WHERE conversation_id = ? AND direction = 'inbound' ORDER BY created_at DESC LIMIT 1`,
@@ -666,6 +673,54 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       payload: data.payload,
       metadata,
     };
+
+    // E48 (S48.6) — stale-pane guard. A pool pane (e.g. "agent:peggy-pool-3")
+    // can be evicted (its pool_leases row reassigned to a different
+    // conversation) while a reply it generated for its PREVIOUS conversation
+    // is still in flight. Resolve which conversation this send targets, then
+    // reject if the sending pane's lease has already moved on to a different
+    // conversation — before the message is ever enqueued.
+    //
+    // conversationId resolution order:
+    //   1. Reuse the reply_to -> transcripts.conversation_id lookup above.
+    //   2. Else data.metadata.conversation_id, when a non-empty string (set
+    //      by the `reply` MCP tool — see src/mcp/tools/index.ts).
+    //   3. Else derive it the same way Stage 70 (route-resolve) does for
+    //      inbound — this covers send_message/send_email, which never set
+    //      reply_to.
+    let conversationId: string | null;
+    if (replyToConversationId) {
+      conversationId = replyToConversationId;
+    } else if (
+      typeof data.metadata?.['conversation_id'] === 'string' &&
+      data.metadata['conversation_id'].length > 0
+    ) {
+      conversationId = data.metadata['conversation_id'];
+    } else {
+      const bareContactId = data.recipient.startsWith('contact:')
+        ? data.recipient.slice('contact:'.length)
+        : data.recipient;
+      conversationId = computeConversationId(bareContactId, data.channel, data.topic ?? 'general');
+    }
+
+    if (conversationId) {
+      const leaseStore = new LeaseStore(db);
+      const leaseRow = leaseStore.findByAgentAnyPool(data.sender);
+      if (leaseRow && leaseRow.state === 'leased' && leaseRow.conversation_id !== conversationId) {
+        console.error(
+          `[pool-guard] stale sender: sender=${data.sender} expected_conversation_id=${conversationId} ` +
+            `actual_conversation_id=${leaseRow.conversation_id} — rejecting`,
+        );
+        return reply.status(409).send({
+          ok: false,
+          error: `stale sender: pane ${data.sender} is no longer leased to this conversation`,
+        });
+      }
+      // No matching lease row (not a pool-tracked sender — the common case),
+      // or conversation_id matches, or the row isn't currently 'leased':
+      // nothing to guard against, proceed normally.
+    }
+
     const id = queue.enqueue(envelope, data.expires_at);
     return reply.status(201).send({ ok: true, id, queued: true });
   });

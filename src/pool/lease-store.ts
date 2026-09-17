@@ -271,6 +271,24 @@ export class LeaseStore {
     return row ?? null;
   }
 
+  /**
+   * Same as `findByAgent`, but without a `pool_id` filter — for callers (e.g.
+   * the outbound stale-sender guard in src/http/api.ts, E48 S48.6) that only
+   * have an `agentId` (from `envelope.sender`) and no way to know which
+   * pool's id to scope the lookup to. `agentId` is the PREFIXED form, same
+   * convention as `findByAgent`. Agent ids are expected-unique across pools
+   * by construction (each pool derives its panes' ids from its own distinct
+   * `agent_id` prefix — see derivePaneAgentId in types.ts), but this query
+   * does not assume that: if somehow more than one row matches, it returns
+   * the first.
+   */
+  findByAgentAnyPool(agentId: string): PoolLeaseRow | null {
+    const row = this.db
+      .prepare(`SELECT * FROM pool_leases WHERE agent_id = ? LIMIT 1`)
+      .get(agentId) as PoolLeaseRow | undefined;
+    return row ?? null;
+  }
+
   list(poolId: string): PoolLeaseRow[] {
     return this.db
       .prepare(`SELECT * FROM pool_leases WHERE pool_id = ? ORDER BY pane_id ASC`)

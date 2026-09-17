@@ -1,6 +1,6 @@
-import { createHash } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import type { AppConfig } from '../../config/schema.js';
+import { computeConversationId } from '../conversation-id.js';
 import { channelMatches, type PipelineStage, type RouteTarget } from '../types.js';
 
 /**
@@ -31,8 +31,7 @@ export function createRouteResolve(config: AppConfig, _db: Database.Database): P
 
     // Compute conversation_id: sha256(sorted([contact_id, channel, topic]).join(':'))
     const contactId = e.sender.startsWith('contact:') ? e.sender.slice('contact:'.length) : e.sender;
-    const parts = [contactId, e.channel, e.topic].sort();
-    const conversationId = createHash('sha256').update(parts.join(':')).digest('hex');
+    const conversationId = computeConversationId(contactId, e.channel, e.topic);
     ctx.conversationId = conversationId;
 
     // Match first applicable route rule

@@ -9,6 +9,9 @@ import type { AdapterInstance } from '../core/registry.js';
 import { createHttpServer } from './api.js';
 import { PipelineEngine } from '../pipeline/engine.js';
 import type { AppConfig } from '../config/schema.js';
+import { LeaseStore } from '../pool/lease-store.js';
+import { computeConversationId } from '../pipeline/conversation-id.js';
+import type { AcquireResult } from '../pool/types.js';
 
 function makeDb(): Database.Database {
   const db = new Database(':memory:');
@@ -423,6 +426,150 @@ describe('POST /api/v1/messages — reply_to resolution (E28)', () => {
     const message = await enqueueAndFetch(validMessage);
     const metadata = message['metadata'] as Record<string, unknown>;
     expect(metadata['reply_to_platform_message_id']).toBeUndefined();
+  });
+});
+
+describe('POST /api/v1/messages — stale-pane guard (E48 S48.6)', () => {
+  let server: FastifyInstance;
+  let queue: MessageQueue;
+  let db: Database.Database;
+
+  beforeEach(async () => {
+    ({ server, queue, db } = await makeServer());
+  });
+
+  afterEach(async () => {
+    await server.close();
+  });
+
+  /** Seeds one pane in `poolId`, acquires it for `conversationId`, and confirms it `leased`. */
+  function seedLeasedPane(poolId: string, paneAgentId: string, conversationId: string): void {
+    const leaseStore = new LeaseStore(db);
+    leaseStore.seedPanes(poolId, [{ paneId: `${poolId}:1`, agentId: paneAgentId }]);
+    const result: AcquireResult = leaseStore.acquire(poolId, conversationId, {
+      poolAgentId: poolId,
+      panes: 1,
+      maxPanes: 1,
+      growth: 'fixed',
+      idleEvictMs: 15 * 60 * 1000,
+    });
+    if (result.kind !== 'bound') {
+      throw new Error(`test setup: expected acquire() to return "bound", got "${result.kind}"`);
+    }
+    leaseStore.confirmReady(poolId, result.lease.pane_id);
+  }
+
+  it('has zero effect when sender matches no pool lease at all (non-pool traffic)', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/messages',
+      payload: { ...validMessage, sender: 'agent:peggy-pool-99', metadata: { conversation_id: 'conv-x' } },
+    });
+
+    expect(res.statusCode).toBe(201);
+    const body = JSON.parse(res.body) as { ok: boolean; queued: boolean };
+    expect(body.ok).toBe(true);
+    expect(body.queued).toBe(true);
+  });
+
+  it('succeeds when sender is not an "agent:"-prefixed id at all (e.g. a contact sender)', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/messages',
+      payload: validMessage, // sender: 'contact:alice'
+    });
+
+    expect(res.statusCode).toBe(201);
+  });
+
+  it('succeeds when sender matches a leased row with the SAME conversation_id', async () => {
+    seedLeasedPane('peggy', 'agent:peggy-pool-1', 'conv-match');
+
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/messages',
+      payload: { ...validMessage, sender: 'agent:peggy-pool-1', metadata: { conversation_id: 'conv-match' } },
+    });
+
+    expect(res.statusCode).toBe(201);
+  });
+
+  it('rejects with 409 when sender matches a leased row with a DIFFERENT conversation_id, and does not enqueue', async () => {
+    seedLeasedPane('peggy', 'agent:peggy-pool-1', 'conv-current');
+    const countsBefore = queue.counts();
+
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/messages',
+      payload: { ...validMessage, sender: 'agent:peggy-pool-1', metadata: { conversation_id: 'conv-stale' } },
+    });
+
+    expect(res.statusCode).toBe(409);
+    const body = JSON.parse(res.body) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain('agent:peggy-pool-1');
+
+    const countsAfter = queue.counts();
+    expect(countsAfter['pending'] ?? 0).toBe(countsBefore['pending'] ?? 0);
+  });
+
+  it('triggers the guard on mismatch when conversationId is derivable only via the fallback hash-derivation path', async () => {
+    seedLeasedPane('peggy', 'agent:peggy-pool-1', 'conv-current');
+
+    // No reply_to, no metadata.conversation_id — forces the derivation path:
+    // computeConversationId(bareContactId, channel, topic).
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/messages',
+      payload: {
+        channel: 'telegram',
+        sender: 'agent:peggy-pool-1',
+        recipient: 'contact:alice',
+        payload: { type: 'text', body: 'stale reply' },
+      },
+    });
+
+    expect(res.statusCode).toBe(409);
+  });
+
+  it('succeeds via the fallback hash-derivation path when the derived conversationId matches the lease', async () => {
+    const expectedConversationId = computeConversationId('alice', 'telegram', 'general');
+    seedLeasedPane('peggy', 'agent:peggy-pool-1', expectedConversationId);
+
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/messages',
+      payload: {
+        channel: 'telegram',
+        sender: 'agent:peggy-pool-1',
+        recipient: 'contact:alice',
+        payload: { type: 'text', body: 'legit reply' },
+      },
+    });
+
+    expect(res.statusCode).toBe(201);
+  });
+
+  it('does not block when the matching lease row is not yet "leased" (e.g. still launching)', async () => {
+    const leaseStore = new LeaseStore(db);
+    leaseStore.seedPanes('peggy', [{ paneId: 'peggy:1', agentId: 'agent:peggy-pool-1' }]);
+    const result = leaseStore.acquire('peggy', 'conv-launching', {
+      poolAgentId: 'peggy',
+      panes: 1,
+      maxPanes: 1,
+      growth: 'fixed',
+      idleEvictMs: 15 * 60 * 1000,
+    });
+    if (result.kind !== 'bound') throw new Error(`expected "bound", got "${result.kind}"`);
+    // Deliberately no confirmReady() — row stays in 'launching', not 'leased'.
+
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/messages',
+      payload: { ...validMessage, sender: 'agent:peggy-pool-1', metadata: { conversation_id: 'conv-different' } },
+    });
+
+    expect(res.statusCode).toBe(201);
   });
 });
 

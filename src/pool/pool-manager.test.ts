@@ -1,9 +1,12 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { randomUUID } from 'node:crypto';
 import Database from 'better-sqlite3';
 import { runMigrations } from '../db/schema.js';
 import { PoolManager, createPoolManagers, type PaneLauncher } from './pool-manager.js';
 import type { LaunchParams } from './pane.js';
 import type { AppConfig, CcPoolAdapterConfig, CcPoolInstanceConfig } from '../config/schema.js';
+import { MessageQueue } from '../core/queue.js';
+import type { MessageEnvelope } from '../types/envelope.js';
 
 function makeDb(): Database.Database {
   const db = new Database(':memory:');
@@ -57,6 +60,64 @@ function makeManager(cfgOverrides: Partial<CcPoolInstanceConfig> = {}, db: Datab
   const paneLauncher = makeFakeLauncher();
   const manager = new PoolManager({ cfg, db, busBaseUrl: 'http://127.0.0.1:3000', paneLauncher });
   return { manager, paneLauncher, db, cfg };
+}
+
+/** A TmuxController-shaped fake — only paneAlive/capturePane are exercised by
+ *  reconcileLiveness(), the rest exist so the object structurally satisfies
+ *  PoolManagerDeps.tmux. No explicit return-type annotation, matching
+ *  makeFakeLauncher()'s own rationale above (keeps `.mock` accessible). */
+function makeFakeTmux() {
+  return {
+    ensureSession: vi.fn(async (_session: string, _cwd: string) => {}),
+    listWindows: vi.fn(async (_session: string) => []),
+    createWindow: vi.fn(async (_session: string, name: string, _cwd: string, _env?: Record<string, string>) =>
+      `${_session}:${name}`,
+    ),
+    killWindow: vi.fn(async (_target: string) => {}),
+    sendKeys: vi.fn(async (_target: string, _keys: string) => {}),
+    sendCommand: vi.fn(async (_target: string, _line: string) => {}),
+    paneAlive: vi.fn(async (_target: string) => true),
+    paneCommand: vi.fn(async (_target: string) => null as string | null),
+    capturePane: vi.fn(async (_target: string, _lines?: number) => ''),
+  };
+}
+
+/** A fake fetch — mirrors pane.test.ts's own loosely-typed Response fake.
+ *  notifySystem() never inspects the resolved value, so `{ ok: true }` is
+ *  enough. Cast at the injection site with `as unknown as typeof fetch`,
+ *  matching pane.test.ts's exact convention. */
+function makeFakeFetch() {
+  return vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => ({ ok: true }) as unknown as Response);
+}
+
+/** A minimal MessageEnvelope parked (or about to be parked) under some pool's
+ *  parkedRecipientId(). Callers override `recipient`/`metadata` as needed. */
+function parkEnvelope(conversationId: string): MessageEnvelope {
+  return {
+    id: randomUUID(),
+    timestamp: new Date().toISOString(),
+    channel: 'telegram',
+    topic: 'general',
+    sender: 'contact:bob',
+    recipient: '',
+    reply_to: null,
+    priority: 'normal',
+    payload: { type: 'text', body: 'hello' },
+    metadata: { conversation_id: conversationId },
+  };
+}
+
+/** Peeks at still-pending rows for a recipient via raw SQL — deliberately
+ *  NOT queue.dequeue(), which would mark them 'processing' and make them
+ *  unavailable to the drainParked() call a test wants to run next. */
+function readPendingByRecipient(
+  db: Database.Database,
+  recipient: string,
+): Array<{ id: string; metadata: Record<string, unknown> }> {
+  const rows = db
+    .prepare(`SELECT id, metadata FROM message_queue WHERE recipient = ? AND status = 'pending'`)
+    .all(recipient) as Array<{ id: string; metadata: string }>;
+  return rows.map((r) => ({ id: r.id, metadata: JSON.parse(r.metadata) as Record<string, unknown> }));
 }
 
 describe('PoolManager', () => {
@@ -278,6 +339,329 @@ describe('PoolManager', () => {
       expect(managers.has('agent:jarvis')).toBe(true);
       expect(managers.get('agent:peggy')?.poolId).toBe('peggy');
       expect(managers.get('agent:jarvis')?.poolId).toBe('jarvis');
+    });
+  });
+
+  describe('reconcileLiveness', () => {
+    function makeManagerWithTmux(cfgOverrides: Partial<CcPoolInstanceConfig> = {}) {
+      const db = makeDb();
+      const cfg = makeCfg({ panes: 2, ...cfgOverrides });
+      const paneLauncher = makeFakeLauncher();
+      const tmux = makeFakeTmux();
+      const fetchFn = makeFakeFetch();
+      const manager = new PoolManager({
+        cfg,
+        db,
+        busBaseUrl: 'http://127.0.0.1:3000',
+        paneLauncher,
+        tmux,
+        fetchFn: fetchFn as unknown as typeof fetch,
+      });
+      return { manager, paneLauncher, tmux, fetchFn, db, cfg };
+    }
+
+    it('leased row, paneAlive() true: left completely untouched', async () => {
+      const { manager, tmux, fetchFn } = makeManagerWithTmux();
+      await manager.ensureStarted();
+      const bound = manager.leaseStore.acquire(manager.poolId, 'conv-1', {
+        poolAgentId: 'peggy',
+        panes: 2,
+        maxPanes: 2,
+        growth: 'fixed',
+        idleEvictMs: 1_800_000,
+      });
+      if (bound.kind !== 'bound') throw new Error(`expected bound, got ${bound.kind}`);
+      manager.leaseStore.confirmReady(manager.poolId, bound.lease.pane_id);
+      tmux.paneAlive.mockResolvedValue(true);
+
+      await manager.reconcileLiveness();
+
+      expect(tmux.paneAlive).toHaveBeenCalledWith(bound.lease.pane_id);
+      expect(tmux.capturePane).not.toHaveBeenCalled();
+      const row = manager.leaseStore.findByConversation(manager.poolId, 'conv-1');
+      expect(row?.state).toBe('leased');
+      expect(row?.conversation_id).toBe('conv-1');
+      expect(fetchFn).not.toHaveBeenCalled();
+    });
+
+    it('leased row, paneAlive() false: released (state free, conversation_id null), notifySystem fired once', async () => {
+      const { manager, tmux, fetchFn } = makeManagerWithTmux();
+      await manager.ensureStarted();
+      const bound = manager.leaseStore.acquire(manager.poolId, 'conv-1', {
+        poolAgentId: 'peggy',
+        panes: 2,
+        maxPanes: 2,
+        growth: 'fixed',
+        idleEvictMs: 1_800_000,
+      });
+      if (bound.kind !== 'bound') throw new Error(`expected bound, got ${bound.kind}`);
+      manager.leaseStore.confirmReady(manager.poolId, bound.lease.pane_id);
+      tmux.paneAlive.mockResolvedValue(false);
+      tmux.capturePane.mockResolvedValue('some prior pane output');
+
+      await manager.reconcileLiveness();
+
+      // release() clears conversation_id, so it's no longer findable by the old conversation id.
+      expect(manager.leaseStore.findByConversation(manager.poolId, 'conv-1')).toBeNull();
+      const freed = manager.leaseStore.list(manager.poolId).find((r) => r.pane_id === bound.lease.pane_id);
+      expect(freed?.state).toBe('free');
+      expect(freed?.conversation_id).toBeNull();
+      expect(fetchFn).toHaveBeenCalledTimes(1);
+    });
+
+    it('free row: tmux.paneAlive() is never called', async () => {
+      const { manager, tmux } = makeManagerWithTmux();
+      await manager.ensureStarted(); // both seeded panes remain 'free'
+
+      await manager.reconcileLiveness();
+
+      expect(tmux.paneAlive).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('sweepHardIdle', () => {
+    it('leased row idle past hard_idle_ms: paneLauncher.release called with pane_id + cfg.on_evict, then freed', async () => {
+      const { manager, paneLauncher } = makeManager({
+        panes: 1,
+        on_evict: 'kill',
+        lease: { idle_evict_ms: 1_800_000, hard_idle_ms: 5_000, park_timeout_ms: 300_000 },
+      });
+      await manager.ensureStarted();
+      await manager.resolveRoute('conv-1', { contact_id: 'alice', channel: 'telegram' });
+      const pane = manager.leaseStore.findByConversation(manager.poolId, 'conv-1')!;
+      manager.leaseStore.touch(manager.poolId, pane.pane_id, new Date(Date.now() - 10_000));
+      paneLauncher.release.mockClear();
+
+      await manager.sweepHardIdle();
+
+      expect(paneLauncher.release).toHaveBeenCalledWith(pane.pane_id, 'kill');
+      const row = manager.leaseStore.list(manager.poolId).find((r) => r.pane_id === pane.pane_id);
+      expect(row?.state).toBe('free');
+      expect(row?.conversation_id).toBeNull();
+    });
+
+    it('leased row NOT yet past hard_idle_ms: untouched, release never called', async () => {
+      const { manager, paneLauncher } = makeManager({
+        panes: 1,
+        lease: { idle_evict_ms: 1_800_000, hard_idle_ms: 3_600_000, park_timeout_ms: 300_000 },
+      });
+      await manager.ensureStarted();
+      await manager.resolveRoute('conv-1', { contact_id: 'alice', channel: 'telegram' });
+      paneLauncher.release.mockClear();
+
+      await manager.sweepHardIdle();
+
+      expect(paneLauncher.release).not.toHaveBeenCalled();
+      const row = manager.leaseStore.findByConversation(manager.poolId, 'conv-1');
+      expect(row?.state).toBe('leased');
+    });
+
+    it('a release() rejection for one idle row does not stop a second idle row from also being processed', async () => {
+      const { manager, paneLauncher } = makeManager({
+        panes: 2,
+        lease: { idle_evict_ms: 1_800_000, hard_idle_ms: 5_000, park_timeout_ms: 300_000 },
+      });
+      await manager.ensureStarted();
+      await manager.resolveRoute('conv-1', { contact_id: 'alice', channel: 'telegram' });
+      await manager.resolveRoute('conv-2', { contact_id: 'bob', channel: 'telegram' });
+      const pane1 = manager.leaseStore.findByConversation(manager.poolId, 'conv-1')!;
+      const pane2 = manager.leaseStore.findByConversation(manager.poolId, 'conv-2')!;
+      manager.leaseStore.touch(manager.poolId, pane1.pane_id, new Date(Date.now() - 10_000));
+      manager.leaseStore.touch(manager.poolId, pane2.pane_id, new Date(Date.now() - 10_000));
+      paneLauncher.release.mockClear();
+      paneLauncher.release.mockRejectedValueOnce(new Error('tmux is on fire'));
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      await manager.sweepHardIdle();
+
+      expect(paneLauncher.release).toHaveBeenCalledTimes(2);
+      const row1 = manager.leaseStore.list(manager.poolId).find((r) => r.pane_id === pane1.pane_id);
+      const row2 = manager.leaseStore.list(manager.poolId).find((r) => r.pane_id === pane2.pane_id);
+      expect(row1?.state).toBe('free');
+      expect(row2?.state).toBe('free');
+      expect(errSpy).toHaveBeenCalled();
+
+      errSpy.mockRestore();
+    });
+  });
+
+  describe('drainParked', () => {
+    function makeManagerWithQueue(cfgOverrides: Partial<CcPoolInstanceConfig> = {}) {
+      const db = makeDb();
+      const cfg = makeCfg({ panes: 1, ...cfgOverrides });
+      const paneLauncher = makeFakeLauncher();
+      const fetchFn = makeFakeFetch();
+      const queue = new MessageQueue(db);
+      const manager = new PoolManager({
+        cfg,
+        db,
+        busBaseUrl: 'http://127.0.0.1:3000',
+        paneLauncher,
+        queue,
+        fetchFn: fetchFn as unknown as typeof fetch,
+      });
+      return { manager, paneLauncher, db, cfg, queue, fetchFn };
+    }
+
+    it('resolved: old parked copy acked, a fresh copy enqueued under the newly-resolved recipient', async () => {
+      const { manager, queue } = makeManagerWithQueue();
+      await manager.ensureStarted();
+      await manager.resolveRoute('conv-A', { contact_id: 'alice', channel: 'telegram' }); // occupies the only pane
+
+      const parkedId = queue.enqueue({ ...parkEnvelope('conv-B'), recipient: manager.parkedRecipientId() });
+
+      // Simulate a pane becoming available (e.g. conv-A's conversation ended).
+      const paneA = manager.leaseStore.findByConversation(manager.poolId, 'conv-A')!;
+      manager.leaseStore.release(manager.poolId, paneA.pane_id);
+
+      await manager.drainParked();
+
+      expect(queue.dequeue(manager.parkedRecipientId(), undefined, 10)).toHaveLength(0);
+
+      const paneB = manager.leaseStore.findByConversation(manager.poolId, 'conv-B');
+      expect(paneB?.state).toBe('leased');
+      const delivered = queue.dequeue(paneB!.agent_id, undefined, 10);
+      expect(delivered).toHaveLength(1);
+      expect(delivered[0]?.messageId).not.toBe(parkedId);
+      expect(delivered[0]?.envelope.metadata['conversation_id']).toBe('conv-B');
+      expect(delivered[0]?.envelope.payload).toEqual({ type: 'text', body: 'hello' });
+    });
+
+    it('still exhausted, within park_timeout_ms: re-enqueued onto the same parked bucket, pool_parked_since preserved across retries', async () => {
+      const { manager, queue, db } = makeManagerWithQueue({
+        lease: { idle_evict_ms: 1_800_000, hard_idle_ms: 21_600_000, park_timeout_ms: 300_000 },
+      });
+      await manager.ensureStarted();
+      await manager.resolveRoute('conv-A', { contact_id: 'alice', channel: 'telegram' }); // occupies the only pane, never freed
+
+      queue.enqueue({ ...parkEnvelope('conv-B'), recipient: manager.parkedRecipientId() });
+
+      await manager.drainParked();
+      const afterFirst = readPendingByRecipient(db, manager.parkedRecipientId());
+      expect(afterFirst).toHaveLength(1);
+      const stamp1 = afterFirst[0]!.metadata['pool_parked_since'];
+      expect(typeof stamp1).toBe('string');
+
+      await manager.drainParked();
+      const afterSecond = readPendingByRecipient(db, manager.parkedRecipientId());
+      expect(afterSecond).toHaveLength(1);
+      // The regression test that matters most: the timeout clock starts
+      // once, not on every retry.
+      expect(afterSecond[0]!.metadata['pool_parked_since']).toBe(stamp1);
+    });
+
+    it('past park_timeout_ms: dead-lettered, and notifySystem fires exactly once per conversation across multiple timed-out messages', async () => {
+      const { manager, queue, db, fetchFn } = makeManagerWithQueue({
+        lease: { idle_evict_ms: 1_800_000, hard_idle_ms: 21_600_000, park_timeout_ms: 1_000 },
+      });
+      await manager.ensureStarted();
+      await manager.resolveRoute('conv-A', { contact_id: 'alice', channel: 'telegram' }); // occupies the only pane
+
+      const longAgo = new Date(Date.now() - 999_999_999).toISOString();
+      const id1 = queue.enqueue({
+        ...parkEnvelope('conv-B'),
+        recipient: manager.parkedRecipientId(),
+        metadata: { conversation_id: 'conv-B', pool_parked_since: longAgo },
+      });
+      const id2 = queue.enqueue({
+        ...parkEnvelope('conv-B'),
+        recipient: manager.parkedRecipientId(),
+        metadata: { conversation_id: 'conv-B', pool_parked_since: longAgo },
+      });
+
+      await manager.drainParked();
+
+      // deadLetter() deletes from message_queue and inserts into dead_letter
+      // — queue.counts() (grouped by message_queue.status) can never show a
+      // 'dead_letter' key, since a dead-lettered row no longer exists there.
+      // The dead_letter table itself is the only correct place to assert this.
+      const dl = db
+        .prepare(`SELECT COUNT(*) as n FROM dead_letter WHERE original_message_id IN (?, ?)`)
+        .get(id1, id2) as { n: number };
+      expect(dl.n).toBe(2);
+      expect(queue.dequeue(manager.parkedRecipientId(), undefined, 10)).toHaveLength(0);
+      expect(fetchFn).toHaveBeenCalledTimes(1);
+    });
+
+    it('no queue injected: logs and no-ops rather than throwing', async () => {
+      const { manager } = makeManager({ panes: 1 });
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      await expect(manager.drainParked()).resolves.toBeUndefined();
+
+      expect(errSpy).toHaveBeenCalled();
+      errSpy.mockRestore();
+    });
+  });
+
+  describe('start/stop', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('start() runs reconcileLiveness() once up front, then schedules recurring sweepHardIdle()+drainParked() ticks; stop() halts them', async () => {
+      vi.useFakeTimers();
+      const db = makeDb();
+      const cfg = makeCfg({ panes: 1 });
+      const paneLauncher = makeFakeLauncher();
+      const manager = new PoolManager({
+        cfg,
+        db,
+        busBaseUrl: 'http://127.0.0.1:3000',
+        paneLauncher,
+        sweepIntervalMs: 1_000,
+      });
+      const reconcileSpy = vi.spyOn(manager, 'reconcileLiveness').mockResolvedValue();
+      const sweepSpy = vi.spyOn(manager, 'sweepHardIdle').mockResolvedValue();
+      const drainSpy = vi.spyOn(manager, 'drainParked').mockResolvedValue();
+
+      manager.start();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(reconcileSpy).toHaveBeenCalledTimes(1);
+      expect(sweepSpy).not.toHaveBeenCalled();
+      expect(drainSpy).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(sweepSpy).toHaveBeenCalledTimes(1);
+      expect(drainSpy).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(sweepSpy).toHaveBeenCalledTimes(2);
+      expect(drainSpy).toHaveBeenCalledTimes(2);
+      // Never called again on a recurring tick — only once, up front.
+      expect(reconcileSpy).toHaveBeenCalledTimes(1);
+
+      manager.stop();
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(sweepSpy).toHaveBeenCalledTimes(2);
+      expect(drainSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it('calling start() twice does not create two overlapping intervals', async () => {
+      vi.useFakeTimers();
+      const db = makeDb();
+      const cfg = makeCfg({ panes: 1 });
+      const paneLauncher = makeFakeLauncher();
+      const manager = new PoolManager({
+        cfg,
+        db,
+        busBaseUrl: 'http://127.0.0.1:3000',
+        paneLauncher,
+        sweepIntervalMs: 1_000,
+      });
+      vi.spyOn(manager, 'reconcileLiveness').mockResolvedValue();
+      const sweepSpy = vi.spyOn(manager, 'sweepHardIdle').mockResolvedValue();
+      const drainSpy = vi.spyOn(manager, 'drainParked').mockResolvedValue();
+
+      manager.start();
+      manager.start(); // second call must be a no-op
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      // Two overlapping intervals would make these 2 instead of 1.
+      expect(sweepSpy).toHaveBeenCalledTimes(1);
+      expect(drainSpy).toHaveBeenCalledTimes(1);
+
+      manager.stop();
     });
   });
 });
