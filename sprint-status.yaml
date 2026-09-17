@@ -794,28 +794,38 @@ epics:
       S47.2: pending  # App spike: note entities and semantic recall
       S47.3: pending  # If passed: production indexing + refresh
   E48:
-    status: pending
+    status: complete
+    completed: 2026-09-17
     notes: >
-      Interactive Claude Code session pool: N tmux panes, each an interactive
-      session with its own cc.ts MCP process (agent:cc-pool-N). Bus-side pool
-      manager leases a pane per conversation_id, launches with
-      `claude --session-id <uuid>` or resumes with `--resume`, evicts LRU idle
-      panes and parks messages when exhausted. tmux send-keys is lifecycle only
-      (launch, /clear, kill) — message delivery stays on the existing
-      pending/ack/channel-notification path. Mirrors cc-headless per-conversation
-      session semantics while keeping every session attachable. Generalizes the
-      existing single-session prior art in ~/workspace/peggy-claude-code
-      (start.sh + scripts/agentbus_session_watchdog.sh via com.peggy.session-watchdog
-      launchd, StartInterval 300), which E48 retires.
+      Interactive Claude Code session pool, implemented on feat/e48-cc-session-pool
+      (not yet merged to dev). N tmux panes, each an interactive session with
+      its own cc.ts MCP process, leased per conversation_id by a bus-side
+      PoolManager. Final architecture differs from the original plan in one
+      load-bearing way, discovered during implementation: there is no
+      AdapterInstance/registry.send() path for agent-bound message routing in
+      this codebase at all — delivery is pure string-match polling
+      convention. So cc-pool is a new pipeline stage (pool-route-resolve,
+      slot 72) that rewrites a route's recipientId to the concrete leased
+      pane's id before the existing fan-out/enqueue/poll/ack path runs
+      unmodified — not an adapter, no send(), no new delivery semantics. See
+      docs/CC_POOL_ADAPTER.md for the full reference and
+      _bmad-output/epics/E48-cc-session-pool-tmux.md's inline correction note
+      for the "why" behind the change from the original plan. tmux send-keys
+      is lifecycle only (launch, ack handshake, /clear, kill) — never used to
+      deliver message text. Generalizes the single-session prior art in
+      ~/workspace/peggy-claude-code (start.sh + agentbus_session_watchdog.sh);
+      retiring that hand-rolled setup is documented as a manual operator step
+      (docs/CC_POOL_ADAPTER.md's migration section), not done by this epic —
+      it's live production infra outside this repo.
     stories:
-      S48.1: pending  # tmux control layer (src/pool/tmux.ts)
-      S48.2: pending  # Config schema: adapters.cc-pool + getCcPoolInstances
-      S48.2a: pending # SPIKE GATE: per-pane AGENTBUS_AGENT_ID (.mcp.json hardcodes it)
-      S48.3: pending  # pool_leases table + allocation policy (LRU evict / grow / exhausted)
-      S48.4: pending  # Pane lifecycle: launch, experimental-channel Enter ack, resume, readiness gate, clear/kill
-      S48.5: pending  # CcPoolAdapter: hand-off + persistent park queue
-      S48.6: pending  # Outbound lease guard + draining on eviction
-      S48.7: pending  # Idle expiry, eviction hooks, restart reconciliation, retire peggy launchd watchdog
-      S48.8: pending  # /pool command + GET /api/v1/pool + /status line
-      S48.9: pending  # docs/CC_POOL_ADAPTER.md + adapter comparison table
-last_updated: 2026-09-16  # Backfilled E36, E38, E39, E40 (complete, merged to dev 2026-08-31/09-01) and E37, E41 (pending, epic files only). Added the Siri Bridge package E42–E47 (renumbered from E36–E41 on arrival to avoid the collision): E42 complete, E44 in-progress (S44.5 on-device is the operator's), E43/E45/E46/E47 pending. current_epic → E42/E44; E23's S23.5 still pending operator sign-off. Added E48 (interactive Claude Code session pool over tmux, pending).
+      S48.1: complete  # tmux control layer (src/pool/tmux.ts)
+      S48.2: complete  # Config schema: adapters.cc-pool + getCcPoolInstances
+      S48.2a: complete # Per-pane AGENTBUS_AGENT_ID via generated per-pane --mcp-config (src/pool/mcp-config.ts), project .mcp.json never edited
+      S48.3: complete  # pool_leases table (migration 016) + LeaseStore allocation policy (reuse/bound/grow/evict/exhausted)
+      S48.4: complete  # Pane lifecycle: launch, experimental-channel ack handshake, resume, readiness gate (new GET /api/v1/agents/:id/last-poll), clear/kill
+      S48.5: complete  # PoolManager + pool-route-resolve pipeline stage (superseded the planned CcPoolAdapter/AdapterInstance design — see notes)
+      S48.6: complete  # Outbound lease guard at POST /api/v1/messages + fixed send_message/send_email's hardcoded sender
+      S48.7: complete  # Hard-idle sweep, park-queue drain, startup+recurring reconciliation (dead-pane revival added post-S48.9 review)
+      S48.8: complete  # /pool command + GET /api/v1/pool + /status Pool: line
+      S48.9: complete  # docs/CC_POOL_ADAPTER.md + adapter comparison table + cross-links
+last_updated: 2026-09-17  # E48 (interactive Claude Code session pool over tmux) implemented end-to-end and marked complete — all 10 stories, on feat/e48-cc-session-pool, not yet merged to dev/main. current_epic stays E42/E44 (Siri Bridge) since that's the operator's ongoing focus; E48 was a self-contained side branch, now finished. Prior note preserved: Backfilled E36, E38, E39, E40 (complete, merged to dev 2026-08-31/09-01) and E37, E41 (pending, epic files only). Added the Siri Bridge package E42–E47 (renumbered from E36–E41 on arrival to avoid the collision): E42 complete, E44 in-progress (S44.5 on-device is the operator's), E43/E45/E46/E47 pending. E23's S23.5 still pending operator sign-off.
