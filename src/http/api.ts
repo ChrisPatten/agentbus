@@ -66,6 +66,7 @@ import { recordAgentPoll, getLastPollAt } from './agent-liveness.js';
 import { toBareAgentId } from '../pool/types.js';
 import { LeaseStore } from '../pool/lease-store.js';
 import { computeConversationId } from '../pipeline/conversation-id.js';
+import type { PoolManager } from '../pool/pool-manager.js';
 
 export interface HttpServerDeps {
   queue: MessageQueue;
@@ -82,6 +83,13 @@ export interface HttpServerDeps {
    * `config.adapters.siri.enabled`, the `/api/v1/siri/*` routes are mounted.
    */
   siri?: SiriAdapter;
+  /**
+   * Optional — one PoolManager per configured `cc-pool` instance (E48),
+   * keyed by the pool's prefixed logical agent id (e.g. "agent:peggy").
+   * Empty/absent when no `cc-pool` adapters are configured. Consumed by the
+   * `GET /api/v1/pool` observability route.
+   */
+  poolManagers?: Map<string, PoolManager>;
 }
 
 const MessagePayloadSchema = z.discriminatedUnion('type', [

@@ -665,10 +665,11 @@ export function createPoolManagers(
   config: AppConfig,
   db: Database.Database,
   busBaseUrl: string,
+  queue?: MessageQueue,
 ): Map<string, PoolManager> {
   const managers = new Map<string, PoolManager>();
   for (const cfg of getCcPoolInstances(config)) {
-    managers.set(toPrefixedAgentId(cfg.agent_id), new PoolManager({ cfg, db, busBaseUrl }));
+    managers.set(toPrefixedAgentId(cfg.agent_id), new PoolManager({ cfg, db, busBaseUrl, queue }));
   }
   return managers;
 }

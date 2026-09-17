@@ -41,6 +41,13 @@ export interface HandlerDeps {
   db: Database.Database;
   /** Late-bound headless adapter hooks (see HeadlessControl). */
   headlessControl?: HeadlessControl;
+  /**
+   * One PoolManager per configured `cc-pool` instance (E48), keyed by the
+   * pool's prefixed logical agent id (e.g. "agent:peggy"). Populated upfront
+   * by index.ts, unlike `headlessControl` — absent/empty when no `cc-pool`
+   * adapters are configured.
+   */
+  poolManagers?: Map<string, import('../pool/pool-manager.js').PoolManager>;
 }
 
 // ── /status ──────────────────────────────────────────────────────────────────
