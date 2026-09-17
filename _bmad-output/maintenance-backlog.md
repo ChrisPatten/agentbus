@@ -49,6 +49,8 @@ Effort: S (under an hour), M (an afternoon), L (a day or more).
   `retry_count` column is never used. Either implement retry (reset to
   `pending`, bump `retry_count`, back off) or delete the branch and the
   constant, and correct the docs that promise retries.
+  E48 (cc-pool) works around this with its own park queue rather than
+  returning `retryable: true`; implementing retry would let that queue shrink.
 
 - [ ] **`--rebuild-fts` does not exit.** (S)
   `src/index.ts:69-71` rebuilds the index and then continues normal startup.
