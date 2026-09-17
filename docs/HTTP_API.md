@@ -80,7 +80,7 @@ Always returns `200`. `status` is `healthy` when every adapter reports `online`,
 
 ### `GET /api/v1/pool`
 
-Pane leases and parked-queue depth for each configured `cc-pool` instance (E48) — the same data the [`/pool` command](SLASH_COMMANDS.md#pool-pool-agent-id) renders as text.
+Pane leases and parked-queue depth for each configured `cc-pool` instance — the same data the [`/pool` command](SLASH_COMMANDS.md#pool-pool-agent-id) renders as text.
 
 | Param | Notes |
 |---|---|

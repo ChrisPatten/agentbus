@@ -38,7 +38,7 @@ Pool:
 
 If an adapter is paused it shows `[PAUSED]` next to its name. The `dead_letter` line counts `message_queue` rows with that status; dead-lettered messages are moved to a separate table, so it is always 0.
 
-The `Pool:` section (E48) is one line per configured `cc-pool` instance — `<leased pane count>/<total pane count> leased`, plus a `, N parked` clause when that pool's parked-message queue is non-empty. It is omitted entirely, header included, on any deployment with no `cc-pool` instances configured — `/status`'s output there is unchanged from before this section existed. See [`/pool`](#pool-pool-agent-id) for the per-pane breakdown.
+The `Pool:` section is one line per configured `cc-pool` instance — `<leased pane count>/<total pane count> leased`, plus a `, N parked` clause when that pool's parked-message queue is non-empty. It is omitted entirely, header included, on any deployment with no `cc-pool` instances configured — `/status`'s output there is unchanged from before this section existed. See [`/pool`](#pool-pool-agent-id) for the per-pane breakdown.
 
 ### `/help [command]`
 
@@ -148,7 +148,7 @@ This month: $12.05
 
 ### `/pool [pool-agent-id]`
 
-Renders pane leases and parked-queue depth for each configured `cc-pool` instance (E48) as plain text — the same data as [`GET /api/v1/pool`](HTTP_API.md#pool), for reading from chat instead of curl. Registered in `src/index.ts` via `createPoolCommand` in `src/commands/pool.ts`, the same pattern as `/cost`.
+Renders pane leases and parked-queue depth for each configured `cc-pool` instance as plain text — the same data as [`GET /api/v1/pool`](HTTP_API.md#pool), for reading from chat instead of curl. Registered in `src/index.ts` via `createPoolCommand` in `src/commands/pool.ts`, the same pattern as `/cost`.
 
 ```
 /pool

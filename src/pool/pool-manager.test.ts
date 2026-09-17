@@ -417,6 +417,79 @@ describe('PoolManager', () => {
 
       expect(tmux.paneAlive).not.toHaveBeenCalled();
     });
+
+    it('dead row: revived — killWindow attempted, released back to free, WITHOUT ever calling paneAlive on it', async () => {
+      const { manager, tmux } = makeManagerWithTmux();
+      await manager.ensureStarted();
+      const bound = manager.leaseStore.acquire(manager.poolId, 'conv-1', {
+        poolAgentId: 'peggy',
+        panes: 2,
+        maxPanes: 2,
+        growth: 'fixed',
+        idleEvictMs: 1_800_000,
+      });
+      if (bound.kind !== 'bound') throw new Error(`expected bound, got ${bound.kind}`);
+      manager.leaseStore.markDead(manager.poolId, bound.lease.pane_id);
+
+      await manager.reconcileLiveness();
+
+      expect(tmux.paneAlive).not.toHaveBeenCalledWith(bound.lease.pane_id);
+      expect(tmux.killWindow).toHaveBeenCalledWith(bound.lease.pane_id);
+      const revived = manager.leaseStore.list(manager.poolId).find((r) => r.pane_id === bound.lease.pane_id);
+      expect(revived?.state).toBe('free');
+      expect(revived?.conversation_id).toBeNull();
+    });
+
+    it('dead row: a killWindow rejection does not prevent the row from being released', async () => {
+      const { manager, tmux } = makeManagerWithTmux();
+      await manager.ensureStarted();
+      const bound = manager.leaseStore.acquire(manager.poolId, 'conv-1', {
+        poolAgentId: 'peggy',
+        panes: 2,
+        maxPanes: 2,
+        growth: 'fixed',
+        idleEvictMs: 1_800_000,
+      });
+      if (bound.kind !== 'bound') throw new Error(`expected bound, got ${bound.kind}`);
+      manager.leaseStore.markDead(manager.poolId, bound.lease.pane_id);
+      tmux.killWindow.mockRejectedValueOnce(new Error('no such window'));
+
+      await manager.reconcileLiveness();
+
+      const revived = manager.leaseStore.list(manager.poolId).find((r) => r.pane_id === bound.lease.pane_id);
+      expect(revived?.state).toBe('free');
+    });
+
+    it('a dead row and a separate live leased row are both handled correctly in one pass', async () => {
+      const { manager, tmux } = makeManagerWithTmux();
+      await manager.ensureStarted();
+      const deadBind = manager.leaseStore.acquire(manager.poolId, 'conv-dead', {
+        poolAgentId: 'peggy',
+        panes: 2,
+        maxPanes: 2,
+        growth: 'fixed',
+        idleEvictMs: 1_800_000,
+      });
+      if (deadBind.kind !== 'bound') throw new Error(`expected bound, got ${deadBind.kind}`);
+      manager.leaseStore.markDead(manager.poolId, deadBind.lease.pane_id);
+
+      const liveBind = manager.leaseStore.acquire(manager.poolId, 'conv-live', {
+        poolAgentId: 'peggy',
+        panes: 2,
+        maxPanes: 2,
+        growth: 'fixed',
+        idleEvictMs: 1_800_000,
+      });
+      if (liveBind.kind !== 'bound') throw new Error(`expected bound, got ${liveBind.kind}`);
+      manager.leaseStore.confirmReady(manager.poolId, liveBind.lease.pane_id);
+      tmux.paneAlive.mockResolvedValue(true);
+
+      await manager.reconcileLiveness();
+
+      const rows = manager.leaseStore.list(manager.poolId);
+      expect(rows.find((r) => r.pane_id === deadBind.lease.pane_id)?.state).toBe('free');
+      expect(rows.find((r) => r.pane_id === liveBind.lease.pane_id)?.state).toBe('leased');
+    });
   });
 
   describe('sweepHardIdle', () => {
@@ -639,7 +712,7 @@ describe('PoolManager', () => {
       vi.useRealTimers();
     });
 
-    it('start() runs reconcileLiveness() once up front, then schedules recurring sweepHardIdle()+drainParked() ticks; stop() halts them', async () => {
+    it('start() runs reconcileLiveness() once up front, then schedules recurring reconcileLiveness()+sweepHardIdle()+drainParked() ticks; stop() halts them', async () => {
       vi.useFakeTimers();
       const db = makeDb();
       const cfg = makeCfg({ panes: 1 });
@@ -657,24 +730,57 @@ describe('PoolManager', () => {
 
       manager.start();
       await vi.advanceTimersByTimeAsync(0);
+      // The up-front call from start() itself, before any tick has fired.
       expect(reconcileSpy).toHaveBeenCalledTimes(1);
       expect(sweepSpy).not.toHaveBeenCalled();
       expect(drainSpy).not.toHaveBeenCalled();
 
       await vi.advanceTimersByTimeAsync(1_000);
+      // Every recurring tick re-checks liveness too (see reconcileLiveness()'s
+      // own doc comment) — a crash between ticks must not go unnoticed until
+      // the next full bus-core restart. So this is 2 (the up-front call plus
+      // this tick's), not still 1.
+      expect(reconcileSpy).toHaveBeenCalledTimes(2);
       expect(sweepSpy).toHaveBeenCalledTimes(1);
       expect(drainSpy).toHaveBeenCalledTimes(1);
 
       await vi.advanceTimersByTimeAsync(1_000);
+      expect(reconcileSpy).toHaveBeenCalledTimes(3);
       expect(sweepSpy).toHaveBeenCalledTimes(2);
       expect(drainSpy).toHaveBeenCalledTimes(2);
-      // Never called again on a recurring tick — only once, up front.
-      expect(reconcileSpy).toHaveBeenCalledTimes(1);
 
       manager.stop();
       await vi.advanceTimersByTimeAsync(5_000);
+      expect(reconcileSpy).toHaveBeenCalledTimes(3);
       expect(sweepSpy).toHaveBeenCalledTimes(2);
       expect(drainSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it('a reconcileLiveness() rejection on one tick does not prevent that same tick\'s sweepHardIdle()/drainParked() from running', async () => {
+      vi.useFakeTimers();
+      const db = makeDb();
+      const cfg = makeCfg({ panes: 1 });
+      const paneLauncher = makeFakeLauncher();
+      const manager = new PoolManager({
+        cfg,
+        db,
+        busBaseUrl: 'http://127.0.0.1:3000',
+        paneLauncher,
+        sweepIntervalMs: 1_000,
+      });
+      vi.spyOn(manager, 'reconcileLiveness').mockRejectedValue(new Error('boom'));
+      const sweepSpy = vi.spyOn(manager, 'sweepHardIdle').mockResolvedValue();
+      const drainSpy = vi.spyOn(manager, 'drainParked').mockResolvedValue();
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      manager.start();
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(sweepSpy).toHaveBeenCalledTimes(1);
+      expect(drainSpy).toHaveBeenCalledTimes(1);
+
+      manager.stop();
+      errSpy.mockRestore();
     });
 
     it('calling start() twice does not create two overlapping intervals', async () => {

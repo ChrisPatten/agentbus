@@ -97,6 +97,8 @@ memory:
     telegram:jarvis: 3
 ```
 
+See [CC_POOL_ADAPTER.md](CC_POOL_ADAPTER.md) if you want this same per-bot session isolation backed by a managed interactive session instead of a hand-rolled `on_session_close` command.
+
 ---
 
 **Allowed senders** are derived automatically from the contacts map — any contact with a `platforms.telegram.userId` is permitted:

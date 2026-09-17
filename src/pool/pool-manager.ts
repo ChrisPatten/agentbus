@@ -406,30 +406,45 @@ export class PoolManager {
   // ── S48.7: startup reconciliation, hard-idle sweep, park-queue drain ───────
 
   /**
-   * Idempotent startup pass, meant to be run once right after
-   * `ensureStarted()`. For every row in this pool with state 'leased' or
-   * 'draining', checks whether its tmux window is still alive. A live pane
-   * is adopted as-is — left completely untouched — so a bus-core restart
-   * doesn't interrupt a conversation already flowing to it. A pane whose
-   * window has vanished is the crash-recovery case: capture whatever pane
-   * output remains (best-effort), free the row (the conversation's
-   * `claude_session_id` is preserved in `sessions`, so it resumes correctly
-   * wherever it's next claimed), and fire a restart notice.
+   * Idempotent reconciliation pass — run once right after `ensureStarted()`
+   * at startup, AND on every recurring sweep tick (see `sweepTick()`), not
+   * just once. A crash between two ticks would otherwise go unnoticed until
+   * the next full bus-core restart, silently stranding that pane for
+   * however long the process happens to stay up.
+   *
+   * For every row with state 'leased' or 'draining', checks whether its
+   * tmux window is still alive. A live pane is adopted as-is — left
+   * completely untouched — so a bus-core restart doesn't interrupt a
+   * conversation already flowing to it. A pane whose window has vanished is
+   * the crash-recovery case: capture whatever pane output remains
+   * (best-effort), free the row (the conversation's `claude_session_id` is
+   * preserved in `sessions`, so it resumes correctly wherever it's next
+   * claimed), and fire a restart notice.
+   *
+   * For every row with state 'dead' (a previous launch attempt failed —
+   * see `resolveRoute()`'s catch path): `dead` is otherwise a permanent
+   * dead end — `LeaseStore.acquire()` never selects a `dead` row, so
+   * without this, one transient launch failure (a momentary CLI hiccup, a
+   * network blip during the ack handshake) permanently costs the pool one
+   * pane of capacity, forever, even across restarts. Recover it: best-effort
+   * `tmux.killWindow()` (a failed launch may have left a partially-started
+   * window behind — clear it so the pane starts clean next time; errors are
+   * swallowed the same way a "window already gone" kill is elsewhere),
+   * then release the row back to 'free'.
    *
    * A 'free' row is left alone WITHOUT ever calling `tmux.paneAlive()` on
    * it — a free pane with no live window is the normal, expected steady
    * state for any pane that hasn't been claimed yet (`ensureStarted()` only
    * seeds DB rows; tmux windows/claude processes are created lazily on
    * first claim — see that method's own doc comment), not a problem to fix.
-   * 'launching'/'dead' rows are also left alone: transient/already-handled
-   * states outside this pass's job.
+   * A 'launching' row is left alone too — it's mid-claim, handled by
+   * whichever `resolveRoute()` call is already in flight for it.
    */
   async reconcileLiveness(): Promise<void> {
-    const rows = this.leaseStore
-      .list(this.poolId)
-      .filter((row) => row.state === 'leased' || row.state === 'draining');
+    const allRows = this.leaseStore.list(this.poolId);
 
-    for (const row of rows) {
+    const liveCheckRows = allRows.filter((row) => row.state === 'leased' || row.state === 'draining');
+    for (const row of liveCheckRows) {
       try {
         const alive = await this.tmux.paneAlive(row.pane_id);
         if (alive) continue; // adopted as-is — completely untouched
@@ -450,13 +465,27 @@ export class PoolManager {
 
         const snippet = tail.trim();
         const body =
-          `[pool:${this.poolId}] Pane ${row.pane_id} was found dead on startup reconciliation ` +
+          `[pool:${this.poolId}] Pane ${row.pane_id} was found dead on reconciliation ` +
           `(was serving conversation ${conversationId}) and has been released — its session will ` +
           `resume correctly wherever it is next claimed.` +
           (snippet ? `\n\nLast pane output:\n${snippet}` : '');
         await this.notifySystem(body);
       } catch (err) {
         console.error(`[pool:${this.poolId}] reconcileLiveness: failed to reconcile pane ${row.pane_id}:`, err);
+      }
+    }
+
+    const deadRows = allRows.filter((row) => row.state === 'dead');
+    for (const row of deadRows) {
+      try {
+        try {
+          await this.tmux.killWindow(row.pane_id);
+        } catch (err) {
+          console.error(`[pool:${this.poolId}] reconcileLiveness: killWindow failed for dead pane ${row.pane_id}:`, err);
+        }
+        this.leaseStore.release(this.poolId, row.pane_id);
+      } catch (err) {
+        console.error(`[pool:${this.poolId}] reconcileLiveness: failed to revive dead pane ${row.pane_id}:`, err);
       }
     }
   }
@@ -634,6 +663,11 @@ export class PoolManager {
    *  independently so a failure in sweepHardIdle() doesn't prevent
    *  drainParked() from still running in the same tick. */
   private async sweepTick(): Promise<void> {
+    try {
+      await this.reconcileLiveness();
+    } catch (err) {
+      console.error(`[pool:${this.poolId}] reconcileLiveness() tick failed:`, err);
+    }
     try {
       await this.sweepHardIdle();
     } catch (err) {
