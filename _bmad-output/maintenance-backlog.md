@@ -112,6 +112,20 @@ Effort: S (under an hour), M (an afternoon), L (a day or more).
   Only its test imports it. E13 shipped channel notifications instead of
   `sampling/createMessage`. Delete the module and test.
 
+- [ ] **`cc-pool`'s registered `JournalingRunner` is dead code.** (S)
+  `SessionTracker.dispatchJournaling()` (`src/memory/session-tracker.ts`)
+  builds its `instanceByAgentId` map only from `getCcHeadlessInstances()`, so
+  a session whose `agent_id` is a pool pane (e.g. `agent:peggy-pool-3`) always
+  misses that lookup and `continue`s before ever checking whether a runner is
+  registered for it. `PoolManager.journalingRunner` (E48/S48.5,
+  `src/pool/pool-manager.ts`) is a deliberate permanent no-op, so this has
+  zero behavioral effect today — the outcome (nothing happens) is identical
+  whether the runner runs or not — but it's worth either wiring
+  `dispatchJournaling()` to recognize pool-owned agent ids (matching against
+  each configured pool's derived pane-id pattern, not a flat map, since a
+  pool's registered agent id differs from its panes' own ids) or dropping the
+  registration so it stops looking load-bearing.
+
 - [ ] **`model-override-loader.ts` is mostly dead and duplicated.** (S)
   Only `resolveModelOverride()` is called. `listModelOverrides`,
   `setModelOverride`, `deleteModelOverride`, and `clearAllModelOverrides`

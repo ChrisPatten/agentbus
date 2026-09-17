@@ -44,15 +44,57 @@ text.** Each pane runs its own `cc.ts` with a distinct `AGENTBUS_AGENT_ID`
 pending/ack/channel-notification path:
 
 ```
-inbound → pipeline Stage 70 → target { adapterId: cc-pool, recipientId: agent:peggy }
-        → CcPoolAdapter.send()
-             ├── lease(conversation_id) → pane 2 (agent:cc-pool-2)
+inbound → pipeline Stage 70 (route-resolve)
+             → target { adapterId: cc-pool, recipientId: agent:peggy }
+        → pipeline Stage ~72 (pool-route-resolve, NEW — see below)
+             → PoolManager.resolveRoute(conversationId) → pane 2 (agent:peggy-pool-2)
              ├── tmux: launch `claude --session-id <uuid>` or `claude --resume <uuid>`
-             └── hand envelope to agent:cc-pool-2's queue
-        → pane 2's cc.ts polls /api/v1/messages/pending?agent=cc-pool-2
+             └── rewrites route.recipientId → agent:peggy-pool-2 (in place, before enqueue)
+        → pipeline Stage 80 (transcript-log) stamps sessions.agent_id from the
+          now-concrete recipientId, then fan-out calls the SAME unmodified
+          queue.enqueue({ recipient: 'agent:peggy-pool-2', ... }) every other
+          route already uses
+        → pane 2's cc.ts polls /api/v1/messages/pending?agent=peggy-pool-2
         → notifications/claude/channel → the interactive session wakes
         → agent calls reply → normal outbound path back to Telegram/email
 ```
+
+**Correction from the original planning pass (recorded here for the record,
+not silently rewritten): there is no `CcPoolAdapter implements AdapterInstance`
+and no `.send()` call anywhere in this flow.** Investigation during
+implementation established that agent-bound message delivery in this codebase
+has never gone through `AdapterRegistry`/`AdapterInstance.send()` at all — not
+for `cc-headless`, not for the plain `claude-code` MCP adapter, and there is no
+mechanism for cc-pool to newly invent one without also inventing new
+`DeliveryResult`/retry/ack semantics that nothing else needs. Inbound fan-out
+has always just called `queue.enqueue()` once per route target with
+`recipient` set verbatim to that route's `recipientId`; whichever process
+polls `GET /api/v1/messages/pending?agent=<that string>` picks it up — a
+convention, not a dispatch mechanism. `cc-headless`'s multi-instance support
+(E23) works only because each instance's own configured `agent_id` happens to
+equal the string a route targets it with, decided once at config time.
+
+cc-pool needs *runtime* resolution (which pane, chosen per-conversation via
+lease acquisition), so it is implemented as a **new pipeline stage**
+(`src/pipeline/stages/pool-route-resolve.ts`, slot ~72, between
+route-resolve@70 and transcript-log@80) backed by a **`PoolManager`**
+(`src/pool/pool-manager.ts`, one instance per configured `cc-pool` entry) —
+not an adapter, not registered anywhere, never touched by `DeliveryWorker`.
+The stage rewrites `route.recipientId` in place from the pool's logical id to
+the concrete pane's id before the existing fan-out loop enqueues; everything
+downstream (poll, ack, channel notification, `reply`) is completely
+unmodified. This also means `sessions.agent_id` — stamped by Stage 80 from
+whichever route recipientId survives to that point — needed one small fix
+(`src/pipeline/stages/transcript-log.ts`) to recognize `adapterId ===
+'cc-pool'` alongside `'cc-headless'`, landed as part of S48.5.
+
+The rest of this document (S48.5/S48.6's prose, "New `src/adapters/cc-pool.ts`
+implementing `AdapterInstance`", `DeliveryResult`-shaped language, etc.)
+predates this finding and describes the originally-planned-but-superseded
+shape. It is left as-was for the historical record rather than rewritten
+line-by-line; treat `pool-route-resolve.ts` + `PoolManager` above, and the
+actual code on `feat/e48-cc-session-pool`, as authoritative over any
+`CcPoolAdapter`/`AdapterInstance` language below.
 
 `send-keys` carries only: the launch command, `/clear`, and `C-c`/kill. No
 user-authored text is ever typed into a terminal, so there is no shell-escaping
