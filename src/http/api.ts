@@ -62,6 +62,8 @@ import { logWebhookRequest } from './webhook-log.js';
 import { registerSiriRoutes } from './siri-routes.js';
 import type { SiriAdapter } from '../adapters/siri.js';
 import { VERSION } from '../version.js';
+import { recordAgentPoll, getLastPollAt } from './agent-liveness.js';
+import { toBareAgentId } from '../pool/types.js';
 
 export interface HttpServerDeps {
   queue: MessageQueue;
@@ -567,12 +569,21 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     // ?agent= is a shorthand that prepends the "agent:" prefix (legacy CC adapter usage).
     const recipientId = recipient ?? `agent:${agent}`;
     const parsedLimit = limit ? Math.max(1, Math.min(parseInt(limit, 10) || 10, 100)) : 10;
+    // E48 (S48.4) — record this poll so cc-pool's pane-launch readiness gate
+    // can tell a pane's cc.ts has come up (see src/http/agent-liveness.ts).
+    recordAgentPoll(agent ?? toBareAgentId(recipient!));
     const messages = queue.dequeue(recipientId, topic, parsedLimit);
     return {
       ok: true,
       messages: messages.map((m) => m.envelope),
       count: messages.length,
     };
+  });
+
+  // GET /api/v1/agents/:agentId/last-poll — E48 (S48.4): last time this bare
+  // agent id was seen polling /api/v1/messages/pending, or null if never seen.
+  server.get<{ Params: { agentId: string } }>('/api/v1/agents/:agentId/last-poll', async (req, _reply) => {
+    return { ok: true, agentId: req.params.agentId, lastPollAt: getLastPollAt(req.params.agentId) };
   });
 
   // POST /api/v1/messages/:id/ack

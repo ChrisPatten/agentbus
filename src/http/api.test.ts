@@ -243,6 +243,58 @@ describe('HTTP API', () => {
     });
   });
 
+  // E48 (S48.4) — GET /api/v1/messages/pending records a poll for the
+  // requesting bare agent id, and GET /api/v1/agents/:agentId/last-poll
+  // surfaces it. Uses agent ids not touched by any other describe block in
+  // this file, since the tracker's module state is shared process-wide.
+  describe('GET /api/v1/agents/:agentId/last-poll (E48 S48.4)', () => {
+    it('returns lastPollAt: null before the agent has ever polled', async () => {
+      const res = await server.inject({
+        method: 'GET',
+        url: '/api/v1/agents/s48-4-never-polled/last-poll',
+      });
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body)).toEqual({
+        ok: true,
+        agentId: 's48-4-never-polled',
+        lastPollAt: null,
+      });
+    });
+
+    it('returns a recent ISO timestamp after the agent polls pending messages via ?agent=', async () => {
+      const beforePoll = Date.now();
+      const pollRes = await server.inject({
+        method: 'GET',
+        url: '/api/v1/messages/pending?agent=s48-4-polled-via-agent',
+      });
+      expect(pollRes.statusCode).toBe(200);
+
+      const res = await server.inject({
+        method: 'GET',
+        url: '/api/v1/agents/s48-4-polled-via-agent/last-poll',
+      });
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body) as { ok: boolean; agentId: string; lastPollAt: string | null };
+      expect(body.lastPollAt).not.toBeNull();
+      expect(new Date(body.lastPollAt!).getTime()).toBeGreaterThanOrEqual(beforePoll);
+    });
+
+    it('records the bare agent id even when the poll only supplied ?recipient=', async () => {
+      const pollRes = await server.inject({
+        method: 'GET',
+        url: '/api/v1/messages/pending?recipient=agent:s48-4-polled-via-recipient',
+      });
+      expect(pollRes.statusCode).toBe(200);
+
+      const res = await server.inject({
+        method: 'GET',
+        url: '/api/v1/agents/s48-4-polled-via-recipient/last-poll',
+      });
+      const body = JSON.parse(res.body) as { lastPollAt: string | null };
+      expect(body.lastPollAt).not.toBeNull();
+    });
+  });
+
   // Fix #11: expires_at was not validated as a future timestamp, so messages
   // could be submitted already expired. The schema now rejects past values.
   describe('POST /api/v1/messages — expires_at validation', () => {
