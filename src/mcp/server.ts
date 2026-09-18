@@ -20,7 +20,7 @@ export function createMcpServer(): McpServer {
       instructions: [
         'Messages arrive as a new user turn in this format:',
         '',
-        '  New message from <sender> via <channel> at <timestamp> [id:<message-id>]:',
+        '  New message from <sender> via <channel> (topic: <topic>) at <timestamp> [id:<message-id>]:',
         '  <body>',
         '',
         'Multiple messages in one turn are separated by a blank line, each with its own [id:...] tag.',

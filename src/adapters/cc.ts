@@ -150,7 +150,9 @@ export function formatMessagesForSampling(
       .join('\n');
     const extraLines = [attachmentLines, inlineLines].filter(Boolean).join('\n');
     const bodyWithImages = body && extraLines ? `${body}\n${extraLines}` : body || extraLines;
-    parts.push(`New message from ${env.sender} via ${env.channel}${ts} [id:${env.id}]:\n${bodyWithImages}`);
+    parts.push(
+      `New message from ${env.sender} via ${env.channel} (topic: ${env.topic})${ts} [id:${env.id}]:\n${bodyWithImages}`,
+    );
   }
 
   return parts.join('\n\n');

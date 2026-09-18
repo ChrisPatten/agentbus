@@ -37,7 +37,7 @@ describe('processAckedMessages', () => {
     expect(buffer).toHaveLength(1);
     expect(notify).toHaveBeenCalledOnce();
     const text = notify.mock.calls[0]![0] as string;
-    expect(text).toMatch(/^New message from contact:alice via telegram at \d{4}-\d{2}-\d{2}T\d{2}:\d{2} \[id:msg-001\]:\nHello!$/);
+    expect(text).toMatch(/^New message from contact:alice via telegram \(topic: general\) at \d{4}-\d{2}-\d{2}T\d{2}:\d{2} \[id:msg-001\]:\nHello!$/);
   });
 
   it('batches multiple acked messages into a single notify call', () => {
@@ -84,7 +84,7 @@ describe('formatMessagesForSampling', () => {
   it('formats a single message with full date+time', () => {
     const result = formatMessagesForSampling([makeEnvelope()]);
     expect(result).toMatch(
-      /^New message from contact:alice via telegram at \d{4}-\d{2}-\d{2}T\d{2}:\d{2} \[id:msg-001\]:\nHello!$/
+      /^New message from contact:alice via telegram \(topic: general\) at \d{4}-\d{2}-\d{2}T\d{2}:\d{2} \[id:msg-001\]:\nHello!$/
     );
   });
 
@@ -103,7 +103,7 @@ describe('formatMessagesForSampling', () => {
   it('omits timestamp segment when envelope has no timestamp', () => {
     const env = makeEnvelope({ timestamp: undefined });
     const result = formatMessagesForSampling([env]);
-    expect(result).toBe('New message from contact:alice via telegram [id:msg-001]:\nHello!');
+    expect(result).toBe('New message from contact:alice via telegram (topic: general) [id:msg-001]:\nHello!');
   });
 
   it('renders non-text payload type as bracketed label', () => {
@@ -388,5 +388,46 @@ describe('formatMessagesForSampling', () => {
     const result = formatMessagesForSampling([env]);
     expect(result).toContain('[reacted 👍 to message 555:42]');
     expect(result).not.toContain('Replying to');
+  });
+
+  // ── topic (E29 fix: topic must be recoverable from the formatted text so a
+  // Claude Code hook without access to the structured MessageEnvelope can
+  // regex-parse it back out and target the right Telegram forum topic) ────────
+
+  it('includes "general" as the topic for a general-area message', () => {
+    const env = makeEnvelope({ topic: 'general' });
+    const result = formatMessagesForSampling([env]);
+    expect(result).toContain('New message from contact:alice via telegram (topic: general) ');
+  });
+
+  it('includes a thread:<hash> topic verbatim', () => {
+    const env = makeEnvelope({ topic: 'thread:9cfaf60aed4358c6' });
+    const result = formatMessagesForSampling([env]);
+    expect(result).toContain(
+      'New message from contact:alice via telegram (topic: thread:9cfaf60aed4358c6) ',
+    );
+  });
+
+  it('gives each envelope in a batch its own correct topic, not just the first or last', () => {
+    const envelopes = [
+      makeEnvelope({ id: 'msg-001', topic: 'general', payload: { type: 'text', body: 'First' } }),
+      makeEnvelope({
+        id: 'msg-002',
+        topic: 'thread:aaa111',
+        payload: { type: 'text', body: 'Second' },
+      }),
+      makeEnvelope({
+        id: 'msg-003',
+        topic: 'thread:bbb222',
+        payload: { type: 'text', body: 'Third' },
+      }),
+    ];
+    const result = formatMessagesForSampling(envelopes);
+    const [first, second, third] = result.split('\n\n') as [string, string, string];
+    expect(first).toContain('(topic: general)');
+    expect(second).toContain('(topic: thread:aaa111)');
+    expect(second).not.toContain('(topic: general)');
+    expect(third).toContain('(topic: thread:bbb222)');
+    expect(third).not.toContain('(topic: thread:aaa111)');
   });
 });

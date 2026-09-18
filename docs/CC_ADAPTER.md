@@ -42,16 +42,17 @@ After three consecutive poll failures the interval backs off to 5 seconds and `g
 ### Message format
 
 ```
-New message from contact:alice via telegram:peggy at 2026-09-14T10:00 [id:msg-abc123]:
+New message from contact:alice via telegram:peggy (topic: thread:9cfaf60aed4358c6) at 2026-09-14T10:00 [id:msg-abc123]:
 What's the weather like?
 
-New message from contact:bob via email at 10:02 [id:msg-def456]:
+New message from contact:bob via email (topic: general) at 10:02 [id:msg-def456]:
 [Replying to Alice: "see attached"]
 Here is the document
 [File: /tmp/agentbus/claude/3f1a.pdf — report.pdf]
 ```
 
 - Messages in one poll are separated by a blank line. The first carries a full timestamp, later ones the time only.
+- `(topic: <topic>)` always appears between the channel and the timestamp — `MessageEnvelope.topic` is a required field, so this segment is never omitted. It lets an external consumer (e.g. a Claude Code hook that only sees this rendered prompt text, not the structured envelope) recover the topic with a simple regex and target the right Telegram forum topic for typing/tool-status updates instead of falling back to the group's general area.
 - A reaction renders as `[reacted 👍 to message 555:42]` or `[removed reaction 👍 to message 555:42]`.
 - A quoted reply renders as a `[Replying to <name>: "<text>"]` line before the body.
 - Attachments append `[Image: <path>]` and `[File: <path> — <name>]` lines; inline email images append a `fetch_attachment` hint. See [ATTACHMENTS.md](ATTACHMENTS.md).

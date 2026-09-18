@@ -79,13 +79,13 @@ Multiple agents can each have their own download path and retention.
 Example channel notifications the agent sees:
 
 ```
-New message from 12345 via telegram at 2026-04-21T14:30 [id:...]:
+New message from 12345 via telegram (topic: general) at 2026-04-21T14:30 [id:...]:
 check this out
 [Image: /tmp/agentbus/claude/9a2c-....jpg]
 ```
 
 ```
-New message from 12345 via telegram at 2026-04-21T14:30 [id:...]:
+New message from 12345 via telegram (topic: general) at 2026-04-21T14:30 [id:...]:
 here is the document
 [File: /tmp/agentbus/claude/3f1a-....pdf — report.pdf]
 ```

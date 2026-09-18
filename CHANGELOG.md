@@ -106,6 +106,23 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
   Verified against the real CLI: two different conversations sent to the
   same already-running bus-core process, on the same static route, both
   reached `leased` on their own distinct panes.
+- **E29 tool-status/typing updates landing in a Telegram group's general area
+  instead of the topic the user actually messaged in.** A Claude Code hook
+  outside this repo (`agentbus_tool_status_hook.sh`) has no access to the
+  structured `MessageEnvelope` for a turn — only the rendered prompt text —
+  so it regex-parses `sender`/`channel` back out of the
+  `formatMessagesForSampling` (`src/adapters/cc.ts`) output and POSTs to the
+  `typing`/`tool-status` adapter endpoints. `topic` was never in that text,
+  so those calls always omitted it and silently fell back to the group's
+  general area, regardless of which forum topic the conversation was in.
+  `formatMessagesForSampling` now includes `(topic: <topic>)` between the
+  channel and the optional timestamp in each formatted message line (e.g.
+  `New message from contact:alice via telegram:peggy (topic:
+  thread:9cfaf60aed4358c6) at 2026-09-14T10:00 [id:msg-abc123]:`), so an
+  external regex-based consumer can recover `topic` alongside `sender`/
+  `channel`. `MessageEnvelope.topic` is a required field, so the segment is
+  always present. Purely additive to the format; no other consumer of this
+  string parses it. See [docs/CC_ADAPTER.md](docs/CC_ADAPTER.md#message-format).
 
 ## [0.12.0] - 2026-09-16
 
