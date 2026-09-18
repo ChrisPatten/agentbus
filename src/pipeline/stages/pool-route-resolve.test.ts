@@ -139,6 +139,37 @@ describe('pool-route-resolve stage', () => {
     expect(manager.resolveRoute).not.toHaveBeenCalled();
   });
 
+  it('does not leak resolution state between two separate calls for two different conversations on the same route rule', async () => {
+    // Fake manager whose resolution depends on conversationId, like the real
+    // PoolManager does (a per-conversation lease resolves to a distinct pane).
+    const resolveRoute = vi.fn(async (conversationId: string) =>
+      conversationId === 'conv-1' ? 'agent:peggy-pool-1' : 'agent:peggy-pool-2',
+    );
+    const manager = { resolveRoute } as unknown as PoolManager;
+    const poolManagers = new Map([['agent:peggy', manager]]);
+    const stage = createPoolRouteResolve(poolManagers);
+
+    // Build each call's routes as its own fresh array/objects — mirroring
+    // what route-resolve.ts now does per envelope (never reusing the exact
+    // same route-target object reference across calls), so this test
+    // exercises the stage the way the real pipeline drives it.
+    const routesForConv1: RouteTarget[] = [{ adapterId: 'cc-pool', recipientId: 'agent:peggy' }];
+    const ctx1 = makeCtx({ routes: routesForConv1, conversationId: 'conv-1' }, { sender: 'contact:alice' });
+    const result1 = await stage(ctx1);
+    expect(result1!.routes[0]!.recipientId).toBe('agent:peggy-pool-1');
+
+    const routesForConv2: RouteTarget[] = [{ adapterId: 'cc-pool', recipientId: 'agent:peggy' }];
+    const ctx2 = makeCtx({ routes: routesForConv2, conversationId: 'conv-2' }, { sender: 'contact:bob' });
+    const result2 = await stage(ctx2);
+    expect(result2!.routes[0]!.recipientId).toBe('agent:peggy-pool-2');
+
+    // The first call's resolved route must be totally unaffected by the
+    // second call — no shared object, no stale overwrite.
+    expect(result1!.routes[0]!.recipientId).toBe('agent:peggy-pool-1');
+    expect(result1!.routes[0]).not.toBe(result2!.routes[0]);
+    expect(resolveRoute).toHaveBeenCalledTimes(2);
+  });
+
   it('resolves multiple cc-pool routes (e.g. a primary target plus an also_notify target) independently', async () => {
     const managerA = makeFakeManager('agent:peggy-pool-1');
     const managerB = makeFakeManager('agent:jarvis-pool-2');

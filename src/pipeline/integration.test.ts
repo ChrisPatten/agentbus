@@ -2,7 +2,7 @@
  * End-to-end integration tests for the full inbound pipeline.
  * Tests POST /api/v1/inbound through all 8 stages against real in-memory SQLite.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import type { FastifyInstance } from 'fastify';
 import { runMigrations } from '../db/schema.js';
@@ -17,8 +17,10 @@ import { slashCommandDetect } from './stages/slash-command.js';
 import { createTopicClassify } from './stages/topic-classify.js';
 import { createPriorityScore } from './stages/priority-score.js';
 import { createRouteResolve } from './stages/route-resolve.js';
+import { createPoolRouteResolve } from './stages/pool-route-resolve.js';
 import { createTranscriptLog } from './stages/transcript-log.js';
 import type { AppConfig } from '../config/schema.js';
+import type { PoolManager } from '../pool/pool-manager.js';
 
 const testConfig: AppConfig = {
   bus: { http_port: 0, db_path: ':memory:', log_level: 'info' },
@@ -260,6 +262,89 @@ describe('inbound pipeline — integration', () => {
     expect(res.ok).toBe(true);
 
     await s2.close();
+  });
+
+  it('two envelopes for different conversations through the same static cc-pool route resolve to distinct panes, with no cross-contamination (regression for shared route-target reference bug)', async () => {
+    const config: AppConfig = {
+      ...testConfig,
+      pipeline: {
+        ...testConfig.pipeline,
+        routes: [
+          {
+            match: { channel: 'telegram' },
+            target: { adapterId: 'cc-pool', recipientId: 'agent:peggy' },
+          },
+        ],
+      },
+    };
+
+    const db = new Database(':memory:');
+    db.pragma('foreign_keys = ON');
+    runMigrations(db);
+    const queue = new MessageQueue(db);
+    const registry = new AdapterRegistry();
+
+    // Fake PoolManager: first call resolves to pane 1, second call (a
+    // different conversation, same static route rule) resolves to pane 2 —
+    // exactly like the real per-conversation lease logic would.
+    const resolveRoute = vi.fn(async (_conversationId: string, _promptContext: { contact_id: string; channel: string }) => '');
+    resolveRoute.mockResolvedValueOnce('agent:peggy-pool-1').mockResolvedValueOnce('agent:peggy-pool-2');
+    const fakeManager = { resolveRoute } as unknown as PoolManager;
+    const poolManagers = new Map([['agent:peggy', fakeManager]]);
+
+    const pipeline = new PipelineEngine();
+    pipeline.use({ slot: 10, name: 'normalize',          stage: normalize });
+    pipeline.use({ slot: 20, name: 'contact-resolve',    stage: createContactResolve(config) });
+    pipeline.use({ slot: 30, name: 'dedup',              stage: createDedup(db, config.pipeline.dedup_window_ms) });
+    pipeline.use({ slot: 40, name: 'slash-command',      stage: slashCommandDetect });
+    pipeline.use({ slot: 50, name: 'topic-classify',     stage: createTopicClassify(config) });
+    pipeline.use({ slot: 60, name: 'priority-score',     stage: createPriorityScore(config) });
+    pipeline.use({ slot: 70, name: 'route-resolve',      stage: createRouteResolve(config, db) });
+    pipeline.use({ slot: 72, name: 'pool-route-resolve', stage: createPoolRouteResolve(poolManagers) });
+    pipeline.use({ slot: 80, name: 'transcript-log',     stage: createTranscriptLog(db, config), critical: false });
+
+    const s = await createHttpServer({ queue, registry, config, pipeline, db });
+
+    // Two different senders (contacts) on the same channel/topic produce two
+    // different conversation_ids and both match the single static route rule.
+    const res1 = await s.inject({
+      method: 'POST',
+      url: '/api/v1/inbound',
+      payload: { channel: 'telegram', sender: '123456789', payload: { type: 'text', body: 'first conversation' } },
+    });
+    const res2 = await s.inject({
+      method: 'POST',
+      url: '/api/v1/inbound',
+      payload: { channel: 'telegram', sender: 'contact:someone-else', payload: { type: 'text', body: 'second conversation' } },
+    });
+
+    expect(res1.statusCode).toBe(200);
+    expect(res2.statusCode).toBe(200);
+    expect(resolveRoute).toHaveBeenCalledTimes(2);
+
+    // The two envelopes must have been resolved with two different
+    // conversationIds (proving they were treated as separate conversations,
+    // not deduped or merged).
+    const [call1Args, call2Args] = resolveRoute.mock.calls;
+    expect(call1Args![0]).not.toBe(call2Args![0]);
+
+    // Each envelope must have actually been enqueued to ITS OWN resolved
+    // pane — not both on whatever the first call resolved to (the exact
+    // failure mode of the shared-reference bug: the second call's lookup
+    // would miss, log an error, and leave the route pointed at pane 1).
+    const msgsPane1 = queue.dequeue('agent:peggy-pool-1', undefined, 10);
+    const msgsPane2 = queue.dequeue('agent:peggy-pool-2', undefined, 10);
+    expect(msgsPane1).toHaveLength(1);
+    expect(msgsPane2).toHaveLength(1);
+    expect((msgsPane1[0]!.envelope.payload as { body: string }).body).toBe('first conversation');
+    expect((msgsPane2[0]!.envelope.payload as { body: string }).body).toBe('second conversation');
+
+    // And the static config route target itself must remain untouched
+    // throughout — still the pool's logical id, never overwritten by either
+    // resolution.
+    expect(config.pipeline.routes[0]!.target.recipientId).toBe('agent:peggy');
+
+    await s.close();
   });
 
   it('existing POST /api/v1/messages still works (direct enqueue path)', async () => {

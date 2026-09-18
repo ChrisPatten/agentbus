@@ -41,9 +41,16 @@ export function createRouteResolve(config: AppConfig, _db: Database.Database): P
       if (match.channel && !channelMatches(match.channel, e.channel)) continue;
       if (match.topic && match.topic !== e.topic) continue;
 
-      const targets: RouteTarget[] = [rule.target];
+      // Copy each target object rather than sharing the reference to the one
+      // living inside `config.pipeline.routes[i]`/`.also_notify[i]` — later
+      // stages (e.g. pool-route-resolve) mutate ctx.routes[n].recipientId in
+      // place, and config is parsed once and reused for every envelope for
+      // the lifetime of the process. Sharing the reference here would let
+      // one envelope's resolution permanently corrupt the static route rule
+      // for every subsequent envelope that matches it.
+      const targets: RouteTarget[] = [{ ...rule.target }];
       if (rule.also_notify) {
-        targets.push(...rule.also_notify);
+        targets.push(...rule.also_notify.map((t) => ({ ...t })));
       }
       ctx.routes = targets;
       return ctx;
