@@ -110,6 +110,34 @@ adapters:
   #     system_prompt: |
   #       You are pokeclaude...
 
+  # ── Interactive Claude Code session pool over tmux — _bmad-output/epics/E48-cc-session-pool-tmux.md
+  # A pool of tmux panes, each running its own interactive `claude` session; the bus
+  # leases a pane per conversation on demand. Use this instead of cc-headless when you
+  # want an attachable, watchable session (e.g. `tmux attach -t peggy-pool`) rather than
+  # a one-shot `claude -p` per message batch.
+  # cc-pool:
+  #   agent_id: peggy                # logical agent routes target; panes get derived ids peggy-pool-<n>
+  #   tmux_session: peggy-pool       # tmux session holding the panes
+  #   panes: 4                       # pool size (windows created at startup)
+  #   growth: fixed                  # fixed | dynamic (dynamic creates up to max_panes on demand)
+  #   max_panes: 8                   # only meaningful when growth: dynamic; defaults to panes
+  #   claude_bin: /Users/chrispatten/.local/bin/claude   # must be absolute (a bare "claude" hits your shell function/alias, not the CLI)
+  #   model: sonnet
+  #   working_dir: /Users/chrispatten/workspace/peggy-claude-code
+  #   launch_args:                   # appended verbatim to every launch/resume invocation
+  #     - --dangerously-load-development-channels
+  #   poll_interval_ms: 1000         # passed through to each pane's cc.ts
+  #   launch_ack_delay_ms: 500       # wait, then send Enter to ack the experimental MCP channel prompt
+  #   launch_ack_max_attempts: 3     # re-send Enter if capture-pane still shows the prompt
+  #   launch_ack_pattern: "experimental"  # prompt text to match; override if the CLI rewords it
+  #   pane_env:                      # set via `tmux new-window -e` (TERM/COLORTERM always added)
+  #     CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: "50"
+  #   lease:
+  #     idle_evict_ms: 1800000       # 30m without activity → evictable
+  #     hard_idle_ms: 21600000       # 6h → proactively released even if pool is busy
+  #     park_timeout_ms: 300000      # a parked message waits this long before erroring back
+  #   on_evict: clear                # clear | kill (what happens to the pane on release)
+
   # ── Claude Code MCP adapter, polling mode (persistent session) — docs/CC_ADAPTER.md
   # claude-code:
   #   poll_interval_ms: 1000

@@ -22,7 +22,7 @@ Compared with a persistent session, headless gives per-contact isolation (each c
 
 Resume is keyed on `conversation_id`. The adapter resolves the batch's `conversation_id` from the first message's transcript row, falling back to `sha256(sorted([contact_id, channel, topic]))` if the row is missing, and looks up the open session for that conversation. Each email thread or Telegram forum topic therefore resumes its own session, and a plain Telegram conversation resumes the same one every time.
 
-Headless sessions are never closed on idle. `claude_session_id` is set only by this adapter, so it also marks a session as headless-managed: the transcript-log stage and the `SessionTracker` extend such sessions across any gap instead of closing them. Sessions from the polling MCP adapter (`claude_session_id IS NULL`) still close on idle and fire `on_session_close`.
+Headless sessions are never closed on idle. `claude_session_id` is set only by this adapter, so it also marks a session as headless-managed: the transcript-log stage and the `SessionTracker` extend such sessions across any gap instead of closing them. Sessions from the polling MCP adapter (`claude_session_id IS NULL`) still close on idle and fire `on_session_close`. If you want this same per-conversation session model backed by a real interactive session instead of `claude -p` batches, see [CC_POOL_ADAPTER.md](CC_POOL_ADAPTER.md).
 
 Nothing in AgentBus bounds a long-lived transcript; Claude Code's auto-compaction does, and it is on by default in `-p` mode. Do not set `DISABLE_AUTO_COMPACT=1`.
 

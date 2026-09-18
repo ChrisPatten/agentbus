@@ -62,6 +62,11 @@ import { logWebhookRequest } from './webhook-log.js';
 import { registerSiriRoutes } from './siri-routes.js';
 import type { SiriAdapter } from '../adapters/siri.js';
 import { VERSION } from '../version.js';
+import { recordAgentPoll, getLastPollAt } from './agent-liveness.js';
+import { toBareAgentId } from '../pool/types.js';
+import { LeaseStore } from '../pool/lease-store.js';
+import { computeConversationId } from '../pipeline/conversation-id.js';
+import type { PoolManager } from '../pool/pool-manager.js';
 
 export interface HttpServerDeps {
   queue: MessageQueue;
@@ -78,6 +83,13 @@ export interface HttpServerDeps {
    * `config.adapters.siri.enabled`, the `/api/v1/siri/*` routes are mounted.
    */
   siri?: SiriAdapter;
+  /**
+   * Optional — one PoolManager per configured `cc-pool` instance (E48),
+   * keyed by the pool's prefixed logical agent id (e.g. "agent:peggy").
+   * Empty/absent when no `cc-pool` adapters are configured. Consumed by the
+   * `GET /api/v1/pool` observability route.
+   */
+  poolManagers?: Map<string, PoolManager>;
 }
 
 const MessagePayloadSchema = z.discriminatedUnion('type', [
@@ -493,7 +505,7 @@ export async function processInbound(
 // ── HTTP server ──────────────────────────────────────────────────────────────
 
 export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyInstance> {
-  const { queue, registry, pipeline, config, db } = deps;
+  const { queue, registry, pipeline, config, db, poolManagers } = deps;
   const server = Fastify({ logger: false });
 
   // Pebble webhook fields are plain text (transcription/recordedAt/client) — no
@@ -555,6 +567,44 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     };
   });
 
+  // GET /api/v1/pool?pool=<name> — cc-pool pane leases + parked-queue depth
+  // (E48 S48.8). `conversation_id` is the raw hash here — a human-readable
+  // contact/channel/topic per pane would require joining against
+  // sessions/transcripts by conversation_id, which is out of scope for this
+  // route (the /pool command is where that lookup would be cheap to add
+  // per-row, if ever wanted).
+  server.get<{ Querystring: { pool?: string } }>('/api/v1/pool', async (req, reply) => {
+    if (!poolManagers || poolManagers.size === 0) {
+      return { ok: true, pools: [] };
+    }
+    const filter = req.query.pool; // e.g. "agent:peggy" — matches a poolManagers key
+    const entries = filter
+      ? [...poolManagers.entries()].filter(([key]) => key === filter)
+      : [...poolManagers.entries()];
+    if (filter && entries.length === 0) {
+      return reply.status(404).send({ ok: false, error: `No cc-pool instance for "${filter}"` });
+    }
+    const pools = entries.map(([key, manager]) => {
+      const panes = manager.leaseStore.list(manager.poolId);
+      const parked = manager.parkedStatus();
+      return {
+        pool_id: manager.poolId,
+        agent_id: key,
+        panes: panes.map((p) => ({
+          pane_id: p.pane_id,
+          agent_id: p.agent_id,
+          state: p.state,
+          conversation_id: p.conversation_id,
+          claude_session_id: p.claude_session_id,
+          leased_at: p.leased_at,
+          last_activity_at: p.last_activity_at,
+        })),
+        parked: { count: parked.count, oldest_parked_at: parked.oldestParkedAt },
+      };
+    });
+    return { ok: true, pools };
+  });
+
   // GET /api/v1/messages/pending
   server.get<{
     Querystring: { agent?: string; recipient?: string; limit?: string; topic?: string };
@@ -567,12 +617,21 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     // ?agent= is a shorthand that prepends the "agent:" prefix (legacy CC adapter usage).
     const recipientId = recipient ?? `agent:${agent}`;
     const parsedLimit = limit ? Math.max(1, Math.min(parseInt(limit, 10) || 10, 100)) : 10;
+    // E48 (S48.4) — record this poll so cc-pool's pane-launch readiness gate
+    // can tell a pane's cc.ts has come up (see src/http/agent-liveness.ts).
+    recordAgentPoll(agent ?? toBareAgentId(recipient!));
     const messages = queue.dequeue(recipientId, topic, parsedLimit);
     return {
       ok: true,
       messages: messages.map((m) => m.envelope),
       count: messages.length,
     };
+  });
+
+  // GET /api/v1/agents/:agentId/last-poll — E48 (S48.4): last time this bare
+  // agent id was seen polling /api/v1/messages/pending, or null if never seen.
+  server.get<{ Params: { agentId: string } }>('/api/v1/agents/:agentId/last-poll', async (req, _reply) => {
+    return { ok: true, agentId: req.params.agentId, lastPollAt: getLastPollAt(req.params.agentId) };
   });
 
   // POST /api/v1/messages/:id/ack
@@ -618,11 +677,16 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     // already obvious what a reply is responding to — so it's sent as a plain
     // message instead of a native reply in that case.
     const metadata: Record<string, unknown> = { ...data.metadata };
+    // Captured alongside the reply_to lookup below so the E48 (S48.6)
+    // stale-pane guard further down can reuse this same query result instead
+    // of re-running it.
+    let replyToConversationId: string | null = null;
     if (data.reply_to) {
       const transcript = db
         .prepare(`SELECT conversation_id, metadata FROM transcripts WHERE message_id = ? LIMIT 1`)
         .get(data.reply_to) as { conversation_id: string; metadata: string } | undefined;
       if (transcript) {
+        replyToConversationId = transcript.conversation_id;
         const latestInbound = db
           .prepare(
             `SELECT message_id FROM transcripts WHERE conversation_id = ? AND direction = 'inbound' ORDER BY created_at DESC LIMIT 1`,
@@ -655,6 +719,54 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       payload: data.payload,
       metadata,
     };
+
+    // E48 (S48.6) — stale-pane guard. A pool pane (e.g. "agent:peggy-pool-3")
+    // can be evicted (its pool_leases row reassigned to a different
+    // conversation) while a reply it generated for its PREVIOUS conversation
+    // is still in flight. Resolve which conversation this send targets, then
+    // reject if the sending pane's lease has already moved on to a different
+    // conversation — before the message is ever enqueued.
+    //
+    // conversationId resolution order:
+    //   1. Reuse the reply_to -> transcripts.conversation_id lookup above.
+    //   2. Else data.metadata.conversation_id, when a non-empty string (set
+    //      by the `reply` MCP tool — see src/mcp/tools/index.ts).
+    //   3. Else derive it the same way Stage 70 (route-resolve) does for
+    //      inbound — this covers send_message/send_email, which never set
+    //      reply_to.
+    let conversationId: string | null;
+    if (replyToConversationId) {
+      conversationId = replyToConversationId;
+    } else if (
+      typeof data.metadata?.['conversation_id'] === 'string' &&
+      data.metadata['conversation_id'].length > 0
+    ) {
+      conversationId = data.metadata['conversation_id'];
+    } else {
+      const bareContactId = data.recipient.startsWith('contact:')
+        ? data.recipient.slice('contact:'.length)
+        : data.recipient;
+      conversationId = computeConversationId(bareContactId, data.channel, data.topic ?? 'general');
+    }
+
+    if (conversationId) {
+      const leaseStore = new LeaseStore(db);
+      const leaseRow = leaseStore.findByAgentAnyPool(data.sender);
+      if (leaseRow && leaseRow.state === 'leased' && leaseRow.conversation_id !== conversationId) {
+        console.error(
+          `[pool-guard] stale sender: sender=${data.sender} expected_conversation_id=${conversationId} ` +
+            `actual_conversation_id=${leaseRow.conversation_id} — rejecting`,
+        );
+        return reply.status(409).send({
+          ok: false,
+          error: `stale sender: pane ${data.sender} is no longer leased to this conversation`,
+        });
+      }
+      // No matching lease row (not a pool-tracked sender — the common case),
+      // or conversation_id matches, or the row isn't currently 'leased':
+      // nothing to guard against, proceed normally.
+    }
+
     const id = queue.enqueue(envelope, data.expires_at);
     return reply.status(201).send({ ok: true, id, queued: true });
   });

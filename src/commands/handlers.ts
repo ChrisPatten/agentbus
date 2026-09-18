@@ -41,6 +41,13 @@ export interface HandlerDeps {
   db: Database.Database;
   /** Late-bound headless adapter hooks (see HeadlessControl). */
   headlessControl?: HeadlessControl;
+  /**
+   * One PoolManager per configured `cc-pool` instance (E48), keyed by the
+   * pool's prefixed logical agent id (e.g. "agent:peggy"). Populated upfront
+   * by index.ts, unlike `headlessControl` — absent/empty when no `cc-pool`
+   * adapters are configured.
+   */
+  poolManagers?: Map<string, import('../pool/pool-manager.js').PoolManager>;
 }
 
 // ── /status ──────────────────────────────────────────────────────────────────
@@ -60,6 +67,22 @@ async function statusHandler(
     adapterLines.push(`  ${adapter.id}: ${health.status}${paused}`);
   }
 
+  // Pool: section (E48 S48.8) — one line per configured cc-pool instance,
+  // e.g. "  pool peggy: 3/4 leased, 1 parked". Entirely omitted (no header,
+  // no blank line) when poolManagers is absent/empty, so bus deployments
+  // without cc-pool configured see byte-for-byte the same /status output as
+  // before this feature existed.
+  const poolLines: string[] = [];
+  if (deps.poolManagers && deps.poolManagers.size > 0) {
+    for (const manager of deps.poolManagers.values()) {
+      const panes = manager.leaseStore.list(manager.poolId);
+      const leased = panes.filter((p) => p.state === 'leased').length;
+      const parked = manager.parkedStatus().count;
+      const parkedClause = parked > 0 ? `, ${parked} parked` : '';
+      poolLines.push(`  pool ${manager.poolId}: ${leased}/${panes.length} leased${parkedClause}`);
+    }
+  }
+
   const lines = [
     'AgentBus status',
     '',
@@ -71,6 +94,7 @@ async function statusHandler(
     `  processing: ${counts['processing'] ?? 0}`,
     `  delivered:  ${counts['delivered'] ?? 0}`,
     `  dead_letter: ${counts['dead_letter'] ?? 0}`,
+    ...(poolLines.length > 0 ? ['', 'Pool:', ...poolLines] : []),
   ];
 
   return { body: lines.join('\n') };

@@ -7,8 +7,16 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { toolError, toolSuccess } from './helpers.js';
 import { getEmailInstances, type AppConfig } from '../../config/schema.js';
+import { toPrefixedAgentId } from '../../pool/types.js';
 
-export function registerMessagingTools(server: McpServer, busBaseUrl: string): void {
+/**
+ * @param agentId - The BARE agent id of the pane/instance registering this
+ *   tool (e.g. "peggy-pool-3" or "claude") — stamped onto the outbound
+ *   envelope's `sender` so E48 (S48.6)'s stale-pane guard at
+ *   POST /api/v1/messages can identify which pane actually sent this,
+ *   instead of the previous hardcoded "agent:claude" for every caller.
+ */
+export function registerMessagingTools(server: McpServer, busBaseUrl: string, agentId: string): void {
   server.registerTool(
     'send_message',
     {
@@ -68,7 +76,7 @@ export function registerMessagingTools(server: McpServer, busBaseUrl: string): v
       const envelope = {
         channel,
         topic: topic ?? 'general',
-        sender: 'agent:claude',
+        sender: toPrefixedAgentId(agentId),
         recipient: to,
         reply_to: reply_to ?? null,
         priority: priority ?? 'normal',
@@ -147,10 +155,14 @@ export function buildEmailToolConfig(config: AppConfig): EmailToolConfig | null 
  * the first allowlisted address; an explicit `to` is allowed only if it is on
  * the allowlist. This is the same allowlist the inbound adapter enforces, so the
  * agent can never email an arbitrary address.
+ *
+ * @param agentId - The BARE agent id of the pane/instance registering this
+ *   tool — see the identical param on `registerMessagingTools` above for why.
  */
 export function registerEmailTool(
   server: McpServer,
   busBaseUrl: string,
+  agentId: string,
   emailCfg: EmailToolConfig,
 ): void {
   const defaultTo = emailCfg.allowlist[0]!;
@@ -204,7 +216,7 @@ export function registerEmailTool(
       const envelope = {
         channel: emailCfg.channel,
         topic: 'general',
-        sender: 'agent:claude',
+        sender: toPrefixedAgentId(agentId),
         recipient: `contact:${contactId}`,
         reply_to: null,
         priority: 'normal' as const,

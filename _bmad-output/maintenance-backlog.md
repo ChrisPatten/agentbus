@@ -49,6 +49,8 @@ Effort: S (under an hour), M (an afternoon), L (a day or more).
   `retry_count` column is never used. Either implement retry (reset to
   `pending`, bump `retry_count`, back off) or delete the branch and the
   constant, and correct the docs that promise retries.
+  E48 (cc-pool) works around this with its own park queue rather than
+  returning `retryable: true`; implementing retry would let that queue shrink.
 
 - [ ] **`--rebuild-fts` does not exit.** (S)
   `src/index.ts:69-71` rebuilds the index and then continues normal startup.
@@ -96,6 +98,16 @@ Effort: S (under an hour), M (an afternoon), L (a day or more).
   global override can only be removed with `all=true`. Enforce one global row
   (or allow `scope=global` on delete) once the P0 item lands.
 
+- [ ] **`buildMcpConfig()` doesn't set `AGENTBUS_AGENT_ID` for its spawned tools-only MCP subset.** (S)
+  `src/adapters/cc-headless.ts:143-157` builds the `claude -p` child's MCP env
+  with `AGENTBUS_TOOLS_ONLY`/`AGENTBUS_CONFIG` but never `AGENTBUS_AGENT_ID`,
+  so `send_message`/`send_email` from a headless instance still can't
+  identify their real sender even after E48/S48.6's fix to the
+  tool-registration plumbing (threading `agentId` through
+  `registerHeadlessTools`/`registerMessagingTools`/`registerEmailTool`).
+  Fixing `cc-headless.ts` to pass its own `this.agentId` (stripped to bare
+  form) into that env block would close it.
+
 ## P2: Dead code and unused surface area
 
 - [ ] **Config fields that nothing reads.** (S)
@@ -109,6 +121,20 @@ Effort: S (under an hour), M (an afternoon), L (a day or more).
 - [ ] **`src/mcp/sampling-queue.ts` is unused.** (S)
   Only its test imports it. E13 shipped channel notifications instead of
   `sampling/createMessage`. Delete the module and test.
+
+- [ ] **`cc-pool`'s registered `JournalingRunner` is dead code.** (S)
+  `SessionTracker.dispatchJournaling()` (`src/memory/session-tracker.ts`)
+  builds its `instanceByAgentId` map only from `getCcHeadlessInstances()`, so
+  a session whose `agent_id` is a pool pane (e.g. `agent:peggy-pool-3`) always
+  misses that lookup and `continue`s before ever checking whether a runner is
+  registered for it. `PoolManager.journalingRunner` (E48/S48.5,
+  `src/pool/pool-manager.ts`) is a deliberate permanent no-op, so this has
+  zero behavioral effect today — the outcome (nothing happens) is identical
+  whether the runner runs or not — but it's worth either wiring
+  `dispatchJournaling()` to recognize pool-owned agent ids (matching against
+  each configured pool's derived pane-id pattern, not a flat map, since a
+  pool's registered agent id differs from its panes' own ids) or dropping the
+  registration so it stops looking load-bearing.
 
 - [ ] **`model-override-loader.ts` is mostly dead and duplicated.** (S)
   Only `resolveModelOverride()` is called. `listModelOverrides`,

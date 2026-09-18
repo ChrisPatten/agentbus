@@ -42,6 +42,10 @@ export interface HealthState {
  * @param server      - The MCP server instance
  * @param busBaseUrl  - Base URL of bus-core HTTP API (e.g. "http://127.0.0.1:4000")
  * @param healthState - Mutable health state shared with the polling loop
+ * @param agentId     - BARE agent id of the calling instance (e.g. "claude",
+ *                      "peggy-pool-3") — threaded into `send_message`/`send_email`
+ *                      so their outbound `sender` identifies the real caller
+ *                      (E48 S48.6; previously hardcoded to "agent:claude").
  * @param config      - App config; when present and an email adapter is
  *                      configured, the allowlist-gated `send_email` tool is added
  */
@@ -49,6 +53,7 @@ export function registerAllTools(
   server: McpServer,
   busBaseUrl: string,
   healthState: HealthState,
+  agentId: string,
   config?: AppConfig,
 ): void {
   // E2 core tools
@@ -56,14 +61,14 @@ export function registerAllTools(
 
   // E7 tools
   registerChannelTools(server, busBaseUrl);
-  registerMessagingTools(server, busBaseUrl);
+  registerMessagingTools(server, busBaseUrl, agentId);
   registerMemoryTools(server, busBaseUrl);
   registerSessionTools(server, busBaseUrl);
   registerReactionTools(server, busBaseUrl);
   registerScheduleTools(server, busBaseUrl);
   registerAttachmentTools(server, busBaseUrl);
   registerModelOverrideTools(server, busBaseUrl);
-  maybeRegisterEmailTool(server, busBaseUrl, config);
+  maybeRegisterEmailTool(server, busBaseUrl, agentId, config);
   maybeRegisterTelegramTools(server, busBaseUrl, config);
 }
 
@@ -71,11 +76,12 @@ export function registerAllTools(
 function maybeRegisterEmailTool(
   server: McpServer,
   busBaseUrl: string,
+  agentId: string,
   config?: AppConfig,
 ): void {
   if (!config) return;
   const emailCfg = buildEmailToolConfig(config);
-  if (emailCfg) registerEmailTool(server, busBaseUrl, emailCfg);
+  if (emailCfg) registerEmailTool(server, busBaseUrl, agentId, emailCfg);
 }
 
 /** Register `create_telegram_topic` (E28) when a Telegram adapter is configured. */
@@ -96,22 +102,26 @@ function maybeRegisterTelegramTools(
  * stream-json for these tool calls and lets the agent own delivery (interim
  * "working on it" updates, the final answer, per-channel sends). Excludes
  * get_adapter_status (no persistent health state in a per-request invocation).
+ *
+ * @param agentId - BARE agent id of the calling instance — see registerAllTools's
+ *                  matching param doc.
  */
 export function registerHeadlessTools(
   server: McpServer,
   busBaseUrl: string,
+  agentId: string,
   config?: AppConfig,
 ): void {
   registerReplyTool(server, busBaseUrl);
   registerChannelTools(server, busBaseUrl);
-  registerMessagingTools(server, busBaseUrl);
+  registerMessagingTools(server, busBaseUrl, agentId);
   registerMemoryTools(server, busBaseUrl);
   registerSessionTools(server, busBaseUrl);
   registerReactionTools(server, busBaseUrl);
   registerScheduleTools(server, busBaseUrl);
   registerAttachmentTools(server, busBaseUrl);
   registerModelOverrideTools(server, busBaseUrl);
-  maybeRegisterEmailTool(server, busBaseUrl, config);
+  maybeRegisterEmailTool(server, busBaseUrl, agentId, config);
   maybeRegisterTelegramTools(server, busBaseUrl, config);
 }
 
@@ -170,6 +180,13 @@ function registerReplyTool(server: McpServer, busBaseUrl: string): void {
         return toolError(`Failed to fetch original message: ${String(err)}`);
       }
 
+      // Forward the original message's conversation_id (stamped on inbound
+      // fan-out — see Stage 70/route-resolve.ts) so E48 (S48.6)'s stale-pane
+      // guard at POST /api/v1/messages can resolve this reply's
+      // conversationId directly, without needing the reply_to ->
+      // transcripts DB join (that join still runs too, as a fallback/
+      // cross-check — this is purely additive).
+      const originalConversationId = original.metadata?.['conversation_id'];
       const replyBody = {
         channel: original.channel,
         topic: original.topic,
@@ -178,7 +195,7 @@ function registerReplyTool(server: McpServer, busBaseUrl: string): void {
         reply_to: original.id,
         priority: 'normal' as const,
         payload: { type: 'text' as const, body },
-        metadata: {},
+        metadata: typeof originalConversationId === 'string' ? { conversation_id: originalConversationId } : {},
       };
 
       try {

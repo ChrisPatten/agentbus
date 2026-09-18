@@ -6,9 +6,9 @@ import { registerMessagingTools } from './messaging.js';
 
 const BUS_URL = 'http://bus:4000';
 
-async function makeClient() {
+async function makeClient(agentId = 'claude') {
   const server = new McpServer({ name: 'test', version: '0.0.1' });
-  registerMessagingTools(server, BUS_URL);
+  registerMessagingTools(server, BUS_URL, agentId);
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);
   const client = new Client({ name: 'test-client', version: '0.0.1' });
@@ -232,6 +232,53 @@ describe('send_message tool', () => {
     const postCall = fetchMock.mock.calls[1]! as [string, { body: string }];
     const sentBody = JSON.parse(postCall[1].body) as { reply_to: string };
     expect(sentBody.reply_to).toBe('msg-orig');
+
+    await client.close();
+  });
+
+  it('stamps sender from the registered agentId ("claude") rather than a hardcoded literal', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ ok: true, exists: true }),
+    });
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ ok: true, id: 'msg-sender-claude' }),
+    });
+
+    const client = await makeClient('claude');
+    await client.callTool({
+      name: 'send_message',
+      arguments: { to: 'contact:alice', channel: 'telegram', body: 'hi' },
+    });
+
+    const postCall = fetchMock.mock.calls[1]! as [string, { body: string }];
+    const sentBody = JSON.parse(postCall[1].body) as { sender: string };
+    expect(sentBody.sender).toBe('agent:claude');
+
+    await client.close();
+  });
+
+  it('stamps sender from a pool pane agentId, not the old hardcoded "agent:claude"', async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ ok: true, exists: true }),
+    });
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ ok: true, id: 'msg-sender-pool' }),
+    });
+
+    const client = await makeClient('peggy-pool-3');
+    await client.callTool({
+      name: 'send_message',
+      arguments: { to: 'contact:alice', channel: 'telegram', body: 'hi' },
+    });
+
+    const postCall = fetchMock.mock.calls[1]! as [string, { body: string }];
+    const sentBody = JSON.parse(postCall[1].body) as { sender: string };
+    expect(sentBody.sender).toBe('agent:peggy-pool-3');
+    expect(sentBody.sender).not.toBe('agent:claude');
 
     await client.close();
   });

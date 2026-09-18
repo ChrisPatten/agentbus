@@ -21,6 +21,7 @@ Set `bus.host: 0.0.0.0` to accept connections from other hosts, for example a re
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/api/v1/health` | Liveness, adapter health, queue counts |
+| GET | `/api/v1/pool` | cc-pool pane leases and parked-queue depth (when configured) |
 | POST | `/api/v1/inbound` | Submit an inbound message to the pipeline |
 | POST | `/api/v1/webhooks/pebble` | Pebble Ring voice-memo ingress (when configured) |
 | POST | `/api/v1/siri/ask` | Siri ask: submit a question and wait for the agent's reply (when configured) |
@@ -74,6 +75,53 @@ Always returns `200`. `status` is `healthy` when every adapter reports `online`,
 ```
 
 `queue` counts rows in `message_queue` by status. Dead-lettered messages are moved to a separate `dead_letter` table, so `dead_letter` is always `0` here; query the table directly to inspect them.
+
+## Pool
+
+### `GET /api/v1/pool`
+
+Pane leases and parked-queue depth for each configured `cc-pool` instance — the same data the [`/pool` command](SLASH_COMMANDS.md#pool-pool-agent-id) renders as text.
+
+| Param | Notes |
+|---|---|
+| `pool` | Optional. A `poolManagers` key, e.g. `agent:peggy` — narrows the result to one pool |
+
+When no `cc-pool` instances are configured at all, always returns `200 { "ok": true, "pools": [] }` — this is distinct from an unmatched `?pool=` filter (below), which is a `404`.
+
+```json
+{
+  "ok": true,
+  "pools": [
+    {
+      "pool_id": "peggy",
+      "agent_id": "agent:peggy",
+      "panes": [
+        {
+          "pane_id": "peggy-pool:1",
+          "agent_id": "agent:peggy-pool-1",
+          "state": "leased",
+          "conversation_id": "a3f9c21e...",
+          "claude_session_id": "b7e1...",
+          "leased_at": "2026-09-17T10:00:00.000Z",
+          "last_activity_at": "2026-09-17T10:05:00.000Z"
+        },
+        {
+          "pane_id": "peggy-pool:2",
+          "agent_id": "agent:peggy-pool-2",
+          "state": "free",
+          "conversation_id": null,
+          "claude_session_id": null,
+          "leased_at": null,
+          "last_activity_at": null
+        }
+      ],
+      "parked": { "count": 1, "oldest_parked_at": "2026-09-17T10:04:00.000Z" }
+    }
+  ]
+}
+```
+
+`conversation_id` is the raw sha256 hex — resolving it to a human-readable contact/channel/topic would require an extra join against `sessions`/`transcripts` per pane, which this route deliberately skips (see the `/pool` command for where that lookup is cheap to add per-row). `?pool=<key>` for a pool that isn't in `poolManagers` returns `404 { "ok": false, "error": "No cc-pool instance for \"<key>\"" }`.
 
 ## Inbound
 

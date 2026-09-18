@@ -9,6 +9,18 @@
 
 The headless adapter ([CC_HEADLESS_ADAPTER.md](CC_HEADLESS_ADAPTER.md)) is the primary agent runtime. Polling mode remains for operators who keep a long-lived Claude Code session open. Sessions on that path close on idle and can fire the `on_session_close` hook (see [MEMORY.md](MEMORY.md)).
 
+## Choosing an adapter
+
+AgentBus has three ways to run a Claude Code agent behind a channel:
+
+| Adapter | Concurrency | Interactive | Use it when |
+|---|---|---|---|
+| `claude-code` (this page, polling mode) | One persistent session; every routed conversation shares it | Yes | A single session is fine and you want to watch or drive it by hand |
+| [`cc-headless`](CC_HEADLESS_ADAPTER.md) | One `claude -p` spawn per message batch, resumed per conversation | No | High-volume or multi-tenant agents; nothing to attach to or type into |
+| [`cc-pool`](CC_POOL_ADAPTER.md) | N leased interactive sessions, one pane per active conversation | Yes | You want `cc-headless`'s per-conversation isolation but need a real session you can attach to |
+
+All three can run against the same `working_dir`/`CLAUDE.md` and register the same MCP tool set; they differ only in how a conversation gets a Claude process, and whether that process is one you can watch.
+
 All logging goes to stderr. stdout is the MCP protocol stream.
 
 ## Environment variables

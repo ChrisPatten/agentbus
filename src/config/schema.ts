@@ -264,6 +264,107 @@ const CcHeadlessAdapterSchema = z.object({
 });
 
 /**
+ * Interactive Claude Code session pool over tmux (E48) — a fixed or
+ * dynamically-growing set of tmux panes, each running its own interactive
+ * `claude` session plus a dedicated `cc.ts` MCP process, leased to
+ * conversations on demand by an in-bus pool manager. Complements
+ * `cc-headless` (spawns `claude -p` per message batch — no interactive
+ * session) and `claude-code` (one persistent session shared by everything).
+ * See _bmad-output/epics/E48-cc-session-pool-tmux.md.
+ */
+const CcPoolAdapterSchema = z.object({
+  /**
+   * Logical agent id for the pool; routes target
+   * `recipientId: agent:<agent_id>`. Individual panes get derived ids
+   * (`${agent_id}-pool-${n}`) when they are launched — that derivation
+   * happens downstream, not in this schema.
+   */
+  agent_id: z.string(),
+  /** tmux session name holding this pool's panes (one tmux window per pane). */
+  tmux_session: z.string(),
+  /** Number of panes created at startup. */
+  panes: z.number().int().positive().default(2),
+  /**
+   * `fixed` — exactly `panes` panes for the pool's lifetime.
+   * `dynamic` — starts at `panes`, grows on demand up to `max_panes`.
+   */
+  growth: z.enum(['fixed', 'dynamic']).default('fixed'),
+  /**
+   * Upper bound on pane count when `growth: 'dynamic'`; ignored when
+   * `growth: 'fixed'`. Left optional rather than defaulted here because the
+   * effective default equals `panes`, and a static zod `.default()` cannot
+   * reference a sibling field's parsed value — downstream code must read
+   * this as `cfg.max_panes ?? cfg.panes`.
+   */
+  max_panes: z.number().int().positive().optional(),
+  /**
+   * Absolute path to the `claude` CLI binary. Unlike `cc-headless`'s
+   * `claude_bin`, this has no default and is required: a bare `claude`
+   * typed into a tmux-launched pane resolves through the operator's
+   * interactive shell profile, which commonly defines `claude` as a
+   * tmux-wrapping shell function/alias rather than the CLI binary itself —
+   * see E48 "Prior Art" gotcha 1.
+   */
+  claude_bin: z.string().refine(isAbsolute, {
+    message:
+      'claude_bin must be an absolute path (starting with "/") — a bare ' +
+      "\"claude\" resolves to the user's shell function/alias rather than " +
+      'the CLI binary in a tmux-launched pane, so an absolute path is required',
+  }),
+  /**
+   * Model passed as `--model` to each pane's `claude` invocation. Omit to
+   * let the CLI resolve its own default.
+   */
+  model: z.string().optional(),
+  /**
+   * Working directory shared by every pane in the pool. Determines which
+   * CLAUDE.md hierarchy is auto-loaded into context. Defaults to the
+   * bus-core process cwd downstream, same as `cc-headless`.
+   */
+  working_dir: z.string().optional(),
+  /** Extra CLI args appended verbatim to every launch/resume invocation. */
+  launch_args: z.array(z.string()).default([]),
+  /** Poll interval (ms) passed through to each pane's `cc.ts` MCP process. */
+  poll_interval_ms: z.number().int().positive().default(1000),
+  /**
+   * Unlike `cc-headless` (where `system_prompt` is required and replaces
+   * the default prompt), this is optional: interactive pool sessions rely
+   * on native CLAUDE.md auto-loading from `working_dir` by default. When
+   * given, it is appended via `--append-system-prompt-file` rather than
+   * replacing the default.
+   */
+  system_prompt: z.string().optional(),
+  /** Pane lease lifecycle timing. */
+  lease: z
+    .object({
+      /** Idle time (ms) after which a leased pane becomes evictable. */
+      idle_evict_ms: z.number().int().positive().default(1_800_000),
+      /**
+       * Hard ceiling (ms) since a lease started after which it is
+       * proactively released regardless of activity.
+       */
+      hard_idle_ms: z.number().int().positive().default(21_600_000),
+      /** How long (ms) a parked message waits for a free pane before erroring back. */
+      park_timeout_ms: z.number().int().positive().default(300_000),
+    })
+    .prefault({}),
+  /** What happens to a pane on lease release: clear its screen/context, or kill and relaunch it. */
+  on_evict: z.enum(['clear', 'kill']).default('clear'),
+  /** Delay (ms) before sending Enter to ack the "experimental" MCP-channel launch prompt. */
+  launch_ack_delay_ms: z.number().int().nonnegative().default(500),
+  /** Max re-send attempts of Enter if capture-pane output still shows the ack prompt. */
+  launch_ack_max_attempts: z.number().int().positive().default(3),
+  /** Text matched in capture-pane output to detect the launch-ack prompt; override if the CLI rewords it. */
+  launch_ack_pattern: z.string().default('experimental'),
+  /**
+   * Extra env vars set on the tmux window at creation time
+   * (`tmux new-window -e`). `TERM`/`COLORTERM` are added unconditionally by
+   * later launch code, not defaulted here.
+   */
+  pane_env: z.record(z.string(), z.string()).default({}),
+});
+
+/**
  * Shared config fragment for logging raw incoming webhook requests to disk —
  * a debugging/audit aid, off by default, since request bodies may contain
  * sensitive content. Reusable by any webhook route (see logWebhookRequest in
@@ -344,6 +445,7 @@ const AdaptersConfigSchema = z.object({
   bluebubbles: BlueBubblesAdapterSchema.optional(),
   'claude-code': ClaudeCodeAdapterSchema.optional(),
   'cc-headless': z.union([CcHeadlessAdapterSchema, z.record(z.string(), CcHeadlessAdapterSchema)]).optional(),
+  'cc-pool': z.union([CcPoolAdapterSchema, z.record(z.string(), CcPoolAdapterSchema)]).optional(),
   pebble: PebbleAdapterSchema.optional(),
   siri: SiriAdapterSchema.optional(),
 });
@@ -796,6 +898,82 @@ export function getCcHeadlessInstances(config: AppConfig): CcHeadlessInstanceCon
       );
     }
     seen.add(cfg.agent_id);
+    instances.push({ name, ...cfg });
+  }
+
+  return instances;
+}
+
+/** Resolved config for a single `cc-pool` adapter instance. */
+export type CcPoolAdapterConfig = z.infer<typeof CcPoolAdapterSchema>;
+
+/** Normalised config for a single `cc-pool` instance. */
+export interface CcPoolInstanceConfig extends CcPoolAdapterConfig {
+  /** Instance name used as the adapter id suffix, or null for the single-instance form. */
+  name: string | null;
+}
+
+/**
+ * Normalises `config.adapters['cc-pool']` into a flat list of instances.
+ *
+ * Accepts both forms, mirroring getCcHeadlessInstances():
+ *   - Single-instance: `{ agent_id, tmux_session, ... }` → one instance with name=null
+ *   - Named record: `{ 'peggy-pool': { agent_id, ... }, ... }` → one per key
+ *
+ * Throws on an invalid instance name, a duplicate `agent_id` across instances
+ * (the pool's routing target must be unique), a duplicate `tmux_session`
+ * across instances (two pools cannot share one tmux session), or on
+ * `growth: 'fixed'` combined with an explicit `max_panes` below `panes`
+ * (fixed pools ignore `max_panes`, so a value below `panes` can only be an
+ * operator mistake worth catching at load time).
+ */
+export function getCcPoolInstances(config: AppConfig): CcPoolInstanceConfig[] {
+  const pool = config.adapters['cc-pool'];
+  if (!pool) return [];
+
+  const checkGrowth = (cfg: CcPoolAdapterConfig, name: string | null) => {
+    if (cfg.growth === 'fixed' && cfg.max_panes !== undefined && cfg.max_panes < cfg.panes) {
+      const label = name === null ? 'cc-pool config' : `cc-pool instance "${name}"`;
+      throw new Error(
+        `${label} has growth: 'fixed' with max_panes (${cfg.max_panes}) below panes ` +
+          `(${cfg.panes}) — fixed pools ignore max_panes, so remove it or set it to at least panes`,
+      );
+    }
+  };
+
+  // Discriminate: the single-instance form has `agent_id` (required) at the top level.
+  if (typeof (pool as { agent_id?: unknown }).agent_id === 'string') {
+    const cfg = pool as CcPoolAdapterConfig;
+    checkGrowth(cfg, null);
+    return [{ name: null, ...cfg }];
+  }
+
+  const record = pool as Record<string, CcPoolAdapterConfig>;
+  const seenAgentIds = new Set<string>();
+  const seenTmuxSessions = new Set<string>();
+  const instances: CcPoolInstanceConfig[] = [];
+
+  const VALID_INSTANCE_NAME_RE = /^[a-z0-9_-]+$/;
+
+  for (const [name, cfg] of Object.entries(record)) {
+    if (!VALID_INSTANCE_NAME_RE.test(name)) {
+      throw new Error(
+        `Invalid cc-pool instance name "${name}" — only lowercase letters, digits, hyphens, and underscores are allowed`,
+      );
+    }
+    if (seenAgentIds.has(cfg.agent_id)) {
+      throw new Error(
+        `Duplicate cc-pool agent_id "${cfg.agent_id}" for instance "${name}" — each pool must have a unique agent_id`,
+      );
+    }
+    seenAgentIds.add(cfg.agent_id);
+    if (seenTmuxSessions.has(cfg.tmux_session)) {
+      throw new Error(
+        `Duplicate cc-pool tmux_session "${cfg.tmux_session}" for instance "${name}" — each pool must have a unique tmux_session`,
+      );
+    }
+    seenTmuxSessions.add(cfg.tmux_session);
+    checkGrowth(cfg, name);
     instances.push({ name, ...cfg });
   }
 

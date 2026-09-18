@@ -49,9 +49,9 @@ const messageBuffer: MessageEnvelope[] = [];
 
 const mcpServer = createMcpServer();
 if (TOOLS_ONLY) {
-  registerHeadlessTools(mcpServer, busBaseUrl, config);
+  registerHeadlessTools(mcpServer, busBaseUrl, AGENT_ID, config);
 } else {
-  registerAllTools(mcpServer, busBaseUrl, healthState, config);
+  registerAllTools(mcpServer, busBaseUrl, healthState, AGENT_ID, config);
 }
 
 // ── Message formatting ────────────────────────────────────────────────────────

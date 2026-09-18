@@ -37,6 +37,14 @@ export interface CommandSystemDeps {
   queue: MessageQueue;
   db: Database.Database;
   config: AppConfig;
+  /**
+   * Optional — one PoolManager per configured `cc-pool` instance (E48), keyed
+   * by the pool's prefixed logical agent id. Unlike `headlessControl` below,
+   * this is available upfront (constructed before the command system, not
+   * late-bound after startup), so it's passed straight through to
+   * `createBuiltinCommands` rather than exposed as a mutable holder.
+   */
+  poolManagers?: Map<string, import('../pool/pool-manager.js').PoolManager>;
 }
 
 export interface CommandSystem {
@@ -80,6 +88,7 @@ export function createCommandSystem(deps: CommandSystemDeps): CommandSystem {
     pauseSet,
     db: deps.db,
     headlessControl,
+    poolManagers: deps.poolManagers,
   });
 
   for (const cmd of builtins) {

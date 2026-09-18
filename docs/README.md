@@ -16,6 +16,7 @@ Technical reference for operators and contributors. The public landing page live
 |---|---|
 | [CC_HEADLESS_ADAPTER.md](CC_HEADLESS_ADAPTER.md) | `claude -p` per batch, session resume, system prompt, memory files, journaling, multi-instance |
 | [CC_ADAPTER.md](CC_ADAPTER.md) | The MCP server process: tools-only mode for headless turns, polling mode for a persistent session |
+| [CC_POOL_ADAPTER.md](CC_POOL_ADAPTER.md) | Pool of tmux panes, each an interactive session leased per conversation: lease lifecycle, allocation and eviction, observability, attaching by hand |
 | [MEMORY_MODEL.md](MEMORY_MODEL.md) | Why the agent's own files are the memory system |
 | [MEMORY.md](MEMORY.md) | The legacy structured memory store (dormant by default) |
 

@@ -10,6 +10,34 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+### Added
+- **Interactive Claude Code session pool (E48).** New `cc-pool` adapter type:
+  a configurable pool of tmux panes (`adapters.cc-pool`, single-instance or
+  named-instance form, `src/config/schema.ts`), each running its own
+  interactive `claude` session paired with a per-pane `cc.ts` MCP process,
+  leased to conversations on demand. A new pipeline stage
+  (`pool-route-resolve`, slot 72) resolves each inbound message to a leased
+  pane and rewrites the route's `recipientId` before the existing enqueue
+  path runs — there is no adapter `send()` in the delivery path. `PoolManager`
+  (`src/pool/`) owns lease allocation (reuse/bind/grow/evict/exhausted,
+  backed by the new `pool_leases` table, migration 016), idle and hard-idle
+  eviction, a parked-message queue for when every pane is busy (with a
+  one-time per-conversation notice on timeout), an outbound guard that
+  rejects a reply from a pane whose lease has already moved to a different
+  conversation, and reconciliation (at startup and on every sweep tick) that
+  adopts live panes as-is and recovers both crashed and failed-to-launch
+  panes without a restart. See
+  [docs/CC_POOL_ADAPTER.md](docs/CC_POOL_ADAPTER.md).
+- **cc-pool observability (E48 S48.8).** `GET /api/v1/pool` (optionally
+  filtered with `?pool=<agent id>`) returns pane leases and parked-queue
+  depth for each configured `cc-pool` instance. A new `/pool [pool-agent-id]`
+  bus command (`src/commands/pool.ts`) renders the same data as plain text.
+  `/status` gains a `Pool:` section (one `pool <id>: leased/total leased[, N
+  parked]` line per configured pool), omitted entirely on deployments with no
+  `cc-pool` instances configured. See
+  [docs/HTTP_API.md](docs/HTTP_API.md#pool) and
+  [docs/SLASH_COMMANDS.md](docs/SLASH_COMMANDS.md#pool-pool-agent-id).
+
 ## [0.12.0] - 2026-09-16
 
 ### Added

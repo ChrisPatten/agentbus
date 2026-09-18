@@ -52,11 +52,19 @@ export function createTranscriptLog(db: Database.Database, config: AppConfig): P
     }
     const conversationId = ctx.conversationId;
 
-    // The cc-headless route target's recipientId (e.g. "agent:pokeclaude"), if
-    // this batch is headed to a headless agent — null otherwise (E23). Stamped
-    // on session creation so journaling dispatch/`/clear` can route to the
-    // owning agent's own runner and threshold_ms instead of a single global.
-    const agentId = ctx.routes.find((r) => r.adapterId === 'cc-headless')?.recipientId ?? null;
+    // The owning agent's route target recipientId (e.g. "agent:pokeclaude",
+    // "agent:peggy-pool-3"), if this batch is headed to a cc-headless or
+    // cc-pool agent — null otherwise (E23, extended for cc-pool in E48).
+    // Stamped on session creation so journaling dispatch/`/clear`/`/cost` can
+    // route to the owning agent's own runner/threshold_ms instead of a single
+    // global. For cc-pool, Stage ~72's pool-route-resolve stage has already
+    // rewritten the route's recipientId from the pool's logical agent id
+    // (e.g. "agent:peggy") to the concrete leased pane's own id by the time
+    // this stage runs, so what's stamped here is always the specific pane
+    // that is actually handling (or will handle) this conversation.
+    const agentId =
+      ctx.routes.find((r) => r.adapterId === 'cc-headless' || r.adapterId === 'cc-pool')
+        ?.recipientId ?? null;
 
     // Find active session for this conversation
     const activeSession = db

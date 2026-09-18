@@ -40,10 +40,13 @@ import { TelegramAdapter } from './adapters/telegram.js';
 import { EmailAdapter } from './adapters/email.js';
 import { SiriAdapter } from './adapters/siri.js';
 import { startHeadless, stopHeadless } from './adapters/cc-headless.js';
+import { createPoolManagers } from './pool/pool-manager.js';
+import { createPoolRouteResolve } from './pipeline/stages/pool-route-resolve.js';
 import { DeliveryWorker } from './core/delivery.js';
 import { createCommandSystem } from './commands/index.js';
 import { createTorrentCommand } from './commands/torrent.js';
 import { createCostCommand } from './commands/cost.js';
+import { createPoolCommand } from './commands/pool.js';
 import { Summarizer } from './memory/summarizer.js';
 import { SessionTracker } from './memory/session-tracker.js';
 import { Scheduler } from './scheduler/scheduler.js';
@@ -74,17 +77,28 @@ if (process.argv.includes('--rebuild-fts')) {
 const queue = new MessageQueue(db);
 const registry = new AdapterRegistry();
 
+// ── Interactive session pool (E48) ───────────────────────────────────────────
+// One PoolManager per configured cc-pool instance. Constructed early —
+// unlike cc-headless (started late, after the HTTP server is listening),
+// pool-route-resolve needs poolManagers at pipeline-construction time below,
+// and the command system / HTTP server both need it too, so this is built
+// before anything that depends on it rather than late-bound.
+const busBaseUrl = `http://127.0.0.1:${config.bus.http_port}`;
+const poolManagers = createPoolManagers(config, db, busBaseUrl, queue);
+
 const { registry: commandRegistry, pauseSet, headlessControl } = createCommandSystem({
   adapterRegistry: registry,
   queue,
   db,
   config,
+  poolManagers,
 });
 
 // ── Custom commands ───────────────────────────────────────────────────────────
 
 commandRegistry.register(createTorrentCommand({ commandRegistry, db, registry }));
 commandRegistry.register(createCostCommand({ db, headlessControl }));
+commandRegistry.register(createPoolCommand({ poolManagers }));
 
 const pipeline = new PipelineEngine();
 pipeline.use({ slot: 10, name: 'normalize',        stage: normalize });
@@ -95,6 +109,12 @@ pipeline.use({ slot: 40, name: 'slash-command',    stage: slashCommandDetect });
 pipeline.use({ slot: 50, name: 'topic-classify',   stage: createTopicClassify(config) });
 pipeline.use({ slot: 60, name: 'priority-score',   stage: createPriorityScore(config) });
 pipeline.use({ slot: 70, name: 'route-resolve',    stage: createRouteResolve(config, db) });
+// E48 — rewrites a cc-pool route's recipientId from the pool's logical agent
+// id to a concrete leased pane's id before transcript-log (below) stamps
+// sessions.agent_id from it, and before fan-out enqueues. critical: false —
+// a bug here must not take down transcript logging or delivery to other
+// route targets (e.g. an also_notify entry).
+pipeline.use({ slot: 72, name: 'pool-route-resolve', stage: createPoolRouteResolve(poolManagers), critical: false });
 pipeline.use({ slot: 80, name: 'transcript-log',   stage: createTranscriptLog(db, config), critical: false });
 pipeline.use({ slot: 85, name: 'memory-inject',    stage: createMemoryInject(db, config),  critical: false });
 
@@ -105,7 +125,7 @@ pipeline.use({ slot: 85, name: 'memory-inject',    stage: createMemoryInject(db,
 const siri = config.adapters.siri?.enabled ? new SiriAdapter(config.adapters.siri) : undefined;
 if (siri) registry.register(siri);
 
-const httpServer = await createHttpServer({ queue, registry, config, pipeline, db, commandRegistry, pauseSet, siri });
+const httpServer = await createHttpServer({ queue, registry, config, pipeline, db, commandRegistry, pauseSet, siri, poolManagers });
 
 // ── Platform adapter registration ────────────────────────────────────────────
 // Platform adapters run in-process. They are instantiated from config,
@@ -189,6 +209,7 @@ function shutdown() {
   attachmentSweeper.stop();
   deliveryWorker.stop();
   stopHeadless();
+  for (const pool of poolManagers.values()) pool.stop();
   clearInterval(maintenanceTimer);
   const stops = registry.list().map((a) => a.stop().catch(() => {}));
   Promise.allSettled(stops).finally(() => {
@@ -223,6 +244,22 @@ for (const [agentId, headless] of startHeadless(db)) {
   headlessControl.journalResumeId.set(agentId, headless.journalResumeId);
   // Let /stop reach the owning instance's in-flight turn.
   headlessControl.stopTurn.set(agentId, headless.stopTurn);
+}
+
+// Start every configured cc-pool instance (E48): seed pane rows (idempotent
+// — a no-op if they already exist from a prior run), adopt any live panes
+// left over from before a restart / release any whose window actually
+// vanished (reconcileLiveness — see src/pool/pool-manager.ts's doc comment:
+// a free pane with no tmux window yet is normal and is NOT touched here),
+// then start the recurring hard-idle/park-drain sweep. Registering a
+// journaling runner per pool is currently inert (SessionTracker's dispatch
+// only recognizes cc-headless instances — see the maintenance backlog) but
+// costs nothing and keeps parity with cc-headless's own wiring above.
+for (const [agentId, pool] of poolManagers) {
+  await pool.ensureStarted();
+  await pool.reconcileLiveness();
+  pool.start();
+  sessionTracker.registerJournalingRunner(agentId, pool.journalingRunner);
 }
 
 sessionTracker.start();

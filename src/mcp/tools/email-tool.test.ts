@@ -75,9 +75,9 @@ describe('send_email tool', () => {
 
   let fetchMock: ReturnType<typeof vi.fn>;
 
-  async function makeClient(cfg: EmailToolConfig = emailCfg) {
+  async function makeClient(cfg: EmailToolConfig = emailCfg, agentId = 'claude') {
     const server = new McpServer({ name: 'test', version: '0.0.1' });
-    registerEmailTool(server, BUS_URL, cfg);
+    registerEmailTool(server, BUS_URL, agentId, cfg);
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await server.connect(serverTransport);
     const client = new Client({ name: 'test-client', version: '0.0.1' });
@@ -115,6 +115,22 @@ describe('send_email tool', () => {
     // ...with the exact target address in metadata for the adapter.
     expect(sent.metadata.email_to).toBe('chris@example.com');
     expect(sent.sender).toBe('agent:claude');
+
+    await client.close();
+  });
+
+  it('stamps sender from the registered agentId, not a hardcoded literal', async () => {
+    fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ ok: true, id: 'm-sender' }) });
+
+    const client = await makeClient(emailCfg, 'peggy-pool-3');
+    const result = await client.callTool({ name: 'send_email', arguments: { body: 'hi' } });
+
+    expect(result.isError).toBeFalsy();
+    const sent = JSON.parse((fetchMock.mock.calls[0]! as [string, { body: string }])[1].body) as {
+      sender: string;
+    };
+    expect(sent.sender).toBe('agent:peggy-pool-3');
+    expect(sent.sender).not.toBe('agent:claude');
 
     await client.close();
   });
