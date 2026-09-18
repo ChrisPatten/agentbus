@@ -214,6 +214,65 @@ describe('route-resolve stage', () => {
     expect(rPeggy!.conversationId).not.toBe(rJarvis!.conversationId);
   });
 
+  it('does not let a later stage mutating ctx.routes[0] leak back into the static config object (regression for cross-envelope route-target corruption)', async () => {
+    const config = makeConfig({
+      routes: [
+        { match: { channel: 'telegram' }, target: { adapterId: 'cc-pool', recipientId: 'agent:peggy' } },
+      ],
+    });
+    const db = makeDb();
+    const stage = createRouteResolve(config, db);
+
+    // Envelope 1: resolve the route, then simulate what pool-route-resolve
+    // used to do — mutate the resolved route target in place, as if it were
+    // rewriting the pool's logical id to a concrete pane id.
+    const ctx1 = makeCtx({ channel: 'telegram', sender: 'contact:alice', topic: 'general' }, config, db);
+    const result1 = await stage(ctx1);
+    expect(result1!.routes[0]!.recipientId).toBe('agent:peggy');
+    result1!.routes[0]!.recipientId = 'agent:peggy-pool-1';
+
+    // The static config's route target must be completely unaffected by
+    // that mutation — it is a fresh copy, not the same object.
+    expect(config.pipeline.routes[0]!.target.recipientId).toBe('agent:peggy');
+    expect(config.pipeline.routes[0]!.target).not.toBe(result1!.routes[0]);
+
+    // Envelope 2: a completely different conversation matching the SAME
+    // static route rule must see the ORIGINAL logical id, not the id
+    // envelope 1 stamped onto its own copy.
+    const ctx2 = makeCtx({ channel: 'telegram', sender: 'contact:bob', topic: 'general' }, config, db);
+    const result2 = await stage(ctx2);
+    expect(result2!.routes[0]!.recipientId).toBe('agent:peggy');
+
+    // And the config object itself remains byte-for-byte unchanged after
+    // both calls.
+    expect(config.pipeline.routes[0]!.target.recipientId).toBe('agent:peggy');
+  });
+
+  it('does not let a later stage mutating an also_notify target leak back into the static config object', async () => {
+    const config = makeConfig({
+      routes: [
+        {
+          match: { channel: 'telegram' },
+          target: { adapterId: 'primary', recipientId: 'main' },
+          also_notify: [{ adapterId: 'cc-pool', recipientId: 'agent:peggy' }],
+        },
+      ],
+    });
+    const db = makeDb();
+    const stage = createRouteResolve(config, db);
+
+    const ctx1 = makeCtx({ channel: 'telegram' }, config, db);
+    const result1 = await stage(ctx1);
+    result1!.routes[1]!.recipientId = 'agent:peggy-pool-1';
+
+    expect(config.pipeline.routes[0]!.also_notify![0]!.recipientId).toBe('agent:peggy');
+    expect(config.pipeline.routes[0]!.also_notify![0]).not.toBe(result1!.routes[1]);
+
+    const ctx2 = makeCtx({ channel: 'telegram' }, config, db);
+    const result2 = await stage(ctx2);
+    expect(result2!.routes[1]!.recipientId).toBe('agent:peggy');
+  });
+
   it('routes to correct adapter by named-instance channel', async () => {
     const config = makeConfig({
       routes: [

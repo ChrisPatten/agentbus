@@ -212,6 +212,50 @@ describe('getCcPoolInstances', () => {
     expect(instances[0]!.growth).toBe('fixed');
   });
 
+  it('defaults launch_ack_pattern to a substring of the real dev-channels confirmation prompt, not the old "experimental" value', () => {
+    // Regression test: the old default ('experimental') never appeared
+    // anywhere in the actual --dangerously-load-development-channels
+    // confirmation prompt (verified against a real captured pane, CLI
+    // v2.1.274 — see docs/CC_POOL_ADAPTER.md), so the ack-handshake pattern
+    // check in src/pool/pane.ts never matched and falsely reported the
+    // prompt dismissed on the very first `Enter`, leaving the pane stuck at
+    // that confirmation screen forever. The real prompt's header reads
+    // "WARNING: Loading development channels".
+    const config = AppConfigSchema.parse({
+      bus: { db_path: ':memory:' },
+      adapters: {
+        'cc-pool': {
+          agent_id: 'peggy',
+          tmux_session: 'peggy-pool',
+          claude_bin: '/usr/local/bin/claude',
+        },
+      },
+      memory: {},
+    });
+    const instances = getCcPoolInstances(config);
+    expect(instances[0]!.launch_ack_pattern).toBe('loading development channels');
+
+    const realPromptCapture = [
+      '────────────────────────────────────────────────────────────────',
+      '  WARNING: Loading development channels',
+      '',
+      '  --dangerously-load-development-channels is for local channel development',
+      '  only. Do not use this option to run channels you have downloaded off the',
+      '  internet.',
+      '',
+      '  Please use --channels to run a list of approved channels.',
+      '',
+      '  Channels: server:agentbus',
+      '',
+      '  ❯ 1. I am using this for local development',
+      '    2. Exit',
+      '',
+      '  Enter to confirm · Esc to cancel',
+    ].join('\n');
+    expect(realPromptCapture.toLowerCase().includes(instances[0]!.launch_ack_pattern.toLowerCase())).toBe(true);
+    expect(realPromptCapture.toLowerCase().includes('experimental')).toBe(false);
+  });
+
   it('named-record form returns one entry per key with correct names', () => {
     const config = AppConfigSchema.parse({
       bus: { db_path: ':memory:' },

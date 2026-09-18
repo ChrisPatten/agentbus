@@ -350,12 +350,32 @@ const CcPoolAdapterSchema = z.object({
     .prefault({}),
   /** What happens to a pane on lease release: clear its screen/context, or kill and relaunch it. */
   on_evict: z.enum(['clear', 'kill']).default('clear'),
-  /** Delay (ms) before sending Enter to ack the "experimental" MCP-channel launch prompt. */
-  launch_ack_delay_ms: z.number().int().nonnegative().default(500),
-  /** Max re-send attempts of Enter if capture-pane output still shows the ack prompt. */
+  /**
+   * Total time (ms) `ackHandshake` polls capture-pane output for the
+   * "loading development channels" launch confirmation prompt to actually
+   * appear before concluding there is nothing to dismiss. NOT a blind delay
+   * before pressing Enter — Enter is only ever sent once the prompt is
+   * confirmed showing (see `src/pool/pane.ts`'s `ackHandshake`/
+   * `waitForAckPrompt`). Bumped from the original 500ms: measured against
+   * the real CLI (v2.1.274-276) across several runs, the prompt first
+   * renders roughly 1.0-1.6s after the launch line is sent, so 500ms was
+   * consistently too short to ever observe it — see docs/CC_POOL_ADAPTER.md's
+   * Troubleshooting section for the resulting bug and fix.
+   */
+  launch_ack_delay_ms: z.number().int().nonnegative().default(5000),
+  /** Max Enter presses to dismiss the ack prompt once it's confirmed showing, before giving up. */
   launch_ack_max_attempts: z.number().int().positive().default(3),
-  /** Text matched in capture-pane output to detect the launch-ack prompt; override if the CLI rewords it. */
-  launch_ack_pattern: z.string().default('experimental'),
+  /**
+   * Text matched (case-insensitively) in capture-pane output to detect the
+   * `--dangerously-load-development-channels` confirmation prompt; override
+   * if the CLI rewords it. Verified against a real captured prompt (v2.1.274):
+   * the dialog's header reads "WARNING: Loading development channels" — the
+   * default matches that verbatim, rather than the flag name or a generic
+   * word like "experimental" (which never appears anywhere in the real
+   * prompt and never matched, so the pane was never actually confirmed —
+   * see docs/CC_POOL_ADAPTER.md's Troubleshooting section).
+   */
+  launch_ack_pattern: z.string().default('loading development channels'),
   /**
    * Extra env vars set on the tmux window at creation time
    * (`tmux new-window -e`). `TERM`/`COLORTERM` are added unconditionally by

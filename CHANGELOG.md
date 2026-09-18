@@ -38,6 +38,75 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
   [docs/HTTP_API.md](docs/HTTP_API.md#pool) and
   [docs/SLASH_COMMANDS.md](docs/SLASH_COMMANDS.md#pool-pool-agent-id).
 
+### Fixed
+- **cc-pool: launch acknowledgment and readiness-timeout defects found against
+  a real `claude` CLI.** `CcPoolAdapterSchema.launch_ack_pattern`'s default
+  (`'experimental'`) never appeared anywhere in the real
+  `--dangerously-load-development-channels` confirmation prompt, so the ack
+  handshake always falsely reported the prompt dismissed on the very first
+  `Enter` without ever actually confirming it — the pane was then left
+  stuck at that confirmation screen with `cc.ts` never started. The default
+  is now `'loading development channels'`, matched against a real captured
+  prompt. Separately, `PaneLifecycle`'s readiness-poll loop
+  (`src/pool/pane.ts`) could run past its documented 30-second
+  `LAUNCH_READY_TIMEOUT_MS` bound — indefinitely, if a single `/last-poll`
+  check ever stalled — because the deadline was only re-checked between loop
+  iterations, with nothing bounding how long one iteration's readiness check
+  could take; it's now bounded so the loop reliably re-checks the deadline
+  every poll interval regardless of how long any single check takes. The ack
+  handshake is now bounded by the same overall deadline too, closing a gap
+  where a large `launch_ack_max_attempts` could exceed the documented budget
+  on its own. A third defect, found by live end-to-end verification of the
+  above two fixes against the real CLI: even with the corrected pattern,
+  `ackHandshake` still sent a blind `Enter` after a fixed
+  `launch_ack_delay_ms` delay and treated the pattern's *absence* from
+  `capture-pane` as proof the prompt had been dismissed — indistinguishable,
+  from a single point-in-time check, from "the prompt simply hasn't rendered
+  yet." Measured against real tmux + a real `claude` process, the prompt
+  reliably takes over a second to render, well past the old 500ms default, so
+  the handshake's first check almost always saw "absent" for the wrong
+  reason, declared success, and never pressed `Enter` again — the real
+  prompt then rendered moments later and sat there indefinitely, confirmed by
+  direct reproduction (no mocks). `ackHandshake` now polls `capture-pane` for
+  the prompt to actually appear before ever pressing `Enter`; `Enter` is only
+  sent, and retried, once the prompt is confirmed showing.
+  `launch_ack_delay_ms`'s meaning changes accordingly (total time to wait for
+  the prompt to appear, not a blind pre-Enter delay) and its default is
+  raised from `500` to `5000` to give real margin over the measured render
+  time. See [docs/CC_POOL_ADAPTER.md](docs/CC_POOL_ADAPTER.md)'s
+  Troubleshooting and Observability sections for operator-facing detail,
+  including how to read `/pool`/`GET /api/v1/pool` and parked-message status
+  correctly around a stuck launch.
+- **cc-pool: static route config permanently corrupted by the first message
+  on any route, breaking every subsequent conversation on that route.**
+  `route-resolve.ts` (Stage 70) handed out `ctx.routes` entries that shared
+  object identity with `config.pipeline.routes[i].target` (and
+  `.also_notify[i]`) — the parsed-once config object reused for the lifetime
+  of the process, not a per-envelope copy. `pool-route-resolve.ts`
+  (Stage 72) assigns `route.recipientId = <resolved pane id>` directly onto
+  whatever object it's handed, so on the first message matching a `cc-pool`
+  route, that assignment mutated the static config's own route target in
+  place: `recipientId` flipped from the pool's logical id (e.g.
+  `agent:peggy`) to the concrete pane resolved for that one message (e.g.
+  `agent:peggy-pool-1`), permanently, for every later envelope matching the
+  same rule — including unrelated conversations. Every subsequent message on
+  that route then failed pool-route-resolve's `poolManagers.get(...)` lookup
+  (keyed by the logical id, which no longer appeared anywhere on the route),
+  logged a "No cc-pool instance configured for recipient" error, and left the
+  stale pane id untouched — silently pinning every future conversation on
+  that route to the first conversation's pane, with no lease/eviction/
+  parking logic ever running for them again. Found during real end-to-end
+  verification of the launch-ack fix above, which had worked around it
+  without noticing by restarting bus-core between runs instead of sending two
+  messages through one running process. Fixed by having `route-resolve.ts`
+  copy each target object (`{ ...rule.target }`, and the same for each
+  `also_notify` entry) instead of sharing the config's own reference, plus
+  defense in depth in `pool-route-resolve.ts`, which now replaces a route's
+  array element with a fresh object rather than mutating its input in place.
+  Verified against the real CLI: two different conversations sent to the
+  same already-running bus-core process, on the same static route, both
+  reached `leased` on their own distinct panes.
+
 ## [0.12.0] - 2026-09-16
 
 ### Added

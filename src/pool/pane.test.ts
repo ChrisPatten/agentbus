@@ -36,7 +36,7 @@ function jsonResponse(body: unknown): Response {
   return { ok: true, json: async () => body } as unknown as Response;
 }
 
-/** A capturePane fake whose output never contains the default 'experimental' ack pattern — ack succeeds on the first Enter. */
+/** A capturePane fake whose output never contains makeCfg()'s 'experimental' ack pattern (a stand-in test value — see makeCfg below; the real schema default is 'loading development channels', src/config/schema.ts) — ack succeeds on the first Enter. */
 function makeNoAckCapture() {
   return vi.fn(async () => 'Welcome to Claude Code!\n> ');
 }
@@ -274,8 +274,76 @@ describe('PaneLifecycle.launch — optional flags', () => {
 // ── launch(): ack handshake ──────────────────────────────────────────────────
 
 describe('PaneLifecycle.launch — ack handshake', () => {
-  it('retries Enter until the ack pattern clears, then proceeds to readiness', async () => {
-    const captures = ['Do you want to enable this experimental MCP channel?', 'Welcome! Ready.'];
+  it('never presses Enter when the ack pattern never appears (nothing to dismiss)', async () => {
+    // Regression coverage for the redesigned handshake's "no-op" path: a
+    // prompt that never renders (e.g. a CLI/flag combination that skips the
+    // warning) must not get a speculative Enter pressed into it.
+    const capturePane = makeNoAckCapture();
+    const tmux = makeTmux({ capturePane });
+    const pl = new PaneLifecycle({
+      tmux,
+      busBaseUrl: 'http://x',
+      cfg: makeCfg(),
+      scratchDir,
+      fetchFn: makeReadyFetch(),
+    });
+
+    const launchPromise = pl.launch(makeLaunchParams());
+    await vi.advanceTimersByTimeAsync(2000);
+    await expect(launchPromise).resolves.toBeUndefined();
+
+    expect(tmux.sendKeys).not.toHaveBeenCalled();
+  });
+
+  it(
+    'does NOT declare the prompt dismissed while it has merely not rendered yet — waits for it to ' +
+      'actually appear before pressing Enter at all (regression: fix/pool-launch-ack-and-timeout, 3rd bug)',
+    async () => {
+      // Reproduces, with mocked capturePane responses standing in for the
+      // real CLI's render lag, the exact defect found by end-to-end testing
+      // against the real `claude` binary: the OLD ackHandshake sent a blind
+      // Enter after a fixed delay and treated the ack pattern's ABSENCE from
+      // capturePane as proof of dismissal — indistinguishable from "hasn't
+      // rendered yet" when the delay is shorter than the CLI's actual render
+      // time (measured ~1.0-1.6s against real tmux + real claude, v2.1.274-276
+      // — see this story's report). That bug pressed exactly one premature
+      // Enter into a still-loading pane, declared success, and then the real
+      // prompt rendered moments later and was never dismissed by anything.
+      //
+      // Here, the first two capturePane checks simulate a still-loading pane
+      // (no pattern — nothing rendered yet, NOT "already dismissed"); the
+      // third simulates the prompt actually rendering. The handshake must
+      // keep polling through the first two absences without pressing Enter,
+      // only press it once the prompt is confirmed showing, and then confirm
+      // dismissal.
+      const captures = ['', 'unset TMUX; claude ...', 'confirm this experimental channel warning', 'Welcome! Ready.'];
+      const capturePane = vi.fn(async () => captures.shift()!);
+      const tmux = makeTmux({ capturePane });
+      const pl = new PaneLifecycle({
+        tmux,
+        busBaseUrl: 'http://x',
+        cfg: makeCfg({ launch_ack_delay_ms: 2000 }),
+        scratchDir,
+        fetchFn: makeReadyFetch(),
+      });
+
+      const launchPromise = pl.launch(makeLaunchParams());
+      await vi.advanceTimersByTimeAsync(3000);
+      await expect(launchPromise).resolves.toBeUndefined();
+
+      // Exactly one Enter — pressed only after the prompt was confirmed
+      // showing (the 3rd capturePane call), not during either of the two
+      // "not rendered yet" checks that preceded it.
+      expect(tmux.sendKeys).toHaveBeenCalledTimes(1);
+      expect(tmux.sendKeys).toHaveBeenCalledWith('peggy-pool:1', 'Enter');
+      expect(capturePane).toHaveBeenCalledTimes(4);
+    },
+  );
+
+  it('retries Enter if a dismiss attempt does not clear the prompt, then succeeds', async () => {
+    // Prompt confirmed present immediately; first dismiss Enter doesn't
+    // clear it (still showing); second dismiss Enter does.
+    const captures = ['this experimental channel warning', 'this experimental channel warning', 'Welcome! Ready.'];
     const capturePane = vi.fn(async () => captures.shift()!);
     const tmux = makeTmux({ capturePane });
     const pl = new PaneLifecycle({
@@ -378,6 +446,68 @@ describe('PaneLifecycle.launch — readiness poll', () => {
     const assertion = expect(launchPromise).rejects.toThrow(PaneLaunchError);
     await vi.advanceTimersByTimeAsync(LAUNCH_READY_TIMEOUT_MS + 5_000);
     await assertion;
+  });
+
+  it('throws PaneLaunchError within LAUNCH_READY_TIMEOUT_MS even when an individual isReady() fetch call never settles', async () => {
+    // Regression test for the real production defect (fix/pool-launch-ack-
+    // and-timeout): the old `pollReadiness` implementation only re-checked
+    // `elapsedSince(launchStartedAt) >= LAUNCH_READY_TIMEOUT_MS` BETWEEN loop
+    // iterations — it unconditionally `await`ed `isReady()` (and therefore
+    // this `fetchFn`) first. A `fetchFn` whose promise never resolves or
+    // rejects (a stalled `/last-poll` request against bus-core's own HTTP
+    // server — this loop is calling back into the same process that's
+    // running it) meant control never returned to the top of the loop to
+    // re-evaluate the deadline at all, so `launch()` itself never returned —
+    // no timeout, no `PaneLaunchError`, nothing downstream (not
+    // `markDead()`, not the caller) ever ran. Advancing fake timers past the
+    // deadline proves nothing about THIS bug unless something is actually
+    // racing the stalled call against the clock — which is exactly what the
+    // fix adds.
+    const tmux = makeTmux({ capturePane: makeNoAckCapture() });
+    const fetchFn = vi.fn(() => new Promise<Response>(() => {})); // never settles
+    const pl = new PaneLifecycle({
+      tmux,
+      busBaseUrl: 'http://x',
+      cfg: makeCfg(),
+      scratchDir,
+      fetchFn: fetchFn as unknown as typeof fetch,
+    });
+
+    const launchPromise = pl.launch(makeLaunchParams());
+    const assertion = expect(launchPromise).rejects.toThrow(PaneLaunchError);
+    await vi.advanceTimersByTimeAsync(LAUNCH_READY_TIMEOUT_MS + 5_000);
+    await assertion;
+
+    // The loop kept re-polling on the normal cadence (racing each stalled
+    // call against the poll interval) rather than blocking on the first
+    // hung call forever.
+    expect(fetchFn.mock.calls.length).toBeGreaterThan(1);
+  });
+
+  it('throws PaneLaunchError during the ack handshake if it alone would exceed LAUNCH_READY_TIMEOUT_MS', async () => {
+    // The class doc comment claims LAUNCH_READY_TIMEOUT_MS "encompass[es]
+    // BOTH the ack handshake and the readiness poll — not a separate budget
+    // for each phase." A large operator-configured launch_ack_max_attempts
+    // makes that untrue unless ackHandshake itself checks the same deadline.
+    const capturePane = vi.fn(async () => 'still experimental'); // pattern never clears
+    const tmux = makeTmux({ capturePane });
+    const pl = new PaneLifecycle({
+      tmux,
+      busBaseUrl: 'http://x',
+      cfg: makeCfg({ launch_ack_max_attempts: 1000, launch_ack_delay_ms: 500 }),
+      scratchDir,
+      fetchFn: makeReadyFetch(),
+    });
+
+    const launchPromise = pl.launch(makeLaunchParams());
+    const assertion = expect(launchPromise).rejects.toThrow(PaneLaunchError);
+    await vi.advanceTimersByTimeAsync(LAUNCH_READY_TIMEOUT_MS + 5_000);
+    await assertion;
+
+    // Bounded by the launch deadline, not by grinding through all 1000
+    // configured attempts (500ms delay + 999 * 500ms backoff would be ~8.5
+    // minutes).
+    expect(capturePane.mock.calls.length).toBeLessThan(70);
   });
 });
 
