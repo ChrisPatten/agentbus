@@ -11,6 +11,26 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 ## [Unreleased]
 
 ### Added
+- **Agent-managed knowledge store, Phase 1 (E50).** New `knowledge` table
+  (migration 018) with an FTS5 `knowledge_fts` search index, for the agent to
+  store arbitrary-JSON records with an optional retrieval-cue `index_note`,
+  agent-supplied tags/facets, and four temporal fields
+  (`event_at`/`valid_from`/`relevant_until`/`expires_at`). Four new MCP tools:
+  `write_knowledge`, `get_knowledge`, `forget_knowledge`, `search_knowledge`
+  (keyword/facet/date filtering only — no embeddings or vector search in this
+  phase). Each write computes and stores a `content_hash` of the record so a
+  future per-turn injection path can dedupe against it without re-hashing.
+  See [docs/KNOWLEDGE_STORE.md](docs/KNOWLEDGE_STORE.md).
+- **Per-session context-block ledger for `cc-headless` (E49).** `cc-headless`
+  no longer re-renders `{{memories}}` into the system prompt on every turn —
+  the system prompt is now a frozen, cache-stable prefix. Memory files
+  (`MEMORY.md`, daily journals) are hashed per-file and sent into the user
+  turn only on first mention or when their content changes, tracked in a new
+  `context_blocks` table (migration 017). Claude Code's own auto-compaction
+  is detected via a sharp drop in a session's `turn_costs.input_tokens` and
+  clears that session's ledger, since compaction invalidates what's assumed
+  to already be in context. See
+  [docs/CC_HEADLESS_ADAPTER.md](docs/CC_HEADLESS_ADAPTER.md).
 - **Interactive Claude Code session pool (E48).** New `cc-pool` adapter type:
   a configurable pool of tmux panes (`adapters.cc-pool`, single-instance or
   named-instance form, `src/config/schema.ts`), each running its own

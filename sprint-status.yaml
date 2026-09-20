@@ -828,4 +828,32 @@ epics:
       S48.7: complete  # Hard-idle sweep, park-queue drain, startup+recurring reconciliation (dead-pane revival added post-S48.9 review)
       S48.8: complete  # /pool command + GET /api/v1/pool + /status Pool: line
       S48.9: complete  # docs/CC_POOL_ADAPTER.md + adapter comparison table + cross-links
-last_updated: 2026-09-17  # E48 (interactive Claude Code session pool over tmux) implemented end-to-end and marked complete — all 10 stories, on feat/e48-cc-session-pool, not yet merged to dev/main. current_epic stays E42/E44 (Siri Bridge) since that's the operator's ongoing focus; E48 was a self-contained side branch, now finished. Prior note preserved: Backfilled E36, E38, E39, E40 (complete, merged to dev 2026-08-31/09-01) and E37, E41 (pending, epic files only). Added the Siri Bridge package E42–E47 (renumbered from E36–E41 on arrival to avoid the collision): E42 complete, E44 in-progress (S44.5 on-device is the operator's), E43/E45/E46/E47 pending. E23's S23.5 still pending operator sign-off.
+  E49:
+    status: complete
+    completed: 2026-09-20
+    notes: >
+      Per-session context-block ledger for cc-headless (context_blocks,
+      migration 017). System prompt no longer carries {{memories}} for real
+      sessions — frozen for cache stability. Memory files are hashed per-file
+      and sent into the user turn only on first mention or content change;
+      Claude Code auto-compaction is detected via a sharp drop in
+      turn_costs.input_tokens and clears the session's ledger. Implemented on
+      claude/agent-knowledge-database-xiqn29 (not yet merged, not yet
+      pushed).
+    stories:
+      S49.1: complete  # Ledger table + cc-headless wiring
+  E50:
+    status: complete
+    completed: 2026-09-20
+    notes: >
+      Agent-managed knowledge store, Phase 1 only (schema + CRUD + FTS5
+      keyword search — no embeddings/vector search, no per-turn
+      auto-injection, both deferred to later phases). knowledge table +
+      knowledge_fts (migration 018), content_hash computed and stored at
+      write time for a future injection ledger (E49) to consume directly.
+      4 MCP tools (write/get/forget/search_knowledge). Implemented on
+      claude/agent-knowledge-database-xiqn29, on top of E49 (not yet merged,
+      not yet pushed).
+    stories:
+      S50.1: complete  # Schema, CRUD, FTS5 search, MCP tools
+last_updated: 2026-09-20  # E49 (context-block ledger) + E50 (agent-managed knowledge store, Phase 1) implemented end-to-end on claude/agent-knowledge-database-xiqn29, not yet merged, not yet pushed. Both from a design spike (_bmad-output/planning-artifacts/design-spike-agent-knowledge-store.md) worked out conversationally with the operator. Prior note preserved: 2026-09-17  # E48 (interactive Claude Code session pool over tmux) implemented end-to-end and marked complete — all 10 stories, on feat/e48-cc-session-pool, not yet merged to dev/main. current_epic stays E42/E44 (Siri Bridge) since that's the operator's ongoing focus; E48 was a self-contained side branch, now finished. Prior note preserved: Backfilled E36, E38, E39, E40 (complete, merged to dev 2026-08-31/09-01) and E37, E41 (pending, epic files only). Added the Siri Bridge package E42–E47 (renumbered from E36–E41 on arrival to avoid the collision): E42 complete, E44 in-progress (S44.5 on-device is the operator's), E43/E45/E46/E47 pending. E23's S23.5 still pending operator sign-off.

@@ -1,6 +1,8 @@
 # AgentBus — Design Spike: Agent-Managed Knowledge Store
 
-**Status:** PROPOSED — awaiting decision
+**Status:** Phase 1 implemented (E50, `content_hash` added per below) + the
+context-block ledger implemented as a standalone epic (E49, §9.1). Phases
+0/2–4 remain PROPOSED — awaiting decision. See §12 for what's still open.
 **Author:** drafted 2026-09-20
 **Supersedes/extends:** E8/E9 structured memory (dormant), E20 file-memory model, E30 decoupled journaling
 **Related:** E47 (memory export for Siri indexing), `docs/MEMORY_MODEL.md`, `_bmad-output/planning-artifacts/principles.md`
@@ -93,6 +95,9 @@ CREATE TABLE knowledge (
   body_text       TEXT NOT NULL,         -- derived: flattened payload text, for FTS + embedding
   tags            TEXT NOT NULL DEFAULT '[]',  -- JSON array, agent-supplied
   facets          TEXT NOT NULL DEFAULT '{}',  -- JSON object of scalars, agent-supplied
+  content_hash    TEXT NOT NULL,         -- sha256(body_text), computed at write time (added in
+                                          -- implementation, missing from this draft originally —
+                                          -- see the injection-ledger note below)
 
   -- temporal (§6)
   event_at        TEXT,                  -- when the thing this is ABOUT happened/happens
@@ -122,6 +127,16 @@ CREATE TABLE knowledge (
 validates that it parses and nothing more. `body_text` is a mechanical flatten of
 the payload's string leaves, used for FTS and embedding, so the agent never has
 to duplicate content into a "searchable text" field.
+
+**`content_hash` is computed and stored at write time, not left for a reader
+to compute.** This was caught late in review: without it, a per-turn injection
+path (§9.1) would have to re-hash a record's `body_text` on every candidate
+check, every turn — wasted work on content that mostly doesn't change turn to
+turn. Storing the hash on the row makes the dedup check a plain column
+compare. Implemented in E50 (Phase 1) ahead of the injection path itself
+(E49, §9.1) needing it — the column exists and is populated now; nothing
+reads it for dedup yet, since no auto-injection path calls into the knowledge
+store today.
 
 ### 4.2 Indexes
 
@@ -292,24 +307,59 @@ Ingest is **strictly one-way**: files → index, never index → files. There is
 write-back path, so there is no drift to reconcile — the index is always
 reconstructible by re-ingesting, and the files remain the thing a human reads.
 
-### 9.1 The payoff: semantic memory injection
+### 9.1 The payoff: semantic memory injection — corrected, and partially built
 
-This is the change that makes the whole proposal worth building.
+This is the change that makes the whole proposal worth building. The version
+below corrects two things the original draft got wrong.
+
+**Correction 1 — the injection point.** The original draft said retrieved
+records would ride in the **system prompt**. Wrong: the system prompt is the
+first segment of the prompt-cache prefix (`tools` → `system` → `messages`),
+and `cc-headless` re-rendered it on *every* turn — so anything volatile placed
+there (retrieved records, which differ turn to turn by construction) would
+bust the cache on every single turn, not save tokens. Retrieved content has to
+ride in the **user turn** instead, where it accumulates in the resumed
+session's own transcript and only needs to be sent once.
+
+**Correction 2 — what actually needed building first.** Getting the
+injection point right required a general per-session ledger — hash each
+context block, send it once, resend only on change, clear on detected
+compaction — because retrieved knowledge records aren't the only thing that
+was being resent redundantly: `cc-headless`'s `{{memories}}` interpolation
+(`MEMORY.md` + recent daily journals) had exactly the same bug, and fixing
+that alone was worth more than this section originally gave it credit for.
+**That ledger is now built, as its own epic (E49, not gated on anything in
+this document) — `context_blocks` (migration 017),
+`src/adapters/context-ledger.ts`.** It currently only ledgers memory-file
+blocks. `search_knowledge` results are not yet wired into any per-turn
+injection path — no such path exists today, in either `cc-headless` or
+`cc-pool` — so this remains the design for future work, not something E49
+already does. When it's built, it plugs into the same ledger (`block_key:
+'knowledge:<id>'`), reading `knowledge.content_hash` (§4.1, also now built)
+directly rather than re-hashing records on every check.
+
+With that ledger in place, the original comparison still holds, updated for
+where retrieval fits:
 
 Today Stage 85 (`memory-inject`) front-loads the last 3 days of journal
-regardless of topic. With an index in place, **the inbound message is already a
-query** — so the stage can retrieve the top-k relevant records instead:
+regardless of topic — that's a *separate*, earlier mechanism (fires once per
+new session, before `cc-headless` ever runs) and is unaffected by any of this.
+The opportunity is downstream of it: **the inbound message is already a
+query**, so a future per-turn call into `search_knowledge` could retrieve the
+top-k relevant records into the user turn — ledgered, so only new or changed
+records cost tokens on later turns:
 
-| | Today | With the store |
-|---|---|---|
-| Injected per turn | `MEMORY.md` + last 3 dailies, ~4–8k tokens | `MEMORY.md` + top-k records, ~1.5k tokens |
-| Relevance | temporal proximity only | semantic + keyword + recency |
-| Reach | last 3 days | entire corpus |
-| Grows with | how chatty the last 3 days were | fixed k |
+| | Today (files only, pre-E49) | With E49 (built) | With E49 + knowledge retrieval (not built) |
+|---|---|---|---|
+| Injected per turn | `MEMORY.md` + last 3 dailies, ~4–8k tokens, **every turn** | Same files, but **once per session** unless changed | + top-k records, ledgered the same way |
+| Relevance | temporal proximity only | temporal proximity only | semantic + keyword + recency |
+| Reach | last 3 days | last 3 days | entire corpus |
 
-Better recall over a larger corpus for a fraction of the tokens, on every single
-turn. That is the efficiency win the request is actually reaching for — the
-tools are how the agent gets at it on purpose; this is how it gets it for free.
+E49 alone already captures most of the token saving described here — it just
+does it for files, not yet for retrieved knowledge records. The remaining
+piece (wiring `search_knowledge` into a per-turn call, for both
+`cc-headless` and `cc-pool`, the latter having no per-turn injection point of
+any kind today) is still open — see §12.
 
 ---
 
@@ -360,16 +410,22 @@ available.
 
 ## 11. Phasing
 
-| Phase | Scope | Size | Gate |
-|---|---|---|---|
-| **0** | **Spike.** Load `sqlite-vec` under `better-sqlite3`; index ~500 real journal sections; run 20 real questions; measure recall@5 for FTS5 alone vs. hybrid vs. hybrid+index-note | S | **Does hybrid actually beat FTS5 on this corpus?** If not, drop the vector leg and ship 1 only |
-| **1** | Schema + migration, `write`/`get`/`forget`, FTS5 leg, facets + catalog, `recall_timeline` | M | Ships standalone value with zero embedding dependency |
-| **2** | `EmbeddingProvider` + the three providers, vector leg, RRF fusion, `reindex` job | M | |
-| **3** | Semantic `memory-inject` (§9.1) + one-way file ingest | S | The payoff phase |
-| **4** | `knowledge_edges`, stale-review surface, `explain` mode | S | |
+| Phase | Scope | Size | Gate | Status |
+|---|---|---|---|---|
+| **0** | **Spike.** Load `sqlite-vec` under `better-sqlite3`; index ~500 real journal sections; run 20 real questions; measure recall@5 for FTS5 alone vs. hybrid vs. hybrid+index-note | S | **Does hybrid actually beat FTS5 on this corpus?** If not, drop the vector leg and ship 1 only | Not run |
+| **1** | Schema + migration, `write`/`get`/`forget`, FTS5 leg, `content_hash` at write time | M | Ships standalone value with zero embedding dependency | **Built (E50)** — `recall_timeline` and the `knowledge_facets` catalog/`list_facets` trimmed out as a fast-follow (facet *filtering* and the `facets` column shipped; the vocabulary-catalog convenience tool didn't) |
+| **1.5** | Context-block ledger (didn't exist as a phase in the original draft — needed regardless of Phase 0's outcome, since it also fixes memory-file resending, not just knowledge records) | S | None — no embedding dependency | **Built (E49)** — files only; not yet consumed by knowledge-record retrieval, since Phase 3 doesn't exist yet |
+| **2** | `EmbeddingProvider` + the three providers, vector leg, RRF fusion, `reindex` job | M | Phase 0 | Not started |
+| **3** | Semantic injection (§9.1) wired into `cc-headless` via E49's ledger, + `cc-pool` (no per-turn injection point exists there today — new work, not just reuse) + one-way file ingest | S–M | Phase 1 (have) + Phase 2 or a keyword-only fallback | Not started |
+| **4** | `knowledge_edges`, stale-review surface, `explain` mode | S | | Not started |
 
-Phase 1 is deliberately shippable alone: structured metadata, facets, and
-interval date queries are useful over FTS5 with no embeddings anywhere.
+Phase 1 shipped standalone, as predicted: structured metadata, facets
+filtering, and interval date queries work over FTS5 with no embeddings
+anywhere. Phase 1.5 (the ledger) turned out to be independently valuable
+enough to build before Phase 0's spike even ran — it fixes a real,
+already-existing cost (`cc-headless` re-sending memory files every turn) that
+has nothing to do with whether the knowledge store's hybrid search ever
+proves out.
 
 ---
 
