@@ -94,6 +94,11 @@ function loadMigrations(): Migration[] {
       description: 'Pool leases (interactive Claude Code session pool)',
       sql: readFileSync(join(migrationsDir, '016_pool_leases.sql'), 'utf-8'),
     },
+    {
+      version: 17,
+      description: 'Per-session context-block ledger',
+      sql: readFileSync(join(migrationsDir, '017_context_blocks.sql'), 'utf-8'),
+    },
   ];
 }
 

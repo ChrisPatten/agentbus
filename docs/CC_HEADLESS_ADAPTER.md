@@ -111,7 +111,7 @@ A turn killed by `/stop` sends nothing. See [SLASH_COMMANDS.md](SLASH_COMMANDS.m
 | `{{contact_id}}` | For example `contact:alice` |
 | `{{channel}}` | For example `telegram:peggy` |
 | `{{date}}` | Local date, `YYYY-MM-DD` |
-| `{{memories}}` | The assembled memory files. See [Context assembly](#context-assembly-memory-files) |
+| `{{memories}}` | Empty for a turn with a real, resumable session — memory blocks go into the user turn instead. Falls back to the assembled memory files when there's no session to track. See [Context assembly](#context-assembly-memory-files) |
 | `{{agent_id}}` | For example `agent:claude` |
 | `{{session_summary}}` | Deprecated. Always empty |
 
@@ -125,12 +125,28 @@ The user message is formatted by `formatMessagesForSampling` (`src/adapters/cc.t
 
 ## Context assembly (memory files)
 
-`{{memories}}` is filled by `assembleMemoryContext` (`src/adapters/memory-context.ts`) from the agent's own files, fresh on every turn:
+The agent's memory files are read fresh on every turn by `assembleMemoryBlocks` (`src/adapters/memory-context.ts`):
 
 1. `<working_dir>/<memory.dir>/<memory.index_file>` (default `memory/MEMORY.md`).
 2. Daily journal files for today and the previous `journal_lookback_days - 1` days at `<memory.dir>/<memory.daily_subdir>/YYYY-MM-DD.md`, newest first.
 
-Each file is wrapped in a `=== <relative path> ===` marker. Missing files are skipped. `journal_lookback_days: 0` loads the index only. Daily file names use the local date. Because the block is rebuilt every turn, a journaling update is visible on the next turn.
+Each file becomes a block wrapped in a `=== <relative path> ===` marker. Missing files are skipped. `journal_lookback_days: 0` loads the index only. Daily file names use the local date. `assembleMemoryContext` joins all blocks into one string and remains for callers (and the no-session fallback below) that want that; it is no longer what fills the system prompt on a resumed session. Because the blocks are read fresh every turn, a journaling update is visible on the next turn.
+
+### Per-session context-block ledger
+
+`{{memories}}` used to be re-interpolated into the system prompt on every turn, which sits at the front of the cache prefix (tools → system → messages). Because `{{memories}}` (and `{{date}}`) changed every render, the cached prefix was busted on effectively every turn, and the same memory-file content was resent in full every turn even though the resumed session's own transcript already had it from a prior turn.
+
+`context_blocks` (migration 017) and `src/adapters/context-ledger.ts` fix the resend problem for real, resumable sessions:
+
+- Each memory file from `assembleMemoryBlocks` is hashed (`hashBlock`, sha256) and keyed as `memory:<dir>/<index_file>` or `memory:<dir>/<daily_subdir>/<YYYY-MM-DD>.md`.
+- `runClaudeTurn` (`cc-headless.ts`) only prepends a block to the **user turn** (not the system prompt) when `shouldSendBlock` says its hash is new or has changed for that session — so each block's content is sent at most once per session, not once per turn.
+- Once the turn completes successfully, `markBlockSent` records the hash for every block that was sent, in the same success path as `persistSessionId`/`recordCost`.
+- The system prompt no longer carries `{{memories}}` for a session with a real, resumable session row (`opts.session !== null`): it renders with `memories: ''`, the same way `src/pool/pane.ts`'s `renderAndWriteSystemPrompt` already does for pool sessions (for a different reason — pool sessions rely on native `CLAUDE.md` auto-loading). The system prompt is now a frozen cache prefix instead of changing every turn.
+- **No-session fallback.** When there's no session row to track a ledger against (`opts.session === null`, e.g. `/clear`'s `journalResumeId`), the adapter falls back to the pre-ledger behavior: the full `assembleMemoryContext` string goes into `{{memories}}` on the system prompt, every turn, same as before this change.
+
+**Compaction detection.** `--resume` transcripts are subject to Claude Code's own auto-compaction (see [Session continuity](#session-continuity-long-lived-sessions)), which can summarize away content the ledger believes is already in context. `detectCompaction` reads the two most recent `turn_costs` rows for the session (`input_tokens IS NOT NULL`, most recent first) and calls it a compaction when the more recent row's `input_tokens` is under `COMPACTION_DROP_THRESHOLD` (0.6) times the older row's — auto-compaction summarization produces a sharp drop that ordinary conversation growth does not. When true, `runClaudeTurn` calls `clearLedger` before assembling blocks for that turn, so everything is resent from scratch. The threshold is deliberately biased toward false positives: a false positive just costs one redundant resend, while a false negative would silently leave the ledger believing content is in context that compaction actually removed.
+
+**`{{date}}` still busts the cache once a day — intentionally.** `{{date}}` remains in the system prompt and still changes the rendered text once per calendar day, which invalidates the cache prefix at that point. This is a known, accepted trade-off: once-a-day cache invalidation is a small, fixed cost, unlike the old once-per-turn invalidation this change eliminates. Making `{{date}}` itself cache-stable is out of scope here.
 
 ## Journaling on pause or ceiling
 

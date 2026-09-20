@@ -15,10 +15,14 @@
  *   1. Poll bus HTTP API for pending messages scoped to this instance's agent_id
  *   2. Group by contact, serialize per-contact via promise chaining
  *   3. Look up active session → claude_session_id for --resume
- *   4. Query memories + last session summary → interpolate system prompt
+ *   4. Assemble memory blocks; for a real session, filter to new/changed
+ *      blocks via the context-block ledger (context-ledger.ts) and prepend
+ *      only those to the user turn — the system prompt itself stays a frozen
+ *      cache prefix (no {{memories}}). With no session, fall back to
+ *      inlining the full memory context into the system prompt as before.
  *   5. Spawn: claude -p <prompt> --output-format stream-json [--resume <id>]
  *   6. Capture session_id and result text from stream-json events
- *   7. Store claude_session_id on the session row
+ *   7. Store claude_session_id on the session row; mark sent blocks in the ledger
  *   8. POST outbound envelope to bus
  */
 import { writeFileSync, unlinkSync } from 'node:fs';
@@ -32,11 +36,12 @@ import type Database from 'better-sqlite3';
 import { loadConfig } from '../config/loader.js';
 import { getCcHeadlessInstances, type CcHeadlessInstanceConfig } from '../config/schema.js';
 import { renderSystemPrompt, expandFileReferences, type PromptContext } from './prompt-renderer.js';
-import { assembleMemoryContext, formatLocalDate } from './memory-context.js';
+import { assembleMemoryContext, assembleMemoryBlocks, formatLocalDate } from './memory-context.js';
 import type { MessageEnvelope } from '../types/envelope.js';
 import { formatMessagesForSampling } from './cc.js';
 import { formatToolCallSummary } from './tool-call-summary.js';
 import { resolveModelOverride } from './model-override-loader.js';
+import { hashBlock, shouldSendBlock, markBlockSent, clearLedger, detectCompaction } from './context-ledger.js';
 
 const configPath = process.env['AGENTBUS_CONFIG'] ?? resolve(process.cwd(), 'config.yaml');
 const config = loadConfig(configPath);
@@ -591,11 +596,55 @@ class HeadlessInstance {
     onDelivered?: () => void;
   }): Promise<SpawnResult> {
     const now = new Date();
+
+    // Context-block ledger (migration 017 / src/adapters/context-ledger.ts):
+    // only meaningful when there's a real, resumable session to track it
+    // against — mirrors the `!opts.session` guard `persistSessionId` uses
+    // below. `opts.session` is null for /clear's journalResumeId (the DB
+    // session row is already closed), so that path keeps sending the full,
+    // unfiltered memory context every time via the fallback below.
+    let promptForClaude = opts.prompt;
+    let blocksSentThisTurn: Array<{ key: string; hash: string }> = [];
+
+    if (opts.session) {
+      // Sharp input-token drop since the last turn: Claude Code's own
+      // auto-compaction likely summarized the resumed transcript, so the
+      // ledger's record of "this session already has block X in context" no
+      // longer holds. Wipe it and resend everything fresh.
+      if (detectCompaction(opts.db, opts.session.id)) {
+        clearLedger(opts.db, opts.session.id);
+      }
+
+      const hashedBlocks = assembleMemoryBlocks(this.workingDir, this.cfg.memory, now).map((b) => ({
+        block: b,
+        hash: hashBlock(b.content),
+      }));
+      const newBlocks = hashedBlocks.filter(({ block, hash }) =>
+        shouldSendBlock(opts.db, opts.session!.id, block.key, hash),
+      );
+
+      if (newBlocks.length > 0) {
+        const prefix = newBlocks.map(({ block }) => `=== ${block.label} ===\n${block.content}`).join('\n\n');
+        promptForClaude = `${prefix}\n\n${opts.prompt}`;
+      }
+      blocksSentThisTurn = newBlocks.map(({ block, hash }) => ({ key: block.key, hash }));
+    }
+
     const ctx: PromptContext = {
       contact_id: opts.contactId,
       channel: opts.channel,
       date: formatLocalDate(now),
-      memories: assembleMemoryContext(this.workingDir, this.cfg.memory, now),
+      // The ledger above (when opts.session is set) now carries memory
+      // content into the user turn instead of the system prompt, so the
+      // system prompt stays a frozen cache prefix across turns — mirroring
+      // what src/pool/pane.ts's renderAndWriteSystemPrompt already does for
+      // pool sessions (memories: '' there too), just for a different reason:
+      // pool sessions rely on native CLAUDE.md auto-loading, while headless
+      // turns get their memory content from the ledger-filtered prefix on
+      // `promptForClaude` instead. When there's no session to track a ledger
+      // against, fall back to the old behavior of inlining the full context
+      // via {{memories}}.
+      memories: opts.session ? '' : assembleMemoryContext(this.workingDir, this.cfg.memory, now),
       // E20: structured DB summaries are retired; files are the source of truth.
       session_summary: '',
       agent_id: this.agentId,
@@ -646,7 +695,7 @@ class HeadlessInstance {
 
     try {
       const result = await this.invokeClaude(
-        opts.prompt,
+        promptForClaude,
         spPath,
         mcpPath,
         opts.resumeId,
@@ -666,6 +715,16 @@ class HeadlessInstance {
         persistSessionId(result.claudeSessionId);
       }
       recordCost(result);
+      // Ledger update, same success path as persistSessionId/recordCost
+      // above: only now that the turn actually completed do the blocks we
+      // prepended to promptForClaude count as "sent" — a failed/errored
+      // invokeClaude call must not mark them sent, since claude may never
+      // have actually received them.
+      if (opts.session) {
+        for (const { key, hash } of blocksSentThisTurn) {
+          markBlockSent(opts.db, opts.session.id, key, hash);
+        }
+      }
       return result;
     } finally {
       cleanTmp(spPath, mcpPath);

@@ -3,6 +3,10 @@ import type Database from 'better-sqlite3';
 import RealDatabase from 'better-sqlite3';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { runMigrations } from '../db/schema.js';
 import type { AppConfig } from '../config/schema.js';
 
@@ -625,5 +629,160 @@ describe('turn cost persistence (E39)', () => {
     await new Promise((r) => setTimeout(r, 30));
 
     expect(turnCostRows()).toHaveLength(0);
+  });
+});
+
+describe('context-block ledger (per-session memory dedup)', () => {
+  /** Mirrors resolveConversationId's fallback formula (transcripts row absent, as in these tests). */
+  function fallbackConversationId(senderContactId: string, channel: string, topic: string | undefined): string {
+    const bare = senderContactId.startsWith('contact:') ? senderContactId.slice('contact:'.length) : senderContactId;
+    const parts = [bare, channel, topic].sort();
+    return createHash('sha256').update(parts.join(':')).digest('hex');
+  }
+
+  let workingDir: string;
+  let realDb: InstanceType<typeof RealDatabase>;
+  let fetchMock: ReturnType<typeof vi.fn>;
+  let singleInstanceConfig: AppConfig;
+
+  function makeFakeChild() {
+    const child = new EventEmitter() as EventEmitter & {
+      stdout: PassThrough;
+      stderr: PassThrough;
+      kill: ReturnType<typeof vi.fn>;
+    };
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.kill = vi.fn();
+    return child;
+  }
+
+  function writeEvent(stream: PassThrough, obj: unknown): void {
+    stream.write(JSON.stringify(obj) + '\n');
+  }
+
+  function pendingResponse(messages: unknown[]): Response {
+    return { ok: true, json: async () => ({ ok: true, messages }) } as unknown as Response;
+  }
+
+  function makeEnvelope(id: string, sender: string) {
+    return { id, sender, channel: 'telegram', topic: undefined, body: `msg ${id}` };
+  }
+
+  beforeEach(() => {
+    vi.resetModules();
+    workingDir = mkdtempSync(join(tmpdir(), 'agentbus-ctxledger-'));
+    mkdirSync(join(workingDir, 'memory', 'daily'), { recursive: true });
+    writeFileSync(join(workingDir, 'memory', 'MEMORY.md'), '# Peggy memory index', 'utf-8');
+
+    realDb = new RealDatabase(':memory:');
+    runMigrations(realDb);
+
+    singleInstanceConfig = {
+      ...stubConfig,
+      adapters: {
+        'cc-headless': {
+          agent_id: 'peggy',
+          poll_interval_ms: 15,
+          system_prompt: 'You are Peggy.',
+          claude_bin: 'claude',
+          error_reply: 'err',
+          error_passthrough: false,
+          working_dir: workingDir,
+          memory: { dir: 'memory', index_file: 'MEMORY.md', daily_subdir: 'daily', journal_lookback_days: 0 },
+          journaling: { enabled: true, threshold_ms: 1_800_000, prompt: 'journal' },
+        },
+      },
+    } as unknown as AppConfig;
+    currentConfig = singleInstanceConfig;
+    spawnMock.mockReset();
+
+    fetchMock = vi.fn();
+    global.fetch = fetchMock as unknown as typeof fetch;
+  });
+
+  afterEach(async () => {
+    const { stopHeadless } = await import('./cc-headless.js');
+    stopHeadless();
+    realDb.close();
+    rmSync(workingDir, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  });
+
+  it('sends the memory block on a fresh session, then withholds it on the next turn of the same session', async () => {
+    const conversationId = fallbackConversationId('contact:alice', 'telegram', undefined);
+    const now = new Date().toISOString();
+    // Pre-seed an open session for this conversation, matching what a real
+    // pipeline run (transcript-log stage) would have created, so
+    // getActiveSession() finds a real, resumable session and runClaudeTurn's
+    // ledger path (guarded on opts.session !== null) is exercised.
+    realDb
+      .prepare(
+        `INSERT INTO sessions (id, conversation_id, channel, contact_id, started_at, last_activity)
+         VALUES ('sess-1', ?, 'telegram', 'alice', ?, ?)`,
+      )
+      .run(conversationId, now, now);
+
+    let pendingCall = 0;
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      const u = String(url);
+      if (u.includes('/messages/pending')) {
+        pendingCall += 1;
+        if (pendingCall === 1) return Promise.resolve(pendingResponse([makeEnvelope('m1', 'contact:alice')]));
+        if (pendingCall === 2) return Promise.resolve(pendingResponse([makeEnvelope('m2', 'contact:alice')]));
+        return Promise.resolve(pendingResponse([]));
+      }
+      if (u.includes('/ack')) return Promise.resolve({ ok: true, json: async () => ({}) } as unknown as Response);
+      if (u.includes('/typing') || u.includes('/tool-status')) {
+        return Promise.resolve({ ok: true, json: async () => ({}) } as unknown as Response);
+      }
+      if (u.includes('/api/v1/messages') && init?.method === 'POST') {
+        return Promise.resolve({ ok: true, json: async () => ({}) } as unknown as Response);
+      }
+      return Promise.resolve(pendingResponse([]));
+    });
+
+    const children: ReturnType<typeof makeFakeChild>[] = [];
+    spawnMock.mockImplementation(() => {
+      const child = makeFakeChild();
+      children.push(child);
+      // Each turn: emit the terminal result event shortly after spawn, with
+      // no delivery tool call, so the adapter falls back to posting stdout —
+      // and, more importantly for this test, so processBatch's queue only
+      // advances once the whole run (including runClaudeTurn's post-success
+      // ledger update) has completed, keeping the two turns strictly ordered.
+      setTimeout(() => {
+        writeEvent(child.stdout, {
+          type: 'result',
+          session_id: 'claude-sess-1',
+          result: 'ok',
+          total_cost_usd: 0.001,
+          usage: { input_tokens: 100, output_tokens: 10 },
+          num_turns: 1,
+        });
+        child.emit('close', 0);
+      }, 10);
+      return child as unknown as import('node:child_process').ChildProcess;
+    });
+
+    const { startHeadless } = await import('./cc-headless.js');
+    startHeadless(realDb as unknown as Database.Database);
+
+    // Long enough for both polls and both full turns (each ~10ms + teardown).
+    await new Promise((r) => setTimeout(r, 400));
+
+    expect(spawnMock).toHaveBeenCalledTimes(2);
+
+    // spawn(claude_bin, args, opts) — args[1] is the `-p` prompt (args = ['-p', prompt, ...]).
+    const turn1Args = spawnMock.mock.calls[0]![1] as string[];
+    const turn2Args = spawnMock.mock.calls[1]![1] as string[];
+    expect(turn1Args[1]).toContain('=== memory/MEMORY.md ===');
+    expect(turn1Args[1]).toContain('# Peggy memory index');
+    expect(turn2Args[1]).not.toContain('=== memory/MEMORY.md ===');
+
+    const ledgerRows = realDb
+      .prepare(`SELECT block_key FROM context_blocks WHERE session_id = 'sess-1'`)
+      .all() as Array<{ block_key: string }>;
+    expect(ledgerRows.map((r) => r.block_key)).toEqual(['memory:memory/MEMORY.md']);
   });
 });
