@@ -99,6 +99,11 @@ function loadMigrations(): Migration[] {
       description: 'Per-session context-block ledger',
       sql: readFileSync(join(migrationsDir, '017_context_blocks.sql'), 'utf-8'),
     },
+    {
+      version: 18,
+      description: 'Knowledge store (agent-managed structured knowledge)',
+      sql: readFileSync(join(migrationsDir, '018_knowledge.sql'), 'utf-8'),
+    },
   ];
 }
 

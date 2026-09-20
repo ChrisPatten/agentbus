@@ -71,7 +71,10 @@ For the single-user / single-agent file-memory model the structured store is pur
 
 In those cases, set `memory.structured_extraction: true` to restore the legacy summarizer behavior.
 
+Separately, the `knowledge` table (see [KNOWLEDGE_STORE.md](KNOWLEDGE_STORE.md)) is a **new, always-on, agent-managed** store added alongside this one — it is not a revival of the dormant `memories` / `session_summaries` tables described above, does not sit behind `memory.structured_extraction`, and has its own arbitrary agent-defined schema rather than the fixed preference/fact/plan/etc. categories.
+
 ## See also
 
 - [CC_HEADLESS_ADAPTER.md](./CC_HEADLESS_ADAPTER.md) — the headless adapter, long-lived sessions, context assembly, and journaling mechanics.
 - [MEMORY.md](./MEMORY.md) — the (now dormant) structured memory system: tables, summarizer, and config.
+- [KNOWLEDGE_STORE.md](./KNOWLEDGE_STORE.md) — the new, always-on, agent-managed knowledge store (separate from both of the above).
