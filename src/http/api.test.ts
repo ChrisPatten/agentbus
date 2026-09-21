@@ -582,6 +582,122 @@ describe('POST /api/v1/messages — stale-pane guard (E48 S48.6)', () => {
 
     expect(res.statusCode).toBe(201);
   });
+
+  it('rejects with 409 when sender matches a DRAINING (mid-turn) row for a DIFFERENT conversation — a late reply from a since-reclaimed pane must not slip through just because the pane is busy again', async () => {
+    seedLeasedPane('peggy', 'agent:peggy-pool-1', 'conv-current');
+    const leaseStore = new LeaseStore(db);
+    leaseStore.beginTurn('agent:peggy-pool-1');
+    expect(leaseStore.findByAgent('peggy', 'agent:peggy-pool-1')?.state).toBe('draining');
+
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/messages',
+      payload: { ...validMessage, sender: 'agent:peggy-pool-1', metadata: { conversation_id: 'conv-stale' } },
+    });
+
+    expect(res.statusCode).toBe(409);
+  });
+
+  it('succeeds when sender matches a DRAINING row with the SAME conversation_id, and ends the turn (back to leased)', async () => {
+    seedLeasedPane('peggy', 'agent:peggy-pool-1', 'conv-match');
+    const leaseStore = new LeaseStore(db);
+    leaseStore.beginTurn('agent:peggy-pool-1');
+
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/messages',
+      payload: { ...validMessage, sender: 'agent:peggy-pool-1', metadata: { conversation_id: 'conv-match' } },
+    });
+
+    expect(res.statusCode).toBe(201);
+    expect(leaseStore.findByAgent('peggy', 'agent:peggy-pool-1')?.state).toBe('leased');
+  });
+});
+
+// E48 — turn-tracking (fix for the "stale sender" bug: a pane doing real work
+// on a single-shot delivery must not look idle to LeaseStore.acquire()'s LRU
+// eviction while it's still composing a reply).
+describe('GET /api/v1/messages/pending — turn tracking (E48)', () => {
+  let server: FastifyInstance;
+  let queue: MessageQueue;
+  let db: Database.Database;
+
+  beforeEach(async () => {
+    ({ server, queue, db } = await makeServer());
+  });
+
+  afterEach(async () => {
+    await server.close();
+  });
+
+  it('marks a leased pool pane DRAINING as soon as a message is actually delivered to it', async () => {
+    const leaseStore = new LeaseStore(db);
+    leaseStore.seedPanes('peggy', [{ paneId: 'peggy:1', agentId: 'agent:peggy-pool-1' }]);
+    const bound = leaseStore.acquire('peggy', 'conv-1', {
+      poolAgentId: 'peggy',
+      panes: 1,
+      maxPanes: 1,
+      growth: 'fixed',
+      idleEvictMs: 15 * 60 * 1000,
+    });
+    if (bound.kind !== 'bound') throw new Error(`expected "bound", got "${bound.kind}"`);
+    leaseStore.confirmReady('peggy', bound.lease.pane_id);
+
+    queue.enqueue({
+      id: randomUUID(),
+      timestamp: new Date().toISOString(),
+      channel: 'telegram',
+      topic: 'general',
+      sender: 'contact:alice',
+      recipient: 'agent:peggy-pool-1',
+      reply_to: null,
+      priority: 'normal',
+      payload: { type: 'text', body: 'good morning' },
+      metadata: {},
+    });
+
+    const res = await server.inject({
+      method: 'GET',
+      url: '/api/v1/messages/pending?agent=peggy-pool-1',
+    });
+    expect(res.statusCode).toBe(200);
+    expect((JSON.parse(res.body) as { count: number }).count).toBe(1);
+
+    expect(leaseStore.findByAgent('peggy', 'agent:peggy-pool-1')?.state).toBe('draining');
+  });
+
+  it('does not mark a pane draining when the poll finds nothing pending for it', async () => {
+    const leaseStore = new LeaseStore(db);
+    leaseStore.seedPanes('peggy', [{ paneId: 'peggy:1', agentId: 'agent:peggy-pool-1' }]);
+    const bound = leaseStore.acquire('peggy', 'conv-1', {
+      poolAgentId: 'peggy',
+      panes: 1,
+      maxPanes: 1,
+      growth: 'fixed',
+      idleEvictMs: 15 * 60 * 1000,
+    });
+    if (bound.kind !== 'bound') throw new Error(`expected "bound", got "${bound.kind}"`);
+    leaseStore.confirmReady('peggy', bound.lease.pane_id);
+
+    const res = await server.inject({
+      method: 'GET',
+      url: '/api/v1/messages/pending?agent=peggy-pool-1',
+    });
+    expect(res.statusCode).toBe(200);
+    expect((JSON.parse(res.body) as { count: number }).count).toBe(0);
+
+    expect(leaseStore.findByAgent('peggy', 'agent:peggy-pool-1')?.state).toBe('leased');
+  });
+
+  it('is a no-op for a non-pool agent id (no matching lease row)', async () => {
+    const res = await server.inject({
+      method: 'GET',
+      url: '/api/v1/messages/pending?agent=claude',
+    });
+    expect(res.statusCode).toBe(200);
+    // Just asserting this doesn't throw / doesn't 500 — there's no lease row
+    // to inspect for a non-pool agent.
+  });
 });
 
 // ── E7 endpoint tests ─────────────────────────────────────────────────────────

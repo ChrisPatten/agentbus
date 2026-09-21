@@ -59,6 +59,29 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
   [docs/SLASH_COMMANDS.md](docs/SLASH_COMMANDS.md#pool-pool-agent-id).
 
 ### Fixed
+- **cc-pool: a pane's reply could be dropped mid-turn by a "stale sender"
+  rejection, with no retry — the actual cause of two missed scheduled
+  deliveries.** `pool_leases.last_activity_at` was only ever bumped when a
+  pane was first claimed and on a follow-up inbound message for the same
+  conversation (`LeaseStore.acquire()`'s `reuse` branch) — nothing touched it
+  while a pane was actually composing a reply. A single-shot delivery with
+  no follow-up message (a scheduled trigger, e.g. a morning brief) froze that
+  timestamp the moment work started; if fetching data and composing the
+  reply took long enough relative to `lease.idle_evict_ms`, a *different*
+  conversation's `acquire()` call saw an apparently-idle pane and evicted it
+  mid-turn, and the original turn's reply then hit the outbound stale-sender
+  guard (`POST /api/v1/messages`, `409`) and was silently dropped. Fixed by
+  wiring up the pane lifecycle's previously-unused `draining` state: a pane
+  is now marked `draining` the instant it's actually handed a message
+  (`GET /api/v1/messages/pending`) and back to `leased` once its reply goes
+  out (`POST /api/v1/messages`) — `LeaseStore.acquire()`'s LRU eviction only
+  ever selects `leased` rows, so a `draining` pane can no longer be
+  reassigned mid-turn no matter how long the turn takes. The outbound guard
+  now also treats `draining` the same as `leased` (a pane busy on someone
+  else's turn is exactly as stale a sender as an idle, reassigned one), and
+  the hard-idle sweep now reclaims a stuck `draining` pane too, so a turn
+  that never replies at all still can't strand a pane forever. See
+  [docs/CC_POOL_ADAPTER.md](docs/CC_POOL_ADAPTER.md#pane-lifecycle).
 - **cc-pool: launch acknowledgment and readiness-timeout defects found against
   a real `claude` CLI.** `CcPoolAdapterSchema.launch_ack_pattern`'s default
   (`'experimental'`) never appeared anywhere in the real

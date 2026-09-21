@@ -508,6 +508,10 @@ export async function processInbound(
 export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyInstance> {
   const { queue, registry, pipeline, config, db, poolManagers } = deps;
   const server = Fastify({ logger: false });
+  // Shared across the pending-poll and outbound-send handlers below (E48
+  // S48.6/turn-tracking) — a plain query wrapper over `pool_leases`, cheap to
+  // construct once and reuse rather than `new`-ing it per request.
+  const leaseStore = new LeaseStore(db);
 
   // Pebble webhook fields are plain text (transcription/recordedAt/client) — no
   // file uploads are expected, so files:0 rejects any file part with a 413
@@ -622,6 +626,16 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     // can tell a pane's cc.ts has come up (see src/http/agent-liveness.ts).
     recordAgentPoll(agent ?? toBareAgentId(recipient!));
     const messages = queue.dequeue(recipientId, topic, parsedLimit);
+    if (messages.length > 0) {
+      // E48 — turn-tracking: a pool pane that actually has work handed to it
+      // is busy, not idle, however long composing a reply takes. Mark it
+      // 'draining' (no-op for a non-pool recipientId, or one already
+      // draining) so acquire()'s LRU eviction — which only ever selects
+      // 'leased' rows — can't reassign it mid-turn. See LeaseStore.beginTurn's
+      // doc comment for the full rationale; this is the fix for pane leases
+      // being reassigned out from under a still-composing reply.
+      leaseStore.beginTurn(recipientId);
+    }
     return {
       ok: true,
       messages: messages.map((m) => m.envelope),
@@ -751,9 +765,19 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     }
 
     if (conversationId) {
-      const leaseStore = new LeaseStore(db);
       const leaseRow = leaseStore.findByAgentAnyPool(data.sender);
-      if (leaseRow && leaseRow.state === 'leased' && leaseRow.conversation_id !== conversationId) {
+      // 'draining' is included alongside 'leased': a pane actively mid-turn
+      // for some OTHER conversation is exactly as stale a sender as an idle
+      // one that got reassigned — excluding it here would let a very late
+      // reply from a since-reclaimed pane slip through to whichever
+      // conversation it's currently working on. See LeaseStore.beginTurn's
+      // doc comment for why a pane sits in 'draining' for the duration of a
+      // turn rather than 'leased'.
+      if (
+        leaseRow &&
+        (leaseRow.state === 'leased' || leaseRow.state === 'draining') &&
+        leaseRow.conversation_id !== conversationId
+      ) {
         console.error(
           `[pool-guard] stale sender: sender=${data.sender} expected_conversation_id=${conversationId} ` +
             `actual_conversation_id=${leaseRow.conversation_id} — rejecting`,
@@ -764,11 +788,17 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
         });
       }
       // No matching lease row (not a pool-tracked sender — the common case),
-      // or conversation_id matches, or the row isn't currently 'leased':
-      // nothing to guard against, proceed normally.
+      // or conversation_id matches, or the row isn't currently
+      // 'leased'/'draining': nothing to guard against, proceed normally.
     }
 
     const id = queue.enqueue(envelope, data.expires_at);
+    // Turn-tracking counterpart to beginTurn() in the pending-poll handler
+    // above: this pane's reply for its current turn just went out, so let it
+    // look idle again from now — not from whenever the turn started. No-op
+    // for a non-pool sender or one that wasn't 'draining' (e.g. a send that
+    // doesn't correspond to a pool-delivered turn at all).
+    leaseStore.endTurn(data.sender);
     return reply.status(201).send({ ok: true, id, queued: true });
   });
 

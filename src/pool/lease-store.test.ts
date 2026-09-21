@@ -194,6 +194,44 @@ describe('LeaseStore', () => {
       expect(pane2?.claude_session_id).toBe('sess-2');
     });
 
+    it('reuse: finds an existing DRAINING (mid-turn) row for the conversation, not just leased', () => {
+      const db = makeDb();
+      const store = new LeaseStore(db);
+      store.seedPanes('peggy-pool', [{ paneId: 'peggy-pool:1', agentId: 'agent:peggy-pool-1' }]);
+
+      const bound = assertKind(store.acquire('peggy-pool', 'conv-1', baseOpts()), 'bound');
+      store.confirmReady('peggy-pool', bound.lease.pane_id);
+      store.beginTurn('agent:peggy-pool-1');
+
+      const reused = assertKind(store.acquire('peggy-pool', 'conv-1', baseOpts()), 'reuse');
+      expect(reused.lease.pane_id).toBe(bound.lease.pane_id);
+      expect(reused.lease.state).toBe('draining');
+    });
+
+    it('a DRAINING pane is never evict-eligible, however long past idleEvictMs it is — regression for the "stale sender" bug: a pane mid-turn on a single-shot delivery (e.g. a scheduled brief) must not be reassigned before it can reply', () => {
+      const db = makeDb();
+      const store = new LeaseStore(db);
+      store.seedPanes('peggy-pool', [{ paneId: 'peggy-pool:1', agentId: 'agent:peggy-pool-1' }]);
+
+      const t0 = new Date('2026-01-01T06:30:00.000Z');
+      const bound = assertKind(store.acquire('peggy-pool', 'conv-1', baseOpts({ now: () => t0 })), 'bound');
+      store.confirmReady('peggy-pool', bound.lease.pane_id);
+      // Turn starts right at claim time, same as the real pending-poll -> beginTurn wiring.
+      store.beginTurn('agent:peggy-pool-1', () => t0);
+
+      // Long past idleEvictMs later, a second conversation needs a pane —
+      // with no free/growable pane, the only candidate is still mid-turn.
+      const tLater = new Date('2026-01-01T08:00:00.000Z'); // 90 minutes later
+      const idleEvictMs = 30 * 60 * 1000; // 30 minutes
+
+      const result = store.acquire('peggy-pool', 'conv-2', baseOpts({ now: () => tLater, idleEvictMs }));
+
+      expect(result.kind).toBe('exhausted');
+      const row = store.findByAgent('peggy-pool', 'agent:peggy-pool-1');
+      expect(row?.state).toBe('draining');
+      expect(row?.conversation_id).toBe('conv-1');
+    });
+
     it('exhausted: all panes leased and none idle past threshold mutates nothing', () => {
       const db = makeDb();
       const store = new LeaseStore(db);
@@ -294,6 +332,48 @@ describe('LeaseStore', () => {
       store.markDraining('peggy-pool', bound.lease.pane_id);
       expect(store.findByAgent('peggy-pool', 'agent:peggy-pool-1')?.state).toBe('draining');
     });
+
+    it('beginTurn transitions leased -> draining by agent_id and bumps last_activity_at; no-op when not leased', () => {
+      const db = makeDb();
+      const store = new LeaseStore(db);
+      store.seedPanes('peggy-pool', [{ paneId: 'peggy-pool:1', agentId: 'agent:peggy-pool-1' }]);
+      const t0 = new Date('2026-01-01T00:00:00.000Z');
+      const bound = assertKind(store.acquire('peggy-pool', 'conv-1', baseOpts({ now: () => t0 })), 'bound');
+      store.confirmReady('peggy-pool', bound.lease.pane_id);
+
+      const t1 = new Date('2026-01-01T00:10:00.000Z');
+      const changed = store.beginTurn('agent:peggy-pool-1', () => t1);
+
+      expect(changed).toBe(true);
+      const row = store.findByAgent('peggy-pool', 'agent:peggy-pool-1');
+      expect(row?.state).toBe('draining');
+      expect(row?.last_activity_at).toBe(t1.toISOString());
+
+      // Already draining: no-op.
+      expect(store.beginTurn('agent:peggy-pool-1')).toBe(false);
+      // No matching row at all: no-op, doesn't throw.
+      expect(store.beginTurn('agent:no-such-pane')).toBe(false);
+    });
+
+    it('endTurn transitions draining -> leased by agent_id and bumps last_activity_at; no-op when not draining', () => {
+      const db = makeDb();
+      const store = new LeaseStore(db);
+      store.seedPanes('peggy-pool', [{ paneId: 'peggy-pool:1', agentId: 'agent:peggy-pool-1' }]);
+      const bound = assertKind(store.acquire('peggy-pool', 'conv-1', baseOpts()), 'bound');
+      store.confirmReady('peggy-pool', bound.lease.pane_id);
+      store.beginTurn('agent:peggy-pool-1');
+
+      const t1 = new Date('2026-01-01T00:20:00.000Z');
+      const changed = store.endTurn('agent:peggy-pool-1', () => t1);
+
+      expect(changed).toBe(true);
+      const row = store.findByAgent('peggy-pool', 'agent:peggy-pool-1');
+      expect(row?.state).toBe('leased');
+      expect(row?.last_activity_at).toBe(t1.toISOString());
+
+      // Already leased (not draining): no-op.
+      expect(store.endTurn('agent:peggy-pool-1')).toBe(false);
+    });
   });
 
   describe('lookups', () => {
@@ -376,6 +456,24 @@ describe('LeaseStore', () => {
 
       expect(idle).toHaveLength(1);
       expect(idle[0]?.pane_id).toBe(b1.lease.pane_id);
+    });
+
+    it('findIdleOlderThan also includes DRAINING rows past the cutoff — the hard-idle backstop for a turn that never calls back out', () => {
+      const db = makeDb();
+      const store = new LeaseStore(db);
+      store.seedPanes('peggy-pool', [{ paneId: 'peggy-pool:1', agentId: 'agent:peggy-pool-1' }]);
+
+      const t0 = new Date('2026-01-01T00:00:00.000Z');
+      const bound = assertKind(store.acquire('peggy-pool', 'conv-1', baseOpts({ now: () => t0 })), 'bound');
+      store.confirmReady('peggy-pool', bound.lease.pane_id);
+      store.beginTurn('agent:peggy-pool-1', () => t0);
+
+      const cutoff = new Date('2026-01-01T01:00:00.000Z').toISOString();
+      const idle = store.findIdleOlderThan('peggy-pool', cutoff);
+
+      expect(idle).toHaveLength(1);
+      expect(idle[0]?.pane_id).toBe(bound.lease.pane_id);
+      expect(idle[0]?.state).toBe('draining');
     });
   });
 

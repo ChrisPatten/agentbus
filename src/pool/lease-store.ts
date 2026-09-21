@@ -68,10 +68,14 @@ export class LeaseStore {
       const now = opts.now?.() ?? new Date();
       const nowIso = now.toISOString();
 
-      // 1. Reuse: an existing live lease for this exact conversation.
+      // 1. Reuse: an existing live lease for this exact conversation. Includes
+      // 'draining' (a turn already in flight for this conversation, marked by
+      // beginTurn() below) as well as 'leased' — otherwise a same-conversation
+      // follow-up message that arrives mid-turn would fail to find its own
+      // pane here and get bound onto a second, different pane instead.
       const reuseRow = this.db
         .prepare(
-          `SELECT * FROM pool_leases WHERE pool_id = ? AND conversation_id = ? AND state = 'leased'`,
+          `SELECT * FROM pool_leases WHERE pool_id = ? AND conversation_id = ? AND state IN ('leased', 'draining')`,
         )
         .get(poolId, conversationId) as PoolLeaseRow | undefined;
       if (reuseRow) {
@@ -233,10 +237,55 @@ export class LeaseStore {
 
   /**
    * 'leased' -> 'draining' (used when an in-flight turn must finish before
-   * the pane can be reused — later story wires this up).
+   * the pane can be reused).
    */
   markDraining(poolId: string, paneId: string): void {
     this.db.prepare(`UPDATE pool_leases SET state = 'draining' WHERE pool_id = ? AND pane_id = ?`).run(poolId, paneId);
+  }
+
+  /**
+   * 'leased' -> 'draining', looked up by (prefixed) agent id across all pools
+   * — same pool_id-less lookup convention as `findByAgentAnyPool` (agent ids
+   * are expected-unique across pools by construction). Called from the
+   * inbound poll path (`GET /api/v1/messages/pending`) the moment a pane
+   * actually receives a message to work on, so `acquire()`'s LRU eviction —
+   * which only ever selects `state = 'leased'` rows — can never reassign this
+   * pane out from under an in-flight turn no matter how long that turn takes.
+   * Also bumps `last_activity_at` so a turn that's just starting doesn't
+   * itself look stale to the hard-idle sweep.
+   *
+   * This is the fix for the "stale sender" bug where a pane doing real work
+   * (fetching data, composing a reply) on a single-shot delivery — nothing
+   * ever re-touches its activity timestamp mid-turn otherwise — could still
+   * look idle to a DIFFERENT conversation's `acquire()` call and get evicted
+   * before it ever got to reply.
+   *
+   * No-op (returns false) if the row isn't currently 'leased' (already
+   * draining, freed mid-flight, no matching row at all, etc.) — callers don't
+   * need to distinguish those cases from a successful transition.
+   */
+  beginTurn(agentId: string, now?: () => Date): boolean {
+    const nowIso = (now?.() ?? new Date()).toISOString();
+    const result = this.db
+      .prepare(`UPDATE pool_leases SET state = 'draining', last_activity_at = ? WHERE agent_id = ? AND state = 'leased'`)
+      .run(nowIso, agentId);
+    return result.changes > 0;
+  }
+
+  /**
+   * 'draining' -> 'leased', the counterpart to `beginTurn`. Called from the
+   * outbound send path (`POST /api/v1/messages`) once a pane's reply for its
+   * current turn has actually gone out, so the idle clock (`last_activity_at`)
+   * starts counting from when the pane actually went quiet, not from whenever
+   * the turn began. No-op (returns false) if the row isn't currently
+   * 'draining'.
+   */
+  endTurn(agentId: string, now?: () => Date): boolean {
+    const nowIso = (now?.() ?? new Date()).toISOString();
+    const result = this.db
+      .prepare(`UPDATE pool_leases SET state = 'leased', last_activity_at = ? WHERE agent_id = ? AND state = 'draining'`)
+      .run(nowIso, agentId);
+    return result.changes > 0;
   }
 
   /** Bump last_activity_at to now (or `now` param if given, for tests). */
@@ -296,14 +345,21 @@ export class LeaseStore {
   }
 
   /**
-   * Rows in this pool with state='leased' and last_activity_at older than
-   * `cutoffIso`. Used by a later story's hard-idle sweep.
+   * Rows in this pool with state IN ('leased', 'draining') and
+   * last_activity_at older than `cutoffIso`. Used by `PoolManager.sweepHardIdle()`.
+   * Including 'draining' is a deliberate backstop: a turn that never actually
+   * calls back out (no send_message/reply — so `endTurn()` never runs) would
+   * otherwise sit in 'draining' forever, permanently exempt from
+   * `acquire()`'s LRU eviction (which only ever selects 'leased' rows) AND
+   * from this sweep. Past `hard_idle_ms` such a pane is forcibly reclaimed
+   * anyway, same as a stale 'leased' one — a hung turn costs the pool one
+   * pane for at most `hard_idle_ms`, not forever.
    */
   findIdleOlderThan(poolId: string, cutoffIso: string): PoolLeaseRow[] {
     return this.db
       .prepare(
         `SELECT * FROM pool_leases
-         WHERE pool_id = ? AND state = 'leased'
+         WHERE pool_id = ? AND state IN ('leased', 'draining')
            AND last_activity_at IS NOT NULL AND last_activity_at < ?
          ORDER BY last_activity_at ASC`,
       )
