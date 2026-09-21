@@ -1930,3 +1930,107 @@ describe('GET /api/v1/pool', () => {
     expect(body.pools[0]!.parked.oldest_parked_at).not.toBeNull();
   });
 });
+
+// ── POST /api/v1/pool/:agentId/turn-ended ────────────────────────────────────
+
+describe('POST /api/v1/pool/:agentId/turn-ended', () => {
+  function makeCfg(overrides: Partial<CcPoolInstanceConfig> = {}): CcPoolInstanceConfig {
+    return {
+      name: null,
+      agent_id: 'peggy',
+      tmux_session: 'peggy-pool',
+      panes: 2,
+      growth: 'fixed',
+      max_panes: 2,
+      claude_bin: '/usr/local/bin/claude',
+      model: undefined,
+      working_dir: '/work/dir',
+      launch_args: [],
+      poll_interval_ms: 1000,
+      system_prompt: undefined,
+      lease: { idle_evict_ms: 1_800_000, hard_idle_ms: 21_600_000, park_timeout_ms: 300_000 },
+      on_evict: 'clear',
+      launch_ack_delay_ms: 500,
+      launch_ack_max_attempts: 3,
+      launch_ack_pattern: 'experimental',
+      pane_env: {},
+      ...overrides,
+    };
+  }
+
+  function makeFakePaneLauncher() {
+    return { launch: async () => {}, release: async () => {} };
+  }
+
+  function makeManager(db: Database.Database, cfgOverrides: Partial<CcPoolInstanceConfig> = {}): PoolManager {
+    const cfg = makeCfg(cfgOverrides);
+    return new PoolManager({ cfg, db, busBaseUrl: 'http://127.0.0.1:3000', paneLauncher: makeFakePaneLauncher() });
+  }
+
+  let server: FastifyInstance;
+
+  afterEach(async () => {
+    await server.close();
+  });
+
+  it('touches the pane whose claude_session_id matches the body', async () => {
+    const fixtureDb = makeDb();
+    const manager = makeManager(fixtureDb);
+    manager.leaseStore.seedPanes('peggy', [{ paneId: 'peggy-pool:1', agentId: 'agent:peggy-pool-1' }]);
+    const acquired = manager.leaseStore.acquire('peggy', 'conv-a', {
+      poolAgentId: 'peggy',
+      panes: 1,
+      maxPanes: 1,
+      growth: 'fixed',
+      idleEvictMs: 1_800_000,
+    });
+    if (acquired.kind !== 'bound') throw new Error(`test setup: expected "bound", got "${acquired.kind}"`);
+    manager.leaseStore.confirmReady('peggy', acquired.lease.pane_id);
+    manager.leaseStore.setClaudeSessionId('peggy', acquired.lease.pane_id, 'sess-123');
+    const before = manager.leaseStore.list('peggy').find((p) => p.pane_id === acquired.lease.pane_id)!.last_activity_at;
+
+    const poolManagers = new Map([['agent:peggy', manager]]);
+    ({ server } = await makeServer({ poolManagers }));
+
+    // Ensure the clock advances so a touch is observable even on a fast test run.
+    await new Promise((r) => setTimeout(r, 5));
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/pool/peggy/turn-ended',
+      payload: { session_id: 'sess-123' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ ok: true });
+
+    const after = manager.leaseStore.list('peggy').find((p) => p.pane_id === acquired.lease.pane_id)!.last_activity_at;
+    expect(after).not.toBe(before);
+  });
+
+  it('no-ops with 200 when the agentId has no configured pool', async () => {
+    ({ server } = await makeServer());
+
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/pool/ghost/turn-ended',
+      payload: { session_id: 'sess-123' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ ok: true });
+  });
+
+  it('no-ops with 200 when no pane matches the given session_id', async () => {
+    const fixtureDb = makeDb();
+    const manager = makeManager(fixtureDb);
+    manager.leaseStore.seedPanes('peggy', [{ paneId: 'peggy-pool:1', agentId: 'agent:peggy-pool-1' }]);
+    const poolManagers = new Map([['agent:peggy', manager]]);
+    ({ server } = await makeServer({ poolManagers }));
+
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/pool/peggy/turn-ended',
+      payload: { session_id: 'sess-unknown' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ ok: true });
+  });
+});

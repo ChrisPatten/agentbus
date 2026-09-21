@@ -10,6 +10,7 @@
  * POST /api/v1/messages                  — Direct enqueue (MCP reply tool).
  * GET  /api/v1/messages/:id              — Fetch a single message by ID.
  * POST /api/v1/inbound                   — Inbound pipeline entry point.
+ * POST /api/v1/pool/:agentId/turn-ended  — Pool pane activity signal (Stop hook).
  * POST /api/v1/webhooks/pebble           — Pebble Ring voice-memo webhook (E25).
  *                                          Only registered when adapters.pebble.enabled.
  * POST /api/v1/siri/ask                  — Siri channel ask (E42, src/http/siri-routes.ts).
@@ -63,7 +64,7 @@ import { registerSiriRoutes } from './siri-routes.js';
 import type { SiriAdapter } from '../adapters/siri.js';
 import { VERSION } from '../version.js';
 import { recordAgentPoll, getLastPollAt } from './agent-liveness.js';
-import { toBareAgentId } from '../pool/types.js';
+import { toBareAgentId, toPrefixedAgentId } from '../pool/types.js';
 import { LeaseStore } from '../pool/lease-store.js';
 import { computeConversationId } from '../pipeline/conversation-id.js';
 import type { PoolManager } from '../pool/pool-manager.js';
@@ -605,6 +606,34 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     });
     return { ok: true, pools };
   });
+
+  // POST /api/v1/pool/:agentId/turn-ended — real-time pane activity signal,
+  // fed by a native Claude Code `Stop` hook (fires after every assistant
+  // turn). `leaseStore.touch()` otherwise has no caller: last_activity_at is
+  // today only bumped by acquire()'s message-routing path (a message routed
+  // IN to a pane), never by the pane's own turn actually finishing — so a
+  // long turn or extended thinking time looks idle prematurely against
+  // idle_evict_ms/hard_idle_ms. This is a foundation a future pool-journaling
+  // trigger could build on, but it does not itself decide journal-worthiness
+  // or run any journaling turn.
+  // `:agentId` is bare (e.g. "peggy"), matching the Stop hook's config-side
+  // agent_id. Fire-and-forget like /typing and /tool-status above: always
+  // 200, no-op silently when the pool, or a pane with a matching
+  // claude_session_id, isn't found.
+  server.post<{ Params: { agentId: string }; Body: { session_id?: string } }>(
+    '/api/v1/pool/:agentId/turn-ended',
+    async (req, _reply) => {
+      const manager = poolManagers?.get(toPrefixedAgentId(req.params.agentId));
+      const sessionId = req.body?.session_id;
+      if (manager && sessionId) {
+        const pane = manager.leaseStore.list(manager.poolId).find((p) => p.claude_session_id === sessionId);
+        if (pane) {
+          manager.leaseStore.touch(manager.poolId, pane.pane_id);
+        }
+      }
+      return { ok: true };
+    },
+  );
 
   // GET /api/v1/messages/pending
   server.get<{

@@ -52,7 +52,7 @@ Here is the document
 ```
 
 - Messages in one poll are separated by a blank line. The first carries a full timestamp, later ones the time only.
-- `(topic: <topic>)` always appears between the channel and the timestamp — `MessageEnvelope.topic` is a required field, so this segment is never omitted. It lets an external consumer (e.g. a Claude Code hook that only sees this rendered prompt text, not the structured envelope) recover the topic with a simple regex and target the right Telegram forum topic for typing/tool-status updates instead of falling back to the group's general area.
+- `(topic: <topic>)` always appears between the channel and the timestamp — `MessageEnvelope.topic` is a required field, so this segment is never omitted. It lets an external consumer — [`scripts/hooks/agentbus_tool_status_hook.sh`](../scripts/hooks/agentbus_tool_status_hook.sh), a Claude Code hook that only sees this rendered prompt text, not the structured envelope — recover the topic with a simple regex and target the right Telegram forum topic for typing/tool-status updates instead of falling back to the group's general area. That regex treats the segment as optional, not required: see [CC_POOL_ADAPTER.md#live-tool-call-status-stream](CC_POOL_ADAPTER.md#live-tool-call-status-stream) for why a strict match broke silently against long-lived pool panes.
 - A reaction renders as `[reacted 👍 to message 555:42]` or `[removed reaction 👍 to message 555:42]`.
 - A quoted reply renders as a `[Replying to <name>: "<text>"]` line before the body.
 - Attachments append `[Image: <path>]` and `[File: <path> — <name>]` lines; inline email images append a `fetch_attachment` hint. See [ATTACHMENTS.md](ATTACHMENTS.md).

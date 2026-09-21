@@ -57,8 +57,47 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
   `cc-pool` instances configured. See
   [docs/HTTP_API.md](docs/HTTP_API.md#pool) and
   [docs/SLASH_COMMANDS.md](docs/SLASH_COMMANDS.md#pool-pool-agent-id).
+- **Pool-pane Claude Code hooks now tracked in this repo,
+  `scripts/hooks/`.** `agentbus_stop_hook.sh` (feeds
+  `POST /api/v1/pool/:agentId/turn-ended`, see above) and
+  `agentbus_precompact_snapshot.sh` (a transcript-snapshot safety net for a
+  pool agent's own memory system; doesn't call any AgentBus endpoint) were
+  previously maintained only inside the deploying agent's own project
+  directory, outside version control here — same gap as
+  `agentbus_tool_status_hook.sh` below. A deployment symlinks each in and
+  registers it in that project's own `.claude/settings.json`. See
+  [docs/CC_POOL_ADAPTER.md#other-pool-pane-hooks](docs/CC_POOL_ADAPTER.md#other-pool-pane-hooks).
 
 ### Fixed
+- **cc-pool: pane `last_activity_at` no longer goes stale during a long turn.**
+  Activity was previously only bumped when a message was routed *in* to a
+  pane, never when the pane's own turn finished — so a long-running reply or
+  extended thinking time could look idle-eligible under `idle_evict_ms`/
+  `hard_idle_ms` well before it actually was. New
+  `POST /api/v1/pool/:agentId/turn-ended`, meant to be fed by a native Claude
+  Code `Stop` hook on the pane's `claude` process, calls the existing (until
+  now uncalled) `LeaseStore.touch()` in real time. See
+  [docs/HTTP_API.md](docs/HTTP_API.md#post-apiv1poolagentidturn-ended) and
+  [docs/CC_POOL_ADAPTER.md](docs/CC_POOL_ADAPTER.md#post-apiv1poolagentidturn-ended).
+- **cc-pool: live tool-call status stream going silent on already-running panes
+  after an unrelated message-format change.** `agentbus_tool_status_hook.sh`'s
+  `UserPromptSubmit` regex required the `(topic: ...)` segment `cc.ts` started
+  emitting in the topic fix above — but a pool pane's `cc.ts` subprocess only
+  ever reads the format that existed when the pane launched and never
+  restarts on its own, so any pane already running from before that change
+  kept emitting the old, topic-less format for as long as it stayed alive.
+  Against those panes the regex matched zero messages, its per-session state
+  file stayed `[]` forever, and `PostToolUse` had nothing to report to —
+  discovered 2026-09-20 when 4 of 5 live pool panes turned out to have gone
+  completely silent this way. The regex now treats `(topic: ...)` as
+  optional (falls back to `general`), matching both formats regardless of
+  which one a given pane's `cc.ts` happens to be running. This script is now
+  tracked in this repo at
+  [`scripts/hooks/agentbus_tool_status_hook.sh`](scripts/hooks/agentbus_tool_status_hook.sh)
+  — previously it existed only inside the deploying agent's own project
+  directory, outside version control here. A deployment symlinks it in and
+  registers it in that project's own `.claude/settings.json`. See
+  [docs/CC_POOL_ADAPTER.md#live-tool-call-status-stream](docs/CC_POOL_ADAPTER.md#live-tool-call-status-stream).
 - **cc-pool: launch acknowledgment and readiness-timeout defects found against
   a real `claude` CLI.** `CcPoolAdapterSchema.launch_ack_pattern`'s default
   (`'experimental'`) never appeared anywhere in the real

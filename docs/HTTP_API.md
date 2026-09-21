@@ -22,6 +22,7 @@ Set `bus.host: 0.0.0.0` to accept connections from other hosts, for example a re
 |---|---|---|
 | GET | `/api/v1/health` | Liveness, adapter health, queue counts |
 | GET | `/api/v1/pool` | cc-pool pane leases and parked-queue depth (when configured) |
+| POST | `/api/v1/pool/:agentId/turn-ended` | Real-time pane activity signal, fed by a `Stop` hook |
 | POST | `/api/v1/inbound` | Submit an inbound message to the pipeline |
 | POST | `/api/v1/webhooks/pebble` | Pebble Ring voice-memo ingress (when configured) |
 | POST | `/api/v1/siri/ask` | Siri ask: submit a question and wait for the agent's reply (when configured) |
@@ -126,6 +127,16 @@ When no `cc-pool` instances are configured at all, always returns `200 { "ok": t
 ```
 
 `conversation_id` is the raw sha256 hex — resolving it to a human-readable contact/channel/topic would require an extra join against `sessions`/`transcripts` per pane, which this route deliberately skips (see the `/pool` command for where that lookup is cheap to add per-row). `?pool=<key>` for a pool that isn't in `poolManagers` returns `404 { "ok": false, "error": "No cc-pool instance for \"<key>\"" }`.
+
+### `POST /api/v1/pool/:agentId/turn-ended`
+
+Real-time correction to a pane's `last_activity_at`, meant to be called from a Claude Code `Stop` hook (fires after every assistant turn) on the pane's own `claude` process — `last_activity_at` is otherwise only bumped when a message is routed in, so a long turn looks idle before it actually is. `:agentId` is the pool's bare agent id (e.g. `peggy`).
+
+| Field | Required | Notes |
+|---|---|---|
+| `session_id` | Yes (to have any effect) | The pane's `claude_session_id`; matched against `pool_leases` |
+
+Fire-and-forget, like `/typing` and `/tool-status`: always `200 { "ok": true }`, silently a no-op if the pool or a matching pane isn't found. Does not decide journal-worthiness or run any journaling turn — see [CC_POOL_ADAPTER.md#session-tracker-interaction](CC_POOL_ADAPTER.md#session-tracker-interaction) for that separate, still-open gap.
 
 ## Inbound
 
