@@ -78,7 +78,10 @@ function makeCtx(
  *  makes a plain object literal structurally incompatible without the cast. */
 function makeFakeManager(resolvedId: string): PoolManager {
   return {
-    resolveRoute: vi.fn(async (_conversationId: string, _promptContext: { contact_id: string; channel: string }) => resolvedId),
+    resolveRoute: vi.fn(
+      async (_conversationId: string, _promptContext: { contact_id: string; channel: string; topic?: string }) =>
+        resolvedId,
+    ),
   } as unknown as PoolManager;
 }
 
@@ -94,7 +97,11 @@ describe('pool-route-resolve stage', () => {
 
     expect(result).not.toBeNull();
     expect(result!.routes[0]!.recipientId).toBe('agent:peggy-pool-3');
-    expect(manager.resolveRoute).toHaveBeenCalledWith('conv-1', { contact_id: 'alice', channel: 'telegram' });
+    expect(manager.resolveRoute).toHaveBeenCalledWith('conv-1', {
+      contact_id: 'alice',
+      channel: 'telegram',
+      topic: 'general',
+    });
   });
 
   it('leaves a non-cc-pool route untouched and never calls any manager', async () => {

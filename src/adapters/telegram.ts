@@ -183,6 +183,10 @@ interface DraftState {
   /** Resolves when the initial sendMessage settles — send() awaits this to
    * close the race where final delivery arrives before the draft exists. */
   creating: Promise<void> | null;
+  /** True while `lines` holds only a cold-start stand-in (e.g. cc-pool's
+   * "One moment") rather than real activity. The next appended line
+   * replaces `lines` instead of growing it — see appendToolCallLine. */
+  placeholder: boolean;
 }
 
 // ── Dependencies for inbound pipeline processing ─────────────────────────────
@@ -838,13 +842,17 @@ export class TelegramAdapter implements AdapterInstance {
 
   /**
    * Called by bus-core once per non-delivery tool call during an in-flight
-   * turn. Appends `text` as a line to a single evolving Telegram message for
-   * the contact's chat, batching edits to ~1/sec (see appendToolCallLine).
+   * turn — and once, with `placeholder: true`, by cc-pool right before a
+   * cold-starting pane launch begins (no pane is alive yet to have made a
+   * real tool call). Appends `text` as a line to a single evolving Telegram
+   * message for the contact's chat, batching edits to ~1/sec (see
+   * appendToolCallLine). A placeholder line is replaced, not appended to, by
+   * whatever line comes after it.
    */
-  reportToolCall(contactId: string, text: string, channel?: string, topic?: string): void {
+  reportToolCall(contactId: string, text: string, channel?: string, topic?: string, placeholder?: boolean): void {
     const resolved = this.resolveChatAndTopic(contactId, channel, topic);
     if (resolved) {
-      this.appendToolCallLine(resolved.chatId, text, resolved.messageThreadId);
+      this.appendToolCallLine(resolved.chatId, text, resolved.messageThreadId, placeholder);
     } else {
       console.warn(`${this.tag} reportToolCall: no chat_id for contact "${contactId}"`);
     }
@@ -855,19 +863,38 @@ export class TelegramAdapter implements AdapterInstance {
    * check-and-reserve is synchronous (no `await` in between) so two calls
    * arriving before the first `sendMessage` resolves can never both see "no
    * draft" and both create one.
+   *
+   * If a draft already exists and is currently just a cold-start placeholder
+   * (`state.placeholder`), this line REPLACES it (`state.lines = [line]`)
+   * instead of appending — the placeholder was a stand-in for activity, not
+   * activity itself, so it shouldn't linger as a permanent first line once
+   * something real has happened. Only one placeholder call is ever made per
+   * draft (cc-pool fires it once, before launch), so this replace can only
+   * ever fire against a state that is still exactly `["One moment"]`.
    */
-  private appendToolCallLine(chatId: number, line: string, messageThreadId?: number): void {
+  private appendToolCallLine(chatId: number, line: string, messageThreadId?: number, placeholder?: boolean): void {
     const key = this.draftKey(chatId, messageThreadId);
     const state = this.draftMessages.get(key);
     if (state) {
-      state.lines.push(line);
+      if (state.placeholder) {
+        state.lines = [line];
+        state.placeholder = false;
+      } else {
+        state.lines.push(line);
+      }
       if (state.messageId !== null) this.scheduleDraftFlush(chatId, key, state);
       // else: creation still in flight — createDraftMessage's post-await
       // check picks up this line once the initial send resolves.
       return;
     }
 
-    const fresh: DraftState = { messageId: null, lines: [line], timer: null, creating: null };
+    const fresh: DraftState = {
+      messageId: null,
+      lines: [line],
+      timer: null,
+      creating: null,
+      placeholder: placeholder ?? false,
+    };
     this.draftMessages.set(key, fresh);
     fresh.creating = this.createDraftMessage(chatId, key, fresh, messageThreadId);
   }

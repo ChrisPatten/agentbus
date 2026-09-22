@@ -79,8 +79,13 @@ export interface AdapterInstance {
    * Fire-and-forget — called once per non-delivery tool call as the agent
    * works. No-op unless the adapter declares `capabilities.toolStatus`.
    * `channel`/`topic` disambiguate the target chat/topic, as with `startTyping`.
+   * `placeholder: true` marks this call as a cold-start stand-in (e.g.
+   * cc-pool's "One moment" line, posted before a pane has even launched) —
+   * an implementing adapter should replace rather than append to it on the
+   * next call for the same contact/channel/topic, since it's a stand-in for
+   * real activity, not activity itself.
    */
-  reportToolCall?(contactId: string, text: string, channel?: string, topic?: string): void;
+  reportToolCall?(contactId: string, text: string, channel?: string, topic?: string, placeholder?: boolean): void;
   /**
    * Finalize the live tool-call status draft for a contact (E29 / `/stop`):
    * append `note` as a final line and stop treating the message as an

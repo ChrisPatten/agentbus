@@ -195,6 +195,14 @@ This script lives here because it's AgentBus functionality, but it *runs* inside
 
 **Version-skew gotcha (bit us 2026-09-20):** a pool pane's `cc.ts` subprocess is spawned once, at pane launch, and never restarts on its own — it keeps running whatever `agentbus` source existed at that moment for as long as the pane stays alive, which for a long-lived pooled pane can be days. When `cc.ts`'s message format changed to add the `(topic: ...)` segment (commit `4340adf`), panes already running from before that commit kept emitting the old format indefinitely. The hook's regex must tolerate every message-format version any currently-running pane might still be emitting, not just the latest — it cannot assume a pane's `cc.ts` is current just because the repo is. The shipped regex treats `(topic: ...)` as optional for exactly this reason (falls back to `general`, matching pre-fix behavior) rather than requiring it.
 
+### Cold-start placeholder
+
+The hooks above only cover a pane that's already alive. A `bound`/`grow`/`evict` resolution (see [Allocation and eviction](#allocation-and-eviction)) is a genuine cold start: `resolveRoute()` blocks on the full [launch sequence](#launch-sequence) — the ack handshake and readiness poll, up to the 30s launch timeout — before the message is even delivered to the pane, and until it is, nothing has run the tool-status hook's `UserPromptSubmit` branch yet. Before this, the user saw nothing at all during that wait.
+
+`PoolManager.resolveRoute()` (`src/pool/pool-manager.ts`) now covers this itself: right before calling `paneLauncher.launch()` for any non-`reuse` outcome, it fires a fire-and-forget `POST /api/v1/adapters/:channel/tool-status` with `{ contact_id, text: "One moment…", topic, placeholder: true }` — the same endpoint and adapter capability check (`capabilities.toolStatus`) as a real tool-status line, just with `placeholder: true` set. `reuse` never fires it — a reused pane has no launch latency to cover.
+
+On the adapter side (`TelegramAdapter.appendToolCallLine`, `src/adapters/telegram.ts`), a draft created from a `placeholder: true` call is marked as such (`DraftState.placeholder`). The *next* line posted for that same chat/topic — whether a real tool-status line from the pane's own hook, or the final reply overwriting the draft outright if no tool call happened at all — replaces the placeholder's `lines` instead of appending to it, so "One moment…" never lingers as a permanent first line once anything real has happened. Only Telegram implements `reportToolCall`/`capabilities.toolStatus` today (see [TELEGRAM_ADAPTER.md#live-tool-call-status-stream](TELEGRAM_ADAPTER.md#live-tool-call-status-stream)), so this is currently Telegram-only, same as the rest of the live tool-call status stream — other channels see no behavior change.
+
 ### `/pool` command
 
 `/pool [pool-agent-id]` renders pane leases and parked-queue depth as text, from any connected channel:

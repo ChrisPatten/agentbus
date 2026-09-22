@@ -975,7 +975,10 @@ function makeTelegramFetchMock() {
 function getDraftState(adapter: TelegramAdapter, chatId: number, messageThreadId?: number) {
   return (
     adapter as unknown as {
-      draftMessages: Map<string, { messageId: number | null; lines: string[]; creating: Promise<void> | null }>;
+      draftMessages: Map<
+        string,
+        { messageId: number | null; lines: string[]; creating: Promise<void> | null; placeholder: boolean }
+      >;
     }
   ).draftMessages.get(`${chatId}:${messageThreadId ?? 'general'}`);
 }
@@ -1832,6 +1835,68 @@ describe('TelegramAdapter draft-message lifecycle (E29)', () => {
     adapter.reportToolCall('chris', 'next turn line');
     await getDraftState(adapter, 12345)?.creating;
     expect(callsTo(telegramFetch.fn, 'sendMessage')).toHaveLength(2);
+  });
+
+  // ── cc-pool cold-start placeholder ("One moment") ───────────────────────────
+
+  it('a placeholder draft is created with the placeholder text', async () => {
+    adapter.reportToolCall('chris', 'One moment', undefined, undefined, true);
+    const draft = getDraftState(adapter, 12345);
+    await draft?.creating;
+
+    expect(draft?.placeholder).toBe(true);
+    expect(callsTo(telegramFetch.fn, 'sendMessage')).toHaveLength(1);
+    const [, init] = callsTo(telegramFetch.fn, 'sendMessage')[0] as [string, { body: string }];
+    expect((JSON.parse(init.body) as { text: string }).text).toBe('One moment');
+  });
+
+  it('the first real tool-call line replaces the placeholder rather than appending to it', async () => {
+    adapter.reportToolCall('chris', 'One moment', undefined, undefined, true);
+    const draft = getDraftState(adapter, 12345);
+    await draft?.creating;
+
+    adapter.reportToolCall('chris', 'Bash: ls');
+    expect(draft?.placeholder).toBe(false);
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(callsTo(telegramFetch.fn, 'sendMessage')).toHaveLength(1); // still just the placeholder's own send
+    expect(callsTo(telegramFetch.fn, 'editMessageText')).toHaveLength(1);
+    const [, init] = callsTo(telegramFetch.fn, 'editMessageText')[0] as [string, { body: string }];
+    const editedText = (JSON.parse(init.body) as { text: string }).text;
+    expect(editedText).toBe('Bash: ls');
+    expect(editedText).not.toContain('One moment');
+  });
+
+  it('lines after the placeholder-replacing line append normally', async () => {
+    adapter.reportToolCall('chris', 'One moment', undefined, undefined, true);
+    await getDraftState(adapter, 12345)?.creating;
+
+    adapter.reportToolCall('chris', 'Bash: ls');
+    adapter.reportToolCall('chris', 'Read: file.ts');
+    await vi.advanceTimersByTimeAsync(1000);
+
+    const [, init] = callsTo(telegramFetch.fn, 'editMessageText')[0] as [string, { body: string }];
+    const editedText = (JSON.parse(init.body) as { text: string }).text;
+    expect(editedText).not.toContain('One moment');
+    expect(editedText).toContain('Bash: ls');
+    expect(editedText).toContain('Read: file.ts');
+  });
+
+  it('overwrite-on-delivery replaces a still-unreplaced placeholder (no tool calls happened at all)', async () => {
+    adapter.reportToolCall('chris', 'One moment', undefined, undefined, true);
+    const draft = getDraftState(adapter, 12345);
+    await draft?.creating;
+    const draftMessageId = draft?.messageId;
+
+    const result = await adapter.send(makeTextEnvelope('the final answer'));
+
+    expect(result.success).toBe(true);
+    expect(callsTo(telegramFetch.fn, 'editMessageText')).toHaveLength(1);
+    const [, init] = callsTo(telegramFetch.fn, 'editMessageText')[0] as [string, { body: string }];
+    const body = JSON.parse(init.body) as { message_id: number; text: string };
+    expect(body.message_id).toBe(draftMessageId);
+    expect(body.text).toBe('the final answer');
+    expect(getDraftState(adapter, 12345)).toBeUndefined();
   });
 
   it('send() behaves exactly as today when no draft exists', async () => {

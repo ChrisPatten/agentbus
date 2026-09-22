@@ -200,6 +200,63 @@ describe('PoolManager', () => {
       expect(lease?.claude_session_id).toBe(launchArgs.sessionId);
     });
 
+    it('bound: posts a "One moment" placeholder tool-status line before launching', async () => {
+      const db = makeDb();
+      const cfg = makeCfg({ panes: 2 });
+      const paneLauncher = makeFakeLauncher();
+      const fetchFn = makeFakeFetch();
+      const manager = new PoolManager({
+        cfg,
+        db,
+        busBaseUrl: 'http://127.0.0.1:3000',
+        paneLauncher,
+        fetchFn: fetchFn as unknown as typeof fetch,
+      });
+      await manager.ensureStarted();
+
+      await manager.resolveRoute('conv-new', { contact_id: 'alice', channel: 'telegram', topic: 'thread:abc' });
+
+      const placeholderCalls = fetchFn.mock.calls.filter(([url]) => String(url).endsWith('/tool-status'));
+      expect(placeholderCalls).toHaveLength(1);
+      const [url, init] = placeholderCalls[0]! as [string, { body: string }];
+      expect(url).toBe('http://127.0.0.1:3000/api/v1/adapters/telegram/tool-status');
+      expect(JSON.parse(init.body)).toEqual({
+        contact_id: 'alice',
+        text: 'One moment…',
+        topic: 'thread:abc',
+        placeholder: true,
+      });
+    });
+
+    it('reuse: never posts the cold-start placeholder — there is no launch to cover', async () => {
+      const db = makeDb();
+      const cfg = makeCfg({ panes: 2 });
+      const paneLauncher = makeFakeLauncher();
+      const fetchFn = makeFakeFetch();
+      const manager = new PoolManager({
+        cfg,
+        db,
+        busBaseUrl: 'http://127.0.0.1:3000',
+        paneLauncher,
+        fetchFn: fetchFn as unknown as typeof fetch,
+      });
+      await manager.ensureStarted();
+      const bound = manager.leaseStore.acquire(manager.poolId, 'conv-1', {
+        poolAgentId: 'peggy',
+        panes: 2,
+        maxPanes: 2,
+        growth: 'fixed',
+        idleEvictMs: 1_800_000,
+      });
+      if (bound.kind !== 'bound') throw new Error(`expected bound, got ${bound.kind}`);
+      manager.leaseStore.confirmReady(manager.poolId, bound.lease.pane_id);
+      fetchFn.mockClear();
+
+      await manager.resolveRoute('conv-1', { contact_id: 'alice', channel: 'telegram' });
+
+      expect(fetchFn).not.toHaveBeenCalled();
+    });
+
     it('bound (conversation with a prior sessions.claude_session_id): resumes with that same session id', async () => {
       const { manager, paneLauncher, db } = makeManager({ panes: 2 });
       await manager.ensureStarted();
@@ -653,7 +710,13 @@ describe('PoolManager', () => {
         .get(id1, id2) as { n: number };
       expect(dl.n).toBe(2);
       expect(queue.dequeue(manager.parkedRecipientId(), undefined, 10)).toHaveLength(0);
-      expect(fetchFn).toHaveBeenCalledTimes(1);
+      // fetchFn is shared with resolveRoute()'s cold-start placeholder POST
+      // (the setup call above occupies the pool's only pane), so filter to
+      // notifySystem's own endpoint rather than asserting total call count.
+      const systemNoticeCalls = fetchFn.mock.calls.filter(([url]) =>
+        String(url).endsWith('/api/v1/inbound'),
+      );
+      expect(systemNoticeCalls).toHaveLength(1);
     });
 
     it('no queue injected: logs and no-ops rather than throwing', async () => {

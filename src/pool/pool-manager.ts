@@ -249,7 +249,7 @@ export class PoolManager {
    */
   async resolveRoute(
     conversationId: string,
-    promptContext: { contact_id: string; channel: string },
+    promptContext: { contact_id: string; channel: string; topic?: string },
   ): Promise<string> {
     try {
       const result = this.leaseStore.acquire(this.poolId, conversationId, {
@@ -292,6 +292,15 @@ export class PoolManager {
       const priorRow = this.getActiveSessionRow(conversationId);
       const sessionId = priorRow?.claude_session_id ?? randomUUID();
       const resume = priorRow?.claude_session_id != null;
+
+      // Every non-reuse outcome (bound/grow/evict) is about to block on a
+      // real launch — the ack handshake + readiness poll below can take
+      // several seconds, up to the 30s launch timeout. Fire a "One moment"
+      // placeholder now, before that wait, so the user sees something
+      // immediately instead of silence; the pane's own tool-status hook (or
+      // its final reply, if no tool calls happen) then replaces it once real
+      // activity starts. Fire-and-forget — must never add to launch latency.
+      this.notifyColdStart(promptContext.channel, promptContext.contact_id, promptContext.topic);
 
       try {
         await this.paneLauncher.launch({
@@ -704,6 +713,27 @@ export class PoolManager {
     } catch (err) {
       console.error(`[pool:${this.poolId}] Failed to post system notice: ${String(err)}`);
     }
+  }
+
+  /**
+   * Fire-and-forget "One moment" placeholder for a cold-starting launch —
+   * posted through the same `POST /api/v1/adapters/:channel/tool-status`
+   * endpoint `reportToolCall()`'s real tool-call lines use (`placeholder:
+   * true`), so it's subject to the same capability check and no-ops
+   * silently on any channel that doesn't support it, exactly like a real
+   * tool-status line. Deliberately not awaited by the caller — this must
+   * never add to launch latency, which is already budgeted up to 30s. A
+   * failure here is logged and otherwise inconsequential: the user just
+   * doesn't see the placeholder, launch proceeds unaffected either way.
+   */
+  private notifyColdStart(channel: string, contactId: string, topic: string | undefined): void {
+    void this.fetchFn(`${this.busBaseUrl}/api/v1/adapters/${channel}/tool-status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contact_id: contactId, text: 'One moment…', topic, placeholder: true }),
+    }).catch((err) => {
+      console.error(`[pool:${this.poolId}] Failed to post cold-start placeholder: ${String(err)}`);
+    });
   }
 }
 

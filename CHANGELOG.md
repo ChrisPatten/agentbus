@@ -67,6 +67,21 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
   `agentbus_tool_status_hook.sh` below. A deployment symlinks each in and
   registers it in that project's own `.claude/settings.json`. See
   [docs/CC_POOL_ADAPTER.md#other-pool-pane-hooks](docs/CC_POOL_ADAPTER.md#other-pool-pane-hooks).
+- **cc-pool: "One moment…" placeholder during a cold-starting pane launch.**
+  A `bound`/`grow`/`evict` resolution blocks on the full launch sequence
+  (ack handshake + readiness poll, up to 30s) before the message even
+  reaches the pane — until now the user saw nothing at all during that
+  wait, since the tool-status hook can't fire until the pane is already
+  alive. `PoolManager.resolveRoute()` now fires a fire-and-forget
+  `POST /api/v1/adapters/:channel/tool-status` with
+  `{ text: "One moment…", placeholder: true }` right before launching.
+  `reportToolCall` (`AdapterInstance`, `src/core/registry.ts`) gains an
+  optional 5th `placeholder` argument; `TelegramAdapter` (the only adapter
+  implementing it) replaces rather than appends to a placeholder draft on
+  the next line posted for the same chat/topic, so "One moment…" never
+  lingers once a real tool call or the final reply arrives. `reuse` never
+  fires it — a reused pane has no launch latency to cover. See
+  [docs/CC_POOL_ADAPTER.md#cold-start-placeholder](docs/CC_POOL_ADAPTER.md#cold-start-placeholder).
 
 ### Fixed
 - **cc-pool: pane `last_activity_at` no longer goes stale during a long turn.**

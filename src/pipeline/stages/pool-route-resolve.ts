@@ -43,6 +43,7 @@ export function createPoolRouteResolve(poolManagers: Map<string, PoolManager>): 
       const recipientId = await manager.resolveRoute(conversationId, {
         contact_id: contactId,
         channel: ctx.envelope.channel,
+        topic: ctx.envelope.topic,
       });
       // Replace the array element with a fresh object rather than mutating
       // `route` in place — defense in depth. Even with route-resolve.ts now

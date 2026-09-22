@@ -855,19 +855,22 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
 
   // POST /api/v1/adapters/:id/tool-status — live tool-call status line for an
   // in-flight turn (E29). `:id` is a channel, resolved the same way as `/typing`
-  // above; `topic` (E28) further targets a specific forum topic. Fire-and-forget
-  // by callers — always returns 200, even when the adapter is not found or
+  // above; `topic` (E28) further targets a specific forum topic. `placeholder`
+  // (cc-pool cold-start line) is passed through unchanged — see
+  // AdapterInstance.reportToolCall's doc comment in src/core/registry.ts for
+  // what an implementing adapter should do with it. Fire-and-forget by
+  // callers — always returns 200, even when the adapter is not found or
   // doesn't support the capability (no-op in those cases).
-  server.post<{ Params: { id: string }; Body: { contact_id?: string; text?: string; topic?: string } }>(
-    '/api/v1/adapters/:id/tool-status',
-    async (req, _reply) => {
-      const adapter = registry.lookupPrimaryByChannel(req.params.id);
-      if (adapter?.capabilities.toolStatus && typeof adapter.reportToolCall === 'function' && req.body.text) {
-        adapter.reportToolCall(req.body.contact_id ?? '', req.body.text, req.params.id, req.body.topic);
-      }
-      return { ok: true };
-    },
-  );
+  server.post<{
+    Params: { id: string };
+    Body: { contact_id?: string; text?: string; topic?: string; placeholder?: boolean };
+  }>('/api/v1/adapters/:id/tool-status', async (req, _reply) => {
+    const adapter = registry.lookupPrimaryByChannel(req.params.id);
+    if (adapter?.capabilities.toolStatus && typeof adapter.reportToolCall === 'function' && req.body.text) {
+      adapter.reportToolCall(req.body.contact_id ?? '', req.body.text, req.params.id, req.body.topic, req.body.placeholder);
+    }
+    return { ok: true };
+  });
 
   // POST /api/v1/adapters/:id/topics — create a new forum topic (E28,
   // Telegram groups only). `:id` is a channel, resolved the same way as

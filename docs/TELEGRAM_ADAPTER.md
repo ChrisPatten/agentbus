@@ -421,6 +421,16 @@ delivered — instead of just a typing indicator.
    unconditionally stops the persistent typing indicator for the chat
    (whether or not a draft was open) — otherwise it would keep blinking for
    up to its 2-minute safety timeout after the turn was already killed.
+10. **A `placeholder: true` line starts a draft that gets *replaced*, not
+    appended to.** `reportToolCall`'s optional 5th argument marks the draft
+    as a stand-in for activity, not activity itself — cc-pool uses this for
+    its "One moment…" cold-start line (see
+    [CC_POOL_ADAPTER.md#cold-start-placeholder](CC_POOL_ADAPTER.md#cold-start-placeholder)).
+    The next line posted for the same chat/topic overwrites `lines` instead
+    of growing it, so the placeholder never lingers as a permanent first
+    line once something real has happened; overwrite-on-delivery above
+    still applies unconditionally if the draft is still just the
+    placeholder when the final reply arrives.
 
 **Known limitation:** if bus-core crashes mid-turn, a draft message can be
 left showing a stale tool-call trail on Telegram forever (the same exposure
