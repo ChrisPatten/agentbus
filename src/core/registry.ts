@@ -1,5 +1,6 @@
 import type { MessageEnvelope } from '../types/envelope.js';
 import type { CommandManifest } from '../commands/registry.js';
+import type { ApprovalRequest } from '../approvals/types.js';
 
 /** Capabilities advertised by an adapter */
 export interface AdapterCapabilities {
@@ -13,6 +14,12 @@ export interface AdapterCapabilities {
   /** Live tool-call status stream — a single evolving message showing what the
    * agent is doing mid-turn (E29). Telegram only today. */
   toolStatus?: boolean;
+  /**
+   * Can notify a human of a pending interactive-approval request (Approve/
+   * Deny buttons or equivalent) and accept the human's answer back (E51).
+   * Telegram only today — see src/approvals/dispatch.ts.
+   */
+  interactiveApproval?: boolean;
   /** Can accept slash command registration */
   registerCommands?: boolean;
   /** Maximum message length in characters. Default: 4096 (Telegram limit) */
@@ -115,6 +122,26 @@ export interface AdapterInstance {
     name: string,
     context?: string,
   ): Promise<{ ok: true; topic: string; message_thread_id: number; name: string } | { ok: false; error: string }>;
+  /**
+   * Put a pending interactive-approval request in front of the human it's
+   * addressed to — Telegram's implementation sends Approve/Deny inline-
+   * keyboard buttons (E51). Only called when `capabilities.interactiveApproval`
+   * is true (src/approvals/dispatch.ts). Returns the platform channel +
+   * message id the request landed on, stored back onto the
+   * `approval_requests` row so `finalizeApproval` can find it again once the
+   * request reaches a terminal state.
+   */
+  notifyApproval?(request: ApprovalRequest): Promise<{ channel: string; messageId: string }>;
+  /**
+   * Edit a previously-sent approval notification to remove any live
+   * Approve/Deny controls and show the final outcome, once `request` has
+   * reached a terminal status (approved/denied/expired/stale) — called by
+   * the expiry sweep (E51 S51.6) for the case nobody tapped a button in
+   * time. The interactive tap path (Telegram's own callback_query handler)
+   * already has the message in hand and edits it directly without going
+   * through this seam.
+   */
+  finalizeApproval?(request: ApprovalRequest): Promise<void>;
 }
 
 export type { CommandManifest };

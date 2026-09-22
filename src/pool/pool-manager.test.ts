@@ -2,7 +2,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import Database from 'better-sqlite3';
 import { runMigrations } from '../db/schema.js';
-import { PoolManager, createPoolManagers, type PaneLauncher } from './pool-manager.js';
+import { PoolManager, createPoolManagers, findPoolManagerForAgent, type PaneLauncher } from './pool-manager.js';
 import type { LaunchParams } from './pane.js';
 import type { AppConfig, CcPoolAdapterConfig, CcPoolInstanceConfig } from '../config/schema.js';
 import { MessageQueue } from '../core/queue.js';

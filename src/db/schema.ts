@@ -104,6 +104,11 @@ function loadMigrations(): Migration[] {
       description: 'Knowledge store (agent-managed structured knowledge)',
       sql: readFileSync(join(migrationsDir, '018_knowledge.sql'), 'utf-8'),
     },
+    {
+      version: 19,
+      description: 'Approval requests (cross-adapter human-in-the-loop, E51)',
+      sql: readFileSync(join(migrationsDir, '019_approval_requests.sql'), 'utf-8'),
+    },
   ];
 }
 

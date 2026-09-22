@@ -369,6 +369,39 @@ export class PoolManager {
   }
 
   /**
+   * S51.4 (E51) — resolve a pending interactive-approval request against
+   * THIS pool by sending the mapped keystroke into agentId's CURRENT lease.
+   * Re-resolves the lease at answer time (not cached from when the request
+   * was raised) — the one thing the Sep 20 partial turn-ended fix didn't do
+   * for the mid-turn lease-reassignment case, and exactly the bug this epic
+   * exists to close (see the epic's Risks section).
+   *
+   * `approve` sends `Enter` (accepts the pre-highlighted default option,
+   * observed to be the least-destructive "Yes" in both real dialog
+   * instances this epic's keystroke mapping is based on); `deny` sends
+   * `Escape` (the dialog's own documented cancel key).
+   *
+   * Returns `'resolved'` after sending the keystroke, or `'stale'` (no
+   * keystroke sent) when: no lease row exists for `agentId` in this pool,
+   * the row isn't currently `leased`, or (`expectedConversationId` given)
+   * the lease has moved on to a different conversation since the request
+   * was raised.
+   */
+  async resolveApproval(
+    agentId: string,
+    expectedConversationId: string | null,
+    decision: 'approve' | 'deny',
+  ): Promise<'resolved' | 'stale'> {
+    const leaseRow = this.leaseStore.findByAgent(this.poolId, toPrefixedAgentId(agentId));
+    if (!leaseRow || leaseRow.state !== 'leased') return 'stale';
+    if (expectedConversationId && leaseRow.conversation_id !== expectedConversationId) return 'stale';
+
+    const key = decision === 'approve' ? 'Enter' : 'Escape';
+    await this.tmux.sendKeys(leaseRow.pane_id, key);
+    return 'resolved';
+  }
+
+  /**
    * `toPrefixedAgentId(`${cfg.agent_id}__parked`)` — the synthetic recipient
    * id nothing ever polls. A later story's sweep timer drains it by
    * dequeuing from this id and retrying `resolveRoute`. Exposed as a method
@@ -755,4 +788,27 @@ export function createPoolManagers(
     managers.set(toPrefixedAgentId(cfg.agent_id), new PoolManager({ cfg, db, busBaseUrl, queue }));
   }
   return managers;
+}
+
+/**
+ * S51.4 (E51) — find the `PoolManager` instance that currently owns a lease
+ * row for `agentId` (bare or prefixed), across every configured pool. A pane
+ * agent id is unique to the pool that derived it (see
+ * `derivePaneAgentId`/types.ts's module doc), so at most one manager's
+ * `leaseStore` will ever have a matching row — this just saves the caller
+ * (the `POST /api/v1/approvals/:id/resolve` handler) from having to know or
+ * guess which configured pool a request's `agent_id` belongs to. Returns
+ * `undefined` if no configured pool has ever seeded a row for this agentId.
+ */
+export function findPoolManagerForAgent(
+  poolManagers: Map<string, PoolManager>,
+  agentId: string,
+): PoolManager | undefined {
+  const prefixed = toPrefixedAgentId(agentId);
+  for (const manager of poolManagers.values()) {
+    if (manager.leaseStore.findByAgent(manager.poolId, prefixed)) {
+      return manager;
+    }
+  }
+  return undefined;
 }
