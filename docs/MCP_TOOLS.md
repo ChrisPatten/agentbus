@@ -21,6 +21,7 @@ Errors come back as `{ "content": [{ "type": "text", "text": "Error: ..." }], "i
 | `schedule_message`, `list_schedules`, `cancel_schedule` | Scheduled messages | Always |
 | `set_headless_model`, `get_headless_model`, `list_headless_model`, `delete_headless_model` | Runtime model overrides for headless spawns | Always |
 | `recall_memory`, `log_memory` | Legacy structured memory store | Always; dormant unless `memory.structured_extraction` |
+| `write_knowledge`, `get_knowledge`, `forget_knowledge`, `search_knowledge` | Agent-managed structured knowledge store (Phase 1) | Always |
 | `get_adapter_status` | Health of the polling MCP adapter | Polling mode only |
 
 ## Messaging
@@ -177,6 +178,30 @@ Output: `{ "memories": [...], "count": n }`.
 
 Input: `{ "contact_id": "chris", "content": "...", "category"?: "general", "confidence"?: 0.9, "source"?: "manual", "expires_at"? }`
 Output: `{ "ok": true, "id", "superseded": "<old id>" | null }`.
+
+## Knowledge store
+
+Agent-managed structured knowledge (Phase 1: FTS5 keyword search, no embeddings yet). New and always-on, independent of the legacy memory store above. See [KNOWLEDGE_STORE.md](KNOWLEDGE_STORE.md).
+
+### `write_knowledge`
+
+Input: `{ "agent_id", "kind", "title", "payload", "index_note"?, "tags"?, "facets"?, "event_at"?, "valid_from"?, "relevant_until"?, "expires_at"?, "importance"?: 0.5, "confidence"?: 0.9, "source"?: "agent", "session_id"?, "contact_id"?, "channel"?, "supersedes"? }`. `payload` is a JSON-encoded string in the agent's own schema. Pass `supersedes` (an existing knowledge id) to mark that row replaced.
+Output: `{ "ok": true, "id", "content_hash", "superseded_id": "<old id>" | null }`.
+
+### `get_knowledge`
+
+Input: `{ "id" }`. Bumps `recall_count` / `last_recalled_at`.
+Output: `{ "knowledge": {...} }`.
+
+### `forget_knowledge`
+
+Input: `{ "id", "mode": "supersede" | "expire" | "delete", "superseded_by"? }`. `superseded_by` is required when `mode` is `"supersede"`.
+Output: `{ "ok": true }`.
+
+### `search_knowledge`
+
+Input: `{ "agent_id", "q"?, "kind"?, "tags"?, "facets"?, "event_from"?, "event_to"?, "limit"?: 10 }`. `limit` max 50. Omit `q` to filter/browse, newest-updated first. Always excludes superseded and expired rows.
+Output: `{ "results": [...], "count": n }`.
 
 ## Polling adapter only
 

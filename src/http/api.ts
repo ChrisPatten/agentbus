@@ -67,6 +67,7 @@ import { toBareAgentId } from '../pool/types.js';
 import { LeaseStore } from '../pool/lease-store.js';
 import { computeConversationId } from '../pipeline/conversation-id.js';
 import type { PoolManager } from '../pool/pool-manager.js';
+import { writeKnowledge, getKnowledge, forgetKnowledge, searchKnowledge } from '../knowledge/store.js';
 
 export interface HttpServerDeps {
   queue: MessageQueue;
@@ -1303,6 +1304,131 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       superseded: supersededId ?? null,
     });
   });
+
+  // ── Knowledge store endpoints (agent-managed structured knowledge, Phase 1) ──
+  //
+  // Unlike the /api/v1/memories endpoints above, this table is new and
+  // always-on (no config flag gates it, no `available: false` degradation —
+  // ordinary 400/404/500 is correct here). See src/knowledge/store.ts and
+  // docs/KNOWLEDGE_STORE.md.
+
+  const KnowledgeWriteSchema = z.object({
+    agent_id: z.string().min(1),
+    kind: z.string().min(1),
+    title: z.string().min(1),
+    payload: z.string().min(1),
+    index_note: z.string().optional(),
+    tags: z.array(z.string()).optional(),
+    facets: z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()])).optional(),
+    event_at: z.string().optional(),
+    valid_from: z.string().optional(),
+    relevant_until: z.string().optional(),
+    expires_at: z.string().optional(),
+    importance: z.number().min(0).max(1).optional(),
+    confidence: z.number().min(0).max(1).optional(),
+    source: z.string().optional(),
+    session_id: z.string().optional(),
+    contact_id: z.string().optional(),
+    channel: z.string().optional(),
+    supersedes: z.string().optional(),
+  });
+
+  // POST /api/v1/knowledge — write a new knowledge row
+  server.post<{ Body: unknown }>('/api/v1/knowledge', async (req, reply) => {
+    const parsed = KnowledgeWriteSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ ok: false, error: parsed.error.message });
+    }
+
+    try {
+      const result = writeKnowledge(db, parsed.data);
+      return reply.status(201).send({
+        ok: true,
+        id: result.id,
+        content_hash: result.contentHash,
+        superseded_id: result.supersededId,
+      });
+    } catch (err) {
+      return reply.status(400).send({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // GET /api/v1/knowledge/search — FTS5 + filter search over knowledge rows
+  server.get<{
+    Querystring: {
+      q?: string;
+      agent_id?: string;
+      kind?: string;
+      tags?: string;
+      facets?: string;
+      event_from?: string;
+      event_to?: string;
+      limit?: string;
+    };
+  }>('/api/v1/knowledge/search', async (req, reply) => {
+    const { q, agent_id, kind, tags, facets, event_from, event_to, limit } = req.query;
+
+    if (!agent_id || agent_id.trim().length === 0) {
+      return reply.status(400).send({ ok: false, error: 'Query parameter "agent_id" is required' });
+    }
+
+    let facetsObj: Record<string, string | number | boolean> | undefined;
+    if (facets !== undefined) {
+      try {
+        facetsObj = JSON.parse(facets) as Record<string, string | number | boolean>;
+      } catch {
+        return reply.status(400).send({ ok: false, error: 'Query parameter "facets" must be valid JSON' });
+      }
+    }
+
+    try {
+      const result = searchKnowledge(db, {
+        agent_id,
+        q,
+        kind,
+        tags: tags ? tags.split(',').map((t) => t.trim()).filter((t) => t.length > 0) : undefined,
+        facets: facetsObj,
+        event_from,
+        event_to,
+        limit: limit !== undefined ? parseInt(limit, 10) : undefined,
+      });
+      return { ok: true, results: result.results, count: result.count };
+    } catch (err) {
+      return reply.status(500).send({ ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // GET /api/v1/knowledge/:id — fetch one row (bumps recall bookkeeping)
+  server.get<{ Params: { id: string } }>('/api/v1/knowledge/:id', async (req, reply) => {
+    const row = getKnowledge(db, req.params.id);
+    if (!row) {
+      return reply.status(404).send({ ok: false, error: `Knowledge row not found: ${req.params.id}` });
+    }
+    return { ok: true, knowledge: row };
+  });
+
+  // POST /api/v1/knowledge/:id/forget — supersede, expire, or hard-delete a row
+  const KnowledgeForgetSchema = z.object({
+    mode: z.enum(['supersede', 'expire', 'delete']),
+    superseded_by: z.string().optional(),
+  });
+
+  server.post<{ Params: { id: string }; Body: unknown }>(
+    '/api/v1/knowledge/:id/forget',
+    async (req, reply) => {
+      const parsed = KnowledgeForgetSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return reply.status(400).send({ ok: false, error: parsed.error.message });
+      }
+
+      try {
+        forgetKnowledge(db, req.params.id, parsed.data.mode, { supersededBy: parsed.data.superseded_by });
+        return { ok: true };
+      } catch (err) {
+        return reply.status(400).send({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      }
+    },
+  );
 
   // ── Schedule endpoints (E18) ─────────────────────────────────────────────────
 

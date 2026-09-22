@@ -43,6 +43,10 @@ Set `bus.host: 0.0.0.0` to accept connections from other hosts, for example a re
 | GET | `/api/v1/attachments/:id` | Resolve a stored attachment |
 | GET | `/api/v1/memories/recall` | Search the legacy memory store |
 | POST | `/api/v1/memories` | Insert into the legacy memory store |
+| POST | `/api/v1/knowledge` | Write a knowledge row |
+| GET | `/api/v1/knowledge/search` | Search knowledge rows |
+| GET | `/api/v1/knowledge/:id` | Fetch one knowledge row |
+| POST | `/api/v1/knowledge/:id/forget` | Supersede, expire, or delete a knowledge row |
 | POST | `/api/v1/schedules` | Create a schedule |
 | GET | `/api/v1/schedules` | List schedules |
 | GET | `/api/v1/schedules/:id` | Fetch a schedule |
@@ -311,6 +315,36 @@ Returns active memories (not superseded, not expired) ordered by confidence, the
 ### `POST /api/v1/memories`
 
 Body `{ "contact_id", "content", "category"?, "confidence"?, "source"?, "expires_at"?, "channel"? }`. Supersedes the existing active memory for the same contact, category, and channel. Returns `201 { "ok": true, "id", "superseded": "<old-id>" | null }`.
+
+## Knowledge
+
+Agent-managed structured knowledge (Phase 1). New and always-on — no config flag, no `available: false` degradation. See [KNOWLEDGE_STORE.md](KNOWLEDGE_STORE.md).
+
+### `POST /api/v1/knowledge`
+
+Body `{ "agent_id", "kind", "title", "payload", "index_note"?, "tags"?, "facets"?, "event_at"?, "valid_from"?, "relevant_until"?, "expires_at"?, "importance"?, "confidence"?, "source"?, "session_id"?, "contact_id"?, "channel"?, "supersedes"? }`. `payload` is a JSON-encoded string in the agent's own schema; `400` if it does not parse as JSON. When `supersedes` is given, that row's `superseded_by` is set to the new row's id in the same transaction. Returns `201 { "ok": true, "id", "content_hash", "superseded_id": "<old-id>" | null }`.
+
+### `GET /api/v1/knowledge/search`
+
+| Param | Notes |
+|---|---|
+| `agent_id` | Required |
+| `q` | Optional FTS5 match string. Omit to filter/browse, ordered by `updated_at DESC` |
+| `kind` | Optional exact filter |
+| `tags` | Optional, comma-separated; row must contain all |
+| `facets` | Optional JSON object string; row must exact-match every given key |
+| `event_from`, `event_to` | Optional ISO 8601 bounds on `event_at`; a row with no `event_at` is never excluded by these |
+| `limit` | 1 to 50, default 10 |
+
+Always excludes superseded and expired rows. Returns `{ "ok": true, "results": [...], "count": n }`.
+
+### `GET /api/v1/knowledge/:id`
+
+Returns `{ "ok": true, "knowledge": {...} }`. Bumps `recall_count` / `last_recalled_at`. `404` if unknown.
+
+### `POST /api/v1/knowledge/:id/forget`
+
+Body `{ "mode": "supersede" | "expire" | "delete", "superseded_by"? }`. `superseded_by` is required when `mode` is `"supersede"`. Returns `{ "ok": true }`.
 
 ## Schedules
 

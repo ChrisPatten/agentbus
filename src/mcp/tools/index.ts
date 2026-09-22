@@ -6,6 +6,7 @@
  *   - list_channels (S7.1)
  *   - send_message (S7.2)
  *   - recall_memory, log_memory, search_transcripts (S7.3)
+ *   - write_knowledge, get_knowledge, forget_knowledge, search_knowledge (agent-managed knowledge store, Phase 1)
  *   - get_session, list_sessions (S7.4)
  *   - react_to_message (S7.5)
  *   - schedule_message, list_schedules, cancel_schedule (E18)
@@ -19,6 +20,7 @@ import type { AppConfig } from '../../config/schema.js';
 import { registerChannelTools } from './channels.js';
 import { registerMessagingTools, registerEmailTool, buildEmailToolConfig } from './messaging.js';
 import { registerMemoryTools } from './memory.js';
+import { registerKnowledgeTools } from './knowledge.js';
 import { registerSessionTools } from './sessions.js';
 import { registerReactionTools } from './reactions.js';
 import { registerScheduleTools } from './scheduling.js';
@@ -63,6 +65,7 @@ export function registerAllTools(
   registerChannelTools(server, busBaseUrl);
   registerMessagingTools(server, busBaseUrl, agentId);
   registerMemoryTools(server, busBaseUrl);
+  registerKnowledgeTools(server, busBaseUrl);
   registerSessionTools(server, busBaseUrl);
   registerReactionTools(server, busBaseUrl);
   registerScheduleTools(server, busBaseUrl);
@@ -116,6 +119,7 @@ export function registerHeadlessTools(
   registerChannelTools(server, busBaseUrl);
   registerMessagingTools(server, busBaseUrl, agentId);
   registerMemoryTools(server, busBaseUrl);
+  registerKnowledgeTools(server, busBaseUrl);
   registerSessionTools(server, busBaseUrl);
   registerReactionTools(server, busBaseUrl);
   registerScheduleTools(server, busBaseUrl);
