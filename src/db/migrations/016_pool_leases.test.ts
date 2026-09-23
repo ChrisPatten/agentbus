@@ -36,6 +36,7 @@ describe('migration 016 — pool_leases table', () => {
         'state',
         'leased_at',
         'last_activity_at',
+        'last_turn_ended_at', // added by migration 020 (E52)
       ].sort(),
     );
 
