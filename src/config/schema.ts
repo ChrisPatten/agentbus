@@ -382,6 +382,20 @@ const CcPoolAdapterSchema = z.object({
    * later launch code, not defaulted here.
    */
   pane_env: z.record(z.string(), z.string()).default({}),
+  /**
+   * Stall watchdog (E52). Deliberately no `.default()`: a zod default would
+   * make this a required key on `CcPoolInstanceConfig`. Defaults are applied
+   * by `resolveWatchdogConfig()` in src/pool/watchdog-config.ts.
+   */
+  watchdog: z
+    .object({
+      enabled: z.boolean().optional(),
+      observe_only: z.boolean().optional(),
+      sample_interval_ms: z.number().int().positive().optional(),
+      stall_after_ms: z.number().int().positive().optional(),
+      alert_contact: z.string().optional(),
+    })
+    .optional(),
 });
 
 /**

@@ -109,6 +109,11 @@ function loadMigrations(): Migration[] {
       description: 'Approval requests (cross-adapter human-in-the-loop, E51)',
       sql: readFileSync(join(migrationsDir, '019_approval_requests.sql'), 'utf-8'),
     },
+    {
+      version: 20,
+      description: 'Pool pane watchdog: pool_leases.last_turn_ended_at + pane_incidents (E52)',
+      sql: readFileSync(join(migrationsDir, '020_pane_watchdog.sql'), 'utf-8'),
+    },
   ];
 }
 

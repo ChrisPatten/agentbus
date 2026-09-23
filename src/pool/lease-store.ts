@@ -91,7 +91,7 @@ export class LeaseStore {
           .prepare(
             `UPDATE pool_leases
              SET state = 'launching', conversation_id = ?, claude_session_id = NULL,
-                 leased_at = ?, last_activity_at = ?
+                 leased_at = ?, last_activity_at = ?, last_turn_ended_at = NULL
              WHERE pool_id = ? AND pane_id = ? AND state = 'free'`,
           )
           .run(conversationId, nowIso, nowIso, poolId, freeRow.pane_id);
@@ -102,6 +102,7 @@ export class LeaseStore {
           claude_session_id: null,
           leased_at: nowIso,
           last_activity_at: nowIso,
+          last_turn_ended_at: null,
         };
         return { kind: 'bound', lease: bound };
       }
@@ -141,6 +142,7 @@ export class LeaseStore {
             state: 'launching',
             leased_at: nowIso,
             last_activity_at: nowIso,
+            last_turn_ended_at: null,
           };
           return { kind: 'grow', lease: grown };
         }
@@ -170,7 +172,7 @@ export class LeaseStore {
           .prepare(
             `UPDATE pool_leases
              SET state = 'launching', conversation_id = ?, claude_session_id = NULL,
-                 leased_at = ?, last_activity_at = ?
+                 leased_at = ?, last_activity_at = ?, last_turn_ended_at = NULL
              WHERE pool_id = ? AND pane_id = ? AND state = 'leased'`,
           )
           .run(conversationId, nowIso, nowIso, poolId, evictRow.pane_id);
@@ -181,6 +183,7 @@ export class LeaseStore {
           claude_session_id: null,
           leased_at: nowIso,
           last_activity_at: nowIso,
+          last_turn_ended_at: null,
         };
         return { kind: 'evict', lease: claimed, evicted };
       }
@@ -225,7 +228,8 @@ export class LeaseStore {
     this.db
       .prepare(
         `UPDATE pool_leases
-         SET state = 'free', conversation_id = NULL, claude_session_id = NULL, leased_at = NULL
+         SET state = 'free', conversation_id = NULL, claude_session_id = NULL, leased_at = NULL,
+             last_turn_ended_at = NULL
          WHERE pool_id = ? AND pane_id = ?`,
       )
       .run(poolId, paneId);
@@ -245,6 +249,16 @@ export class LeaseStore {
     this.db
       .prepare(`UPDATE pool_leases SET last_activity_at = ? WHERE pool_id = ? AND pane_id = ?`)
       .run(nowIso, poolId, paneId);
+  }
+
+  /**
+   * Record that the pane's Claude turn finished (Stop hook). Sets
+   * last_turn_ended_at and last_activity_at. No-op when the pane doesn't exist.
+   */
+  markTurnEnded(poolId: string, paneId: string, nowIso = new Date().toISOString()): void {
+    this.db
+      .prepare(`UPDATE pool_leases SET last_turn_ended_at = ?, last_activity_at = ? WHERE pool_id = ? AND pane_id = ?`)
+      .run(nowIso, nowIso, poolId, paneId);
   }
 
   setClaudeSessionId(poolId: string, paneId: string, claudeSessionId: string): void {

@@ -877,7 +877,7 @@ epics:
       S51.6: complete  # expiry sweep + message cleanup, on the 60s maintenance tick
       S51.7: complete  # docs/APPROVALS.md
   E52:
-    status: pending
+    status: in-progress
     notes: >
       Pool pane watchdog: detect a leased cc-pool pane that has unhandled work
       and a static screen, classify it (known blocking screen, delivered but
@@ -889,10 +889,10 @@ epics:
       observe-only first so patterns come from captured screens. Epic file
       only; not started.
     stories:
-      S52.1: pending  # Screen sampler + stall detector, observe-only
-      S52.2: pending  # last_turn_ended_at + unhandled-work query
+      S52.1: complete  # Screen sampler + stall detector, observe-only (feat/e52-pool-watchdog)
+      S52.2: complete  # last_turn_ended_at + unhandled-work query
       S52.3: pending  # Classifier + pattern table (from captured screens)
       S52.4: pending  # Actions: alert, auto-answer (alerts if it fails)
       S52.5: pending  # Observability: /pool, incidents endpoint
       S52.6: pending  # Docs
-last_updated: 2026-09-23  # E52 (pool pane watchdog) epic written, not started. Prior note preserved: E51 (approval requests) merged to dev and live, awaiting a real end-to-end check. Prior note preserved: E49 (context-block ledger) + E50 (agent-managed knowledge store, Phase 1) implemented end-to-end on claude/agent-knowledge-database-xiqn29, not yet merged, not yet pushed. Both from a design spike (_bmad-output/planning-artifacts/design-spike-agent-knowledge-store.md) worked out conversationally with the operator. Prior note preserved: 2026-09-17  # E48 (interactive Claude Code session pool over tmux) implemented end-to-end and marked complete — all 10 stories, on feat/e48-cc-session-pool, not yet merged to dev/main. current_epic stays E42/E44 (Siri Bridge) since that's the operator's ongoing focus; E48 was a self-contained side branch, now finished. Prior note preserved: Backfilled E36, E38, E39, E40 (complete, merged to dev 2026-08-31/09-01) and E37, E41 (pending, epic files only). Added the Siri Bridge package E42–E47 (renumbered from E36–E41 on arrival to avoid the collision): E42 complete, E44 in-progress (S44.5 on-device is the operator's), E43/E45/E46/E47 pending. E23's S23.5 still pending operator sign-off.
+last_updated: 2026-09-23  # E52 (pool pane watchdog): S52.1 and S52.2 implemented on feat/e52-pool-watchdog, not yet merged; S52.3 waits on real captured stalls. Prior note preserved: E51 (approval requests) merged to dev and live, awaiting a real end-to-end check. Prior note preserved: E49 (context-block ledger) + E50 (agent-managed knowledge store, Phase 1) implemented end-to-end on claude/agent-knowledge-database-xiqn29, not yet merged, not yet pushed. Both from a design spike (_bmad-output/planning-artifacts/design-spike-agent-knowledge-store.md) worked out conversationally with the operator. Prior note preserved: 2026-09-17  # E48 (interactive Claude Code session pool over tmux) implemented end-to-end and marked complete — all 10 stories, on feat/e48-cc-session-pool, not yet merged to dev/main. current_epic stays E42/E44 (Siri Bridge) since that's the operator's ongoing focus; E48 was a self-contained side branch, now finished. Prior note preserved: Backfilled E36, E38, E39, E40 (complete, merged to dev 2026-08-31/09-01) and E37, E41 (pending, epic files only). Added the Siri Bridge package E42–E47 (renumbered from E36–E41 on arrival to avoid the collision): E42 complete, E44 in-progress (S44.5 on-device is the operator's), E43/E45/E46/E47 pending. E23's S23.5 still pending operator sign-off.

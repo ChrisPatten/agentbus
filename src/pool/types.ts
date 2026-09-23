@@ -73,6 +73,8 @@ export interface PoolLeaseRow {
   state: PaneState;
   leased_at: string | null;
   last_activity_at: string | null;
+  /** Set by the Stop hook (`markTurnEnded`); cleared when the pane is (re)assigned or released. */
+  last_turn_ended_at: string | null;
 }
 
 /**

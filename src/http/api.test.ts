@@ -2004,6 +2004,9 @@ describe('POST /api/v1/pool/:agentId/turn-ended', () => {
 
     const after = manager.leaseStore.list('peggy').find((p) => p.pane_id === acquired.lease.pane_id)!.last_activity_at;
     expect(after).not.toBe(before);
+    const paneRow = manager.leaseStore.list('peggy').find((p) => p.pane_id === acquired.lease.pane_id)!;
+    expect(paneRow.last_turn_ended_at).not.toBeNull();
+    expect(paneRow.last_turn_ended_at).toBe(paneRow.last_activity_at);
   });
 
   it('no-ops with 200 when the agentId has no configured pool', async () => {

@@ -637,7 +637,7 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       if (manager && sessionId) {
         const pane = manager.leaseStore.list(manager.poolId).find((p) => p.claude_session_id === sessionId);
         if (pane) {
-          manager.leaseStore.touch(manager.poolId, pane.pane_id);
+          manager.leaseStore.markTurnEnded(manager.poolId, pane.pane_id);
         }
       }
       return { ok: true };

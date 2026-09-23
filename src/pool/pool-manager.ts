@@ -30,6 +30,9 @@ import { getCcPoolInstances, type AppConfig, type CcPoolInstanceConfig } from '.
 import { LeaseStore } from './lease-store.js';
 import { PaneLifecycle, type LaunchParams } from './pane.js';
 import { createTmuxController, realTmuxExec, type TmuxController } from './tmux.js';
+import { PaneWatchdog } from './watchdog.js';
+import { resolveWatchdogConfig } from './watchdog-config.js';
+import { IncidentStore } from './watchdog-store.js';
 import { derivePaneAgentId, derivePaneWindowName, toBareAgentId, toPrefixedAgentId } from './types.js';
 import type { JournalingRunner } from '../memory/session-tracker.js';
 import type { MessageQueue } from '../core/queue.js';
@@ -97,6 +100,8 @@ export interface PoolManagerDeps {
   /** Override for the recurring `sweepHardIdle()`+`drainParked()` interval
    *  `start()` schedules. Defaults to `DEFAULT_SWEEP_INTERVAL_MS` (60s). */
   sweepIntervalMs?: number;
+  /** Injectable for tests — defaults to a `PaneWatchdog` built from `cfg.watchdog`. */
+  watchdog?: PaneWatchdog;
 }
 
 /**
@@ -113,6 +118,8 @@ export class PoolManager {
   /** = cfg.agent_id (bare) — validated unique across instances already by getCcPoolInstances. */
   readonly poolId: string;
   readonly leaseStore: LeaseStore;
+  /** E52 stall detector; started/stopped with the manager. */
+  readonly watchdog: PaneWatchdog;
   /** Permanent, deliberate no-op — see the constructor assignment below for the full rationale. */
   readonly journalingRunner: JournalingRunner;
 
@@ -198,6 +205,17 @@ export class PoolManager {
     // touches session-tracker.ts, which is outside this story's file list —
     // left for the story that wires `PoolManager` into
     // index.ts/SessionTracker.
+    this.watchdog =
+      deps.watchdog ??
+      new PaneWatchdog({
+        poolId: this.poolId,
+        leaseStore: this.leaseStore,
+        tmux: this.tmux,
+        db: deps.db,
+        incidentStore: new IncidentStore(deps.db),
+        cfg: resolveWatchdogConfig(deps.cfg.watchdog),
+      });
+
     this.journalingRunner = async (_conversationId: string) => {
       return { skipped: true };
     };
@@ -704,6 +722,8 @@ export class PoolManager {
     this.sweepTimer = setInterval(() => {
       void this.sweepTick();
     }, this.sweepIntervalMs);
+
+    this.watchdog.start();
   }
 
   /** Clears the interval from start(). No-op if not started. */
@@ -712,6 +732,7 @@ export class PoolManager {
       clearInterval(this.sweepTimer);
       this.sweepTimer = null;
     }
+    this.watchdog.stop();
     this.running = false;
   }
 

@@ -395,4 +395,53 @@ describe('LeaseStore', () => {
       expect(store.findByAgent('pool-b', 'agent:peggy-pool-1')?.state).toBe('free');
     });
   });
+
+  describe('last_turn_ended_at', () => {
+    const T1 = '2026-01-01T00:00:00.000Z';
+    const T2 = '2026-01-01T00:05:00.000Z';
+
+    it('markTurnEnded sets last_turn_ended_at and last_activity_at', () => {
+      const store = new LeaseStore(makeDb());
+      store.seedPanes('p', [{ paneId: 'p:1', agentId: 'agent:peggy-pool-1' }]);
+      store.markTurnEnded('p', 'p:1', T1);
+      const row = store.list('p')[0];
+      expect(row.last_turn_ended_at).toBe(T1);
+      expect(row.last_activity_at).toBe(T1);
+    });
+
+    it('markTurnEnded is a no-op for an unknown pane', () => {
+      const store = new LeaseStore(makeDb());
+      store.seedPanes('p', [{ paneId: 'p:1', agentId: 'agent:peggy-pool-1' }]);
+      store.markTurnEnded('p', 'p:nope', T1);
+      expect(store.list('p')).toHaveLength(1);
+      expect(store.list('p')[0].last_turn_ended_at).toBeNull();
+    });
+
+    it('is cleared when the pane is re-leased (bound) and on release', () => {
+      const store = new LeaseStore(makeDb());
+      store.seedPanes('p', [{ paneId: 'p:1', agentId: 'agent:peggy-pool-1' }]);
+      const a = assertKind(store.acquire('p', 'conv-a', baseOpts()), 'bound');
+      expect(a.lease.last_turn_ended_at).toBeNull();
+      store.confirmReady('p', 'p:1');
+      store.markTurnEnded('p', 'p:1', T1);
+      store.release('p', 'p:1');
+      expect(store.list('p')[0].last_turn_ended_at).toBeNull();
+
+      store.markTurnEnded('p', 'p:1', T1);
+      assertKind(store.acquire('p', 'conv-b', baseOpts()), 'bound');
+      expect(store.list('p')[0].last_turn_ended_at).toBeNull();
+    });
+
+    it('is cleared when the pane is evicted to a new conversation', () => {
+      const store = new LeaseStore(makeDb());
+      store.seedPanes('p', [{ paneId: 'p:1', agentId: 'agent:peggy-pool-1' }]);
+      const now = () => new Date(T2);
+      assertKind(store.acquire('p', 'conv-a', baseOpts({ now: () => new Date(T1) })), 'bound');
+      store.confirmReady('p', 'p:1');
+      store.markTurnEnded('p', 'p:1', T1);
+      const ev = assertKind(store.acquire('p', 'conv-b', baseOpts({ now, idleEvictMs: 1000 })), 'evict');
+      expect(ev.lease.last_turn_ended_at).toBeNull();
+      expect(store.list('p')[0].last_turn_ended_at).toBeNull();
+    });
+  });
 });
