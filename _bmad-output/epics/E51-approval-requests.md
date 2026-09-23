@@ -6,6 +6,7 @@
 | Dependencies | E10 (adapter capabilities pattern), E29 (tool-status stream — same capability-flag/dispatch precedent), E48 (cc-pool tmux lifecycle, `sendKeys` primitive, "send-keys is lifecycle-only, never message delivery" convention) |
 | Story Count | 7 |
 | Estimated Complexity | M |
+| Status | Implemented on `feat/e51-approval-requests`; S51.5 needs live registration in the pane project |
 
 ---
 
@@ -297,6 +298,32 @@ migration every time a new backend's payload looks slightly different.
   liveness/watchdog system. If that's still wanted, it's a separate, smaller
   effort layered on top (e.g. `PostToolUse`/turn-duration heuristics), not
   blocked by this epic.
+
+## Implementation notes (deviations from the plan above)
+
+- **Hook identifies its pane by `session_id`, not `$AGENTBUS_AGENT_ID`.**
+  S51.5 assumed the pane's shell has `AGENTBUS_AGENT_ID`; only the pane's MCP
+  server process does (`src/pool/mcp-config.ts`). `POST /api/v1/approvals`
+  therefore accepts `sessionId` and recovers the pane from
+  `pool_leases.claude_session_id`, as `/turn-ended` does.
+- **The hook needs no cached channel/contact context.** The server resolves
+  the contact from the pane's lease, so S51.5 does not read the tool-status
+  hook's per-session state.
+- **Resolution checks the screen first.** S51.4 also captures the pane and
+  requires the dialog footer (`Esc to cancel`) before sending a key. The
+  planned "a terminal answer makes the request stale for free" did not hold on
+  its own, and `Escape` on a pane that is not at a dialog interrupts its live
+  turn.
+- **Notification goes to the contact's DM**, not the conversation's chat, so a
+  group-topic session's tool summary isn't shown to the group.
+- **Only the addressed contact may answer**, enforced in `resolveApproval()`
+  (`onlyContactId`), not just by the sender allow-list.
+- **Resolution is shared, not an HTTP self-call.** `src/approvals/resolve.ts`
+  backs both the route and the Telegram callback. There is no
+  `AdapterInstance.resolveApproval`; the backend seam is `deliverDecision()`.
+- **Repeat hook firings are deduplicated** per pane, tool, and summary.
+- **Timeout stays 15 minutes** (`APPROVAL_TIMEOUT_MS`), pending operator
+  confirmation.
 
 ## Sequencing
 

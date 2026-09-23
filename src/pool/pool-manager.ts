@@ -34,6 +34,9 @@ import { derivePaneAgentId, derivePaneWindowName, toBareAgentId, toPrefixedAgent
 import type { JournalingRunner } from '../memory/session-tracker.js';
 import type { MessageQueue } from '../core/queue.js';
 
+/** Footer line of Claude Code's interactive permission dialog ("Esc to cancel · Tab to amend"), observed in live captures — see the E51 epic. */
+const PERMISSION_DIALOG_PATTERN = /esc to cancel/i;
+
 /**
  * S48.7 tuning constants — not exposed via config (mirrors LAUNCH_READY_TIMEOUT_MS
  * in pane.ts, which is also a fixed constant rather than a config field).
@@ -383,22 +386,33 @@ export class PoolManager {
    *
    * Returns `'resolved'` after sending the keystroke, or `'stale'` (no
    * keystroke sent) when: no lease row exists for `agentId` in this pool,
-   * the row isn't currently `leased`, or (`expectedConversationId` given)
-   * the lease has moved on to a different conversation since the request
-   * was raised.
+   * the row isn't currently `leased`, (`expectedConversationId` given) the
+   * lease has moved on to a different conversation since the request was
+   * raised, or the pane no longer shows a permission dialog — someone
+   * already answered it at the terminal, or the turn moved on. That last
+   * check matters because `Escape` sent to a pane that is NOT at a dialog
+   * interrupts its live turn, and `Enter` would submit whatever is in its
+   * input box.
    */
   async resolveApproval(
     agentId: string,
     expectedConversationId: string | null,
     decision: 'approve' | 'deny',
-  ): Promise<'resolved' | 'stale'> {
+  ): Promise<{ result: 'resolved'; key: string } | { result: 'stale'; reason: string }> {
     const leaseRow = this.leaseStore.findByAgent(this.poolId, toPrefixedAgentId(agentId));
-    if (!leaseRow || leaseRow.state !== 'leased') return 'stale';
-    if (expectedConversationId && leaseRow.conversation_id !== expectedConversationId) return 'stale';
+    if (!leaseRow || leaseRow.state !== 'leased') return { result: 'stale', reason: 'pane is no longer leased' };
+    if (expectedConversationId && leaseRow.conversation_id !== expectedConversationId) {
+      return { result: 'stale', reason: 'pane lease moved to another conversation' };
+    }
+
+    const screen = await this.tmux.capturePane(leaseRow.pane_id, 30);
+    if (!PERMISSION_DIALOG_PATTERN.test(screen)) {
+      return { result: 'stale', reason: 'no permission dialog showing in the pane' };
+    }
 
     const key = decision === 'approve' ? 'Enter' : 'Escape';
     await this.tmux.sendKeys(leaseRow.pane_id, key);
-    return 'resolved';
+    return { result: 'resolved', key };
   }
 
   /**

@@ -105,13 +105,40 @@ export class ApprovalStore {
    * a no-op (does not throw) if the row is already resolved/expired/stale —
    * this is what makes "Chris answered at the terminal directly" race-safe.
    */
-  resolve(id: string, status: ApprovalStatus, resolvedBy: string, now: Date = new Date()): boolean {
+  resolve(
+    id: string,
+    status: ApprovalStatus,
+    resolvedBy: string,
+    now: Date = new Date(),
+    extraContext?: Record<string, unknown>,
+  ): boolean {
+    const row = extraContext ? this.getById(id) : null;
+    const rawContext = row ? mergeContext(row.raw_context, extraContext!) : null;
     const result = this.db
       .prepare(
-        `UPDATE approval_requests SET status = ?, resolved_at = ?, resolved_by = ? WHERE id = ? AND status = 'pending'`,
+        `UPDATE approval_requests
+         SET status = ?, resolved_at = ?, resolved_by = ?, raw_context = COALESCE(?, raw_context)
+         WHERE id = ? AND status = 'pending'`,
       )
-      .run(status, now.toISOString(), resolvedBy, id);
+      .run(status, now.toISOString(), resolvedBy, rawContext, id);
     return result.changes > 0;
+  }
+
+  /**
+   * The still-`pending` row for the same backend target and the same
+   * tool/summary, if any — lets the reception endpoint collapse a repeated
+   * hook firing for one unanswered prompt into one notification instead of
+   * spamming the human's phone.
+   */
+  findPendingDuplicate(adapterId: string, agentId: string, toolName: string, summary: string): ApprovalRequest | null {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM approval_requests
+         WHERE status = 'pending' AND adapter_id = ? AND agent_id = ? AND tool_name = ? AND summary = ?
+         ORDER BY requested_at DESC LIMIT 1`,
+      )
+      .get(adapterId, agentId, toolName, summary) as ApprovalRequest | undefined;
+    return row ?? null;
   }
 
   /**

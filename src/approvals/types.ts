@@ -56,3 +56,10 @@ export interface ApprovalRequestInput {
   /** Arbitrary JSON-serializable context — stored verbatim as `raw_context`. */
   context?: unknown;
 }
+
+/**
+ * How long a request stays answerable before the sweep expires it. Long
+ * enough to see and tap on a phone, short enough that a pane isn't blocked
+ * all day. Not yet configurable.
+ */
+export const APPROVAL_TIMEOUT_MS = 15 * 60 * 1000;

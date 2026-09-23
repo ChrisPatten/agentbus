@@ -163,3 +163,45 @@ describe('ApprovalStore', () => {
     expect(store.getById(row.id)!.notify_message_id).toBeNull();
   });
 });
+
+describe('ApprovalStore.resolve extraContext', () => {
+  it('merges extra context into raw_context on resolution', () => {
+    const store = new ApprovalStore(makeDb());
+    const row = store.insert({ ...baseInput, context: { cwd: '/x' } }, 60_000);
+
+    store.resolve(row.id, 'approved', 'chris', new Date(), { keys_sent: 'Enter' });
+
+    expect(JSON.parse(store.getById(row.id)!.raw_context!)).toEqual({ cwd: '/x', keys_sent: 'Enter' });
+  });
+
+  it('leaves raw_context alone when no extra context is given', () => {
+    const store = new ApprovalStore(makeDb());
+    const row = store.insert({ ...baseInput, context: { cwd: '/x' } }, 60_000);
+
+    store.resolve(row.id, 'denied', 'chris');
+
+    expect(JSON.parse(store.getById(row.id)!.raw_context!)).toEqual({ cwd: '/x' });
+  });
+});
+
+describe('ApprovalStore.findPendingDuplicate', () => {
+  it('finds a pending row for the same target, tool and summary', () => {
+    const store = new ApprovalStore(makeDb());
+    const row = store.insert(baseInput, 60_000);
+
+    const dup = store.findPendingDuplicate(baseInput.adapterId, baseInput.agentId, baseInput.toolName, baseInput.summary);
+
+    expect(dup?.id).toBe(row.id);
+  });
+
+  it('ignores resolved rows and rows for a different summary', () => {
+    const store = new ApprovalStore(makeDb());
+    const row = store.insert(baseInput, 60_000);
+    store.resolve(row.id, 'approved', 'chris');
+    store.insert({ ...baseInput, summary: 'something else' }, 60_000);
+
+    expect(
+      store.findPendingDuplicate(baseInput.adapterId, baseInput.agentId, baseInput.toolName, baseInput.summary),
+    ).toBeNull();
+  });
+});

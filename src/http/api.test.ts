@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import type { FastifyInstance } from 'fastify';
 import { randomUUID } from 'node:crypto';
@@ -37,9 +37,9 @@ const stubConfig = {
 } as unknown as AppConfig;
 
 async function makeServer(
-  opts: { poolManagers?: Map<string, PoolManager> } = {},
+  opts: { poolManagers?: Map<string, PoolManager>; db?: Database.Database } = {},
 ): Promise<{ server: FastifyInstance; queue: MessageQueue; db: Database.Database; registry: AdapterRegistry }> {
-  const db = makeDb();
+  const db = opts.db ?? makeDb();
   const queue = new MessageQueue(db);
   const registry = new AdapterRegistry();
   const pipeline = new PipelineEngine(); // no-op pipeline for existing tests
@@ -2032,5 +2032,184 @@ describe('POST /api/v1/pool/:agentId/turn-ended', () => {
     });
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body)).toEqual({ ok: true });
+  });
+});
+
+// ── Approval requests (E51) ──────────────────────────────────────────────────
+
+describe('approval requests (E51)', () => {
+  const DIALOG = 'Do you want to proceed?\n ❯ 1. Yes\n   2. No\nEsc to cancel · Tab to amend';
+  let server: FastifyInstance;
+
+  afterEach(async () => {
+    await server.close();
+  });
+
+  function makeCfg(): CcPoolInstanceConfig {
+    return {
+      name: null,
+      agent_id: 'peggy',
+      tmux_session: 'peggy-pool',
+      panes: 1,
+      growth: 'fixed',
+      max_panes: 1,
+      claude_bin: '/usr/local/bin/claude',
+      model: undefined,
+      working_dir: '/work/dir',
+      launch_args: [],
+      poll_interval_ms: 1000,
+      system_prompt: undefined,
+      lease: { idle_evict_ms: 1_800_000, hard_idle_ms: 21_600_000, park_timeout_ms: 300_000 },
+      on_evict: 'clear',
+      launch_ack_delay_ms: 500,
+      launch_ack_max_attempts: 3,
+      launch_ack_pattern: 'experimental',
+      pane_env: {},
+    };
+  }
+
+  /** A server over one leased cc-pool pane (session "sess-1", conversation conv-a) with a notifying stub adapter. */
+  async function setup(opts: { notify?: boolean } = {}) {
+    const db = makeDb();
+    const sendKeys = vi.fn(async (_target: string, _keys: string) => {});
+    const manager = new PoolManager({
+      cfg: makeCfg(),
+      db,
+      busBaseUrl: 'http://127.0.0.1:3000',
+      paneLauncher: { launch: async () => {}, release: async () => {} },
+      tmux: {
+        ensureSession: async () => {},
+        listWindows: async () => [],
+        createWindow: async () => '',
+        killWindow: async () => {},
+        sendKeys,
+        sendCommand: async () => {},
+        paneAlive: async () => true,
+        paneCommand: async () => null,
+        capturePane: async () => DIALOG,
+      },
+    });
+    manager.leaseStore.seedPanes('peggy', [{ paneId: 'peggy-pool:1', agentId: 'agent:peggy-pool-1' }]);
+    const acquired = manager.leaseStore.acquire('peggy', 'conv-a', {
+      poolAgentId: 'peggy',
+      panes: 1,
+      maxPanes: 1,
+      growth: 'fixed',
+      idleEvictMs: 1_800_000,
+    });
+    if (acquired.kind !== 'bound') throw new Error('test setup: expected "bound"');
+    manager.leaseStore.confirmReady('peggy', acquired.lease.pane_id);
+    manager.leaseStore.setClaudeSessionId('peggy', acquired.lease.pane_id, 'sess-1');
+    db.prepare(
+      `INSERT INTO sessions (id, conversation_id, channel, contact_id, started_at, last_activity, message_count)
+       VALUES (?, 'conv-a', 'telegram', 'chris', ?, ?, 0)`,
+    ).run(randomUUID(), new Date().toISOString(), new Date().toISOString());
+
+    const notified: unknown[] = [];
+    const made = await makeServer({ poolManagers: new Map([['agent:peggy', manager]]), db });
+    server = made.server;
+    made.registry.register({
+      id: 'telegram',
+      name: 'telegram',
+      capabilities: { send: true, interactiveApproval: opts.notify !== false, channels: ['telegram'] },
+      start: async () => {},
+      stop: async () => {},
+      health: async () => ({ status: 'healthy' as const }),
+      send: async () => ({ success: true }),
+      notifyApproval: async (req) => {
+        notified.push(req);
+        return { channel: 'telegram', messageId: '12345:9' };
+      },
+    });
+    return { sendKeys, notified, db };
+  }
+
+  const body = { adapterId: 'cc-pool', sessionId: 'sess-1', toolName: 'Bash', summary: 'rm -rf build/' };
+  const post = (payload: unknown) => server.inject({ method: 'POST', url: '/api/v1/approvals', payload: payload as object });
+
+  it('creates a pending request from a session id, notifies the addressed contact, and records the message ref', async () => {
+    const { notified } = await setup();
+
+    const res = await post(body);
+
+    expect(res.statusCode).toBe(200);
+    const { id } = JSON.parse(res.body) as { id: string };
+    expect(notified).toHaveLength(1);
+    const got = await server.inject({ method: 'GET', url: `/api/v1/approvals/${id}` });
+    expect(JSON.parse(got.body).approval).toMatchObject({
+      status: 'pending',
+      agent_id: 'peggy-pool-1',
+      contact_id: 'chris',
+      conversation_id: 'conv-a',
+      notify_message_id: '12345:9',
+    });
+  });
+
+  it('collapses a repeat of the same still-pending request into one notification', async () => {
+    const { notified } = await setup();
+
+    const first = JSON.parse((await post(body)).body) as { id: string };
+    const second = JSON.parse((await post(body)).body) as { id: string; duplicate?: boolean };
+
+    expect(second.id).toBe(first.id);
+    expect(second.duplicate).toBe(true);
+    expect(notified).toHaveLength(1);
+  });
+
+  it('marks the request stale, with a reason, when no adapter can notify', async () => {
+    await setup({ notify: false });
+
+    const { id } = JSON.parse((await post(body)).body) as { id: string };
+
+    const got = JSON.parse((await server.inject({ method: 'GET', url: `/api/v1/approvals/${id}` })).body);
+    expect(got.approval.status).toBe('stale');
+    expect(got.approval.raw_context).toContain('interactiveApproval');
+  });
+
+  it('rejects a body with neither agentId nor sessionId (400)', async () => {
+    await setup();
+    expect((await post({ adapterId: 'cc-pool', toolName: 'Bash', summary: 'x' })).statusCode).toBe(400);
+  });
+
+  it('returns 422 for a session that belongs to no pane', async () => {
+    await setup();
+    expect((await post({ ...body, sessionId: 'unknown' })).statusCode).toBe(422);
+  });
+
+  it('lists requests, filtered by status', async () => {
+    await setup();
+    await post(body);
+
+    const pending = JSON.parse((await server.inject({ method: 'GET', url: '/api/v1/approvals?status=pending' })).body);
+    const approved = JSON.parse((await server.inject({ method: 'GET', url: '/api/v1/approvals?status=approved' })).body);
+
+    expect(pending.approvals).toHaveLength(1);
+    expect(approved.approvals).toHaveLength(0);
+    expect((await server.inject({ method: 'GET', url: '/api/v1/approvals?status=bogus' })).statusCode).toBe(400);
+  });
+
+  it('resolve sends Enter into the pane for approve and reports the outcome', async () => {
+    const { sendKeys } = await setup();
+    const { id } = JSON.parse((await post(body)).body) as { id: string };
+
+    const res = await server.inject({
+      method: 'POST',
+      url: `/api/v1/approvals/${id}/resolve`,
+      payload: { decision: 'approve', resolvedBy: 'contact:chris' },
+    });
+
+    expect(JSON.parse(res.body)).toMatchObject({ ok: true, outcome: 'approved' });
+    expect(sendKeys).toHaveBeenCalledExactlyOnceWith('peggy-pool:1', 'Enter');
+  });
+
+  it('resolve validates the decision and 404s an unknown id', async () => {
+    await setup();
+    const { id } = JSON.parse((await post(body)).body) as { id: string };
+
+    const bad = await server.inject({ method: 'POST', url: `/api/v1/approvals/${id}/resolve`, payload: { decision: 'maybe' } });
+    const missing = await server.inject({ method: 'POST', url: '/api/v1/approvals/nope/resolve', payload: { decision: 'deny' } });
+
+    expect(bad.statusCode).toBe(400);
+    expect(missing.statusCode).toBe(404);
   });
 });

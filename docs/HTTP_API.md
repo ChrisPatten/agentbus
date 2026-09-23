@@ -23,6 +23,10 @@ Set `bus.host: 0.0.0.0` to accept connections from other hosts, for example a re
 | GET | `/api/v1/health` | Liveness, adapter health, queue counts |
 | GET | `/api/v1/pool` | cc-pool pane leases and parked-queue depth (when configured) |
 | POST | `/api/v1/pool/:agentId/turn-ended` | Real-time pane activity signal, fed by a `Stop` hook |
+| POST | `/api/v1/approvals` | Raise an interactive-approval request for a blocked pane |
+| GET | `/api/v1/approvals` | List approval requests, optionally by status |
+| GET | `/api/v1/approvals/:id` | Fetch one approval request |
+| POST | `/api/v1/approvals/:id/resolve` | Answer an approval request |
 | POST | `/api/v1/inbound` | Submit an inbound message to the pipeline |
 | POST | `/api/v1/webhooks/pebble` | Pebble Ring voice-memo ingress (when configured) |
 | POST | `/api/v1/siri/ask` | Siri ask: submit a question and wait for the agent's reply (when configured) |
@@ -137,6 +141,38 @@ Real-time correction to a pane's `last_activity_at`, meant to be called from a C
 | `session_id` | Yes (to have any effect) | The pane's `claude_session_id`; matched against `pool_leases` |
 
 Fire-and-forget, like `/typing` and `/tool-status`: always `200 { "ok": true }`, silently a no-op if the pool or a matching pane isn't found. Does not decide journal-worthiness or run any journaling turn — see [CC_POOL_ADAPTER.md#session-tracker-interaction](CC_POOL_ADAPTER.md#session-tracker-interaction) for that separate, still-open gap.
+
+## Approvals
+
+Human-in-the-loop answers for blocked agents. See [APPROVALS.md](APPROVALS.md) for the flow.
+
+### `POST /api/v1/approvals`
+
+Raises a request and notifies the addressed contact before returning. Called by the `PermissionRequest` hook.
+
+| Field | Required | Notes |
+|---|---|---|
+| `adapterId` | Yes | The backend raising it. Only `cc-pool` is supported. |
+| `sessionId` | One of `sessionId`/`agentId` | The pane's `claude_session_id`. The pane is recovered from `pool_leases`. |
+| `agentId` | One of `sessionId`/`agentId` | The pane's bare agent id, e.g. `peggy-pool-1`. |
+| `conversationId` | No | Used only if the pane has no live lease. |
+| `toolName` | Yes | e.g. `Bash`. |
+| `summary` | Yes | One line, up to 1000 characters. |
+| `context` | No | Any JSON. Stored as `raw_context`. |
+
+Returns `200 { ok, id, status }`. `status` is `stale` if no adapter could notify. A repeat of a still-pending request for the same pane, tool, and summary returns the existing `id` with `duplicate: true`. Returns `400` for a malformed body and `422` when the pane or contact can't be determined.
+
+### `GET /api/v1/approvals`
+
+`?status=` filters by `pending`, `approved`, `denied`, `expired`, or `stale`. Returns `{ ok, approvals }`, newest first.
+
+### `GET /api/v1/approvals/:id`
+
+Returns `{ ok, approval }`, or `404`.
+
+### `POST /api/v1/approvals/:id/resolve`
+
+Body: `{ "decision": "approve" | "deny", "resolvedBy": "<who>" }`. Sends the key into the pane if the request is still answerable. Returns `{ ok, outcome, approval }` where `outcome` is `approved`, `denied`, `stale`, `expired`, or `already_resolved`. `404` for an unknown id, `400` for a bad `decision`.
 
 ## Inbound
 

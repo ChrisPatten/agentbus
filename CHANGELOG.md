@@ -11,6 +11,18 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 ## [Unreleased]
 
 ### Added
+- **Answer a blocked pane's permission prompt from Telegram (E51).** When a
+  `cc-pool` pane hits an interactive permission dialog, the addressed contact
+  gets a Telegram DM with Approve/Deny buttons; tapping one sends `Enter` or
+  `Escape` into the pane. Adds the `approval_requests` table (migration 019),
+  `POST/GET /api/v1/approvals` and `POST /api/v1/approvals/:id/resolve`, the
+  `interactiveApproval` adapter capability, and
+  `scripts/hooks/agentbus_approval_hook.sh` (a `PermissionRequest` hook). A
+  request no one answers within 15 minutes expires. No key is sent if the
+  pane's dialog is already gone, its lease moved to another conversation, or
+  the tapping contact isn't the one asked. Requires registering the hook in
+  the pane project and relaunching its panes. See
+  [docs/APPROVALS.md](docs/APPROVALS.md).
 - **Agent-managed knowledge store, Phase 1 (E50).** New `knowledge` table
   (migration 018) with an FTS5 `knowledge_fts` search index, for the agent to
   store arbitrary-JSON records with an optional retrieval-cue `index_note`,
