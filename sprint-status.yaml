@@ -862,16 +862,37 @@ epics:
       Formal approval requests: a cc-pool pane's PermissionRequest hook raises
       a request, the addressed contact answers with Telegram Approve/Deny
       buttons, and the answer is sent into the pane with tmux send-keys.
-      approval_requests table (migration 019). Implemented on
-      feat/e51-approval-requests; not yet merged. Remaining: S51.5 hook
-      registration in the pane project (peggy-claude-code) and a live
-      end-to-end check, plus operator sign-off on the 15-minute timeout.
+      approval_requests table (migration 019). Merged to dev and live in
+      bus-core as of 2026-09-23; the hook is registered in peggy-claude-code.
+      Remaining: a live end-to-end check with a real permission prompt, and
+      operator sign-off on the 15-minute timeout. Known gap: system-channel
+      conversations have no human contact, so their requests are dropped or
+      stale (see E52).
     stories:
       S51.1: complete  # approval_requests table + POST/GET /api/v1/approvals
       S51.2: complete  # interactiveApproval capability + dispatch
       S51.3: complete  # Telegram inline keyboard + callback_query handling
       S51.4: complete  # cc-pool resolution (Enter/Escape, staleness checks)
-      S51.5: in-progress  # hook written and pipe-tested; not yet registered in the pane project
+      S51.5: complete  # hook written, pipe-tested, registered in peggy-claude-code
       S51.6: complete  # expiry sweep + message cleanup, on the 60s maintenance tick
       S51.7: complete  # docs/APPROVALS.md
-last_updated: 2026-09-23  # E51 (approval requests) implemented on feat/e51-approval-requests except live hook registration; not yet merged. Prior note preserved: E49 (context-block ledger) + E50 (agent-managed knowledge store, Phase 1) implemented end-to-end on claude/agent-knowledge-database-xiqn29, not yet merged, not yet pushed. Both from a design spike (_bmad-output/planning-artifacts/design-spike-agent-knowledge-store.md) worked out conversationally with the operator. Prior note preserved: 2026-09-17  # E48 (interactive Claude Code session pool over tmux) implemented end-to-end and marked complete — all 10 stories, on feat/e48-cc-session-pool, not yet merged to dev/main. current_epic stays E42/E44 (Siri Bridge) since that's the operator's ongoing focus; E48 was a self-contained side branch, now finished. Prior note preserved: Backfilled E36, E38, E39, E40 (complete, merged to dev 2026-08-31/09-01) and E37, E41 (pending, epic files only). Added the Siri Bridge package E42–E47 (renumbered from E36–E41 on arrival to avoid the collision): E42 complete, E44 in-progress (S44.5 on-device is the operator's), E43/E45/E46/E47 pending. E23's S23.5 still pending operator sign-off.
+  E52:
+    status: pending
+    notes: >
+      Pool pane watchdog: detect a leased cc-pool pane that has unhandled work
+      and a static screen, classify it (known blocking screen, delivered but
+      never woken, frozen mid-turn), alert, and auto-answer known-safe
+      screens. Backstop for what E51 (permission dialogs) does not cover,
+      including system-channel conversations with no human to notify.
+      Alerts to the Telegram DM (system-channel stalls too), 5 minute
+      threshold, auto-answer must alert if it fails, recycle deferred. Ships
+      observe-only first so patterns come from captured screens. Epic file
+      only; not started.
+    stories:
+      S52.1: pending  # Screen sampler + stall detector, observe-only
+      S52.2: pending  # last_turn_ended_at + unhandled-work query
+      S52.3: pending  # Classifier + pattern table (from captured screens)
+      S52.4: pending  # Actions: alert, auto-answer (alerts if it fails)
+      S52.5: pending  # Observability: /pool, incidents endpoint
+      S52.6: pending  # Docs
+last_updated: 2026-09-23  # E52 (pool pane watchdog) epic written, not started. Prior note preserved: E51 (approval requests) merged to dev and live, awaiting a real end-to-end check. Prior note preserved: E49 (context-block ledger) + E50 (agent-managed knowledge store, Phase 1) implemented end-to-end on claude/agent-knowledge-database-xiqn29, not yet merged, not yet pushed. Both from a design spike (_bmad-output/planning-artifacts/design-spike-agent-knowledge-store.md) worked out conversationally with the operator. Prior note preserved: 2026-09-17  # E48 (interactive Claude Code session pool over tmux) implemented end-to-end and marked complete — all 10 stories, on feat/e48-cc-session-pool, not yet merged to dev/main. current_epic stays E42/E44 (Siri Bridge) since that's the operator's ongoing focus; E48 was a self-contained side branch, now finished. Prior note preserved: Backfilled E36, E38, E39, E40 (complete, merged to dev 2026-08-31/09-01) and E37, E41 (pending, epic files only). Added the Siri Bridge package E42–E47 (renumbered from E36–E41 on arrival to avoid the collision): E42 complete, E44 in-progress (S44.5 on-device is the operator's), E43/E45/E46/E47 pending. E23's S23.5 still pending operator sign-off.
