@@ -49,6 +49,30 @@ describe('migration 020 — pane watchdog', () => {
     expect(row.last_turn_ended_at).toBeNull();
   });
 
+  it('backfills last_turn_ended_at for panes already leased, so old acks are not "unhandled"', () => {
+    const db = new Database(':memory:');
+    runMigrations(db);
+    // Rewind to the pre-020 state, with one leased and one free pane.
+    db.exec(`DROP TABLE pane_incidents; ALTER TABLE pool_leases DROP COLUMN last_turn_ended_at;`);
+    db.prepare(`DELETE FROM schema_migrations WHERE version = 20`).run();
+    const ins = db.prepare(
+      `INSERT INTO pool_leases (pool_id, pane_id, agent_id, state, leased_at) VALUES ('peggy', ?, ?, ?, '2026-09-23T18:00:00.000Z')`,
+    );
+    ins.run('peggy-pool:1', 'agent:peggy-pool-1', 'leased');
+    ins.run('peggy-pool:2', 'agent:peggy-pool-2', 'free');
+
+    runMigrations(db);
+
+    const rows = Object.fromEntries(
+      (db.prepare(`SELECT pane_id, last_turn_ended_at AS t FROM pool_leases`).all() as Array<{ pane_id: string; t: string | null }>).map(
+        (r) => [r.pane_id, r.t],
+      ),
+    );
+    expect(rows['peggy-pool:1']).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    expect(rows['peggy-pool:1']! > '2026-09-23T18:00:00.000Z').toBe(true);
+    expect(rows['peggy-pool:2']).toBeNull();
+  });
+
   it('is idempotent across repeated runMigrations calls', () => {
     const db = migrated();
     expect(() => runMigrations(db)).not.toThrow();

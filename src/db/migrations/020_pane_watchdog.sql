@@ -12,6 +12,14 @@
 
 ALTER TABLE pool_leases ADD COLUMN last_turn_ended_at TEXT;
 
+-- Nothing recorded turn ends before this migration, so a pane leased earlier
+-- would look like it has every message since its lease began still unhandled.
+-- Treat everything acked before now as handled. The timestamp format matches
+-- Date.toISOString(), which acked_at and leased_at use.
+UPDATE pool_leases
+   SET last_turn_ended_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+ WHERE state IN ('leased', 'draining');
+
 CREATE TABLE IF NOT EXISTS pane_incidents (
   id               TEXT PRIMARY KEY,
   pool_id          TEXT NOT NULL,

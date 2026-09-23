@@ -60,6 +60,11 @@ Every field of `adapters.cc-pool`:
 | `launch_ack_max_attempts` | number | `3` | Maximum `Enter` presses to dismiss the ack prompt, once it's confirmed showing, before giving up. |
 | `launch_ack_pattern` | string | `"loading development channels"` | Text matched (case-insensitively) in pane output to detect the ack prompt — the real prompt's header reads "WARNING: Loading development channels". Override if a CLI update rewords it. |
 | `pane_env` | map of string to string | `{}` | Extra environment variables set at window-creation time (`tmux new-window -e`). `TERM` and `COLORTERM` are always added on top, unconditionally. |
+| `watchdog.enabled` | boolean | `true` | Turns the stall watchdog on or off. |
+| `watchdog.observe_only` | boolean | `true` | Reserved for the alert and answer stories. Detection is always observe-only today. |
+| `watchdog.sample_interval_ms` | number (ms) | `30000` | How often the watchdog samples leased panes. |
+| `watchdog.stall_after_ms` | number (ms) | `300000` (5 min) | How long unhandled work and an unchanged screen must both persist before a pane counts as stalled. |
+| `watchdog.alert_contact` | string | unset | Contact to alert about a stall. Not used yet. |
 
 ### Single instance vs. named instances
 
@@ -277,6 +282,33 @@ The `Stop` hook that feeds it is [`scripts/hooks/agentbus_stop_hook.sh`](../scri
 `POST /api/v1/inbound` (and every other inbound entry point) fully `await`s the pipeline, including `pool-route-resolve`, before responding — so `{"ok":true,"enqueued_count":1}` genuinely means Stage 72 finished resolving a route and Stage 80's fan-out enqueue succeeded. What it does **not** tell you is which of `reuse`/`bound`/`grow`/`evict`/`exhausted` that resolution landed on. A `bound`/`grow`/`evict` result blocks the response on the full pane `launch()` (ack handshake + readiness poll, up to the 30s launch timeout) before it can return — so if you see an immediate, fast response for a message on a pool that's currently mid-launch (a pane in `launching` state in `/pool`), that response is for a message that hit the `exhausted` branch and was parked; it did **not** wait on, and says nothing about the outcome of, whatever launch is already in flight for that pool. Check `/pool`'s per-pane `state` (or `GET /api/v1/pool`), not just an inbound response's `ok`/`enqueued_count`, to know whether a pool is actually able to seat a conversation right now.
 
 Similarly, `message_queue.status` for a message parked to `agent:<agent_id>__parked` is not a reliable signal of whether that conversation ever actually reached a live pane. The park-queue drain (`PoolManager.drainParked()`, on every sweep tick) retries still-exhausted messages by **re-enqueueing a fresh copy under a new message id** and `ack()`-ing the old row purely to satisfy `ack()`'s "must be `processing`" precondition — `ack()`'s only status transition is `processing → delivered`, there is no dedicated "requeued"/"superseded" status. So a parked message's original row will show `status: "delivered"` after its very first re-park cycle (at most one `sweepIntervalMs`, 60s by default, after it was first parked) even though the conversation is, in current fact, still sitting in the parked queue — just under a different row id. This is expected, not a bug: don't infer "this conversation's message actually reached its agent" from one row's `status` by id alone. To check whether a conversation is genuinely still parked, use `/pool`'s `parked:` count/oldest-age for that pool, or `PoolManager.parkedStatus()`, not a single historical message id.
+
+## Stall watchdog
+
+The watchdog finds leased panes that have stopped making progress and records each as an incident. Detection is observe-only so far: it sends no alerts and presses no keys in a pane.
+
+A pane is stalled when all of these hold:
+
+- It is `leased` and has unhandled work older than `watchdog.stall_after_ms`. Unhandled work is a message `cc.ts` acked (delivered, not necessarily handled) with no `Stop`-hook turn-end signal since.
+- Its captured screen (`capture-pane`, last 40 lines, hashed as-is) has not changed for `watchdog.stall_after_ms`. The hash keeps spinners and elapsed timers, because a moving timer means the pane is alive. Tracking is in memory, so a bus-core restart restarts the clock.
+- No `pending` approval request exists for the pane. Permission dialogs belong to [approvals](APPROVALS.md).
+
+An idle pane has no unhandled work, so it never matches.
+
+Turn ends are recorded from the `Stop` hook (`/turn-ended`), which is why the pane project needs that hook registered. Migration 020 treats every message acked before it ran as handled, so panes already leased at deploy don't report stalls for old messages.
+
+A stall inserts one row in `pane_incidents` with class `unknown_blocked`, the full screen text, the conversation, and `unhandled_since`, and logs a `[pool:<id>] watchdog:` warning. Only one incident is open per pane. It resolves as `recovered` when the screen changes or the unhandled work clears, and as `released` when the lease ends or moves to another conversation. The screen snapshot stays in the local database.
+
+### Known false positives
+
+- **A turn ended by a user interrupt** may not fire the `Stop` hook. The pane then sits at an idle prompt with a delivered message and no recorded turn end, and looks stalled after `stall_after_ms`.
+
+### Not yet verified
+
+- Whether the `Stop` hook fires for a turn ended by an interrupt or a permission denial. The false positive above depends on it.
+- A working pane's captured screen changes between samples. An idle pane's screen was confirmed identical across captures 35 seconds apart.
+- What an idle-prompt stall (message acked, no turn started) looks like on screen.
+- The text of the working-turn indicator.
 
 ## Attaching to a pane by hand
 

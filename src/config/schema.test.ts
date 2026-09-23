@@ -696,3 +696,47 @@ describe('journalingThresholdForChannel (E20)', () => {
     expect(journalingThresholdForChannel(t, 'sms')).toBe(900_000);
   });
 });
+
+describe('cc-pool watchdog config', () => {
+  const parse = (watchdog?: unknown) =>
+    AppConfigSchema.safeParse({
+      bus: { db_path: ':memory:' },
+      adapters: {
+        'cc-pool': {
+          agent_id: 'peggy',
+          tmux_session: 'peggy-pool',
+          claude_bin: '/usr/local/bin/claude',
+          ...(watchdog === undefined ? {} : { watchdog }),
+        },
+      },
+      memory: {},
+    });
+
+  it('leaves watchdog undefined when omitted', () => {
+    const r = parse();
+    expect(r.success).toBe(true);
+    if (r.success) expect(getCcPoolInstances(r.data)[0]!.watchdog).toBeUndefined();
+  });
+
+  it('accepts valid values', () => {
+    const r = parse({
+      enabled: false,
+      observe_only: true,
+      sample_interval_ms: 1000,
+      stall_after_ms: 60000,
+      alert_contact: 'chris',
+    });
+    expect(r.success).toBe(true);
+  });
+
+  it.each([
+    [{ sample_interval_ms: 0 }],
+    [{ stall_after_ms: -5 }],
+    [{ stall_after_ms: 1.5 }],
+    [{ enabled: 'yes' }],
+    [{ observe_only: 1 }],
+    [{ alert_contact: 42 }],
+  ])('rejects invalid watchdog %j', (wd) => {
+    expect(parse(wd).success).toBe(false);
+  });
+});

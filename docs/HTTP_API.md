@@ -134,13 +134,13 @@ When no `cc-pool` instances are configured at all, always returns `200 { "ok": t
 
 ### `POST /api/v1/pool/:agentId/turn-ended`
 
-Real-time correction to a pane's `last_activity_at`, meant to be called from a Claude Code `Stop` hook (fires after every assistant turn) on the pane's own `claude` process — `last_activity_at` is otherwise only bumped when a message is routed in, so a long turn looks idle before it actually is. `:agentId` is the pool's bare agent id (e.g. `peggy`).
+Real-time correction to a pane's `last_activity_at`, which also records `last_turn_ended_at`, meant to be called from a Claude Code `Stop` hook (fires after every assistant turn) on the pane's own `claude` process — `last_activity_at` is otherwise only bumped when a message is routed in, so a long turn looks idle before it actually is. `:agentId` is the pool's bare agent id (e.g. `peggy`).
 
 | Field | Required | Notes |
 |---|---|---|
 | `session_id` | Yes (to have any effect) | The pane's `claude_session_id`; matched against `pool_leases` |
 
-Fire-and-forget, like `/typing` and `/tool-status`: always `200 { "ok": true }`, silently a no-op if the pool or a matching pane isn't found. Does not decide journal-worthiness or run any journaling turn — see [CC_POOL_ADAPTER.md#session-tracker-interaction](CC_POOL_ADAPTER.md#session-tracker-interaction) for that separate, still-open gap.
+Fire-and-forget, like `/typing` and `/tool-status`: always `200 { "ok": true }`, silently a no-op if the pool or a matching pane isn't found. The pane stall watchdog compares `last_turn_ended_at` against message acks to detect a pane that received a message but never finished a turn; the timestamp is cleared when the pane is leased to a new conversation or released. Does not decide journal-worthiness or run any journaling turn — see [CC_POOL_ADAPTER.md#session-tracker-interaction](CC_POOL_ADAPTER.md#session-tracker-interaction) for that separate, still-open gap.
 
 ## Approvals
 

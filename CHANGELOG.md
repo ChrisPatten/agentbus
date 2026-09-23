@@ -11,6 +11,18 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 ## [Unreleased]
 
 ### Added
+- **Stall watchdog for `cc-pool` panes, observe-only (E52, S52.1–S52.2).**
+  A leased pane with unhandled work and a screen unchanged for
+  `watchdog.stall_after_ms` (default 5 minutes) is recorded as an incident in
+  the new `pane_incidents` table (migration 020), with the full screen
+  snapshot kept locally. Panes with a pending approval request are excluded.
+  It never sends keys and sends no alerts yet. The `/turn-ended` Stop hook now
+  also records `pool_leases.last_turn_ended_at`, which is compared against
+  message acks to decide what is unhandled; the migration treats messages acked
+  before it as handled. New optional config: `adapters.cc-pool.watchdog`
+  (`enabled`, `observe_only`, `sample_interval_ms`, `stall_after_ms`,
+  `alert_contact`). See the "Stall watchdog" section of
+  [docs/CC_POOL_ADAPTER.md](docs/CC_POOL_ADAPTER.md).
 - **Makefile targets for pool debugging and development.** `make pool`,
   `pool-capture`, `pool-attach`, and `approvals` inspect cc-pool panes and
   approval requests; `health`, `logs-err`, and `safe-restart` cover operating
