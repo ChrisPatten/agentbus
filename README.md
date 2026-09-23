@@ -39,6 +39,7 @@ For a managed deployment (pm2, log files, restart on reboot), see [docs/DEPLOYME
 npx tsc --noEmit     # type-check
 npx vitest run       # run all tests
 make dev             # run bus-core with AGENTBUS_CONFIG
+make check           # type-check, then run all tests
 make help            # list Makefile targets
 ```
 

@@ -91,13 +91,38 @@ bus-core runs as one pm2-managed process. Platform adapters (Telegram, email, th
 |---|---|
 | `make start` | Start or restart `bus-core` under pm2 and save the process list |
 | `make stop` | Stop and remove `bus-core` from pm2 |
-| `make restart` | Restart `bus-core`. Use after config changes |
+| `make restart` | Restart `bus-core`, then wait up to 30 seconds for `/api/v1/health`. Use after config changes |
+| `make safe-restart` | Restart with a health check and automatic rollback to `main`. See `scripts/safe_restart.sh` |
 | `make status` | `pm2 describe bus-core` |
-| `make logs` | Tail the `bus-core` log |
+| `make logs` | Tail the `bus-core` log. `LINES=` sets the history (default 60) |
+| `make logs-err` | Tail the `bus-core` error log only |
+| `make health` | Print `GET /api/v1/health` |
 | `make dev` | Run in the foreground with `AGENTBUS_CONFIG` |
 | `make debug-payloads` | Run in the foreground and log raw Telegram updates without forwarding them |
-| `make kill` | Kill a foreground `src/index.ts` process |
+| `make kill` | Stop pm2's `bus-core` and any foreground `bus-core` started from this checkout |
 | `make help` | List targets |
+
+### Pool and approvals
+
+| Target | What it does |
+|---|---|
+| `make pool` | Print `GET /api/v1/pool`: pane states and parked-queue depth |
+| `make pool-capture N=1` | Print pane 1's screen. `LINES=` sets how far back (default 60) |
+| `make pool-attach N=1` | Attach to pane 1, or switch to it when already inside tmux |
+| `make approvals` | List pending [approval requests](APPROVALS.md). `STATUS=` picks another status |
+
+`pool-capture` and `pool-attach` address `<POOL_SESSION>:<N>`. `POOL_SESSION` defaults to `peggy-pool`; set it to your `tmux_session`. `PANE=<tmux target>` replaces `N` for a pane outside that session, such as a grown pane.
+
+### Development
+
+| Target | What it does |
+|---|---|
+| `make test` | Run the full test suite |
+| `make test-one FILE=src/pool/pane.test.ts` | Run one test file |
+| `make typecheck` | `tsc --noEmit` |
+| `make check` | Type-check, then run the full test suite |
+
+The HTTP targets use `BUS_URL` (default `http://127.0.0.1:3000`) and send `BUS_TOKEN` as `X-Bus-Token` when it's set. Override them when `bus.http_port` differs or `bus.auth_token` is configured.
 
 `AGENTBUS_CONFIG=/path/to/config.yaml` overrides the config location for every target.
 

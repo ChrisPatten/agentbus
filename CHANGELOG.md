@@ -11,6 +11,12 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 ## [Unreleased]
 
 ### Added
+- **Makefile targets for pool debugging and development.** `make pool`,
+  `pool-capture`, `pool-attach`, and `approvals` inspect cc-pool panes and
+  approval requests; `health`, `logs-err`, and `safe-restart` cover operating
+  bus-core; `test`, `test-one`, `typecheck`, and `check` cover development.
+  `make restart` now waits for `/api/v1/health` and fails if the bus doesn't
+  come back. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#daily-operations).
 - **Answer a blocked pane's permission prompt from Telegram (E51).** When a
   `cc-pool` pane hits an interactive permission dialog, the addressed contact
   gets a Telegram DM with Approve/Deny buttons; tapping one sends `Enter` or
@@ -209,6 +215,11 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
   `channel`. `MessageEnvelope.topic` is a required field, so the segment is
   always present. Purely additive to the format; no other consumer of this
   string parses it. See [docs/CC_ADAPTER.md](docs/CC_ADAPTER.md#message-format).
+
+### Changed
+- `make kill` now also stops pm2's `bus-core`. Previously pm2 restarted the
+  process it had just killed. `make dev` and `make debug-payloads` use the
+  local `tsx` instead of `npx`.
 
 ## [0.12.0] - 2026-09-16
 
