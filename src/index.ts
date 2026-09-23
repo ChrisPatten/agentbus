@@ -51,6 +51,10 @@ import { Summarizer } from './memory/summarizer.js';
 import { SessionTracker } from './memory/session-tracker.js';
 import { Scheduler } from './scheduler/scheduler.js';
 import { AttachmentSweeper } from './media/attachment-sweeper.js';
+import { ApprovalStore } from './approvals/store.js';
+import { resolveApproval } from './approvals/resolve.js';
+import { sweepApprovals } from './approvals/sweep.js';
+import type { ApprovalDecision } from './approvals/types.js';
 
 const configPath = process.env['AGENTBUS_CONFIG'] ?? resolve(process.cwd(), 'config.yaml');
 
@@ -135,11 +139,19 @@ const httpServer = await createHttpServer({ queue, registry, config, pipeline, d
 
 const adapterDeps = { config, queue, pipeline, db, registry, commandRegistry, pauseSet };
 
+// Interactive approvals (E51): one store, shared by the Telegram button
+// handler, the HTTP routes (which build their own over the same db), and the
+// expiry sweep below.
+const approvalStore = new ApprovalStore(db);
+const resolveApprovalFn = (id: string, decision: ApprovalDecision, resolvedBy: string, onlyContactId?: string) =>
+  resolveApproval({ store: approvalStore, poolManagers }, id, decision, resolvedBy, undefined, onlyContactId);
+
 for (const inst of getTelegramInstances(config)) {
   const telegram = new TelegramAdapter({
     ...adapterDeps,
     instanceName: inst.name ?? undefined,
     instanceConfig: inst,
+    resolveApproval: resolveApprovalFn,
   });
   registry.register(telegram);
 }
@@ -198,6 +210,9 @@ const maintenanceTimer = setInterval(() => {
   if (recovered > 0) console.log(`[agentbus] Recovered ${recovered} stuck processing message(s)`);
   const swept = queue.sweepExpired();
   if (swept > 0) console.log(`[agentbus] Swept ${swept} expired message(s)`);
+  sweepApprovals({ registry, store: approvalStore }).catch((err) =>
+    console.error(`[agentbus] Approval sweep failed: ${String(err)}`),
+  );
 }, SWEEP_INTERVAL_MS);
 
 // ── Shutdown ─────────────────────────────────────────────────────────────────

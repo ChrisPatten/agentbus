@@ -1,9 +1,16 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi, type Mock } from 'vitest';
 import { mkdtempSync, rmSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
-import { pickLargestPhoto, extensionFor, resolveMediaConfig, buildDraftTrail, TelegramAdapter } from './telegram.js';
+import {
+  pickLargestPhoto,
+  extensionFor,
+  resolveMediaConfig,
+  buildDraftTrail,
+  TelegramAdapter,
+  type TelegramAdapterDeps,
+} from './telegram.js';
 import { runMigrations } from '../db/schema.js';
 import { upsertThread } from '../pipeline/thread-store.js';
 import { topicForThreadKey } from '../pipeline/types.js';
@@ -2017,5 +2024,203 @@ describe('TelegramAdapter finalizeDraft (/stop)', () => {
 
     expect(adapter.finalizeDraft('chris', 'Stopped by user')).toBe(false);
     expect(isTypingLoopActive(adapter, 12345)).toBe(false);
+  });
+});
+
+describe('TelegramAdapter interactive approvals (E51)', () => {
+  const REQUEST_ID = '11111111-2222-3333-4444-555555555555';
+  let adapter: TelegramAdapter;
+  let telegramFetch: ReturnType<typeof makeTelegramFetchMock>;
+  let resolveApproval: Mock<NonNullable<TelegramAdapterDeps['resolveApproval']>>;
+
+  function makeRequest(overrides: Partial<import('../approvals/types.js').ApprovalRequest> = {}) {
+    return {
+      id: REQUEST_ID,
+      adapter_id: 'cc-pool',
+      agent_id: 'peggy-pool-1',
+      conversation_id: 'conv-a',
+      contact_id: 'chris',
+      tool_name: 'Bash',
+      summary: 'rm -rf build/',
+      raw_context: null,
+      status: 'pending' as const,
+      requested_at: '2026-09-23T12:00:00.000Z',
+      resolved_at: null,
+      resolved_by: null,
+      notify_channel: null,
+      notify_message_id: null,
+      expires_at: '2026-09-23T12:15:00.000Z',
+      ...overrides,
+    };
+  }
+
+  function tap(fromId: number, data: string) {
+    return (adapter as unknown as { processUpdate: (u: unknown) => Promise<boolean> }).processUpdate({
+      update_id: 1,
+      callback_query: {
+        id: 'cbq-1',
+        from: { id: fromId, first_name: 'X' },
+        data,
+        message: { message_id: 77, chat: { id: 12345, type: 'private' }, date: 0 },
+      },
+    });
+  }
+
+  function bodyOf(call: unknown): Record<string, unknown> {
+    return JSON.parse((call as [string, { body: string }])[1].body) as Record<string, unknown>;
+  }
+
+  beforeEach(() => {
+    resolveApproval = vi.fn<NonNullable<TelegramAdapterDeps['resolveApproval']>>(async () => ({
+      outcome: 'approved' as const,
+      request: makeRequest({ status: 'approved', resolved_by: 'contact:chris' }),
+    }));
+    adapter = new TelegramAdapter({
+      config: makeTestConfig('/tmp/unused-e51'),
+      queue: {} as unknown as MessageQueue,
+      pipeline: {} as unknown as PipelineEngine,
+      db: {} as unknown as Database.Database,
+      instanceConfig: { token: 'test:token', poll_timeout: 30 },
+      resolveApproval,
+    });
+    telegramFetch = makeTelegramFetchMock();
+    vi.stubGlobal('fetch', telegramFetch.fn);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('asks Telegram to deliver callback_query updates (otherwise button taps never arrive)', async () => {
+    let requested: string[] = [];
+    const internals = adapter as unknown as { stopping: boolean; inboundLoop: () => Promise<void> };
+    telegramFetch.fn.mockImplementation((async (_url: string, init?: { body?: string }) => {
+      requested = (JSON.parse(init!.body!) as { allowed_updates: string[] }).allowed_updates;
+      internals.stopping = true;
+      return { ok: true, status: 200, json: async () => ({ ok: true, result: [] }) };
+    }) as never);
+
+    await internals.inboundLoop();
+
+    expect(requested).toContain('callback_query');
+  });
+
+  it('advertises interactiveApproval', () => {
+    expect(adapter.capabilities.interactiveApproval).toBe(true);
+  });
+
+  it('notifyApproval DMs the contact an Approve/Deny keyboard and returns the message ref', async () => {
+    const result = await adapter.notifyApproval(makeRequest());
+
+    const [call] = callsTo(telegramFetch.fn, 'sendMessage');
+    const body = bodyOf(call);
+    expect(body.chat_id).toBe(12345);
+    expect(body).not.toHaveProperty('parse_mode');
+    expect(String(body.text)).toContain('rm -rf build/');
+    expect(body.reply_markup).toEqual({
+      inline_keyboard: [
+        [
+          { text: 'Approve', callback_data: `approve:${REQUEST_ID}` },
+          { text: 'Deny', callback_data: `deny:${REQUEST_ID}` },
+        ],
+      ],
+    });
+    expect(result).toEqual({ channel: 'telegram', messageId: '12345:100' });
+  });
+
+  it('notifyApproval throws for a contact with no Telegram chat', async () => {
+    await expect(adapter.notifyApproval(makeRequest({ contact_id: 'nobody' }))).rejects.toThrow(/no Telegram chat/);
+    expect(callsTo(telegramFetch.fn, 'sendMessage')).toHaveLength(0);
+  });
+
+  it('finalizeApproval replaces the buttons with the outcome text', async () => {
+    await adapter.finalizeApproval(
+      makeRequest({ status: 'expired', resolved_by: 'timeout', notify_message_id: '12345:100' }),
+    );
+
+    const [call] = callsTo(telegramFetch.fn, 'editMessageText');
+    const body = bodyOf(call);
+    expect(body).toMatchObject({ chat_id: 12345, message_id: 100, reply_markup: { inline_keyboard: [] } });
+    expect(String(body.text)).toContain('Expired');
+  });
+
+  it('finalizeApproval swallows a 400 (already edited or message deleted) so the sweep does not retry forever', async () => {
+    telegramFetch.queueFailure('editMessageText', 400, 'message is not modified');
+
+    await expect(
+      adapter.finalizeApproval(makeRequest({ status: 'approved', notify_message_id: '12345:100' })),
+    ).resolves.toBeUndefined();
+  });
+
+  it('finalizeApproval rethrows other failures so the sweep retries', async () => {
+    telegramFetch.queueFailure('editMessageText', 500, 'server error');
+
+    await expect(
+      adapter.finalizeApproval(makeRequest({ status: 'approved', notify_message_id: '12345:100' })),
+    ).rejects.toThrow();
+  });
+
+  it('a tap from the addressed contact resolves the request, edits the message, and answers the callback', async () => {
+    expect(await tap(12345, `approve:${REQUEST_ID}`)).toBe(true);
+
+    expect(resolveApproval).toHaveBeenCalledExactlyOnceWith(REQUEST_ID, 'approve', 'contact:chris', 'chris');
+    expect(callsTo(telegramFetch.fn, 'editMessageText')).toHaveLength(1);
+    expect(bodyOf(callsTo(telegramFetch.fn, 'answerCallbackQuery')[0])).toMatchObject({
+      callback_query_id: 'cbq-1',
+      text: 'Approved',
+    });
+  });
+
+  it('a Deny tap passes the deny decision through', async () => {
+    resolveApproval.mockResolvedValueOnce({
+      outcome: 'denied',
+      request: makeRequest({ status: 'denied', resolved_by: 'contact:chris' }),
+    });
+
+    await tap(12345, `deny:${REQUEST_ID}`);
+
+    expect(resolveApproval).toHaveBeenCalledWith(REQUEST_ID, 'deny', 'contact:chris', 'chris');
+  });
+
+  it('ignores a tap from a sender who is not a known contact', async () => {
+    expect(await tap(99999, `approve:${REQUEST_ID}`)).toBe(true);
+
+    expect(resolveApproval).not.toHaveBeenCalled();
+    expect(bodyOf(callsTo(telegramFetch.fn, 'answerCallbackQuery')[0]).text).toBe('Not authorized');
+  });
+
+  it('reports a request addressed to someone else as not authorized and edits nothing', async () => {
+    resolveApproval.mockResolvedValueOnce({ outcome: 'forbidden' });
+
+    await tap(12345, `approve:${REQUEST_ID}`);
+
+    expect(callsTo(telegramFetch.fn, 'editMessageText')).toHaveLength(0);
+    expect(bodyOf(callsTo(telegramFetch.fn, 'answerCallbackQuery')[0]).text).toBe('Not authorized');
+  });
+
+  it('rejects malformed callback data without resolving anything', async () => {
+    await tap(12345, 'approve:not-a-uuid');
+
+    expect(resolveApproval).not.toHaveBeenCalled();
+    expect(bodyOf(callsTo(telegramFetch.fn, 'answerCallbackQuery')[0]).text).toBe('Unrecognized action');
+  });
+
+  it('tells the user when the prompt was already answered, instead of pretending it worked', async () => {
+    resolveApproval.mockResolvedValueOnce({
+      outcome: 'stale',
+      reason: 'no permission dialog showing in the pane',
+      request: makeRequest({ status: 'stale', resolved_by: 'system' }),
+    });
+
+    await tap(12345, `approve:${REQUEST_ID}`);
+
+    expect(bodyOf(callsTo(telegramFetch.fn, 'answerCallbackQuery')[0]).text).toMatch(/no longer waiting/);
+  });
+
+  it('still returns true (so the update offset advances) when resolution throws', async () => {
+    resolveApproval.mockRejectedValueOnce(new Error('tmux gone'));
+
+    expect(await tap(12345, `approve:${REQUEST_ID}`)).toBe(true);
+    expect(bodyOf(callsTo(telegramFetch.fn, 'answerCallbackQuery')[0]).text).toMatch(/Failed/);
   });
 });

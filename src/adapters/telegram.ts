@@ -32,6 +32,9 @@ import type Database from 'better-sqlite3';
 import { extensionFor, resolveMediaConfig } from '../media/attachments.js';
 import { topicForThreadKey, isThreadTopic } from '../pipeline/types.js';
 import { getThread, upsertThread } from '../pipeline/thread-store.js';
+import type { ApprovalDecision, ApprovalRequest } from '../approvals/types.js';
+import type { ResolveApprovalOutcome } from '../approvals/resolve.js';
+import { renderApprovalOutcome, renderApprovalPending } from '../approvals/render.js';
 
 // Re-exported from the shared media module for backwards-compatible imports.
 export { extensionFor, resolveMediaConfig };
@@ -148,6 +151,15 @@ interface TelegramUpdate {
   update_id: number;
   message?: TelegramMessage;
   message_reaction?: TelegramMessageReactionUpdated;
+  callback_query?: TelegramCallbackQuery;
+}
+
+/** An inline-keyboard button tap (E51 approval buttons). */
+interface TelegramCallbackQuery {
+  id: string;
+  from: TelegramUser;
+  message?: TelegramMessage;
+  data?: string;
 }
 
 interface TelegramApiResponse<T> {
@@ -209,6 +221,17 @@ export interface TelegramAdapterDeps {
    * When provided, the constructor uses this instead of reading from config.adapters.telegram.
    */
   instanceConfig?: { token: string; poll_timeout: number; plugin?: string };
+  /**
+   * Answers an approval request when the human taps Approve/Deny (E51). Absent
+   * in tests/deployments without approvals — taps are then acknowledged as
+   * unavailable rather than dropped.
+   */
+  resolveApproval?: (
+    id: string,
+    decision: ApprovalDecision,
+    resolvedBy: string,
+    onlyContactId?: string,
+  ) => Promise<ResolveApprovalOutcome>;
 }
 
 // ── Message splitting ─────────────────────────────────────────────────────────
@@ -324,6 +347,7 @@ export class TelegramAdapter implements AdapterInstance {
       markRead: false,
       typing: true,
       toolStatus: true,
+      interactiveApproval: true,
       registerCommands: true,
       channels: [this.id],
     };
@@ -1000,6 +1024,121 @@ export class TelegramAdapter implements AdapterInstance {
     return true;
   }
 
+  // ── Interactive approvals (E51) ───────────────────────────────────────────
+
+  /**
+   * Sends the Approve/Deny inline keyboard for `request` to the addressed
+   * contact's DM — deliberately not the conversation's own chat, so a tool
+   * summary from a group-topic session (a shell command, a file path) isn't
+   * shown to the rest of that group. The stored message id is
+   * "{chatId}:{messageId}", the same encoding as `platform_message_id`.
+   */
+  async notifyApproval(request: ApprovalRequest): Promise<{ channel: string; messageId: string }> {
+    const chatId = this.resolveChatId(request.contact_id);
+    if (chatId === undefined) {
+      throw new Error(`no Telegram chat known for contact "${request.contact_id}"`);
+    }
+    const sent = await this.callTelegram<TelegramMessage>('sendMessage', {
+      chat_id: chatId,
+      text: renderApprovalPending(request),
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: 'Approve', callback_data: `approve:${request.id}` },
+            { text: 'Deny', callback_data: `deny:${request.id}` },
+          ],
+        ],
+      },
+    });
+    return { channel: this.id, messageId: `${chatId}:${sent.message_id}` };
+  }
+
+  /** Replaces a resolved request's buttons with its outcome — the sweep's path for requests nobody tapped. */
+  async finalizeApproval(request: ApprovalRequest): Promise<void> {
+    const ref = request.notify_message_id?.split(':');
+    if (!ref || ref.length !== 2) return;
+    await this.editApprovalMessage(Number(ref[0]), Number(ref[1]), request);
+  }
+
+  /**
+   * Edits an approval message to its terminal text with no keyboard. A 400
+   * ("message is not modified" when the tap path already edited it, or the
+   * message was deleted) means there is nothing left to clean up, so it is
+   * swallowed — otherwise the sweep would retry the same message forever.
+   */
+  private async editApprovalMessage(chatId: number, messageId: number, request: ApprovalRequest): Promise<void> {
+    try {
+      await this.callTelegram('editMessageText', {
+        chat_id: chatId,
+        message_id: messageId,
+        text: renderApprovalOutcome(request),
+        reply_markup: { inline_keyboard: [] },
+      });
+    } catch (err: unknown) {
+      if ((err as { status?: number }).status !== 400) throw err;
+    }
+  }
+
+  /**
+   * Handles an Approve/Deny tap. Only the contact the request was addressed
+   * to may answer — an allow-listed sender is not enough, since a forwarded
+   * message or a shared chat would otherwise let anyone on the allow list
+   * resolve someone else's pending tool call. Always returns true so a bad
+   * tap never wedges the update offset.
+   */
+  private async processCallbackQuery(query: TelegramCallbackQuery): Promise<boolean> {
+    const answer = (text: string) =>
+      this.callTelegram('answerCallbackQuery', { callback_query_id: query.id, text }).catch((err) =>
+        console.error(`${this.tag} answerCallbackQuery failed: ${String(err)}`),
+      );
+
+    const match = query.data?.match(/^(approve|deny):([0-9a-f-]{36})$/);
+    if (!match) {
+      await answer('Unrecognized action');
+      return true;
+    }
+    const [, decision, requestId] = match as unknown as [string, ApprovalDecision, string];
+
+    const senderId = String(query.from.id);
+    const contactId = [...this.contactChatIdMap.entries()].find(([, userId]) => String(userId) === senderId)?.[0];
+    if (!this.allowedSenderIds.has(senderId) || !contactId) {
+      console.log(`${this.tag} Dropped approval tap from unknown sender ${senderId}`);
+      await answer('Not authorized');
+      return true;
+    }
+    if (!this.deps.resolveApproval) {
+      await answer('Approvals are not enabled');
+      return true;
+    }
+
+    try {
+      const result = await this.deps.resolveApproval(requestId, decision, `contact:${contactId}`, contactId);
+      if (result.outcome === 'not_found' || result.outcome === 'forbidden') {
+        if (result.outcome === 'forbidden') {
+          console.error(`${this.tag} Approval ${requestId} tapped by ${contactId} but addressed to another contact`);
+        }
+        await answer(result.outcome === 'forbidden' ? 'Not authorized' : 'Request not found');
+        return true;
+      }
+      const chat = query.message?.chat.id;
+      if (chat !== undefined && query.message) {
+        await this.editApprovalMessage(chat, query.message.message_id, result.request);
+      }
+      const labels: Record<Exclude<ResolveApprovalOutcome['outcome'], 'not_found' | 'forbidden'>, string> = {
+        approved: 'Approved',
+        denied: 'Denied',
+        already_resolved: `Already ${result.outcome === 'already_resolved' ? result.request.status : 'handled'}`,
+        expired: 'Request expired',
+        stale: 'Prompt is no longer waiting — nothing sent',
+      };
+      await answer(labels[result.outcome]);
+    } catch (err) {
+      console.error(`${this.tag} Failed to resolve approval ${requestId}: ${String(err)}`);
+      await answer('Failed — try again or answer at the terminal');
+    }
+    return true;
+  }
+
   // ── Telegram API helper ──────────────────────────────────────────────────
 
   private async callTelegram<T>(
@@ -1227,6 +1366,10 @@ export class TelegramAdapter implements AdapterInstance {
       return this.processReactionUpdate(update.message_reaction);
     }
 
+    if (update.callback_query) {
+      return this.processCallbackQuery(update.callback_query);
+    }
+
     const msg = update.message;
     if (!msg || !msg.from) return true; // skip non-message updates
 
@@ -1335,7 +1478,7 @@ export class TelegramAdapter implements AdapterInstance {
         const updates = await this.callTelegram<TelegramUpdate[]>('getUpdates', {
           offset: this.offset,
           timeout: this.pollTimeout,
-          allowed_updates: ['message', 'message_reaction'],
+          allowed_updates: ['message', 'message_reaction', 'callback_query'],
         });
 
         for (const update of updates) {

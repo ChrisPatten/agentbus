@@ -11,6 +11,10 @@
  * GET  /api/v1/messages/:id              — Fetch a single message by ID.
  * POST /api/v1/inbound                   — Inbound pipeline entry point.
  * POST /api/v1/pool/:agentId/turn-ended  — Pool pane activity signal (Stop hook).
+ * POST /api/v1/approvals                 — Raise an interactive-approval request (E51).
+ * GET  /api/v1/approvals                 — List approval requests (?status=).
+ * GET  /api/v1/approvals/:id             — Fetch one approval request.
+ * POST /api/v1/approvals/:id/resolve     — Answer an approval request.
  * POST /api/v1/webhooks/pebble           — Pebble Ring voice-memo webhook (E25).
  *                                          Only registered when adapters.pebble.enabled.
  * POST /api/v1/siri/ask                  — Siri channel ask (E42, src/http/siri-routes.ts).
@@ -68,6 +72,11 @@ import { toBareAgentId, toPrefixedAgentId } from '../pool/types.js';
 import { LeaseStore } from '../pool/lease-store.js';
 import { computeConversationId } from '../pipeline/conversation-id.js';
 import type { PoolManager } from '../pool/pool-manager.js';
+import { ApprovalStore } from '../approvals/store.js';
+import { resolveApprovalTarget } from '../approvals/resolve-target.js';
+import { dispatchApproval } from '../approvals/dispatch.js';
+import { resolveApproval } from '../approvals/resolve.js';
+import { APPROVAL_TIMEOUT_MS, type ApprovalStatus } from '../approvals/types.js';
 import { writeKnowledge, getKnowledge, forgetKnowledge, searchKnowledge } from '../knowledge/store.js';
 
 export interface HttpServerDeps {
@@ -632,6 +641,108 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
         }
       }
       return { ok: true };
+    },
+  );
+
+  // ── Approval requests (E51) ────────────────────────────────────────────────
+  // See docs/APPROVALS.md. Reception (POST), observability (GET), resolution
+  // (POST :id/resolve). The Telegram callback_query handler resolves through
+  // the same resolveApproval() as the route below, not by calling it over HTTP.
+  const approvalStore = new ApprovalStore(db);
+  const ApprovalRequestSchema = z
+    .object({
+      adapterId: z.string().min(1),
+      agentId: z.string().min(1).optional(),
+      sessionId: z.string().min(1).optional(),
+      conversationId: z.string().min(1).optional(),
+      toolName: z.string().min(1),
+      summary: z.string().min(1).max(1000),
+      context: z.unknown().optional(),
+    })
+    .refine((b) => b.agentId || b.sessionId, { message: 'agentId or sessionId is required' });
+
+  server.post<{ Body: unknown }>('/api/v1/approvals', async (req, reply) => {
+    const parsed = ApprovalRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ ok: false, error: parsed.error.message });
+    }
+    const body = parsed.data;
+
+    // The PermissionRequest hook can't see its pane's agent id (only the MCP
+    // server's env carries AGENTBUS_AGENT_ID), so it identifies itself by
+    // Claude session id — same as the turn-ended hook — and the pane's own
+    // agent id is recovered from the lease row that recorded that session.
+    let agentId = body.agentId;
+    if (!agentId && body.adapterId === 'cc-pool' && poolManagers) {
+      for (const manager of poolManagers.values()) {
+        const pane = manager.leaseStore.list(manager.poolId).find((p) => p.claude_session_id === body.sessionId);
+        if (pane) {
+          agentId = toBareAgentId(pane.agent_id);
+          break;
+        }
+      }
+    }
+    if (!agentId) {
+      return reply.status(422).send({ ok: false, error: 'could not determine the requesting agent' });
+    }
+
+    const target = resolveApprovalTarget(db, body.adapterId, agentId, body.conversationId);
+    if (!target) {
+      console.error(`[approvals] no target for ${body.adapterId}/${agentId} — request dropped (${body.toolName})`);
+      return reply.status(422).send({ ok: false, error: 'could not resolve who to ask for this request' });
+    }
+
+    const duplicate = approvalStore.findPendingDuplicate(body.adapterId, agentId, body.toolName, body.summary);
+    if (duplicate) return { ok: true, id: duplicate.id, status: duplicate.status, duplicate: true };
+
+    const request = approvalStore.insert(
+      {
+        adapterId: body.adapterId,
+        agentId,
+        conversationId: target.conversationId,
+        contactId: target.contactId,
+        toolName: body.toolName,
+        summary: body.summary,
+        context: body.context,
+      },
+      APPROVAL_TIMEOUT_MS,
+    );
+    await dispatchApproval({ registry, store: approvalStore }, request, target.channel);
+    return { ok: true, id: request.id, status: approvalStore.getById(request.id)!.status };
+  });
+
+  server.get<{ Querystring: { status?: string } }>('/api/v1/approvals', async (req, reply) => {
+    const status = req.query.status;
+    const valid: ApprovalStatus[] = ['pending', 'approved', 'denied', 'expired', 'stale'];
+    if (status && !valid.includes(status as ApprovalStatus)) {
+      return reply.status(400).send({ ok: false, error: `status must be one of ${valid.join(', ')}` });
+    }
+    return { ok: true, approvals: approvalStore.list(status as ApprovalStatus | undefined) };
+  });
+
+  server.get<{ Params: { id: string } }>('/api/v1/approvals/:id', async (req, reply) => {
+    const row = approvalStore.getById(req.params.id);
+    if (!row) return reply.status(404).send({ ok: false, error: 'Approval request not found' });
+    return { ok: true, approval: row };
+  });
+
+  server.post<{ Params: { id: string }; Body: { decision?: string; resolvedBy?: string } }>(
+    '/api/v1/approvals/:id/resolve',
+    async (req, reply) => {
+      const { decision, resolvedBy } = req.body ?? {};
+      if (decision !== 'approve' && decision !== 'deny') {
+        return reply.status(400).send({ ok: false, error: 'decision must be "approve" or "deny"' });
+      }
+      const result = await resolveApproval(
+        { store: approvalStore, poolManagers: poolManagers ?? new Map() },
+        req.params.id,
+        decision,
+        resolvedBy ?? 'api',
+      );
+      if (result.outcome === 'not_found' || result.outcome === 'forbidden') {
+        return reply.status(404).send({ ok: false, error: 'Approval request not found' });
+      }
+      return { ok: true, outcome: result.outcome, approval: result.request };
     },
   );
 

@@ -447,6 +447,16 @@ At startup, bus-core passes every bus-scope command in the `CommandRegistry` (se
 
 ---
 
+## Interactive approvals
+
+The adapter sends a permission request as a DM with **Approve** and **Deny** inline buttons and handles the `callback_query` when one is tapped. See [APPROVALS.md](APPROVALS.md) for the end-to-end flow.
+
+- The request is sent to the addressed contact's DM, never to a group.
+- Only the addressed contact can answer. Any other sender, including another allow-listed contact, gets "Not authorized" and the request stays pending.
+- The adapter requests `callback_query` in `allowed_updates`. Without it Telegram never delivers button taps.
+
+---
+
 ## Capabilities
 
 | Capability | Supported |
@@ -454,6 +464,7 @@ At startup, bus-core passes every bus-scope command in the `CommandRegistry` (se
 | Typing indicator | Yes — persistent loop, stays active while agent works |
 | Live tool-call status stream | Yes — see [Live tool-call status stream](#live-tool-call-status-stream) |
 | Read receipts | No |
+| Interactive approvals | Yes — Approve/Deny inline buttons, see [APPROVALS.md](APPROVALS.md) |
 | Slash command registration | Yes (`setMyCommands`) |
 | Reactions | Yes (`sendReaction` with emoji) |
 | Message splitting | Yes (chunks <=4096 chars) |
