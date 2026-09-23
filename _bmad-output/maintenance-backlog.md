@@ -108,6 +108,26 @@ Effort: S (under an hour), M (an afternoon), L (a day or more).
   Fixing `cc-headless.ts` to pass its own `this.agentId` (stripped to bare
   form) into that env block would close it.
 
+- [ ] **`cc-pool` panes lose their Claude session on a recycle when the conversation's `sessions` row has no `claude_session_id`.** (S)
+  Found 2026-09-23 while relaunching `peggy-pool:2` after a Claude Code update.
+  The relaunch used `--session-id <new>` instead of `--resume`, so the pane
+  started with no history. `PoolManager.resolveRoute()` resumes only when the
+  conversation's *active* `sessions` row already holds a `claude_session_id`
+  (`src/pool/pool-manager.ts`, `getActiveSessionRow`). Two paths leave it NULL:
+  a conversation's first message (Stage 80 inserts the row after the launch),
+  and a session rollover on a warm pane (idle-close ends the row, and the next
+  message inserts a new one while the same Claude process keeps running). The
+  code's own TODO calls the first case "self-healing on the second message",
+  but that only holds if the second message triggers a launch. On a warm pane
+  it takes the `reuse` path, which never launches, so the id is never written.
+  In the live database the earlier Claude session for that pane was stored on
+  no `sessions` row at all. Long-lived rows that got the id (the Telegram group
+  on pane 1) resume correctly. Fix: on `reuse`, backfill the active row from
+  `pool_leases.claude_session_id` when it is NULL, and have Stage 80 read the
+  lease when it inserts a row. Until then, a recycled pane may not resume;
+  check `select claude_session_id from sessions where conversation_id = ? and
+  ended_at is null` before killing a pane you want to keep history for.
+
 ## P2: Dead code and unused surface area
 
 - [ ] **Config fields that nothing reads.** (S)

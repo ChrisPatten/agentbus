@@ -333,8 +333,11 @@ Recorded 2026-09-23.
 ## Deferred
 
 **Recycle** means killing a stalled pane's tmux window and starting it again,
-the way restarting a frozen app does. The pool then relaunches the pane with
-`claude --resume <session>`, so the conversation's history comes back. It is
+the way restarting a frozen app does. The pool relaunches the pane, with
+`claude --resume <session>` when the conversation's active `sessions` row
+holds a Claude session id, so the history comes back. That id is not always
+stored (see the P1 item in `maintenance-backlog.md`), and without it the pane
+starts a fresh session. It is
 deferred because the watchdog would also have to decide what to do with
 messages the pane had received but not handled. Re-sending them could repeat
 work the pane had partly done (a tool already ran, a reply already went out),
@@ -343,7 +346,8 @@ and dropping them loses the job.
 Until that is designed, the manual version already works: kill the window with
 `tmux kill-window -t peggy-pool:<N>`. `reconcileLiveness()` notices the missing
 window within 60 seconds and releases the lease, and the next message to that
-conversation launches a fresh pane that resumes the session. The message the
+conversation launches a fresh pane. It resumes the session only if the id was
+stored. The message the
 pane was stuck on is not re-sent. The alert text should say this.
 
 ## Sequencing
