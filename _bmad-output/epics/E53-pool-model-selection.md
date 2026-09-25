@@ -6,7 +6,7 @@
 | Dependencies | E48 (cc-pool: `PoolManager.resolveRoute`, `PaneLauncher`, `pool_leases`), E52 (migration 020, `last_turn_ended_at`), migration 015 (`headless_model_overrides`), E14-era scheduler (`scheduled_items`) |
 | Story Count | 6 |
 | Estimated Complexity | M |
-| Status | In progress — decisions recorded |
+| Status | Implemented on `feat/e53-pool-model-selection` — awaiting live check |
 
 ---
 
