@@ -149,6 +149,103 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
   lingers once a real tool call or the final reply arrives. `reuse` never
   fires it — a reused pane has no launch latency to cover. See
   [docs/CC_POOL_ADAPTER.md#cold-start-placeholder](docs/CC_POOL_ADAPTER.md#cold-start-placeholder).
+- **Siri channel spike (E42).** New `siri` channel adapter
+  (`src/adapters/siri.ts`) and `POST /api/v1/siri/ask` /
+  `GET /api/v1/siri/health` routes (`src/http/siri-routes.ts`), mounted only
+  when `adapters.siri.enabled`. An ask is submitted through the normal inbound
+  pipeline and the HTTP request is held open until the agent's `reply` is
+  delivered to the adapter's `send()` (or `reply_timeout_ms` elapses, in which
+  case the response is `status: pending` and the ask stays queued). Identity is
+  a per-contact bearer token (`contacts.*.platforms.siri.token`, ≥ 16 chars,
+  duplicates rejected at load), the same model as Pebble. Config schema gains
+  `adapters.siri` (`reply_timeout_ms`, `max_body_bytes`, `debug_delay_ms`, plus
+  the E43 keys accepted but not yet acted on). Two measurement scripts:
+  `scripts/siri-gate0-latency.ts` (historical time-to-first-reply from
+  transcripts) and `scripts/siri-probe.ts` (live asks with p50/p95 and a CSV).
+  See [docs/SIRI_ADAPTER.md](docs/SIRI_ADAPTER.md).
+- **Peggy iOS app proof of concept (E44).** New `apps/ios/Peggy` (XcodeGen
+  project, Swift 6, SwiftUI, App Intents): an `Ask Peggy` App Shortcut whose
+  `AskPeggyIntent` runs in the background, posts the question to the bus over
+  Tailscale, and returns the reply as Siri dialog; a Settings screen for the
+  bus URL, token, and wait budget with a "Test connection" check against
+  `GET /api/v1/siri/health`; and XCTest coverage for every dialog outcome
+  through a mocked bus client. Tokens live in `UserDefaults` for the POC
+  (Keychain is E45). See `apps/ios/Peggy/README.md`.
+- **Runtime model overrides for headless Claude spawns.** New
+  `headless_model_overrides` table (migration
+  `015_headless_model_overrides.sql`) lets an agent change which model a
+  `cc-headless` spawn uses — scoped to an agent, a schedule, or global —
+  without editing `config.yaml` or restarting the adapter.
+  `HeadlessInstance.invokeClaude()` resolves the model via
+  `resolveModelOverride()` (`src/adapters/model-override-loader.ts`) on every
+  spawn, in specificity order (`schedule_id`+`agent_id` > `agent_id` >
+  `schedule_id` > global), before falling back to `adapters.cc-headless.model`.
+  Managed via `POST`/`GET`/`DELETE /api/v1/model-overrides` and the new
+  `set_headless_model`/`get_headless_model`/`list_headless_model`/
+  `delete_headless_model` MCP tools. Note: `schedule_id` is not yet threaded
+  through from scheduled turns, so only agent-scoped and global overrides take
+  effect today. See
+  [docs/CC_HEADLESS_ADAPTER.md](docs/CC_HEADLESS_ADAPTER.md#runtime-model-overrides).
+- **`/cost` command — per-agent API cost tracking (E39).** Every `claude -p`
+  turn's cost/token/turn-count data (previously parsed and discarded by
+  `HeadlessInstance.invokeClaude()`) is now persisted to a new `turn_costs`
+  table (migration `014_turn_costs.sql`), keyed by `agent_id`. The new bus-scope
+  `/cost` command resolves the calling sender's agent the same way `/stop`
+  does and replies with day (since local midnight)/week (rolling 7 days)/
+  calendar-month-to-date spend. A one-time, manually-run
+  `scripts/backfill_turn_costs.ts` seeds historical cost from each configured
+  `cc-headless` instance's existing `~/.claude/projects/*/*.jsonl` transcripts.
+  See [docs/SLASH_COMMANDS.md](docs/SLASH_COMMANDS.md#cost).
+- **Durable post-restart wake-up via scheduled one-shot + staleness dead-letter (E40).**
+  `POST /api/v1/schedules` and the `schedule_message` MCP tool gain an optional
+  `stale_after_ms` field (positive integer milliseconds, `type: 'once'` only —
+  rejected with `400` on `type: 'cron'`): if a one-shot schedule is still
+  unfired more than `stale_after_ms` after its `fire_at`, `Scheduler.tick()`
+  marks it `status: dead_letter` instead of firing a confusingly-late message.
+  Schedules without `stale_after_ms` (every existing use case) are completely
+  unaffected. `scripts/safe_restart.sh` now creates one of these wake-ups
+  (10s out, 45-minute staleness ceiling, targeting the channel/topic that
+  triggered the restart via new `--notify-channel`/`--notify-topic` args) right
+  before each restart attempt while bus-core is still confirmed healthy — this
+  survives even if the script itself is killed immediately after kicking off
+  the restart. The existing live `notify_peggy()` curl-to-`/api/v1/inbound`
+  call remains as a belt-and-suspenders transition. See
+  [docs/SCHEDULING.md](docs/SCHEDULING.md#staleness-and-dead-lettering).
+- **Configurable raw webhook request logging (E38).** New `logWebhookRequest`
+  helper (`src/http/webhook-log.ts`) appends one JSON line per incoming
+  webhook request — success *and* rejection — to
+  `<dir>/<webhook>/<YYYY-MM-DD>.jsonl`, useful for debugging a misbehaving
+  proxy or unexpected device payload without needing to reproduce the issue
+  live. Off by default (request bodies may contain sensitive content) and
+  best-effort — a write failure is logged to the console and never affects
+  the actual webhook response. Wired into the Pebble webhook via a new
+  `adapters.pebble.logging: { enabled, dir }` config block (defaults:
+  `enabled: false`, `dir: logs/webhooks`), logging both outcomes (auth
+  failure, malformed multipart, missing/invalid fields, or a successful
+  enqueue) with a machine-readable `reason`. The helper and its config shape
+  are generic, not pebble-specific — any future webhook route can reuse the
+  same mechanism.
+- **Slash-command follow-up capture + `/torrent` completion notification (E36).**
+  `CommandRegistry` gains a generic `registerFollowUp`/`consumeFollowUp`
+  primitive: any bus command can ask "check the very next message from this
+  sender" without building its own stateful tracking. It's keyed by
+  `channel:sender`, single-shot (deletes on read whether or not it matches),
+  and TTL-guarded. `processInbound` (`src/http/api.ts`) checks pending
+  follow-ups on plain-text messages before the normal slash-command dispatch
+  block; a match routes straight to the target command's handler and never
+  reaches agent fan-out, while a miss (or expiry) falls through to the
+  pipeline exactly as before. `/torrent` with no argument now asks **"What's
+  the magnet link? 🧲"** and captures the next message (a 10-minute TTL)
+  instead of returning a usage error — send a bare `magnet:...` link right
+  after and the download starts, same as the direct-argument form. `/torrent`
+  also now reports back when a download finishes (or fails, with the exit
+  code and a pointer to `logs/torrents/`) in the same channel/topic it was
+  started from, regardless of which form kicked it off — previously nothing
+  ever reported completion for a spawn that can run anywhere from seconds to
+  hours. The send-response + transcript-log logic used by all three call
+  sites (normal slash dispatch, follow-up dispatch, and the out-of-band
+  completion notification) is now a single shared `sendCommandResponse`
+  helper in `src/http/api.ts` instead of duplicated inline logic.
 
 ### Fixed
 - **`POST /api/v1/model-overrides` no longer 500s (E53 S53.1).** The old
@@ -300,109 +397,6 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 - `make kill` now also stops pm2's `bus-core`. Previously pm2 restarted the
   process it had just killed. `make dev` and `make debug-payloads` use the
   local `tsx` instead of `npx`.
-
-## [0.12.0] - 2026-09-16
-
-### Added
-- **Siri channel spike (E42).** New `siri` channel adapter
-  (`src/adapters/siri.ts`) and `POST /api/v1/siri/ask` /
-  `GET /api/v1/siri/health` routes (`src/http/siri-routes.ts`), mounted only
-  when `adapters.siri.enabled`. An ask is submitted through the normal inbound
-  pipeline and the HTTP request is held open until the agent's `reply` is
-  delivered to the adapter's `send()` (or `reply_timeout_ms` elapses, in which
-  case the response is `status: pending` and the ask stays queued). Identity is
-  a per-contact bearer token (`contacts.*.platforms.siri.token`, ≥ 16 chars,
-  duplicates rejected at load), the same model as Pebble. Config schema gains
-  `adapters.siri` (`reply_timeout_ms`, `max_body_bytes`, `debug_delay_ms`, plus
-  the E43 keys accepted but not yet acted on). Two measurement scripts:
-  `scripts/siri-gate0-latency.ts` (historical time-to-first-reply from
-  transcripts) and `scripts/siri-probe.ts` (live asks with p50/p95 and a CSV).
-  See [docs/SIRI_ADAPTER.md](docs/SIRI_ADAPTER.md).
-- **Peggy iOS app proof of concept (E44).** New `apps/ios/Peggy` (XcodeGen
-  project, Swift 6, SwiftUI, App Intents): an `Ask Peggy` App Shortcut whose
-  `AskPeggyIntent` runs in the background, posts the question to the bus over
-  Tailscale, and returns the reply as Siri dialog; a Settings screen for the
-  bus URL, token, and wait budget with a "Test connection" check against
-  `GET /api/v1/siri/health`; and XCTest coverage for every dialog outcome
-  through a mocked bus client. Tokens live in `UserDefaults` for the POC
-  (Keychain is E45). See `apps/ios/Peggy/README.md`.
-- **Runtime model overrides for headless Claude spawns.** New
-  `headless_model_overrides` table (migration
-  `015_headless_model_overrides.sql`) lets an agent change which model a
-  `cc-headless` spawn uses — scoped to an agent, a schedule, or global —
-  without editing `config.yaml` or restarting the adapter.
-  `HeadlessInstance.invokeClaude()` resolves the model via
-  `resolveModelOverride()` (`src/adapters/model-override-loader.ts`) on every
-  spawn, in specificity order (`schedule_id`+`agent_id` > `agent_id` >
-  `schedule_id` > global), before falling back to `adapters.cc-headless.model`.
-  Managed via `POST`/`GET`/`DELETE /api/v1/model-overrides` and the new
-  `set_headless_model`/`get_headless_model`/`list_headless_model`/
-  `delete_headless_model` MCP tools. Note: `schedule_id` is not yet threaded
-  through from scheduled turns, so only agent-scoped and global overrides take
-  effect today. See
-  [docs/CC_HEADLESS_ADAPTER.md](docs/CC_HEADLESS_ADAPTER.md#runtime-model-overrides).
-- **`/cost` command — per-agent API cost tracking (E39).** Every `claude -p`
-  turn's cost/token/turn-count data (previously parsed and discarded by
-  `HeadlessInstance.invokeClaude()`) is now persisted to a new `turn_costs`
-  table (migration `014_turn_costs.sql`), keyed by `agent_id`. The new bus-scope
-  `/cost` command resolves the calling sender's agent the same way `/stop`
-  does and replies with day (since local midnight)/week (rolling 7 days)/
-  calendar-month-to-date spend. A one-time, manually-run
-  `scripts/backfill_turn_costs.ts` seeds historical cost from each configured
-  `cc-headless` instance's existing `~/.claude/projects/*/*.jsonl` transcripts.
-  See [docs/SLASH_COMMANDS.md](docs/SLASH_COMMANDS.md#cost).
-- **Durable post-restart wake-up via scheduled one-shot + staleness dead-letter (E40).**
-  `POST /api/v1/schedules` and the `schedule_message` MCP tool gain an optional
-  `stale_after_ms` field (positive integer milliseconds, `type: 'once'` only —
-  rejected with `400` on `type: 'cron'`): if a one-shot schedule is still
-  unfired more than `stale_after_ms` after its `fire_at`, `Scheduler.tick()`
-  marks it `status: dead_letter` instead of firing a confusingly-late message.
-  Schedules without `stale_after_ms` (every existing use case) are completely
-  unaffected. `scripts/safe_restart.sh` now creates one of these wake-ups
-  (10s out, 45-minute staleness ceiling, targeting the channel/topic that
-  triggered the restart via new `--notify-channel`/`--notify-topic` args) right
-  before each restart attempt while bus-core is still confirmed healthy — this
-  survives even if the script itself is killed immediately after kicking off
-  the restart. The existing live `notify_peggy()` curl-to-`/api/v1/inbound`
-  call remains as a belt-and-suspenders transition. See
-  [docs/SCHEDULING.md](docs/SCHEDULING.md#staleness-and-dead-lettering).
-- **Configurable raw webhook request logging (E38).** New `logWebhookRequest`
-  helper (`src/http/webhook-log.ts`) appends one JSON line per incoming
-  webhook request — success *and* rejection — to
-  `<dir>/<webhook>/<YYYY-MM-DD>.jsonl`, useful for debugging a misbehaving
-  proxy or unexpected device payload without needing to reproduce the issue
-  live. Off by default (request bodies may contain sensitive content) and
-  best-effort — a write failure is logged to the console and never affects
-  the actual webhook response. Wired into the Pebble webhook via a new
-  `adapters.pebble.logging: { enabled, dir }` config block (defaults:
-  `enabled: false`, `dir: logs/webhooks`), logging both outcomes (auth
-  failure, malformed multipart, missing/invalid fields, or a successful
-  enqueue) with a machine-readable `reason`. The helper and its config shape
-  are generic, not pebble-specific — any future webhook route can reuse the
-  same mechanism.
-- **Slash-command follow-up capture + `/torrent` completion notification (E36).**
-  `CommandRegistry` gains a generic `registerFollowUp`/`consumeFollowUp`
-  primitive: any bus command can ask "check the very next message from this
-  sender" without building its own stateful tracking. It's keyed by
-  `channel:sender`, single-shot (deletes on read whether or not it matches),
-  and TTL-guarded. `processInbound` (`src/http/api.ts`) checks pending
-  follow-ups on plain-text messages before the normal slash-command dispatch
-  block; a match routes straight to the target command's handler and never
-  reaches agent fan-out, while a miss (or expiry) falls through to the
-  pipeline exactly as before. `/torrent` with no argument now asks **"What's
-  the magnet link? 🧲"** and captures the next message (a 10-minute TTL)
-  instead of returning a usage error — send a bare `magnet:...` link right
-  after and the download starts, same as the direct-argument form. `/torrent`
-  also now reports back when a download finishes (or fails, with the exit
-  code and a pointer to `logs/torrents/`) in the same channel/topic it was
-  started from, regardless of which form kicked it off — previously nothing
-  ever reported completion for a spawn that can run anywhere from seconds to
-  hours. The send-response + transcript-log logic used by all three call
-  sites (normal slash dispatch, follow-up dispatch, and the out-of-band
-  completion notification) is now a single shared `sendCommandResponse`
-  helper in `src/http/api.ts` instead of duplicated inline logic.
-
-### Changed
 - **Documentation pass for accuracy and completeness.** `README.md`,
   `docs/HTTP_API.md`, `docs/CC_ADAPTER.md`, `docs/PLUGIN_AUTHORING.md`,
   `docs/DEPLOYMENT.md`, `docs/MEMORY.md`, and `docs/VERSIONING.md` are
@@ -868,8 +862,7 @@ Baseline release. Core bus, pipeline, adapters, memory, scheduling.
 - Scheduled messages (cron + one-shot) via background scheduler. (E18)
 
 [Unreleased]: https://github.com/ChrisPatten/agentbus/compare/v0.13.0...HEAD
-[0.13.0]: https://github.com/ChrisPatten/agentbus/compare/v0.12.0...v0.13.0
-[0.12.0]: https://github.com/ChrisPatten/agentbus/compare/v0.11.0...v0.12.0
+[0.13.0]: https://github.com/ChrisPatten/agentbus/compare/v0.11.0...v0.13.0
 [0.11.0]: https://github.com/ChrisPatten/agentbus/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/ChrisPatten/agentbus/compare/v0.8.0...v0.10.0
 [0.8.0]: https://github.com/ChrisPatten/agentbus/compare/v0.7.1...v0.8.0
