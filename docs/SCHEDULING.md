@@ -17,8 +17,9 @@ schedules:
       Run the weather skill for San Francisco and summarize anything
       notable on my agenda today. Keep it under 3 sentences.
     label: Morning briefing       # optional; shown in /schedule list
-    topic: general                # optional; default: general
+    topic: general                # optional; see "Topic and model" below for the default
     priority: normal              # optional; normal | high | urgent
+    model: sonnet                 # optional; pane model for this job's fires — see "Topic and model"
 
   - id: weekly_review
     cron: "0 17 * * 5"            # every Friday at 17:00
@@ -50,6 +51,29 @@ scheduler:
 ```
 
 > **Note on `enabled: false`** — Config schedules are still upserted into the database even when the scheduler is disabled. Only the tick loop (firing) is stopped. This means schedules are visible and manageable via the HTTP API and MCP tools even when firing is paused.
+
+## Topic and model
+
+A `cc-pool` model is fixed for the life of a Claude session, and every conversation on the same (contact, channel, topic) shares one session — one pane, one model. A schedule can set two fields to control that:
+
+- **`topic`** — which conversation the job's fires belong to. Left unset, a **recurring (`cron`)** schedule defaults to its own `sched:<label-slug>` topic (lowercased, non-alphanumerics collapsed to `-`), or `sched:<id8>` if it has no label — so a new recurring job never lands in an existing conversation, and its own pane can carry its own model. A **one-shot (`once`)** schedule defaults to `general` as before, since it has no ongoing session to isolate. Existing schedules created before this behavior shipped keep their current topic; move one by hand with `PATCH`.
+- **`model`** — the model this job's pane launches with (e.g. `"haiku"`), stamped onto the fired message as `metadata.schedule_model` and read by the pool adapter's model resolution. Unset (`null`) means the job has no model of its own — it falls back to an agent or global override, then the pool's own `model`. Set `model: null` via `PATCH` to clear a job's model.
+
+Example: an Email Watch job that should run cheap and stay off Peggy's main conversation:
+
+```json
+{
+  "type": "cron",
+  "cron_expr": "*/15 * * * *",
+  "channel": "telegram",
+  "sender": "system:peggy",
+  "payload_body": "Check for new mail and summarize anything that needs attention.",
+  "label": "Email Watch",
+  "model": "haiku"
+}
+```
+
+With no `topic` given, this lands in `sched:email-watch` — its own conversation, its own pane, and (with `model: haiku`) its own cheaper model, independent of whatever Peggy's main Telegram conversation is running.
 
 ## How firing works
 
@@ -134,7 +158,9 @@ For a one-shot:
 
 `stale_after_ms` (optional, positive integer milliseconds) is only valid on `type: once` — see [Staleness and dead-lettering](#staleness-and-dead-lettering) above. Sending it alongside `type: cron` returns `400`.
 
-Response: `201 { "ok": true, "id": "<uuid>", "fire_at": "<ISO UTC>" }`
+`topic` (optional, non-empty string) and `model` (optional, non-empty string, ≤100 chars) — see [Topic and model](#topic-and-model) above for what happens when `topic` is omitted.
+
+Response: `201 { "ok": true, "id": "<uuid>", "fire_at": "<ISO UTC>", "topic": "<resolved topic>" }`
 
 ### List schedules
 
@@ -165,15 +191,17 @@ Content-Type: application/json
 {
   "label": "New label",
   "max_fires": 10,
-  "status": "paused"
+  "status": "paused",
+  "topic": "sched:email-watch",
+  "model": "haiku"
 }
 ```
 
-Updatable fields: `label`, `max_fires`, `status` (active ↔ paused only). Cannot update completed or cancelled schedules.
+Updatable fields: `label`, `max_fires`, `status` (active ↔ paused only), `topic` (non-empty string), `model` (non-empty string ≤100 chars, or `null` to clear it). Cannot update completed or cancelled schedules.
 
 ## MCP tools
 
-Three tools are available to the agent:
+Four tools are available to the agent:
 
 ### `schedule_message`
 
@@ -188,11 +216,12 @@ Create a one-shot or recurring schedule.
 | `cron_expr` | string | if cron | Cron expression (e.g. `"0 8 * * 1-5"`) |
 | `fire_at` | string | if once | ISO 8601 future timestamp |
 | `timezone` | string | no | IANA tz (default: `"UTC"`) |
-| `topic` | string | no | Topic (default: `"general"`) |
+| `topic` | string | no | Topic. Omitted: `general` for `once`, `sched:<label-slug>` for `cron` — see [Topic and model](#topic-and-model) |
 | `priority` | string | no | `"normal"` \| `"high"` \| `"urgent"` |
 | `label` | string | no | Human-readable name |
 | `max_fires` | integer | no | Cap on cron fires (null = unlimited) |
 | `stale_after_ms` | integer | no | Once-only staleness ceiling (ms); dead-letters instead of firing if exceeded |
+| `model` | string | no | Model this job's pane launches with (e.g. `"haiku"`); unset falls back to an override, then the pool's model |
 
 ### `list_schedules`
 
@@ -209,6 +238,19 @@ Create a one-shot or recurring schedule.
 |---|---|---|
 | `id` | string | Schedule ID to cancel |
 
+### `update_schedule`
+
+Update a schedule's label, topic, model, `max_fires`, or status. Only the fields provided are changed.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `id` | string | yes | Schedule ID to update |
+| `label` | string | no | New human-readable name |
+| `topic` | string | no | New topic — moves the job to its own (or a shared) conversation |
+| `model` | string \| `null` | no | New model, or `null` to clear the job's model |
+| `max_fires` | integer \| `null` | no | New fire-count cap |
+| `status` | `"active"` \| `"paused"` | no | New status |
+
 ## Slash commands
 
 ### `/schedule list`
@@ -224,9 +266,12 @@ Active schedules for telegram (2):
 
   a1b2c3d4  Morning briefing  next: 2026-04-17 12:00 UTC  (3 fired)
   e5f6g7h8  Weekly review     next: 2026-04-18 21:00 UTC  (0 fired)
+  i9j0k1l2  Email Watch       next: 2026-04-17 12:15 UTC  (12 fired)  [haiku]
 
 Use /schedule cancel <id> to cancel a schedule.
 ```
+
+A `[model]` suffix appears only when the job has its own `model` set.
 
 ### `/schedule cancel <id>`
 

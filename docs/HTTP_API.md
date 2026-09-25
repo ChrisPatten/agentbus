@@ -57,7 +57,7 @@ Set `bus.host: 0.0.0.0` to accept connections from other hosts, for example a re
 | GET | `/api/v1/schedules/:id` | Fetch a schedule |
 | PATCH | `/api/v1/schedules/:id` | Update label, max fires, or pause state |
 | DELETE | `/api/v1/schedules/:id` | Cancel a schedule |
-| POST | `/api/v1/model-overrides` | Set a headless model override |
+| POST | `/api/v1/model-overrides` | Set an agent or global model override |
 | GET | `/api/v1/model-overrides` | List model overrides |
 | DELETE | `/api/v1/model-overrides` | Delete model overrides |
 
@@ -111,6 +111,7 @@ When no `cc-pool` instances are configured at all, always returns `200 { "ok": t
           "state": "leased",
           "conversation_id": "a3f9c21e...",
           "claude_session_id": "b7e1...",
+          "model": "claude-sonnet-5",
           "leased_at": "2026-09-17T10:00:00.000Z",
           "last_activity_at": "2026-09-17T10:05:00.000Z"
         },
@@ -120,6 +121,7 @@ When no `cc-pool` instances are configured at all, always returns `200 { "ok": t
           "state": "free",
           "conversation_id": null,
           "claude_session_id": null,
+          "model": null,
           "leased_at": null,
           "last_activity_at": null
         }
@@ -131,6 +133,8 @@ When no `cc-pool` instances are configured at all, always returns `200 { "ok": t
 ```
 
 `conversation_id` is the raw sha256 hex — resolving it to a human-readable contact/channel/topic would require an extra join against `sessions`/`transcripts` per pane, which this route deliberately skips (see the `/pool` command for where that lookup is cheap to add per-row). `?pool=<key>` for a pool that isn't in `poolManagers` returns `404 { "ok": false, "error": "No cc-pool instance for \"<key>\"" }`.
+
+`model` (E53) is the model this pane's current Claude session was launched with — `null` for a free pane, or a leased pane launched with no `--model` flag (CLI default via `~/.claude/settings.json`). See [CC_POOL_ADAPTER.md#model-selection](CC_POOL_ADAPTER.md#model-selection).
 
 ### `POST /api/v1/pool/:agentId/turn-ended`
 
@@ -406,11 +410,13 @@ See [SCHEDULING.md](SCHEDULING.md) for semantics.
 | `cron_expr` | if `cron` | 5-part cron. `400` if invalid or with no future occurrence |
 | `channel`, `sender`, `payload_body` | yes | Where the message appears to come from, and its text |
 | `timezone` | no | IANA name, default `UTC` |
-| `topic`, `priority`, `label`, `max_fires` | no | |
+| `topic` | no | Omitted: `general` for `once`; `sched:<label-slug>` (or `sched:<id8>`) for `cron` — see [SCHEDULING.md](SCHEDULING.md#topic-and-model) |
+| `priority`, `label`, `max_fires` | no | |
+| `model` | no | Non-empty string, ≤100 chars. Pane model for this job's fires; unset falls back to an override, then the pool's model |
 | `stale_after_ms` | no | `once` only; `400` on `cron` |
 | `created_by` | no | Default `http` |
 
-Returns `201 { "ok": true, "id", "fire_at" }`.
+Returns `201 { "ok": true, "id", "fire_at", "topic" }` — `topic` is the resolved value, including the D1 default when none was given.
 
 ### `GET /api/v1/schedules`
 
@@ -422,7 +428,7 @@ Returns `{ "ok": true, "schedule": {...} }` or `404`.
 
 ### `PATCH /api/v1/schedules/:id`
 
-Body may include `label`, `max_fires` (integer or `null`), and `status` (`active` or `paused`). Setting `max_fires` at or below the current `fire_count` completes the schedule. `400` for a completed or cancelled schedule or an empty body. Returns the updated row.
+Body may include `label`, `max_fires` (integer or `null`), `status` (`active` or `paused`), `topic` (non-empty string), and `model` (non-empty string ≤100 chars, or `null` to clear it). Setting `max_fires` at or below the current `fire_count` completes the schedule. `400` for a completed or cancelled schedule or an empty body. Returns the updated row.
 
 ### `DELETE /api/v1/schedules/:id`
 
@@ -430,18 +436,16 @@ Marks the schedule `cancelled`. `404` if unknown, completed, or already cancelle
 
 ## Model overrides
 
-Runtime model selection for `cc-headless` spawns. See [CC_HEADLESS_ADAPTER.md](CC_HEADLESS_ADAPTER.md#runtime-model-overrides) for resolution order. `agent_id` values are the full recipient ID, for example `agent:claude`.
+Agent-wide and global runtime model overrides, shared by `cc-headless` and `cc-pool`. See [CC_HEADLESS_ADAPTER.md](CC_HEADLESS_ADAPTER.md#runtime-model-overrides) for resolution order. `agent_id` values are the full recipient ID, for example `agent:claude`. A job's own model lives on its schedule (`model` field) instead — see [SCHEDULING.md](SCHEDULING.md).
 
 ### `POST /api/v1/model-overrides`
 
-Body `{ "model": string, "schedule_id"?: string, "agent_id"?: string, "priority"?: number }`. Omit both IDs for a global override. Returns `201 { "ok": true, "id", "override": {...} }`; `400` without `model`.
-
-Known issue: this route returns `500` for every request because its upsert does not match the table's partial unique index. It is tracked as P0 in `_bmad-output/maintenance-backlog.md`.
+Body `{ "model": string, "agent_id"?: string }`. Omit `agent_id` for a global override. Upserts on the agent (or global) scope. Returns `201 { "ok": true, "id", "override": {...} }`; `400` without `model`; `400` if `schedule_id` is given, pointing at the schedule's `model` field instead.
 
 ### `GET /api/v1/model-overrides`
 
-Returns `{ "ok": true, "overrides": [...], "count": n }` ordered by specificity (schedule and agent, agent only, schedule only, global), then `priority` descending, then `updated_at` descending.
+Returns `{ "ok": true, "overrides": [...], "count": n }`, agent-scoped rows first (newest `updated_at` first), then the global row.
 
 ### `DELETE /api/v1/model-overrides`
 
-Query `schedule_id` and/or `agent_id` deletes that exact scope; `all=true` deletes everything. `400` when neither is given. Returns `{ "ok": true, "deleted_count": n, "message" }`.
+Query `agent_id` deletes that agent's override; `scope=global` deletes the global override; `all=true` deletes everything. `400` when none of these is given. Returns `{ "ok": true, "deleted_count": n, "message" }`.

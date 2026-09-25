@@ -10,7 +10,44 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-09-25
+
 ### Added
+- **Per-job model and dedicated conversation for scheduled jobs (E53 S53.3).**
+  `scheduled_items` gains a `model` column (migration 022). `POST
+  /api/v1/schedules`, `PATCH /api/v1/schedules/:id`, and the
+  `schedule_message`/`update_schedule` MCP tools accept `model`; a fire stamps
+  it onto the envelope as `metadata.schedule_model` for the pool/headless
+  adapters to resolve. A new `update_schedule` MCP tool patches `label`,
+  `topic`, `model`, `max_fires`, and `status`. Schedule list/get output and
+  `/schedule list` now show `model`.
+- Config-defined schedules (`config.yaml` `schedules:`) also accept an
+  optional `model` field.
+- **Adapter-neutral model override tools (E53 S53.1).** New MCP tools
+  `set_model_override`, `get_model_override`, `list_model_overrides`, and
+  `delete_model_override` manage the agent-wide and global model overrides
+  shared by `cc-headless` and `cc-pool`. `resolveModel()`
+  (`src/adapters/model-override-loader.ts`) resolves, in order: a fired
+  schedule's own model (`metadata.schedule_model`), an agent-scoped
+  override, the global override, the caller's configured model, then the
+  CLI default. See
+  [docs/CC_HEADLESS_ADAPTER.md](docs/CC_HEADLESS_ADAPTER.md#runtime-model-overrides).
+- **Per-job models for `cc-pool` panes (E53 S53.2, S53.4, S53.5,
+  S53.6).** A pane's `--model` is now resolved per launch, in order: a
+  fired schedule's own model (carried as `metadata.schedule_model`), an
+  agent-scoped override, a global override, then the pool's own
+  `adapters.cc-pool.<name>.model` — never a bare read of `cfg.model` inside
+  the launch line anymore. The resolved model is persisted to the new
+  `pool_leases.model` column (migration 023) and logged on every launch. A
+  model change is applied to an already-leased pane's *next* message: if the
+  pane is between turns it is relaunched in place (`--resume` on the same
+  Claude session, new `--model`); a turn in flight is never interrupted — the
+  switch is deferred to the pane's next message. `/pool` and
+  `GET /api/v1/pool` now show each pane's `model`. bus-core logs a startup
+  warning for a pool with no `model` configured, since panes then silently
+  inherit `~/.claude/settings.json`. See "Model selection" in
+  [docs/CC_POOL_ADAPTER.md](docs/CC_POOL_ADAPTER.md#model-selection).
+
 - **Stall watchdog for `cc-pool` panes, observe-only (E52, S52.1–S52.2).**
   A leased pane with unhandled work and a screen unchanged for
   `watchdog.stall_after_ms` (default 5 minutes) is recorded as an incident in
@@ -114,6 +151,14 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
   [docs/CC_POOL_ADAPTER.md#cold-start-placeholder](docs/CC_POOL_ADAPTER.md#cold-start-placeholder).
 
 ### Fixed
+- **`POST /api/v1/model-overrides` no longer 500s (E53 S53.1).** The old
+  `headless_model_overrides` table's unique index was partial (`WHERE
+  schedule_id IS NOT NULL OR agent_id IS NOT NULL`) and excluded the global
+  (all-NULL) row, so no `ON CONFLICT` target could ever match a global
+  upsert and every write failed. The replacement `model_overrides` table
+  (migration 021) indexes on `COALESCE(agent_id, '')`, so one conflict
+  target covers both an agent-scoped and the global row. Covered by new
+  HTTP-level tests in `src/http/api.test.ts`.
 - **cc-pool: pane `last_activity_at` no longer goes stale during a long turn.**
   Activity was previously only bumped when a message was routed *in* to a
   pane, never when the pane's own turn finished — so a long-running reply or
@@ -229,6 +274,29 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
   string parses it. See [docs/CC_ADAPTER.md](docs/CC_ADAPTER.md#message-format).
 
 ### Changed
+- **New recurring schedules default to their own topic (E53 S53.3, D1).** A
+  `type: cron` schedule created without an explicit `topic` — via `POST
+  /api/v1/schedules`, `schedule_message`, or `config.yaml` — now defaults to
+  `sched:<label-slug>` (or `sched:<id8>` with no label) instead of `general`,
+  so it gets its own conversation and pane rather than sharing one with
+  whatever else uses `general`. One-shot (`type: once`) schedules still
+  default to `general`. Existing schedules are unaffected; move one with
+  `PATCH /api/v1/schedules/:id`. See the "Topic and model" section of
+  [docs/SCHEDULING.md](docs/SCHEDULING.md).
+- **Model override store renamed and simplified; schedule scope removed
+  (E53 S53.1).** `headless_model_overrides` (migration 015) is replaced by
+  `model_overrides` (migration 021): one row per agent plus one global row,
+  no `priority` column. Schedule-scoped overrides are gone — a job's own
+  model now lives on its schedule (`scheduled_items.model`, S53.3), not in the override store. `POST /api/v1/model-overrides` rejects
+  a `schedule_id` in the body with `400`, pointing at the schedule's `model`
+  field; `DELETE` now takes `agent_id` or `scope=global` in place of
+  `schedule_id`/`agent_id` pairs. `set_headless_model`, `get_headless_model`,
+  `list_headless_model`, and `delete_headless_model` are kept as deprecated
+  aliases for `set_model_override`/`get_model_override`/
+  `list_model_overrides`/`delete_model_override` and reject `schedule_id`
+  the same way. Existing schedule-less overrides migrate automatically
+  (newest wins per agent); schedule-scoped rows, unused in production, are
+  dropped.
 - `make kill` now also stops pm2's `bus-core`. Previously pm2 restarted the
   process it had just killed. `make dev` and `make debug-payloads` use the
   local `tsx` instead of `npx`.
@@ -799,7 +867,8 @@ Baseline release. Core bus, pipeline, adapters, memory, scheduling.
 - Built-in slash commands + plugin command registry. (E6)
 - Scheduled messages (cron + one-shot) via background scheduler. (E18)
 
-[Unreleased]: https://github.com/ChrisPatten/agentbus/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/ChrisPatten/agentbus/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/ChrisPatten/agentbus/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/ChrisPatten/agentbus/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/ChrisPatten/agentbus/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/ChrisPatten/agentbus/compare/v0.8.0...v0.10.0

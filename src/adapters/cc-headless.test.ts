@@ -463,6 +463,160 @@ describe('queue responsiveness — advance on delivery, not process exit (E30 / 
   });
 });
 
+describe('model resolution (E53 S53.2)', () => {
+  const modelConfig: AppConfig = {
+    ...stubConfig,
+    adapters: {
+      'cc-headless': {
+        agent_id: 'peggy',
+        poll_interval_ms: 15,
+        system_prompt: 'You are Peggy.',
+        claude_bin: 'claude',
+        error_reply: 'err',
+        error_passthrough: false,
+        model: 'config-model',
+        memory: { dir: 'memory', index_file: 'MEMORY.md', daily_subdir: 'daily', journal_lookback_days: 3 },
+        journaling: { enabled: true, threshold_ms: 1_800_000, prompt: 'journal' },
+      },
+    },
+  } as unknown as AppConfig;
+
+  let realDb: InstanceType<typeof RealDatabase>;
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  function makeFakeChild() {
+    const child = new EventEmitter() as EventEmitter & {
+      stdout: PassThrough;
+      stderr: PassThrough;
+      kill: ReturnType<typeof vi.fn>;
+    };
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.kill = vi.fn();
+    return child;
+  }
+
+  function writeEvent(stream: PassThrough, obj: unknown): void {
+    stream.write(JSON.stringify(obj) + '\n');
+  }
+
+  function pendingResponse(messages: unknown[]): Response {
+    return { ok: true, json: async () => ({ ok: true, messages }) } as unknown as Response;
+  }
+
+  function makeEnvelope(id: string, sender: string, metadata: Record<string, unknown> = {}) {
+    return { id, sender, channel: 'telegram', topic: undefined, body: `msg ${id}`, metadata };
+  }
+
+  beforeEach(() => {
+    vi.resetModules();
+    realDb = new RealDatabase(':memory:');
+    runMigrations(realDb);
+
+    currentConfig = modelConfig;
+    spawnMock.mockReset();
+
+    fetchMock = vi.fn();
+    global.fetch = fetchMock as unknown as typeof fetch;
+  });
+
+  afterEach(async () => {
+    const { stopHeadless } = await import('./cc-headless.js');
+    stopHeadless();
+    realDb.close();
+    vi.restoreAllMocks();
+  });
+
+  /** Runs one full batch (one message) through startHeadless and returns the spawned args. */
+  async function runOneBatch(envelope: ReturnType<typeof makeEnvelope>): Promise<string[]> {
+    let pendingCall = 0;
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      const u = String(url);
+      if (u.includes('/messages/pending')) {
+        pendingCall += 1;
+        if (pendingCall === 1) return Promise.resolve(pendingResponse([envelope]));
+        return Promise.resolve(pendingResponse([]));
+      }
+      if (u.includes('/ack') || u.includes('/typing') || u.includes('/tool-status')) {
+        return Promise.resolve({ ok: true, json: async () => ({}) } as unknown as Response);
+      }
+      if (u.includes('/api/v1/messages') && init?.method === 'POST') {
+        return Promise.resolve({ ok: true, json: async () => ({}) } as unknown as Response);
+      }
+      return Promise.resolve(pendingResponse([]));
+    });
+
+    let spawnedArgs: string[] = [];
+    spawnMock.mockImplementation((_bin: string, args: string[]) => {
+      spawnedArgs = args;
+      const child = makeFakeChild();
+      setTimeout(() => {
+        writeEvent(child.stdout, {
+          type: 'assistant',
+          session_id: 'sess-1',
+          message: { content: [{ type: 'tool_use', name: 'mcp__agentbus__reply', input: { text: 'hi' } }] },
+        });
+        writeEvent(child.stdout, { type: 'result', session_id: 'sess-1', result: 'hi' });
+        child.emit('close', 0);
+      }, 5);
+      return child as unknown as import('node:child_process').ChildProcess;
+    });
+
+    const { startHeadless } = await import('./cc-headless.js');
+    startHeadless(realDb as unknown as Database.Database);
+    await new Promise((r) => setTimeout(r, 80));
+    return spawnedArgs;
+  }
+
+  it('uses the configured model when nothing else overrides it', async () => {
+    const args = await runOneBatch(makeEnvelope('m1', 'contact:alice'));
+    const idx = args.indexOf('--model');
+    expect(idx).toBeGreaterThanOrEqual(0);
+    expect(args[idx + 1]).toBe('config-model');
+  });
+
+  it('prefers an agent-scoped model_overrides row over the configured model', async () => {
+    const now = new Date().toISOString();
+    realDb
+      .prepare(`INSERT INTO model_overrides (agent_id, model, created_at, updated_at) VALUES (?, ?, ?, ?)`)
+      .run('agent:peggy', 'agent-override-model', now, now);
+
+    const args = await runOneBatch(makeEnvelope('m1', 'contact:alice'));
+    const idx = args.indexOf('--model');
+    expect(args[idx + 1]).toBe('agent-override-model');
+  });
+
+  it('prefers the global override over the configured model when there is no agent override', async () => {
+    const now = new Date().toISOString();
+    realDb
+      .prepare(`INSERT INTO model_overrides (agent_id, model, created_at, updated_at) VALUES (NULL, ?, ?, ?)`)
+      .run('global-override-model', now, now);
+
+    const args = await runOneBatch(makeEnvelope('m1', 'contact:alice'));
+    const idx = args.indexOf('--model');
+    expect(args[idx + 1]).toBe('global-override-model');
+  });
+
+  it('prefers metadata.schedule_model over any override or the configured model', async () => {
+    const now = new Date().toISOString();
+    realDb
+      .prepare(`INSERT INTO model_overrides (agent_id, model, created_at, updated_at) VALUES (?, ?, ?, ?)`)
+      .run('agent:peggy', 'agent-override-model', now, now);
+
+    const args = await runOneBatch(
+      makeEnvelope('m1', 'contact:alice', { schedule_model: 'schedule-model' }),
+    );
+    const idx = args.indexOf('--model');
+    expect(args[idx + 1]).toBe('schedule-model');
+  });
+
+  it('ignores an empty-string metadata.schedule_model', async () => {
+    const args = await runOneBatch(makeEnvelope('m1', 'contact:alice', { schedule_model: '' }));
+    const idx = args.indexOf('--model');
+    expect(args[idx + 1]).toBe('config-model');
+  });
+});
+
 describe('turn cost persistence (E39)', () => {
   const singleInstanceConfig: AppConfig = {
     ...stubConfig,

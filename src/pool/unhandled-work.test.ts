@@ -28,6 +28,7 @@ function row(over: Partial<PoolLeaseRow> = {}): PoolLeaseRow {
     agent_id: AGENT,
     conversation_id: 'c',
     claude_session_id: null,
+    model: null,
     state: 'leased',
     leased_at: '2026-01-01T10:00:00.000Z',
     last_activity_at: null,

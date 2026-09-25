@@ -181,16 +181,16 @@ describe('PaneLifecycle.launch — fresh vs resume', () => {
 // ── launch(): optional flags ─────────────────────────────────────────────────
 
 describe('PaneLifecycle.launch — optional flags', () => {
-  it('includes --model only when cfg.model is set', async () => {
+  it('includes --model only when LaunchParams.model is set (E53: resolved by the caller, not read from cfg.model)', async () => {
     const tmuxWith = makeTmux({ capturePane: makeNoAckCapture() });
     const plWith = new PaneLifecycle({
       tmux: tmuxWith,
       busBaseUrl: 'http://x',
-      cfg: makeCfg({ model: 'claude-sonnet-5' }),
+      cfg: makeCfg({ model: undefined }),
       scratchDir,
       fetchFn: makeReadyFetch(),
     });
-    const withPromise = plWith.launch(makeLaunchParams());
+    const withPromise = plWith.launch(makeLaunchParams({ model: 'claude-sonnet-5' }));
     await vi.advanceTimersByTimeAsync(600);
     await withPromise;
     expect(tmuxWith.sendCommand.mock.calls[0]![1] as string).toContain(`${q('--model')} ${q('claude-sonnet-5')}`);
@@ -199,13 +199,16 @@ describe('PaneLifecycle.launch — optional flags', () => {
     const plWithout = new PaneLifecycle({
       tmux: tmuxWithout,
       busBaseUrl: 'http://x',
-      cfg: makeCfg({ model: undefined }),
+      cfg: makeCfg({ model: 'claude-sonnet-5' }),
       scratchDir,
       fetchFn: makeReadyFetch(),
     });
-    const withoutPromise = plWithout.launch(makeLaunchParams());
+    const withoutPromise = plWithout.launch(makeLaunchParams({ model: undefined }));
     await vi.advanceTimersByTimeAsync(600);
     await withoutPromise;
+    // cfg.model is set here but LaunchParams.model is not — confirms
+    // buildLaunchLine() no longer falls back to cfg.model directly; the
+    // caller (PoolManager) is solely responsible for resolving it.
     expect(tmuxWithout.sendCommand.mock.calls[0]![1] as string).not.toContain(q('--model'));
   });
 

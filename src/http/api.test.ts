@@ -1578,6 +1578,137 @@ describe('Schedule CRUD endpoints', () => {
     expect(row.stale_after_ms).toBe(45 * 60 * 1000);
   });
 
+  // ── E53 S53.3: model + default topic ──────────────────────────────────────
+
+  it('creates a schedule with a model and persists it', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/schedules',
+      payload: {
+        type: 'once',
+        fire_at: futureAt,
+        channel: 'telegram',
+        sender: 'contact:chris',
+        payload_body: 'Wake up',
+        model: 'haiku',
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const body = JSON.parse(res.body) as { id: string };
+    const row = db.prepare(`SELECT model FROM scheduled_items WHERE id = ?`).get(body.id) as {
+      model: string | null;
+    };
+    expect(row.model).toBe('haiku');
+  });
+
+  it('rejects an empty-string model', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/schedules',
+      payload: {
+        type: 'once',
+        fire_at: futureAt,
+        channel: 'telegram',
+        sender: 'contact:chris',
+        payload_body: 'Wake up',
+        model: '',
+      },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('rejects a model longer than 100 characters', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/schedules',
+      payload: {
+        type: 'once',
+        fire_at: futureAt,
+        channel: 'telegram',
+        sender: 'contact:chris',
+        payload_body: 'Wake up',
+        model: 'x'.repeat(101),
+      },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('a cron schedule created without a topic gets sched:<label-slug>', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/schedules',
+      payload: {
+        type: 'cron',
+        cron_expr: '0 8 * * 1-5',
+        channel: 'telegram',
+        sender: 'system:scheduler',
+        payload_body: 'Check the inbox',
+        label: 'Email Watch!!',
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const body = JSON.parse(res.body) as { id: string; topic: string };
+    expect(body.topic).toBe('sched:email-watch');
+    const row = db.prepare(`SELECT topic FROM scheduled_items WHERE id = ?`).get(body.id) as {
+      topic: string;
+    };
+    expect(row.topic).toBe('sched:email-watch');
+  });
+
+  it('a cron schedule created without a topic or label falls back to sched:<id8>', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/schedules',
+      payload: {
+        type: 'cron',
+        cron_expr: '0 8 * * 1-5',
+        channel: 'telegram',
+        sender: 'system:scheduler',
+        payload_body: 'Check the inbox',
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const body = JSON.parse(res.body) as { id: string; topic: string };
+    expect(body.topic).toBe(`sched:${body.id.slice(0, 8)}`);
+  });
+
+  it('a once schedule created without a topic stays general', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/schedules',
+      payload: {
+        type: 'once',
+        fire_at: futureAt,
+        channel: 'telegram',
+        sender: 'contact:chris',
+        payload_body: 'Reminder',
+        label: 'Some label',
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const body = JSON.parse(res.body) as { id: string; topic: string };
+    expect(body.topic).toBe('general');
+  });
+
+  it('honors an explicit topic over the D1 default', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/schedules',
+      payload: {
+        type: 'cron',
+        cron_expr: '0 8 * * 1-5',
+        channel: 'telegram',
+        sender: 'system:scheduler',
+        payload_body: 'Check the inbox',
+        label: 'Email Watch',
+        topic: 'custom-topic',
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const body = JSON.parse(res.body) as { topic: string };
+    expect(body.topic).toBe('custom-topic');
+  });
+
   it('rejects stale_after_ms set alongside type: cron', async () => {
     const res = await server.inject({
       method: 'POST',
@@ -1748,6 +1879,66 @@ describe('Schedule CRUD endpoints', () => {
     expect(res.statusCode).toBe(400);
   });
 
+  it('updates topic and model on an active schedule', async () => {
+    const createRes = await server.inject({
+      method: 'POST',
+      url: '/api/v1/schedules',
+      payload: { type: 'once', fire_at: futureAt, channel: 'telegram', sender: 'contact:chris', payload_body: 'Q' },
+    });
+    const { id } = JSON.parse(createRes.body) as { id: string };
+
+    const res = await server.inject({
+      method: 'PATCH',
+      url: `/api/v1/schedules/${id}`,
+      payload: { topic: 'sched:custom', model: 'haiku' },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body) as { ok: boolean; schedule: { topic: string; model: string } };
+    expect(body.schedule.topic).toBe('sched:custom');
+    expect(body.schedule.model).toBe('haiku');
+  });
+
+  it('clears model via PATCH with model: null', async () => {
+    const createRes = await server.inject({
+      method: 'POST',
+      url: '/api/v1/schedules',
+      payload: {
+        type: 'once',
+        fire_at: futureAt,
+        channel: 'telegram',
+        sender: 'contact:chris',
+        payload_body: 'R',
+        model: 'haiku',
+      },
+    });
+    const { id } = JSON.parse(createRes.body) as { id: string };
+
+    const res = await server.inject({
+      method: 'PATCH',
+      url: `/api/v1/schedules/${id}`,
+      payload: { model: null },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body) as { ok: boolean; schedule: { model: string | null } };
+    expect(body.schedule.model).toBeNull();
+  });
+
+  it('rejects an empty-string topic via PATCH', async () => {
+    const createRes = await server.inject({
+      method: 'POST',
+      url: '/api/v1/schedules',
+      payload: { type: 'once', fire_at: futureAt, channel: 'telegram', sender: 'contact:chris', payload_body: 'S' },
+    });
+    const { id } = JSON.parse(createRes.body) as { id: string };
+
+    const res = await server.inject({
+      method: 'PATCH',
+      url: `/api/v1/schedules/${id}`,
+      payload: { topic: '' },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
   it('returns 404 for PATCH on an unknown schedule', async () => {
     const res = await server.inject({
       method: 'PATCH',
@@ -1755,6 +1946,161 @@ describe('Schedule CRUD endpoints', () => {
       payload: { label: 'X' },
     });
     expect(res.statusCode).toBe(404);
+  });
+});
+
+// ── /api/v1/model-overrides (E53 S53.1) ──────────────────────────────────────
+
+describe('Model override endpoints', () => {
+  let server: FastifyInstance;
+  let db: Database.Database;
+
+  beforeEach(async () => {
+    ({ server, db } = await makeServer());
+  });
+
+  afterEach(async () => {
+    await server.close();
+  });
+
+  // ── POST ──────────────────────────────────────────────────────────────────
+
+  it('creates a global override on POST with no agent_id', async () => {
+    const res = await server.inject({ method: 'POST', url: '/api/v1/model-overrides', payload: { model: 'opus' } });
+    expect(res.statusCode).toBe(201);
+    const body = JSON.parse(res.body) as { ok: boolean; id: number; override: { agent_id: string | null; model: string } };
+    expect(body.ok).toBe(true);
+    expect(body.override.agent_id).toBeNull();
+    expect(body.override.model).toBe('opus');
+  });
+
+  it('creates an agent-scoped override on POST with agent_id', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/model-overrides',
+      payload: { model: 'sonnet', agent_id: 'agent:peggy' },
+    });
+    expect(res.statusCode).toBe(201);
+    const body = JSON.parse(res.body) as { ok: boolean; override: { agent_id: string | null; model: string } };
+    expect(body.override.agent_id).toBe('agent:peggy');
+    expect(body.override.model).toBe('sonnet');
+  });
+
+  it('upserts on a repeat POST for the same scope instead of erroring', async () => {
+    const first = await server.inject({
+      method: 'POST',
+      url: '/api/v1/model-overrides',
+      payload: { model: 'opus', agent_id: 'agent:peggy' },
+    });
+    const second = await server.inject({
+      method: 'POST',
+      url: '/api/v1/model-overrides',
+      payload: { model: 'haiku', agent_id: 'agent:peggy' },
+    });
+    expect(first.statusCode).toBe(201);
+    expect(second.statusCode).toBe(201);
+    const firstBody = JSON.parse(first.body) as { id: number };
+    const secondBody = JSON.parse(second.body) as { id: number; override: { model: string } };
+    expect(secondBody.id).toBe(firstBody.id);
+    expect(secondBody.override.model).toBe('haiku');
+
+    const rows = db.prepare(`SELECT COUNT(*) as cnt FROM model_overrides`).get() as { cnt: number };
+    expect(rows.cnt).toBe(1);
+  });
+
+  it('rejects POST without model', async () => {
+    const res = await server.inject({ method: 'POST', url: '/api/v1/model-overrides', payload: {} });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('rejects POST with schedule_id, pointing at the schedule field', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/model-overrides',
+      payload: { model: 'opus', schedule_id: 'sched-1' },
+    });
+    expect(res.statusCode).toBe(400);
+    const body = JSON.parse(res.body) as { error: string };
+    expect(body.error).toMatch(/schedule/i);
+  });
+
+  // ── GET ───────────────────────────────────────────────────────────────────
+
+  it('lists agent-scoped rows before the global row', async () => {
+    await server.inject({ method: 'POST', url: '/api/v1/model-overrides', payload: { model: 'opus' } });
+    await server.inject({
+      method: 'POST',
+      url: '/api/v1/model-overrides',
+      payload: { model: 'sonnet', agent_id: 'agent:peggy' },
+    });
+
+    const res = await server.inject({ method: 'GET', url: '/api/v1/model-overrides' });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body) as { ok: boolean; count: number; overrides: Array<{ agent_id: string | null; model: string }> };
+    expect(body.count).toBe(2);
+    expect(body.overrides[0]!.agent_id).toBe('agent:peggy');
+    expect(body.overrides[1]!.agent_id).toBeNull();
+  });
+
+  it('returns an empty list with no overrides set', async () => {
+    const res = await server.inject({ method: 'GET', url: '/api/v1/model-overrides' });
+    const body = JSON.parse(res.body) as { overrides: unknown[]; count: number };
+    expect(body.overrides).toEqual([]);
+    expect(body.count).toBe(0);
+  });
+
+  // ── DELETE ────────────────────────────────────────────────────────────────
+
+  it('deletes an agent-scoped override by agent_id', async () => {
+    await server.inject({
+      method: 'POST',
+      url: '/api/v1/model-overrides',
+      payload: { model: 'sonnet', agent_id: 'agent:peggy' },
+    });
+
+    const res = await server.inject({ method: 'DELETE', url: '/api/v1/model-overrides?agent_id=agent:peggy' });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body) as { deleted_count: number };
+    expect(body.deleted_count).toBe(1);
+
+    const remaining = db.prepare(`SELECT COUNT(*) as cnt FROM model_overrides`).get() as { cnt: number };
+    expect(remaining.cnt).toBe(0);
+  });
+
+  it('deletes the global override with scope=global', async () => {
+    await server.inject({ method: 'POST', url: '/api/v1/model-overrides', payload: { model: 'opus' } });
+    await server.inject({
+      method: 'POST',
+      url: '/api/v1/model-overrides',
+      payload: { model: 'sonnet', agent_id: 'agent:peggy' },
+    });
+
+    const res = await server.inject({ method: 'DELETE', url: '/api/v1/model-overrides?scope=global' });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body) as { deleted_count: number };
+    expect(body.deleted_count).toBe(1);
+
+    const remaining = db.prepare(`SELECT agent_id FROM model_overrides`).all() as Array<{ agent_id: string }>;
+    expect(remaining).toEqual([{ agent_id: 'agent:peggy' }]);
+  });
+
+  it('deletes everything with all=true', async () => {
+    await server.inject({ method: 'POST', url: '/api/v1/model-overrides', payload: { model: 'opus' } });
+    await server.inject({
+      method: 'POST',
+      url: '/api/v1/model-overrides',
+      payload: { model: 'sonnet', agent_id: 'agent:peggy' },
+    });
+
+    const res = await server.inject({ method: 'DELETE', url: '/api/v1/model-overrides?all=true' });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body) as { deleted_count: number };
+    expect(body.deleted_count).toBe(2);
+  });
+
+  it('rejects DELETE with neither agent_id, scope=global, nor all=true', async () => {
+    const res = await server.inject({ method: 'DELETE', url: '/api/v1/model-overrides' });
+    expect(res.statusCode).toBe(400);
   });
 });
 
@@ -1875,6 +2221,36 @@ describe('GET /api/v1/pool', () => {
     expect(freePane.conversation_id).toBeNull();
 
     expect(pool.parked).toEqual({ count: 0, oldest_parked_at: null });
+  });
+
+  it('includes each pane\'s model (E53): the leased session\'s model, null for a free pane', async () => {
+    const fixtureDb = makeDb();
+    const manager = makeManager(fixtureDb);
+    manager.leaseStore.seedPanes('peggy', [
+      { paneId: 'peggy-pool:1', agentId: 'agent:peggy-pool-1' },
+      { paneId: 'peggy-pool:2', agentId: 'agent:peggy-pool-2' },
+    ]);
+    const acquired = manager.leaseStore.acquire('peggy', 'conv-a', {
+      poolAgentId: 'peggy',
+      panes: 2,
+      maxPanes: 2,
+      growth: 'fixed',
+      idleEvictMs: 1_800_000,
+    });
+    if (acquired.kind !== 'bound') throw new Error(`test setup: expected "bound", got "${acquired.kind}"`);
+    manager.leaseStore.confirmReady('peggy', acquired.lease.pane_id);
+    manager.leaseStore.setModel('peggy', acquired.lease.pane_id, 'claude-haiku-5');
+
+    const poolManagers = new Map([['agent:peggy', manager]]);
+    ({ server } = await makeServer({ poolManagers }));
+
+    const res = await server.inject({ method: 'GET', url: '/api/v1/pool' });
+    const body = JSON.parse(res.body) as {
+      pools: Array<{ panes: Array<{ pane_id: string; model: string | null }> }>;
+    };
+    const pool = body.pools[0]!;
+    expect(pool.panes.find((p) => p.pane_id === 'peggy-pool:1')!.model).toBe('claude-haiku-5');
+    expect(pool.panes.find((p) => p.pane_id === 'peggy-pool:2')!.model).toBeNull();
   });
 
   it('?pool= narrows the result to the matching pool', async () => {

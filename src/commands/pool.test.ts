@@ -112,6 +112,34 @@ describe('/pool', () => {
     expect(result.body).toContain('parked: 0');
   });
 
+  it('shows the leased pane\'s model (E53), and omits model= for a free pane / a leased pane with no model', async () => {
+    const db = makeDb();
+    const manager = makeManager(db);
+    manager.leaseStore.seedPanes('peggy', [
+      { paneId: 'peggy-pool:1', agentId: 'agent:peggy-pool-1' },
+      { paneId: 'peggy-pool:2', agentId: 'agent:peggy-pool-2' },
+    ]);
+    const acquired = manager.leaseStore.acquire('peggy', 'conv-abcdef1234', {
+      poolAgentId: 'peggy',
+      panes: 2,
+      maxPanes: 2,
+      growth: 'fixed',
+      idleEvictMs: 1_800_000,
+    });
+    if (acquired.kind !== 'bound') throw new Error(`test setup: expected "bound", got "${acquired.kind}"`);
+    manager.leaseStore.confirmReady('peggy', acquired.lease.pane_id);
+    manager.leaseStore.setModel('peggy', acquired.lease.pane_id, 'claude-haiku-5');
+
+    const poolManagers = new Map([['agent:peggy', manager]]);
+    const cmd = createPoolCommand({ poolManagers, now: () => new Date('2026-01-01T00:00:00.000Z') });
+    const result = await cmd.handler([], makeCtx(db));
+
+    expect(result.body).toContain('model=claude-haiku-5');
+    // Free pane line has no model= segment at all.
+    const freeLine = (result.body ?? '').split('\n').find((l) => l.includes('peggy-pool:2'))!;
+    expect(freeLine).not.toContain('model=');
+  });
+
   it('filters to one pool when args[0] matches (bare or "agent:"-prefixed form)', async () => {
     const db = makeDb();
     const peggy = makeManager(db, { agent_id: 'peggy', tmux_session: 'peggy-pool' });

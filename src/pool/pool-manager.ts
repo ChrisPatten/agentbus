@@ -33,9 +33,43 @@ import { createTmuxController, realTmuxExec, type TmuxController } from './tmux.
 import { PaneWatchdog } from './watchdog.js';
 import { resolveWatchdogConfig } from './watchdog-config.js';
 import { IncidentStore } from './watchdog-store.js';
-import { derivePaneAgentId, derivePaneWindowName, toBareAgentId, toPrefixedAgentId } from './types.js';
+import {
+  derivePaneAgentId,
+  derivePaneWindowName,
+  toBareAgentId,
+  toPrefixedAgentId,
+  type PoolLeaseRow,
+} from './types.js';
+import { getUnhandledSince } from './unhandled-work.js';
+import { resolveModel as resolveModelFromStore, type ModelSource, type ResolvedModel } from '../adapters/model-override-loader.js';
 import type { JournalingRunner } from '../memory/session-tracker.js';
 import type { MessageQueue } from '../core/queue.js';
+
+/**
+ * E53 — where a pane launch's `--model` came from. Re-exported aliases of
+ * `src/adapters/model-override-loader.ts`'s own types (that module owns the
+ * canonical resolution order and priority — schedule > agent override >
+ * global override > config > nothing) so callers that only import from this
+ * module (tests, `PoolManagerDeps.resolveModel`'s signature) don't need a
+ * second import, without this module maintaining its own duplicate union.
+ */
+export type PoolModelSource = ModelSource;
+
+/** Result of resolving a pane's model for one launch/relaunch. */
+export type PoolResolvedModel = ResolvedModel;
+
+/**
+ * Default resolver used when `PoolManagerDeps.resolveModel` isn't injected —
+ * schedule model (if the caller passed one) wins, else `cfg.model`, else
+ * nothing. Does NOT know about agent/global overrides (no `db`/`agentId`
+ * passed through) — a `PoolManager` constructed directly without wiring
+ * `resolveModel` (every unit test in this file, notably) gets this narrow
+ * behavior. `createPoolManagers()` below — the factory `src/index.ts`
+ * actually calls — wires the real, override-aware resolver instead.
+ */
+function defaultResolveModel(cfgModel: string | undefined): (scheduleModel: string | null) => PoolResolvedModel {
+  return (scheduleModel) => resolveModelFromStore({ scheduleModel, configModel: cfgModel });
+}
 
 /** Footer line of Claude Code's interactive permission dialog ("Esc to cancel · Tab to amend"), observed in live captures — see the E51 epic. */
 const PERMISSION_DIALOG_PATTERN = /esc to cancel/i;
@@ -102,6 +136,26 @@ export interface PoolManagerDeps {
   sweepIntervalMs?: number;
   /** Injectable for tests — defaults to a `PaneWatchdog` built from `cfg.watchdog`. */
   watchdog?: PaneWatchdog;
+  /**
+   * E53 — resolves the model to launch/relaunch a pane with, from the
+   * schedule model carried on the envelope (see `resolveRoute()`'s
+   * `promptContext.scheduleModel`). Optional: when omitted, `PoolManager`
+   * falls back to `defaultResolveModel(cfg.model)` — schedule model, else
+   * `cfg.model`, else nothing (source `'cli-default'`). That default does
+   * NOT apply agent- or global-scoped overrides (it calls the loader's
+   * `resolveModel()` with no `db`/`agentId`, which skips the override
+   * lookup entirely — see that function's own doc comment).
+   *
+   * `createPoolManagers()` below — the factory `src/index.ts` actually
+   * calls — wires the real, override-aware resolver: `db` +
+   * `agentId: toPrefixedAgentId(cfg.agent_id)` + `configModel: cfg.model`
+   * passed through to `src/adapters/model-override-loader.ts`'s
+   * `resolveModel()`, so `agent:<pool agent_id>` and global overrides
+   * (`model_overrides`, migration 021) take effect. Only a `PoolManager`
+   * built directly via `new PoolManager(...)` — every unit test in this
+   * file — gets the narrower default above instead.
+   */
+  resolveModel?: (scheduleModel: string | null) => PoolResolvedModel;
 }
 
 /**
@@ -131,6 +185,30 @@ export class PoolManager {
   private readonly queue: MessageQueue | undefined;
   private readonly fetchFn: typeof fetch;
   private readonly sweepIntervalMs: number;
+  /** E53 — see `PoolManagerDeps.resolveModel`'s doc comment. */
+  /**
+   * E53 — the wired resolver (`PoolManagerDeps.resolveModel`, or the default
+   * fallback). Public (not `private`) so tests can assert what a
+   * `PoolManager` actually resolves — in particular, that `createPoolManagers()`'s
+   * wiring reaches an agent/global override — without needing a full launch.
+   */
+  readonly resolveModelFn: (scheduleModel: string | null) => PoolResolvedModel;
+  /**
+   * E53 (follow-up fix, round 2) — the in-flight release-then-launch
+   * operation per pane, keyed by `pane_id`. Set by `trackPaneOperation()`
+   * SYNCHRONOUSLY, right when a pane is claimed (before its release, if
+   * any, or its launch ever runs — see that method's doc comment for why
+   * round 1 of this fix, which only tracked the launch call itself, still
+   * had a gap), cleared once the whole operation settles. A concurrent
+   * `resolveRoute()` call that finds a pane's row already `launching` awaits
+   * this (via `awaitInFlightThenResolve()`) instead of racing ahead of it —
+   * enqueuing a message before an in-flight release/relaunch has actually
+   * landed risks the OLD, still-alive Claude session acking it right before
+   * it dies (or, for `on_evict: clear`, a session that's about to be handed
+   * to a different conversation entirely). Entries never reject (see
+   * `trackPaneOperation()`) — a waiter doesn't need its own try/catch.
+   */
+  private readonly inFlightLaunches = new Map<string, Promise<void>>();
   /** conversationIds already notified about a parked-timeout dead-letter, so
    *  drainParked() sends at most one notice per conversation. In-memory
    *  only — resets on process restart — and entries are never pruned (a
@@ -150,6 +228,19 @@ export class PoolManager {
     this.queue = deps.queue;
     this.fetchFn = deps.fetchFn ?? fetch;
     this.sweepIntervalMs = deps.sweepIntervalMs ?? DEFAULT_SWEEP_INTERVAL_MS;
+    this.resolveModelFn = deps.resolveModel ?? defaultResolveModel(deps.cfg.model);
+
+    // E53 S53.4 — startup warning: no pane launch should silently depend on
+    // ~/.claude/settings.json for its model. Logged once, at construction,
+    // rather than per-launch, so it doesn't repeat every time a pane is
+    // (re)launched.
+    if (!deps.cfg.model) {
+      console.warn(
+        `[pool:${this.poolId}] No 'model' configured for this pool — panes with no schedule/override model will ` +
+          `fall back to whatever model is set in ~/.claude/settings.json, which any interactive '/model' typed in ` +
+          `ANY Claude session (this pool's or otherwise) rewrites. Set adapters.cc-pool.<name>.model to pin it.`,
+      );
+    }
 
     // Resolved unconditionally (even when paneLauncher is injected) so
     // reconcileLiveness() always has a TmuxController to call
@@ -270,7 +361,7 @@ export class PoolManager {
    */
   async resolveRoute(
     conversationId: string,
-    promptContext: { contact_id: string; channel: string; topic?: string },
+    promptContext: { contact_id: string; channel: string; topic?: string; scheduleModel?: string | null },
   ): Promise<string> {
     try {
       const result = this.leaseStore.acquire(this.poolId, conversationId, {
@@ -285,34 +376,45 @@ export class PoolManager {
         // acquire()'s own reuse branch already bumps last_activity_at in the
         // same transaction (verified by reading lease-store.ts directly) —
         // no separate touch() call needed here.
-        return result.lease.agent_id;
+        //
+        // E53 S53.5 concurrency fix: `acquire()`'s reuse query also matches
+        // a row already 'launching' (a fresh bound/grow/evict launch OR a
+        // model-switch relaunch already in flight for this exact
+        // conversation — see LeaseStore.beginRelaunch()'s doc comment).
+        // Returning this pane's agent id immediately here would be racy: the
+        // caller enqueues the inbound message right after this call returns,
+        // and if this is a relaunch in flight, the OLD Claude session is
+        // still alive until `paneLauncher.release(..., 'kill')` actually
+        // completes — it could ack the message into a session that's about
+        // to be killed, silently losing it. Wait for the in-flight
+        // launch/relaunch to actually finish (never throws — see
+        // `awaitInFlightThenResolve()`), then re-read the row fresh.
+        if (result.lease.state === 'launching') {
+          return this.awaitInFlightThenResolve(result.lease.pane_id, conversationId);
+        }
+        return this.handleReuse(conversationId, result.lease, promptContext);
       }
 
       if (result.kind === 'exhausted') {
         return this.parkedRecipientId();
       }
 
-      if (result.kind === 'evict') {
-        // The DB-side claim already happened atomically inside acquire() —
-        // a failed /clear or kill on the displaced occupant must not block
-        // seating the new conversation.
-        try {
-          await this.paneLauncher.release(result.lease.pane_id, this.cfg.on_evict);
-        } catch (err) {
-          console.error(
-            `[pool:${this.poolId}] Failed to release evicted pane ${result.lease.pane_id} ` +
-              `(on_evict=${this.cfg.on_evict}) — proceeding to seat the new conversation anyway:`,
-            err,
-          );
-        }
-      }
-
-      // bound | grow | evict-fallthrough: launch/resume Claude in the claimed pane.
+      // bound | grow | evict: launch/resume Claude in the claimed pane. The
+      // DB-side claim already happened atomically inside acquire() — 'evict'
+      // still needs its displaced occupant released first, but that release
+      // (and the launch that follows) now runs INSIDE trackPaneOperation()
+      // below, not out here before it — see that call's own comment for why
+      // (the bug this follow-up fixes).
       const lease = result.lease;
 
       const priorRow = this.getActiveSessionRow(conversationId);
       const sessionId = priorRow?.claude_session_id ?? randomUUID();
       const resume = priorRow?.claude_session_id != null;
+
+      // E53 S53.4 — resolve BEFORE launching, so the very first launch of a
+      // pane already carries the right --model (never a plain cfg.model
+      // read inside pane.ts anymore — see LaunchParams.model's doc comment).
+      const resolved = this.resolveModelFn(promptContext.scheduleModel ?? null);
 
       // Every non-reuse outcome (bound/grow/evict) is about to block on a
       // real launch — the ack handshake + readiness poll below can take
@@ -323,61 +425,50 @@ export class PoolManager {
       // activity starts. Fire-and-forget — must never add to launch latency.
       this.notifyColdStart(promptContext.channel, promptContext.contact_id, promptContext.topic);
 
-      try {
-        await this.paneLauncher.launch({
-          paneId: lease.pane_id,
-          paneAgentId: toBareAgentId(lease.agent_id),
-          promptContext,
-          sessionId,
-          resume,
-          ensureWindow: {
-            cwd: this.cfg.working_dir ?? process.cwd(),
-            env: this.cfg.pane_env,
+      // E53 (follow-up fix, round 2) — trackPaneOperation() registers this
+      // pane's in-flight entry SYNCHRONOUSLY, right now, before the 'evict'
+      // release below (or the launch after it) ever runs — see that
+      // method's doc comment for why the entry must cover release too, not
+      // just the launch call `runTrackedLaunch()` makes.
+      const launched = await this.trackPaneOperation(lease.pane_id, async () => {
+        if (result.kind === 'evict') {
+          // A failed /clear or kill on the displaced occupant must not block
+          // seating the new conversation.
+          try {
+            await this.paneLauncher.release(lease.pane_id, this.cfg.on_evict);
+          } catch (err) {
+            console.error(
+              `[pool:${this.poolId}] Failed to release evicted pane ${lease.pane_id} ` +
+                `(on_evict=${this.cfg.on_evict}) — proceeding to seat the new conversation anyway:`,
+              err,
+            );
+          }
+        }
+        return this.runTrackedLaunch(
+          lease.pane_id,
+          {
+            paneId: lease.pane_id,
+            paneAgentId: toBareAgentId(lease.agent_id),
+            promptContext,
+            sessionId,
+            resume,
+            model: resolved.model,
+            ensureWindow: {
+              cwd: this.cfg.working_dir ?? process.cwd(),
+              env: this.cfg.pane_env,
+            },
           },
-        });
-      } catch (err) {
-        console.error(
-          `[pool:${this.poolId}] Pane launch failed for ${lease.pane_id} — marking dead and parking ` +
-            `conversation ${conversationId}:`,
-          err,
+          resolved,
         );
-        this.leaseStore.markDead(this.poolId, lease.pane_id);
+      });
+      if (!launched) {
+        console.error(
+          `[pool:${this.poolId}] Pane launch failed for ${lease.pane_id} — parking conversation ${conversationId}`,
+        );
         return this.parkedRecipientId();
       }
 
-      this.leaseStore.confirmReady(this.poolId, lease.pane_id);
-      this.leaseStore.setClaudeSessionId(this.poolId, lease.pane_id, sessionId);
-
-      if (priorRow) {
-        this.db.prepare(`UPDATE sessions SET claude_session_id = ? WHERE id = ?`).run(sessionId, priorRow.id);
-      } else {
-        // No `sessions` row exists yet for this conversation — Stage 80
-        // (transcript-log) hasn't run for this envelope yet; it runs later
-        // in the same pipeline pass and will INSERT the row itself (with
-        // claude_session_id left NULL, since it has no way to know the id
-        // we just minted here). Re-check once for a race (another resolver
-        // creating the row between our lookup above and here) before giving
-        // up — `sessions` has no unique constraint on conversation_id alone
-        // (confirmed by reading src/db/migrations/001_initial_schema.sql:
-        // only a non-unique `idx_sess_conversation` index), so there is no
-        // safe `INSERT ... ON CONFLICT(conversation_id)` to fall back on.
-        const raceRow = this.getActiveSessionRow(conversationId);
-        if (raceRow) {
-          this.db.prepare(`UPDATE sessions SET claude_session_id = ? WHERE id = ?`).run(sessionId, raceRow.id);
-        }
-        // TODO(E48-S48.6 or a later follow-up): this conversation's
-        // first-ever pool message leaves its minted claude_session_id
-        // living only in pool_leases (via setClaudeSessionId above) until
-        // its NEXT message arrives — Stage 80 creates the `sessions` row
-        // with claude_session_id NULL, and nothing currently backfills it
-        // on that first row. Teach Stage 80 (src/pipeline/stages/
-        // transcript-log.ts) to consult LeaseStore.findByConversation() /
-        // pool_leases for an already-minted claude_session_id when it
-        // INSERTs a brand-new row, instead of always defaulting that column
-        // to NULL. Until then this is a narrow, self-healing gap: the `if
-        // (priorRow)` branch above fixes the row up on the conversation's
-        // second message.
-      }
+      this.persistSessionId(conversationId, priorRow, sessionId);
 
       return lease.agent_id;
     } catch (err) {
@@ -442,6 +533,289 @@ export class PoolManager {
    */
   parkedRecipientId(): string {
     return toPrefixedAgentId(`${this.cfg.agent_id}__parked`);
+  }
+
+  /**
+   * E53 S53.5 — the `reuse` half of model resolution. Called for every
+   * message on a conversation whose pane is already leased (or already
+   * `launching` — see `LeaseStore.acquire()`'s reuse query). Decision D2
+   * ("apply at once"): if the resolved model differs from what the pane's
+   * session was last launched with, and the pane is between turns (no
+   * unhandled work — E52's `getUnhandledSince`), relaunch it in place
+   * (`Ctrl-C`/kill, then `--resume` on the SAME Claude session id with the
+   * NEW `--model`) before handing the message off. A turn in flight is never
+   * interrupted — the switch is deferred to the pane's next `reuse` call.
+   *
+   * `lease.model === null` is treated as "unknown", not "no model": a
+   * defined resolved model always counts as a mismatch against it (covers a
+   * lease created before migration 023, or a pane launched before this
+   * story). `resolved.model === undefined` (no schedule model, no pool
+   * `cfg.model` — `cli-default`) never triggers a switch either way; there
+   * is nothing to pin it to.
+   *
+   * Concurrency: `LeaseStore.beginRelaunch()` atomically claims the row
+   * (`leased` -> `launching`, scoped to this exact `conversationId`) before
+   * any tmux/launch work starts. A second concurrent call for the same
+   * conversation that also decides to relaunch loses that race (returns
+   * `false`) and simply returns the pane's current agent id unchanged,
+   * leaving the winner's relaunch to finish — see `beginRelaunch()`'s own
+   * doc comment for why this can't result in two relaunches or two panes
+   * for one conversation.
+   */
+  private async handleReuse(
+    conversationId: string,
+    lease: PoolLeaseRow,
+    promptContext: { contact_id: string; channel: string; topic?: string; scheduleModel?: string | null },
+  ): Promise<string> {
+    const resolved = this.resolveModelFn(promptContext.scheduleModel ?? null);
+    const mismatch = resolved.model !== undefined && resolved.model !== lease.model;
+    if (!mismatch) return lease.agent_id;
+
+    const unhandledSince = getUnhandledSince(this.db, lease);
+    if (unhandledSince !== null) {
+      console.log(
+        `[pool:${this.poolId}] Model switch to "${resolved.model}" (source=${resolved.source}) for ${lease.pane_id} ` +
+          `deferred — a turn is still in flight (unhandled work since ${unhandledSince})`,
+      );
+      return lease.agent_id;
+    }
+
+    const claimed = this.leaseStore.beginRelaunch(this.poolId, lease.pane_id, conversationId);
+    if (!claimed) {
+      // Lost the race to another concurrent resolveRoute() call for this
+      // same conversation — its relaunch (or its own initial launch, if this
+      // was actually racing a brand-new conversation's first message) is
+      // already in flight. Follow-up fix: don't just return the pane id —
+      // the winner's `release(..., 'kill')` may not have completed yet, so
+      // the OLD Claude session could still be alive to ack a message this
+      // caller's caller is about to enqueue, right before it's killed. Wait
+      // for the in-flight operation to actually finish, then re-read.
+      return this.awaitInFlightThenResolve(lease.pane_id, conversationId);
+    }
+
+    // Bad-resume-id fix: `lease.claude_session_id` is the pane's transient
+    // cache and is normally set (this is a relaunch of an already-`leased`
+    // pane), but don't trust that alone — fall back to the durable
+    // `sessions.claude_session_id` for this conversation, and if NEITHER has
+    // one, this is a session that was never actually established (shouldn't
+    // normally happen for a `leased` pane, but `--resume <random-uuid>`
+    // fails outright, so launch fresh rather than gamble). Mirrors
+    // resolveRoute()'s own bound-path priorRow/resume logic exactly.
+    const priorRow = this.getActiveSessionRow(conversationId);
+    const sessionId = lease.claude_session_id ?? priorRow?.claude_session_id ?? randomUUID();
+    const resume = lease.claude_session_id != null || priorRow?.claude_session_id != null;
+
+    this.notifyColdStart(promptContext.channel, promptContext.contact_id, promptContext.topic);
+
+    // E53 (follow-up fix, round 2) — trackPaneOperation() registers this
+    // pane's in-flight entry SYNCHRONOUSLY, right after beginRelaunch()
+    // claimed the row above, before the release below (or the launch after
+    // it) ever runs. The danger window this closes: the OLD Claude session
+    // is alive until `release(..., 'kill')` actually completes — a
+    // concurrent resolveRoute() call that saw no map entry during exactly
+    // that window would previously return this pane's id immediately, and
+    // the caller could enqueue a message the dying session acks and loses.
+    const launched = await this.trackPaneOperation(lease.pane_id, async () => {
+      try {
+        await this.paneLauncher.release(lease.pane_id, 'kill');
+      } catch (err) {
+        // Mirrors resolveRoute()'s evict-path tolerance: a failed release
+        // must not block seating the relaunch — the DB-side claim already
+        // happened.
+        console.error(
+          `[pool:${this.poolId}] Failed to release pane ${lease.pane_id} for a model-switch relaunch — ` +
+            `proceeding to launch anyway:`,
+          err,
+        );
+      }
+      return this.runTrackedLaunch(
+        lease.pane_id,
+        {
+          paneId: lease.pane_id,
+          paneAgentId: toBareAgentId(lease.agent_id),
+          promptContext,
+          sessionId,
+          resume,
+          model: resolved.model,
+          ensureWindow: {
+            cwd: this.cfg.working_dir ?? process.cwd(),
+            env: this.cfg.pane_env,
+          },
+        },
+        resolved,
+      );
+    });
+    if (!launched) {
+      console.error(
+        `[pool:${this.poolId}] Model-switch relaunch failed for ${lease.pane_id} — parking conversation ${conversationId}`,
+      );
+      return this.parkedRecipientId();
+    }
+
+    this.persistSessionId(conversationId, priorRow, sessionId);
+
+    return lease.agent_id;
+  }
+
+  /**
+   * E53 (follow-up fix, round 2) — the concurrency guard's registration
+   * point. Creates a deferred promise and stores it in `inFlightLaunches`
+   * under `paneId` SYNCHRONOUSLY — before `fn` (or anything inside it) ever
+   * runs, let alone awaits — then runs `fn`, resolving the deferred (and
+   * clearing the map entry) once `fn` settles, success or failure.
+   *
+   * This must wrap the ENTIRE release-then-launch sequence for a claimed
+   * pane (`resolveRoute()`'s bound/grow/evict path, and `handleReuse()`'s
+   * relaunch path), not just the launch call — round 1 of this fix tracked
+   * only `paneLauncher.launch()` (inside the old `runTrackedLaunch()`),
+   * which left a gap: an 'evict' or a relaunch's `release()` call runs
+   * BEFORE any launch attempt, and the previous occupant's Claude
+   * session/cc.ts is still alive for the full duration of that release
+   * (`on_evict: kill`/relaunch's `Ctrl-C`+kill, or, worse, `on_evict: clear`,
+   * which never kills it at all — the process keeps running and polling
+   * indefinitely). A concurrent `resolveRoute()` call landing during exactly
+   * that window found no map entry yet (the old code only set one once
+   * `runTrackedLaunch()` itself started), returned the pane's id
+   * immediately, and the caller could enqueue a message the dying (or, for
+   * `clear`, the about-to-be-repurposed) session acks and loses. Calling
+   * this synchronously right after the DB claim — `acquire()` returning
+   * bound/grow/evict, or `beginRelaunch()` succeeding — closes that gap:
+   * there is now no synchronous gap between "row is 'launching'" and "the
+   * map has an entry for it" for a waiter to land in.
+   *
+   * The deferred never rejects — a waiter (`awaitInFlightThenResolve()`)
+   * only needs to know the operation finished, not how; `fn`'s own
+   * success/failure is still returned/thrown to THIS caller normally.
+   */
+  private async trackPaneOperation<T>(paneId: string, fn: () => Promise<T>): Promise<T> {
+    let resolveDeferred: () => void = () => {};
+    const deferred = new Promise<void>((resolve) => {
+      resolveDeferred = resolve;
+    });
+    this.inFlightLaunches.set(paneId, deferred);
+    try {
+      return await fn();
+    } finally {
+      resolveDeferred();
+      // Only clear if this is still OUR entry — a guard against clobbering a
+      // newer operation's tracking, though in practice `beginRelaunch()`'s
+      // and `acquire()`'s atomic claims mean at most one operation is ever
+      // in flight for a given pane at a time, so this should always be true.
+      if (this.inFlightLaunches.get(paneId) === deferred) {
+        this.inFlightLaunches.delete(paneId);
+      }
+    }
+  }
+
+  /**
+   * E53 — runs `paneLauncher.launch()` for `params` and its success/failure
+   * bookkeeping. Shared by both the fresh bound/grow/evict path and the
+   * S53.5 relaunch path — the only difference between them is what `params`
+   * (resume vs. fresh, which session id) and `resolved` (the model) already
+   * are by the time this is called. Always invoked from inside a
+   * `trackPaneOperation()` call (see that method's doc comment for why it,
+   * not this one, owns the `inFlightLaunches` registration — this method no
+   * longer touches that map itself).
+   *
+   * On success: `confirmReady()`, `setClaudeSessionId()`, `setModel()`, and
+   * the `launching ... model=...` log line. On failure: `markDead()`. Session
+   * bookkeeping in the `sessions` table (not `pool_leases`) is the caller's
+   * job — see `persistSessionId()` — since it needs `priorRow`, which is
+   * cheaper for each caller to have already looked up than to re-derive here.
+   *
+   * Returns `true` on success, `false` on failure (never throws — the error
+   * is already logged and the pane already marked dead by the time this
+   * returns `false`).
+   */
+  private async runTrackedLaunch(
+    paneId: string,
+    params: LaunchParams,
+    resolved: PoolResolvedModel,
+  ): Promise<boolean> {
+    try {
+      await this.paneLauncher.launch(params);
+      this.leaseStore.confirmReady(this.poolId, paneId);
+      this.leaseStore.setClaudeSessionId(this.poolId, paneId, params.sessionId);
+      this.leaseStore.setModel(this.poolId, paneId, resolved.model ?? null);
+      console.log(
+        `[pool:${this.poolId}] launching ${paneId} model=${resolved.model ?? '(none)'} (source=${resolved.source})`,
+      );
+      return true;
+    } catch (err) {
+      console.error(`[pool:${this.poolId}] Pane launch failed for ${paneId}:`, err);
+      this.leaseStore.markDead(this.poolId, paneId);
+      return false;
+    }
+  }
+
+  /**
+   * E53 (follow-up fix) — the other half of the concurrency guard. Called
+   * when `resolveRoute()`/`handleReuse()` finds a pane already `launching`
+   * (an in-flight fresh launch or relaunch for this same conversation) —
+   * awaits that operation's tracked promise (a no-op if it already finished,
+   * or if there's no entry at all: nothing to wait for), then re-reads the
+   * row fresh rather than trusting whatever it looked like before waiting.
+   *
+   * `undefined`/missing/mismatched conversation, or `dead`, all park the
+   * message rather than address it to a pane that's no longer this
+   * conversation's (or that failed to come up at all) — the same
+   * fail-safe-to-parked posture every other `resolveRoute()` failure path
+   * uses. Anything else (in practice: `leased`) hands back that row's own
+   * agent id — the launch/relaunch this call waited on is, by definition,
+   * exactly the one that just finished setting it up.
+   */
+  private async awaitInFlightThenResolve(paneId: string, conversationId: string): Promise<string> {
+    const inFlight = this.inFlightLaunches.get(paneId);
+    if (inFlight) {
+      await inFlight; // never rejects — see runTrackedLaunch()'s `waitable`
+    }
+    const row = this.leaseStore.findByPane(this.poolId, paneId);
+    if (!row || row.state === 'dead' || row.conversation_id !== conversationId) {
+      return this.parkedRecipientId();
+    }
+    return row.agent_id;
+  }
+
+  /**
+   * Writes `sessionId` into the conversation's `sessions.claude_session_id`
+   * row, same as `resolveRoute()`'s bound path always did inline — extracted
+   * so the S53.5 relaunch path (which can also mint a fresh session id, per
+   * the bad-resume-id fix above) shares the exact same race-safe logic
+   * rather than a second copy of it. Idempotent to call with the same id
+   * `sessions` already has (the common resume case). See the inline comments
+   * for why the no-`priorRow` branch re-checks once before giving up.
+   */
+  private persistSessionId(conversationId: string, priorRow: ActiveSessionRow | undefined, sessionId: string): void {
+    if (priorRow) {
+      this.db.prepare(`UPDATE sessions SET claude_session_id = ? WHERE id = ?`).run(sessionId, priorRow.id);
+      return;
+    }
+    // No `sessions` row existed yet for this conversation at the time the
+    // caller looked it up — Stage 80 (transcript-log) hasn't run for this
+    // envelope yet on a brand-new conversation; it runs later in the same
+    // pipeline pass and will INSERT the row itself (with claude_session_id
+    // left NULL, since it has no way to know the id just minted here).
+    // Re-check once for a race (another resolver creating the row between
+    // the caller's lookup and here) before giving up — `sessions` has no
+    // unique constraint on conversation_id alone (confirmed by reading
+    // src/db/migrations/001_initial_schema.sql: only a non-unique
+    // idx_sess_conversation index), so there is no safe
+    // `INSERT ... ON CONFLICT(conversation_id)` to fall back on.
+    const raceRow = this.getActiveSessionRow(conversationId);
+    if (raceRow) {
+      this.db.prepare(`UPDATE sessions SET claude_session_id = ? WHERE id = ?`).run(sessionId, raceRow.id);
+    }
+    // TODO(E48-S48.6 or a later follow-up): this conversation's first-ever
+    // pool message leaves its minted claude_session_id living only in
+    // pool_leases (via setClaudeSessionId in runTrackedLaunch) until its
+    // NEXT message arrives — Stage 80 creates the `sessions` row with
+    // claude_session_id NULL, and nothing currently backfills it on that
+    // first row. Teach Stage 80 (src/pipeline/stages/transcript-log.ts) to
+    // consult LeaseStore.findByConversation()/pool_leases for an
+    // already-minted claude_session_id when it INSERTs a brand-new row,
+    // instead of always defaulting that column to NULL. Until then this is a
+    // narrow, self-healing gap: the `if (priorRow)` branch above fixes the
+    // row up on the conversation's second message.
   }
 
   /**
@@ -820,7 +1194,17 @@ export function createPoolManagers(
 ): Map<string, PoolManager> {
   const managers = new Map<string, PoolManager>();
   for (const cfg of getCcPoolInstances(config)) {
-    managers.set(toPrefixedAgentId(cfg.agent_id), new PoolManager({ cfg, db, busBaseUrl, queue }));
+    const agentId = toPrefixedAgentId(cfg.agent_id);
+    // E53 — the real, override-aware resolver: schedule model, then an
+    // `agent:<pool agent_id>` override, then a global override (both from
+    // `model_overrides`, migration 021), then this pool's own `cfg.model`.
+    // Every `PoolManager` built through this factory (i.e. every one
+    // `src/index.ts` actually runs) gets this; only direct
+    // `new PoolManager(...)` construction (tests) falls back to
+    // `defaultResolveModel`'s narrower schedule/config-only behavior.
+    const resolveModel = (scheduleModel: string | null): PoolResolvedModel =>
+      resolveModelFromStore({ scheduleModel, db, agentId, configModel: cfg.model });
+    managers.set(agentId, new PoolManager({ cfg, db, busBaseUrl, queue, resolveModel }));
   }
   return managers;
 }

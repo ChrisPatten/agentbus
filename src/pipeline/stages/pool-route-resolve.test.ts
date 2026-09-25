@@ -79,8 +79,10 @@ function makeCtx(
 function makeFakeManager(resolvedId: string): PoolManager {
   return {
     resolveRoute: vi.fn(
-      async (_conversationId: string, _promptContext: { contact_id: string; channel: string; topic?: string }) =>
-        resolvedId,
+      async (
+        _conversationId: string,
+        _promptContext: { contact_id: string; channel: string; topic?: string; scheduleModel: string | null },
+      ) => resolvedId,
     ),
   } as unknown as PoolManager;
 }
@@ -101,7 +103,41 @@ describe('pool-route-resolve stage', () => {
       contact_id: 'alice',
       channel: 'telegram',
       topic: 'general',
+      scheduleModel: null,
     });
+  });
+
+  it('passes metadata.schedule_model through as scheduleModel when it is a non-empty string', async () => {
+    const manager = makeFakeManager('agent:peggy-pool-3');
+    const poolManagers = new Map([['agent:peggy', manager]]);
+    const stage = createPoolRouteResolve(poolManagers);
+    const routes: RouteTarget[] = [{ adapterId: 'cc-pool', recipientId: 'agent:peggy' }];
+    const ctx = makeCtx({ routes, conversationId: 'conv-1' }, { metadata: { schedule_model: 'haiku' } });
+
+    await stage(ctx);
+
+    expect(manager.resolveRoute).toHaveBeenCalledWith('conv-1', {
+      contact_id: 'alice',
+      channel: 'telegram',
+      topic: 'general',
+      scheduleModel: 'haiku',
+    });
+  });
+
+  it('normalizes an absent, non-string, or empty-string metadata.schedule_model to null', async () => {
+    const manager = makeFakeManager('agent:peggy-pool-3');
+    const poolManagers = new Map([['agent:peggy', manager]]);
+
+    for (const metadata of [{}, { schedule_model: '' }, { schedule_model: 42 }]) {
+      const stage = createPoolRouteResolve(poolManagers);
+      const routes: RouteTarget[] = [{ adapterId: 'cc-pool', recipientId: 'agent:peggy' }];
+      const ctx = makeCtx({ routes, conversationId: 'conv-1' }, { metadata });
+
+      await stage(ctx);
+
+      const lastCall = vi.mocked(manager.resolveRoute).mock.calls.at(-1)!;
+      expect(lastCall[1]).toMatchObject({ scheduleModel: null });
+    }
   });
 
   it('leaves a non-cc-pool route untouched and never calls any manager', async () => {

@@ -114,6 +114,21 @@ function loadMigrations(): Migration[] {
       description: 'Pool pane watchdog: pool_leases.last_turn_ended_at + pane_incidents (E52)',
       sql: readFileSync(join(migrationsDir, '020_pane_watchdog.sql'), 'utf-8'),
     },
+    {
+      version: 21,
+      description: 'model_overrides table replaces headless_model_overrides (E53 S53.1)',
+      sql: readFileSync(join(migrationsDir, '021_model_overrides.sql'), 'utf-8'),
+    },
+    {
+      version: 22,
+      description: 'Scheduled items model column (E53 S53.3)',
+      sql: readFileSync(join(migrationsDir, '022_scheduled_items_model.sql'), 'utf-8'),
+    },
+    {
+      version: 23,
+      description: 'Pool leases model column (E53 S53.4)',
+      sql: readFileSync(join(migrationsDir, '023_pool_leases_model.sql'), 'utf-8'),
+    },
   ];
 }
 
