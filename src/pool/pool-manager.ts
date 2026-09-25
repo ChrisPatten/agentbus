@@ -194,17 +194,19 @@ export class PoolManager {
    */
   readonly resolveModelFn: (scheduleModel: string | null) => PoolResolvedModel;
   /**
-   * E53 (follow-up fix) — the in-flight launch/relaunch per pane, keyed by
-   * `pane_id`. Set by `runTrackedLaunch()` for the FULL operation (the
-   * `paneLauncher.launch()` call plus its success/failure bookkeeping, not
-   * just the call itself), cleared in that method's `finally`. A concurrent
+   * E53 (follow-up fix, round 2) — the in-flight release-then-launch
+   * operation per pane, keyed by `pane_id`. Set by `trackPaneOperation()`
+   * SYNCHRONOUSLY, right when a pane is claimed (before its release, if
+   * any, or its launch ever runs — see that method's doc comment for why
+   * round 1 of this fix, which only tracked the launch call itself, still
+   * had a gap), cleared once the whole operation settles. A concurrent
    * `resolveRoute()` call that finds a pane's row already `launching` awaits
    * this (via `awaitInFlightThenResolve()`) instead of racing ahead of it —
-   * see that method's doc comment for why: enqueuing a message before an
-   * in-flight relaunch's `release(..., 'kill')` has actually landed risks
-   * the OLD, still-alive Claude session acking it right before it dies.
-   * Entries never reject (see `runTrackedLaunch()`'s `waitable`) — a waiter
-   * doesn't need its own try/catch.
+   * enqueuing a message before an in-flight release/relaunch has actually
+   * landed risks the OLD, still-alive Claude session acking it right before
+   * it dies (or, for `on_evict: clear`, a session that's about to be handed
+   * to a different conversation entirely). Entries never reject (see
+   * `trackPaneOperation()`) — a waiter doesn't need its own try/catch.
    */
   private readonly inFlightLaunches = new Map<string, Promise<void>>();
   /** conversationIds already notified about a parked-timeout dead-letter, so
@@ -397,22 +399,12 @@ export class PoolManager {
         return this.parkedRecipientId();
       }
 
-      if (result.kind === 'evict') {
-        // The DB-side claim already happened atomically inside acquire() —
-        // a failed /clear or kill on the displaced occupant must not block
-        // seating the new conversation.
-        try {
-          await this.paneLauncher.release(result.lease.pane_id, this.cfg.on_evict);
-        } catch (err) {
-          console.error(
-            `[pool:${this.poolId}] Failed to release evicted pane ${result.lease.pane_id} ` +
-              `(on_evict=${this.cfg.on_evict}) — proceeding to seat the new conversation anyway:`,
-            err,
-          );
-        }
-      }
-
-      // bound | grow | evict-fallthrough: launch/resume Claude in the claimed pane.
+      // bound | grow | evict: launch/resume Claude in the claimed pane. The
+      // DB-side claim already happened atomically inside acquire() — 'evict'
+      // still needs its displaced occupant released first, but that release
+      // (and the launch that follows) now runs INSIDE trackPaneOperation()
+      // below, not out here before it — see that call's own comment for why
+      // (the bug this follow-up fixes).
       const lease = result.lease;
 
       const priorRow = this.getActiveSessionRow(conversationId);
@@ -433,22 +425,42 @@ export class PoolManager {
       // activity starts. Fire-and-forget — must never add to launch latency.
       this.notifyColdStart(promptContext.channel, promptContext.contact_id, promptContext.topic);
 
-      const launched = await this.runTrackedLaunch(
-        lease.pane_id,
-        {
-          paneId: lease.pane_id,
-          paneAgentId: toBareAgentId(lease.agent_id),
-          promptContext,
-          sessionId,
-          resume,
-          model: resolved.model,
-          ensureWindow: {
-            cwd: this.cfg.working_dir ?? process.cwd(),
-            env: this.cfg.pane_env,
+      // E53 (follow-up fix, round 2) — trackPaneOperation() registers this
+      // pane's in-flight entry SYNCHRONOUSLY, right now, before the 'evict'
+      // release below (or the launch after it) ever runs — see that
+      // method's doc comment for why the entry must cover release too, not
+      // just the launch call `runTrackedLaunch()` makes.
+      const launched = await this.trackPaneOperation(lease.pane_id, async () => {
+        if (result.kind === 'evict') {
+          // A failed /clear or kill on the displaced occupant must not block
+          // seating the new conversation.
+          try {
+            await this.paneLauncher.release(lease.pane_id, this.cfg.on_evict);
+          } catch (err) {
+            console.error(
+              `[pool:${this.poolId}] Failed to release evicted pane ${lease.pane_id} ` +
+                `(on_evict=${this.cfg.on_evict}) — proceeding to seat the new conversation anyway:`,
+              err,
+            );
+          }
+        }
+        return this.runTrackedLaunch(
+          lease.pane_id,
+          {
+            paneId: lease.pane_id,
+            paneAgentId: toBareAgentId(lease.agent_id),
+            promptContext,
+            sessionId,
+            resume,
+            model: resolved.model,
+            ensureWindow: {
+              cwd: this.cfg.working_dir ?? process.cwd(),
+              env: this.cfg.pane_env,
+            },
           },
-        },
-        resolved,
-      );
+          resolved,
+        );
+      });
       if (!launched) {
         console.error(
           `[pool:${this.poolId}] Pane launch failed for ${lease.pane_id} — parking conversation ${conversationId}`,
@@ -595,34 +607,44 @@ export class PoolManager {
 
     this.notifyColdStart(promptContext.channel, promptContext.contact_id, promptContext.topic);
 
-    try {
-      await this.paneLauncher.release(lease.pane_id, 'kill');
-    } catch (err) {
-      // Mirrors resolveRoute()'s evict-path tolerance: a failed release must
-      // not block seating the relaunch — the DB-side claim already happened.
-      console.error(
-        `[pool:${this.poolId}] Failed to release pane ${lease.pane_id} for a model-switch relaunch — ` +
-          `proceeding to launch anyway:`,
-        err,
-      );
-    }
-
-    const launched = await this.runTrackedLaunch(
-      lease.pane_id,
-      {
-        paneId: lease.pane_id,
-        paneAgentId: toBareAgentId(lease.agent_id),
-        promptContext,
-        sessionId,
-        resume,
-        model: resolved.model,
-        ensureWindow: {
-          cwd: this.cfg.working_dir ?? process.cwd(),
-          env: this.cfg.pane_env,
+    // E53 (follow-up fix, round 2) — trackPaneOperation() registers this
+    // pane's in-flight entry SYNCHRONOUSLY, right after beginRelaunch()
+    // claimed the row above, before the release below (or the launch after
+    // it) ever runs. The danger window this closes: the OLD Claude session
+    // is alive until `release(..., 'kill')` actually completes — a
+    // concurrent resolveRoute() call that saw no map entry during exactly
+    // that window would previously return this pane's id immediately, and
+    // the caller could enqueue a message the dying session acks and loses.
+    const launched = await this.trackPaneOperation(lease.pane_id, async () => {
+      try {
+        await this.paneLauncher.release(lease.pane_id, 'kill');
+      } catch (err) {
+        // Mirrors resolveRoute()'s evict-path tolerance: a failed release
+        // must not block seating the relaunch — the DB-side claim already
+        // happened.
+        console.error(
+          `[pool:${this.poolId}] Failed to release pane ${lease.pane_id} for a model-switch relaunch — ` +
+            `proceeding to launch anyway:`,
+          err,
+        );
+      }
+      return this.runTrackedLaunch(
+        lease.pane_id,
+        {
+          paneId: lease.pane_id,
+          paneAgentId: toBareAgentId(lease.agent_id),
+          promptContext,
+          sessionId,
+          resume,
+          model: resolved.model,
+          ensureWindow: {
+            cwd: this.cfg.working_dir ?? process.cwd(),
+            env: this.cfg.pane_env,
+          },
         },
-      },
-      resolved,
-    );
+        resolved,
+      );
+    });
     if (!launched) {
       console.error(
         `[pool:${this.poolId}] Model-switch relaunch failed for ${lease.pane_id} — parking conversation ${conversationId}`,
@@ -636,16 +658,64 @@ export class PoolManager {
   }
 
   /**
-   * E53 (follow-up fix) — runs `paneLauncher.launch()` for `params`, tracked
-   * in `inFlightLaunches` for the whole operation (through the success/
-   * failure bookkeeping below, not just the launch call itself — see that
-   * field's doc comment) so a concurrent `resolveRoute()` call for the same
-   * pane can await it via `awaitInFlightThenResolve()` instead of racing
-   * ahead of a launch or relaunch that hasn't actually finished yet. Shared
-   * by both the fresh bound/grow/evict path and the S53.5 relaunch path —
-   * the only difference between them is what `params` (resume vs. fresh,
-   * which session id) and `resolved` (the model) already are by the time
-   * this is called.
+   * E53 (follow-up fix, round 2) — the concurrency guard's registration
+   * point. Creates a deferred promise and stores it in `inFlightLaunches`
+   * under `paneId` SYNCHRONOUSLY — before `fn` (or anything inside it) ever
+   * runs, let alone awaits — then runs `fn`, resolving the deferred (and
+   * clearing the map entry) once `fn` settles, success or failure.
+   *
+   * This must wrap the ENTIRE release-then-launch sequence for a claimed
+   * pane (`resolveRoute()`'s bound/grow/evict path, and `handleReuse()`'s
+   * relaunch path), not just the launch call — round 1 of this fix tracked
+   * only `paneLauncher.launch()` (inside the old `runTrackedLaunch()`),
+   * which left a gap: an 'evict' or a relaunch's `release()` call runs
+   * BEFORE any launch attempt, and the previous occupant's Claude
+   * session/cc.ts is still alive for the full duration of that release
+   * (`on_evict: kill`/relaunch's `Ctrl-C`+kill, or, worse, `on_evict: clear`,
+   * which never kills it at all — the process keeps running and polling
+   * indefinitely). A concurrent `resolveRoute()` call landing during exactly
+   * that window found no map entry yet (the old code only set one once
+   * `runTrackedLaunch()` itself started), returned the pane's id
+   * immediately, and the caller could enqueue a message the dying (or, for
+   * `clear`, the about-to-be-repurposed) session acks and loses. Calling
+   * this synchronously right after the DB claim — `acquire()` returning
+   * bound/grow/evict, or `beginRelaunch()` succeeding — closes that gap:
+   * there is now no synchronous gap between "row is 'launching'" and "the
+   * map has an entry for it" for a waiter to land in.
+   *
+   * The deferred never rejects — a waiter (`awaitInFlightThenResolve()`)
+   * only needs to know the operation finished, not how; `fn`'s own
+   * success/failure is still returned/thrown to THIS caller normally.
+   */
+  private async trackPaneOperation<T>(paneId: string, fn: () => Promise<T>): Promise<T> {
+    let resolveDeferred: () => void = () => {};
+    const deferred = new Promise<void>((resolve) => {
+      resolveDeferred = resolve;
+    });
+    this.inFlightLaunches.set(paneId, deferred);
+    try {
+      return await fn();
+    } finally {
+      resolveDeferred();
+      // Only clear if this is still OUR entry — a guard against clobbering a
+      // newer operation's tracking, though in practice `beginRelaunch()`'s
+      // and `acquire()`'s atomic claims mean at most one operation is ever
+      // in flight for a given pane at a time, so this should always be true.
+      if (this.inFlightLaunches.get(paneId) === deferred) {
+        this.inFlightLaunches.delete(paneId);
+      }
+    }
+  }
+
+  /**
+   * E53 — runs `paneLauncher.launch()` for `params` and its success/failure
+   * bookkeeping. Shared by both the fresh bound/grow/evict path and the
+   * S53.5 relaunch path — the only difference between them is what `params`
+   * (resume vs. fresh, which session id) and `resolved` (the model) already
+   * are by the time this is called. Always invoked from inside a
+   * `trackPaneOperation()` call (see that method's doc comment for why it,
+   * not this one, owns the `inFlightLaunches` registration — this method no
+   * longer touches that map itself).
    *
    * On success: `confirmReady()`, `setClaudeSessionId()`, `setModel()`, and
    * the `launching ... model=...` log line. On failure: `markDead()`. Session
@@ -662,19 +732,8 @@ export class PoolManager {
     params: LaunchParams,
     resolved: PoolResolvedModel,
   ): Promise<boolean> {
-    const launchOp = this.paneLauncher.launch(params);
-    // A separate, NEVER-rejecting derived promise for other callers to
-    // await via inFlightLaunches/awaitInFlightThenResolve() — they only care
-    // that the operation finished (one way or another), not its outcome;
-    // `launchOp` itself (which this method awaits below, and whose rejection
-    // this method itself handles) is not shared.
-    const waitable: Promise<void> = launchOp.then(
-      () => undefined,
-      () => undefined,
-    );
-    this.inFlightLaunches.set(paneId, waitable);
     try {
-      await launchOp;
+      await this.paneLauncher.launch(params);
       this.leaseStore.confirmReady(this.poolId, paneId);
       this.leaseStore.setClaudeSessionId(this.poolId, paneId, params.sessionId);
       this.leaseStore.setModel(this.poolId, paneId, resolved.model ?? null);
@@ -686,14 +745,6 @@ export class PoolManager {
       console.error(`[pool:${this.poolId}] Pane launch failed for ${paneId}:`, err);
       this.leaseStore.markDead(this.poolId, paneId);
       return false;
-    } finally {
-      // Only clear if this is still OUR entry — a guard against clobbering a
-      // newer launch's tracking, though in practice `beginRelaunch()`'s and
-      // `acquire()`'s atomic claims mean at most one launch is ever in
-      // flight for a given pane at a time, so this should always be true.
-      if (this.inFlightLaunches.get(paneId) === waitable) {
-        this.inFlightLaunches.delete(paneId);
-      }
     }
   }
 

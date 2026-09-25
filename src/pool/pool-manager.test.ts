@@ -401,6 +401,57 @@ describe('PoolManager', () => {
       errSpy.mockRestore();
     });
 
+    it('concurrency guard (round 2), evict path: a second resolveRoute() for the same new conversation does not settle while the evicted pane\'s release() is still pending', async () => {
+      // Same gap as the relaunch path (round 1 only tracked launch()), but
+      // for an 'evict' claim: the displaced occupant's release() — which,
+      // for the default on_evict: 'clear', never even kills the process —
+      // runs before the new conversation's launch, and the old occupant's
+      // Claude session/cc.ts is alive throughout it.
+      const { manager, paneLauncher } = makeManager({ panes: 1 });
+      await manager.ensureStarted();
+      await manager.resolveRoute('conv-old', { contact_id: 'alice', channel: 'telegram' });
+      const pane = manager.leaseStore.findByConversation(manager.poolId, 'conv-old');
+      manager.leaseStore.touch(manager.poolId, pane!.pane_id, new Date('2000-01-01T00:00:00.000Z'));
+      paneLauncher.launch.mockClear();
+      paneLauncher.release.mockClear();
+
+      let releaseRelease: () => void = () => {};
+      const releaseGate = new Promise<void>((resolve) => {
+        releaseRelease = resolve;
+      });
+      paneLauncher.release.mockImplementationOnce(async () => {
+        await releaseGate;
+      });
+
+      const firstCall = manager.resolveRoute('conv-new', { contact_id: 'bob', channel: 'telegram' });
+      for (let i = 0; i < 20 && paneLauncher.release.mock.calls.length === 0; i++) {
+        await Promise.resolve();
+      }
+      expect(paneLauncher.release).toHaveBeenCalledTimes(1);
+      expect(paneLauncher.launch).not.toHaveBeenCalled();
+
+      const secondCall = manager.resolveRoute('conv-new', { contact_id: 'bob', channel: 'telegram' });
+      let secondSettledEarly = false;
+      secondCall.then(() => {
+        secondSettledEarly = true;
+      });
+      for (let i = 0; i < 20; i++) {
+        await Promise.resolve();
+      }
+      expect(secondSettledEarly).toBe(false);
+      expect(paneLauncher.launch).not.toHaveBeenCalled();
+
+      releaseRelease();
+      const [firstResult, secondResult] = await Promise.all([firstCall, secondCall]);
+
+      expect(firstResult).toBe('agent:peggy-pool-1');
+      expect(secondResult).toBe('agent:peggy-pool-1');
+      expect(paneLauncher.release).toHaveBeenCalledTimes(1);
+      expect(paneLauncher.launch).toHaveBeenCalledTimes(1);
+      const newLease = manager.leaseStore.findByConversation(manager.poolId, 'conv-new');
+      expect(newLease?.state).toBe('leased');
+    });
+
     it('launch failure: marks the pane dead, returns the parked id, and does not reject', async () => {
       const { manager, paneLauncher } = makeManager({ panes: 1 });
       await manager.ensureStarted();
@@ -685,6 +736,64 @@ describe('PoolManager', () => {
       const lease = manager.leaseStore.findByConversation(manager.poolId, 'conv-1');
       expect(lease?.state).toBe('leased');
       expect(lease?.model).toBe('claude-new-model');
+    });
+
+    it('concurrency guard (round 2): the in-flight entry covers release() too — a second resolveRoute() does not settle while the relaunch\'s release() is still pending', async () => {
+      // Round 1 of this fix only tracked the launch() call itself, leaving a
+      // gap: the pane's row is already 'launching' (and the OLD Claude
+      // session is still alive) for the ENTIRE release() call too, before
+      // any launch is even attempted. This test gates release(), not
+      // launch(), to prove that gap is closed.
+      const { manager, paneLauncher } = makeManager({ panes: 1, model: 'claude-old-model' });
+      await manager.ensureStarted();
+      const { paneId } = await leaseWithModel(manager, paneLauncher, 'conv-1', 'claude-old-model');
+
+      let releaseRelease: () => void = () => {};
+      const releaseGate = new Promise<void>((resolve) => {
+        releaseRelease = resolve;
+      });
+      paneLauncher.release.mockImplementationOnce(async () => {
+        await releaseGate;
+      });
+
+      const firstCall = manager.resolveRoute('conv-1', {
+        contact_id: 'alice',
+        channel: 'telegram',
+        scheduleModel: 'claude-new-model',
+      });
+      // beginRelaunch()'s atomic DB claim, and trackPaneOperation()'s map
+      // registration, both run synchronously before any await — poll until
+      // release() has actually been called (i.e. we're inside the gated
+      // window) rather than assuming a fixed number of microtask flushes.
+      for (let i = 0; i < 20 && paneLauncher.release.mock.calls.length === 0; i++) {
+        await Promise.resolve();
+      }
+      expect(paneLauncher.release).toHaveBeenCalledTimes(1);
+      expect(paneLauncher.launch).not.toHaveBeenCalled(); // release() hasn't even resolved yet
+
+      const secondCall = manager.resolveRoute('conv-1', {
+        contact_id: 'alice',
+        channel: 'telegram',
+        scheduleModel: 'claude-new-model',
+      });
+      let secondSettledEarly = false;
+      secondCall.then(() => {
+        secondSettledEarly = true;
+      });
+      for (let i = 0; i < 20; i++) {
+        await Promise.resolve();
+      }
+      expect(secondSettledEarly).toBe(false);
+      expect(paneLauncher.launch).not.toHaveBeenCalled();
+
+      releaseRelease();
+      const [firstResult, secondResult] = await Promise.all([firstCall, secondCall]);
+
+      expect(firstResult).toBe('agent:peggy-pool-1');
+      expect(secondResult).toBe('agent:peggy-pool-1');
+      expect(paneLauncher.release).toHaveBeenCalledTimes(1);
+      expect(paneLauncher.launch).toHaveBeenCalledTimes(1);
+      void paneId;
     });
 
     it('concurrency guard: if the in-flight relaunch fails, a second resolveRoute() waiting on it gets parked too', async () => {
