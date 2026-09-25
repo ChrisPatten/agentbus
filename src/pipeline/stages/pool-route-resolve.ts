@@ -30,6 +30,13 @@ export function createPoolRouteResolve(poolManagers: Map<string, PoolManager>): 
     const contactId = ctx.envelope.sender.startsWith('contact:')
       ? ctx.envelope.sender.slice('contact:'.length)
       : ctx.envelope.sender;
+    // E53 S53.2 — carried by the scheduler (fireItem()) as metadata.schedule_model
+    // when the fired schedule has a non-null model; undefined/absent/empty
+    // otherwise. Normalized to `null` (rather than left `undefined`) so
+    // PoolManager.resolveRoute()'s promptContext.scheduleModel always means
+    // "no schedule model" the same way, whatever produced the envelope.
+    const rawScheduleModel = ctx.envelope.metadata?.['schedule_model'];
+    const scheduleModel = typeof rawScheduleModel === 'string' && rawScheduleModel.length > 0 ? rawScheduleModel : null;
     for (let i = 0; i < ctx.routes.length; i++) {
       const route = ctx.routes[i]!;
       if (route.adapterId !== 'cc-pool') continue;
@@ -44,6 +51,7 @@ export function createPoolRouteResolve(poolManagers: Map<string, PoolManager>): 
         contact_id: contactId,
         channel: ctx.envelope.channel,
         topic: ctx.envelope.topic,
+        scheduleModel,
       });
       // Replace the array element with a fresh object rather than mutating
       // `route` in place — defense in depth. Even with route-resolve.ts now

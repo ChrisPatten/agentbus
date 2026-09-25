@@ -33,9 +33,47 @@ import { createTmuxController, realTmuxExec, type TmuxController } from './tmux.
 import { PaneWatchdog } from './watchdog.js';
 import { resolveWatchdogConfig } from './watchdog-config.js';
 import { IncidentStore } from './watchdog-store.js';
-import { derivePaneAgentId, derivePaneWindowName, toBareAgentId, toPrefixedAgentId } from './types.js';
+import {
+  derivePaneAgentId,
+  derivePaneWindowName,
+  toBareAgentId,
+  toPrefixedAgentId,
+  type PoolLeaseRow,
+} from './types.js';
+import { getUnhandledSince } from './unhandled-work.js';
 import type { JournalingRunner } from '../memory/session-tracker.js';
 import type { MessageQueue } from '../core/queue.js';
+
+/**
+ * E53 — where a pane launch's `--model` came from. Mirrors the epic's fixed
+ * resolution order (`_bmad-output/epics/E53-pool-model-selection.md`):
+ * schedule > agent override > global override > pool config > nothing.
+ */
+export type PoolModelSource = 'schedule' | 'agent-override' | 'global-override' | 'config' | 'cli-default';
+
+/** Result of resolving a pane's model for one launch/relaunch. */
+export interface PoolResolvedModel {
+  model: string | undefined;
+  source: PoolModelSource;
+}
+
+/**
+ * Default resolver used when `PoolManagerDeps.resolveModel` isn't injected —
+ * schedule model (if the caller passed one) wins, else `cfg.model`, else
+ * nothing. Does NOT know about agent/global overrides — those live in
+ * `src/adapters/model-override-loader.ts` (a sibling E53 story's file, not
+ * importable from this worktree — see this module's own doc comment on
+ * `PoolManagerDeps.resolveModel`). The real orchestrator wiring in
+ * `src/index.ts` is expected to inject a resolver that layers overrides in
+ * between these two steps.
+ */
+function defaultResolveModel(cfgModel: string | undefined): (scheduleModel: string | null) => PoolResolvedModel {
+  return (scheduleModel) => {
+    if (scheduleModel) return { model: scheduleModel, source: 'schedule' };
+    if (cfgModel) return { model: cfgModel, source: 'config' };
+    return { model: undefined, source: 'cli-default' };
+  };
+}
 
 /** Footer line of Claude Code's interactive permission dialog ("Esc to cancel · Tab to amend"), observed in live captures — see the E51 epic. */
 const PERMISSION_DIALOG_PATTERN = /esc to cancel/i;
@@ -102,6 +140,26 @@ export interface PoolManagerDeps {
   sweepIntervalMs?: number;
   /** Injectable for tests — defaults to a `PaneWatchdog` built from `cfg.watchdog`. */
   watchdog?: PaneWatchdog;
+  /**
+   * E53 — resolves the model to launch/relaunch a pane with, from the
+   * schedule model carried on the envelope (see `resolveRoute()`'s
+   * `promptContext.scheduleModel`). Optional: when omitted, `PoolManager`
+   * falls back to `defaultResolveModel(cfg.model)` — schedule model, else
+   * `cfg.model`, else nothing (source `'cli-default'`). That default does
+   * NOT apply agent- or global-scoped overrides.
+   *
+   * The real resolver — the one that also layers in `agent:<pool agent_id>`
+   * and global overrides from `src/adapters/model-override-loader.ts`'s
+   * `resolveModel()` (a sibling E53 story's export, not importable from this
+   * worktree — see the decoupling contract in this story's task) — is meant
+   * to be constructed and injected here by `src/index.ts`'s pool-manager
+   * wiring (`createPoolManagers()` below, or wherever it calls `new
+   * PoolManager(...)`), AFTER that module's `resolveModel(db, agentId)` is
+   * available. Until that wiring lands, every `PoolManager` uses the default
+   * above and schedule/pool-config models alone take effect — overrides are
+   * a no-op for cc-pool, not broken, just not wired yet.
+   */
+  resolveModel?: (scheduleModel: string | null) => PoolResolvedModel;
 }
 
 /**
@@ -131,6 +189,8 @@ export class PoolManager {
   private readonly queue: MessageQueue | undefined;
   private readonly fetchFn: typeof fetch;
   private readonly sweepIntervalMs: number;
+  /** E53 — see `PoolManagerDeps.resolveModel`'s doc comment. */
+  private readonly resolveModelFn: (scheduleModel: string | null) => PoolResolvedModel;
   /** conversationIds already notified about a parked-timeout dead-letter, so
    *  drainParked() sends at most one notice per conversation. In-memory
    *  only — resets on process restart — and entries are never pruned (a
@@ -150,6 +210,19 @@ export class PoolManager {
     this.queue = deps.queue;
     this.fetchFn = deps.fetchFn ?? fetch;
     this.sweepIntervalMs = deps.sweepIntervalMs ?? DEFAULT_SWEEP_INTERVAL_MS;
+    this.resolveModelFn = deps.resolveModel ?? defaultResolveModel(deps.cfg.model);
+
+    // E53 S53.4 — startup warning: no pane launch should silently depend on
+    // ~/.claude/settings.json for its model. Logged once, at construction,
+    // rather than per-launch, so it doesn't repeat every time a pane is
+    // (re)launched.
+    if (!deps.cfg.model) {
+      console.warn(
+        `[pool:${this.poolId}] No 'model' configured for this pool — panes with no schedule/override model will ` +
+          `fall back to whatever model is set in ~/.claude/settings.json, which any interactive '/model' typed in ` +
+          `ANY Claude session (this pool's or otherwise) rewrites. Set adapters.cc-pool.<name>.model to pin it.`,
+      );
+    }
 
     // Resolved unconditionally (even when paneLauncher is injected) so
     // reconcileLiveness() always has a TmuxController to call
@@ -270,7 +343,7 @@ export class PoolManager {
    */
   async resolveRoute(
     conversationId: string,
-    promptContext: { contact_id: string; channel: string; topic?: string },
+    promptContext: { contact_id: string; channel: string; topic?: string; scheduleModel?: string | null },
   ): Promise<string> {
     try {
       const result = this.leaseStore.acquire(this.poolId, conversationId, {
@@ -285,7 +358,7 @@ export class PoolManager {
         // acquire()'s own reuse branch already bumps last_activity_at in the
         // same transaction (verified by reading lease-store.ts directly) —
         // no separate touch() call needed here.
-        return result.lease.agent_id;
+        return this.handleReuse(conversationId, result.lease, promptContext);
       }
 
       if (result.kind === 'exhausted') {
@@ -314,6 +387,11 @@ export class PoolManager {
       const sessionId = priorRow?.claude_session_id ?? randomUUID();
       const resume = priorRow?.claude_session_id != null;
 
+      // E53 S53.4 — resolve BEFORE launching, so the very first launch of a
+      // pane already carries the right --model (never a plain cfg.model
+      // read inside pane.ts anymore — see LaunchParams.model's doc comment).
+      const resolved = this.resolveModelFn(promptContext.scheduleModel ?? null);
+
       // Every non-reuse outcome (bound/grow/evict) is about to block on a
       // real launch — the ack handshake + readiness poll below can take
       // several seconds, up to the 30s launch timeout. Fire a "One moment"
@@ -330,6 +408,7 @@ export class PoolManager {
           promptContext,
           sessionId,
           resume,
+          model: resolved.model,
           ensureWindow: {
             cwd: this.cfg.working_dir ?? process.cwd(),
             env: this.cfg.pane_env,
@@ -347,6 +426,10 @@ export class PoolManager {
 
       this.leaseStore.confirmReady(this.poolId, lease.pane_id);
       this.leaseStore.setClaudeSessionId(this.poolId, lease.pane_id, sessionId);
+      this.leaseStore.setModel(this.poolId, lease.pane_id, resolved.model ?? null);
+      console.log(
+        `[pool:${this.poolId}] launching ${lease.pane_id} model=${resolved.model ?? '(none)'} (source=${resolved.source})`,
+      );
 
       if (priorRow) {
         this.db.prepare(`UPDATE sessions SET claude_session_id = ? WHERE id = ?`).run(sessionId, priorRow.id);
@@ -442,6 +525,96 @@ export class PoolManager {
    */
   parkedRecipientId(): string {
     return toPrefixedAgentId(`${this.cfg.agent_id}__parked`);
+  }
+
+  /**
+   * E53 S53.5 — the `reuse` half of model resolution. Called for every
+   * message on a conversation whose pane is already leased (or already
+   * `launching` — see `LeaseStore.acquire()`'s reuse query). Decision D2
+   * ("apply at once"): if the resolved model differs from what the pane's
+   * session was last launched with, and the pane is between turns (no
+   * unhandled work — E52's `getUnhandledSince`), relaunch it in place
+   * (`Ctrl-C`/kill, then `--resume` on the SAME Claude session id with the
+   * NEW `--model`) before handing the message off. A turn in flight is never
+   * interrupted — the switch is deferred to the pane's next `reuse` call.
+   *
+   * `lease.model === null` is treated as "unknown", not "no model": a
+   * defined resolved model always counts as a mismatch against it (covers a
+   * lease created before migration 023, or a pane launched before this
+   * story). `resolved.model === undefined` (no schedule model, no pool
+   * `cfg.model` — `cli-default`) never triggers a switch either way; there
+   * is nothing to pin it to.
+   *
+   * Concurrency: `LeaseStore.beginRelaunch()` atomically claims the row
+   * (`leased` -> `launching`, scoped to this exact `conversationId`) before
+   * any tmux/launch work starts. A second concurrent call for the same
+   * conversation that also decides to relaunch loses that race (returns
+   * `false`) and simply returns the pane's current agent id unchanged,
+   * leaving the winner's relaunch to finish — see `beginRelaunch()`'s own
+   * doc comment for why this can't result in two relaunches or two panes
+   * for one conversation.
+   */
+  private async handleReuse(
+    conversationId: string,
+    lease: PoolLeaseRow,
+    promptContext: { contact_id: string; channel: string; topic?: string; scheduleModel?: string | null },
+  ): Promise<string> {
+    const resolved = this.resolveModelFn(promptContext.scheduleModel ?? null);
+    const mismatch = resolved.model !== undefined && resolved.model !== lease.model;
+    if (!mismatch) return lease.agent_id;
+
+    const unhandledSince = getUnhandledSince(this.db, lease);
+    if (unhandledSince !== null) {
+      console.log(
+        `[pool:${this.poolId}] Model switch to "${resolved.model}" (source=${resolved.source}) for ${lease.pane_id} ` +
+          `deferred — a turn is still in flight (unhandled work since ${unhandledSince})`,
+      );
+      return lease.agent_id;
+    }
+
+    const claimed = this.leaseStore.beginRelaunch(this.poolId, lease.pane_id, conversationId);
+    if (!claimed) {
+      // Lost the race to another concurrent resolveRoute() call for this
+      // same conversation — its relaunch (or its own initial launch, if this
+      // was actually racing a brand-new conversation's first message) is
+      // already in flight. Nothing more to do here.
+      return lease.agent_id;
+    }
+
+    this.notifyColdStart(promptContext.channel, promptContext.contact_id, promptContext.topic);
+
+    try {
+      await this.paneLauncher.release(lease.pane_id, 'kill');
+      await this.paneLauncher.launch({
+        paneId: lease.pane_id,
+        paneAgentId: toBareAgentId(lease.agent_id),
+        promptContext,
+        // The pane's own transient session cache — this is a relaunch of the
+        // SAME Claude session (D2: "relaunch in place"), never a fresh one.
+        sessionId: lease.claude_session_id ?? randomUUID(),
+        resume: true,
+        model: resolved.model,
+        ensureWindow: {
+          cwd: this.cfg.working_dir ?? process.cwd(),
+          env: this.cfg.pane_env,
+        },
+      });
+    } catch (err) {
+      console.error(
+        `[pool:${this.poolId}] Model-switch relaunch failed for ${lease.pane_id} — marking dead and parking ` +
+          `conversation ${conversationId}:`,
+        err,
+      );
+      this.leaseStore.markDead(this.poolId, lease.pane_id);
+      return this.parkedRecipientId();
+    }
+
+    this.leaseStore.confirmReady(this.poolId, lease.pane_id);
+    this.leaseStore.setModel(this.poolId, lease.pane_id, resolved.model ?? null);
+    console.log(
+      `[pool:${this.poolId}] launching ${lease.pane_id} model=${resolved.model ?? '(none)'} (source=${resolved.source})`,
+    );
+    return lease.agent_id;
   }
 
   /**

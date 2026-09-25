@@ -106,6 +106,16 @@ export interface LaunchParams {
   /** true = `--resume <sessionId>`. false = `--session-id <sessionId>` (fresh). */
   resume: boolean;
   /**
+   * The model to pass as `--model`, already resolved by the caller (E53:
+   * schedule model -> agent override -> global override -> `cfg.model` ->
+   * nothing). `undefined` omits the flag entirely (CLI default via
+   * `~/.claude/settings.json`). Replaces the old direct read of
+   * `this.cfg.model` in `buildLaunchLine()` — every caller is now
+   * responsible for resolving the value (`cfg.model` is only the last
+   * fallback inside that resolution, not read here anymore).
+   */
+  model?: string;
+  /**
    * If the target window doesn't exist yet, create it with this cwd/env
    * before launching (covers both a pool's initial panes on first-ever
    * launch and a `growth: dynamic` pane that has no window at all). When the
@@ -320,8 +330,8 @@ export class PaneLifecycle {
     args.push('--mcp-config', mcpConfigPath);
     args.push('--strict-mcp-config');
 
-    if (this.cfg.model) {
-      args.push('--model', this.cfg.model);
+    if (params.model) {
+      args.push('--model', params.model);
     }
     if (systemPromptPath) {
       args.push('--append-system-prompt-file', systemPromptPath);

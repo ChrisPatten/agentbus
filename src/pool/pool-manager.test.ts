@@ -2,7 +2,13 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import Database from 'better-sqlite3';
 import { runMigrations } from '../db/schema.js';
-import { PoolManager, createPoolManagers, findPoolManagerForAgent, type PaneLauncher } from './pool-manager.js';
+import {
+  PoolManager,
+  createPoolManagers,
+  findPoolManagerForAgent,
+  type PaneLauncher,
+  type PoolResolvedModel,
+} from './pool-manager.js';
 import type { LaunchParams } from './pane.js';
 import type { AppConfig, CcPoolAdapterConfig, CcPoolInstanceConfig } from '../config/schema.js';
 import { MessageQueue } from '../core/queue.js';
@@ -366,6 +372,276 @@ describe('PoolManager', () => {
       const lease = manager.leaseStore.list(manager.poolId)[0];
       expect(lease?.state).toBe('dead');
 
+      errSpy.mockRestore();
+    });
+  });
+
+  // ── E53 S53.4 — model resolution on a fresh launch ─────────────────────────
+
+  describe('resolveRoute — model resolution (E53 S53.4)', () => {
+    it('bound: passes the resolved model to launch() and persists it to pool_leases.model', async () => {
+      const { manager, paneLauncher } = makeManager({ panes: 1, model: 'claude-config-model' });
+      await manager.ensureStarted();
+
+      const result = await manager.resolveRoute('conv-new', { contact_id: 'alice', channel: 'telegram' });
+
+      const launchArgs = paneLauncher.launch.mock.calls[0]![0];
+      expect(launchArgs.model).toBe('claude-config-model');
+      const lease = manager.leaseStore.findByConversation(manager.poolId, 'conv-new');
+      expect(lease?.model).toBe('claude-config-model');
+      expect(result).toBe('agent:peggy-pool-1');
+    });
+
+    it('bound: a schedule model (scheduleModel) outranks the pool config model', async () => {
+      const { manager, paneLauncher } = makeManager({ panes: 1, model: 'claude-config-model' });
+      await manager.ensureStarted();
+
+      await manager.resolveRoute('conv-new', { contact_id: 'alice', channel: 'telegram', scheduleModel: 'haiku' });
+
+      const launchArgs = paneLauncher.launch.mock.calls[0]![0];
+      expect(launchArgs.model).toBe('haiku');
+      const lease = manager.leaseStore.findByConversation(manager.poolId, 'conv-new');
+      expect(lease?.model).toBe('haiku');
+    });
+
+    it('bound: no model resolves at all (no schedule model, no cfg.model) launches with model undefined and persists NULL', async () => {
+      const { manager, paneLauncher } = makeManager({ panes: 1, model: undefined });
+      await manager.ensureStarted();
+
+      await manager.resolveRoute('conv-new', { contact_id: 'alice', channel: 'telegram' });
+
+      const launchArgs = paneLauncher.launch.mock.calls[0]![0];
+      expect(launchArgs.model).toBeUndefined();
+      const lease = manager.leaseStore.findByConversation(manager.poolId, 'conv-new');
+      expect(lease?.model).toBeNull();
+    });
+
+    it('uses an injected resolveModel dep instead of the default schedule/cfg.model fallback', async () => {
+      const db = makeDb();
+      const cfg = makeCfg({ panes: 1, model: 'claude-config-model' });
+      const paneLauncher = makeFakeLauncher();
+      const resolveModel = vi.fn(
+        (scheduleModel: string | null): PoolResolvedModel =>
+          scheduleModel
+            ? { model: `override-for-${scheduleModel}`, source: 'schedule' }
+            : { model: 'agent-override-model', source: 'agent-override' },
+      );
+      const manager = new PoolManager({ cfg, db, busBaseUrl: 'http://127.0.0.1:3000', paneLauncher, resolveModel });
+      await manager.ensureStarted();
+
+      await manager.resolveRoute('conv-new', { contact_id: 'alice', channel: 'telegram' });
+
+      expect(resolveModel).toHaveBeenCalledWith(null);
+      const launchArgs = paneLauncher.launch.mock.calls[0]![0];
+      expect(launchArgs.model).toBe('agent-override-model');
+    });
+  });
+
+  // ── E53 startup warning ─────────────────────────────────────────────────────
+
+  describe('startup warning for a pool with no model configured (E53)', () => {
+    it('warns once at construction when cfg.model is unset', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      makeManager({ model: undefined });
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy.mock.calls[0]![0]).toContain("No 'model' configured");
+      warnSpy.mockRestore();
+    });
+
+    it('does not warn when cfg.model is set', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      makeManager({ model: 'claude-sonnet-5' });
+      expect(warnSpy).not.toHaveBeenCalled();
+      warnSpy.mockRestore();
+    });
+  });
+
+  // ── E53 S53.5 — model change on reuse (a leased pane) ───────────────────────
+
+  describe('resolveRoute — model change on reuse (E53 S53.5)', () => {
+    /** Bind + confirmReady + setModel a pane for `conversationId`, with an
+     *  optional prior model persisted, then clear the launcher mocks so
+     *  later assertions only see calls made during the test's own act. */
+    async function leaseWithModel(
+      manager: PoolManager,
+      paneLauncher: ReturnType<typeof makeFakeLauncher>,
+      conversationId: string,
+      priorModel: string | null,
+    ) {
+      const result = await manager.resolveRoute(conversationId, { contact_id: 'alice', channel: 'telegram' });
+      const lease = manager.leaseStore.findByConversation(manager.poolId, conversationId)!;
+      manager.leaseStore.setModel(manager.poolId, lease.pane_id, priorModel);
+      paneLauncher.launch.mockClear();
+      paneLauncher.release.mockClear();
+      return { result, paneId: lease.pane_id, claudeSessionId: lease.claude_session_id! };
+    }
+
+    it('mismatch between turns: relaunches in place with --resume on the same session and the new model', async () => {
+      const { manager, paneLauncher } = makeManager({ panes: 1, model: 'claude-old-model' });
+      await manager.ensureStarted();
+      const { paneId, claudeSessionId } = await leaseWithModel(manager, paneLauncher, 'conv-1', 'claude-old-model');
+
+      const result = await manager.resolveRoute('conv-1', {
+        contact_id: 'alice',
+        channel: 'telegram',
+        scheduleModel: 'claude-new-model',
+      });
+
+      expect(result).toBe('agent:peggy-pool-1');
+      expect(paneLauncher.release).toHaveBeenCalledWith(paneId, 'kill');
+      expect(paneLauncher.launch).toHaveBeenCalledTimes(1);
+      const launchArgs = paneLauncher.launch.mock.calls[0]![0];
+      expect(launchArgs.resume).toBe(true);
+      expect(launchArgs.sessionId).toBe(claudeSessionId);
+      expect(launchArgs.model).toBe('claude-new-model');
+
+      const lease = manager.leaseStore.findByConversation(manager.poolId, 'conv-1');
+      expect(lease?.state).toBe('leased');
+      expect(lease?.model).toBe('claude-new-model');
+    });
+
+    it('mismatch mid-turn (unhandled work present): does not relaunch, defers to the next message', async () => {
+      const { manager, paneLauncher, db } = makeManager({ panes: 1, model: 'claude-old-model' });
+      await manager.ensureStarted();
+      const { paneId } = await leaseWithModel(manager, paneLauncher, 'conv-1', 'claude-old-model');
+
+      // Simulate an unhandled, acked message for this pane: acked_at after
+      // the lease's leased_at, no last_turn_ended_at recorded since.
+      const lease = manager.leaseStore.findByConversation(manager.poolId, 'conv-1')!;
+      db.prepare(
+        `INSERT INTO message_queue (id, recipient, channel, topic, sender, priority, payload, metadata, status, created_at, updated_at, acked_at)
+         VALUES ('msg-1', ?, 'telegram', 'general', 'contact:alice', 'normal', '{}', '{}', 'delivered', datetime('now'), datetime('now'), ?)`,
+      ).run(lease.agent_id, new Date(Date.now() + 1000).toISOString());
+
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      const result = await manager.resolveRoute('conv-1', {
+        contact_id: 'alice',
+        channel: 'telegram',
+        scheduleModel: 'claude-new-model',
+      });
+
+      expect(result).toBe('agent:peggy-pool-1');
+      expect(paneLauncher.release).not.toHaveBeenCalled();
+      expect(paneLauncher.launch).not.toHaveBeenCalled();
+      const stillLease = manager.leaseStore.findByConversation(manager.poolId, 'conv-1');
+      expect(stillLease?.state).toBe('leased');
+      expect(stillLease?.model).toBe('claude-old-model');
+      expect(logSpy).toHaveBeenCalled();
+      logSpy.mockRestore();
+      void paneId;
+    });
+
+    it('match: resolved model equals pool_leases.model — no relaunch', async () => {
+      const { manager, paneLauncher } = makeManager({ panes: 1, model: 'claude-same-model' });
+      await manager.ensureStarted();
+      await leaseWithModel(manager, paneLauncher, 'conv-1', 'claude-same-model');
+
+      const result = await manager.resolveRoute('conv-1', { contact_id: 'alice', channel: 'telegram' });
+
+      expect(result).toBe('agent:peggy-pool-1');
+      expect(paneLauncher.release).not.toHaveBeenCalled();
+      expect(paneLauncher.launch).not.toHaveBeenCalled();
+    });
+
+    it('null lease.model with a defined resolved model: treated as unknown, relaunches between turns', async () => {
+      const { manager, paneLauncher } = makeManager({ panes: 1, model: 'claude-config-model' });
+      await manager.ensureStarted();
+      const { paneId, claudeSessionId } = await leaseWithModel(manager, paneLauncher, 'conv-1', null);
+
+      const result = await manager.resolveRoute('conv-1', { contact_id: 'alice', channel: 'telegram' });
+
+      expect(result).toBe('agent:peggy-pool-1');
+      expect(paneLauncher.release).toHaveBeenCalledWith(paneId, 'kill');
+      const launchArgs = paneLauncher.launch.mock.calls[0]![0];
+      expect(launchArgs.resume).toBe(true);
+      expect(launchArgs.sessionId).toBe(claudeSessionId);
+      expect(launchArgs.model).toBe('claude-config-model');
+      const lease = manager.leaseStore.findByConversation(manager.poolId, 'conv-1');
+      expect(lease?.model).toBe('claude-config-model');
+    });
+
+    it('no resolved model at all (undefined): never relaunches, regardless of lease.model', async () => {
+      const { manager, paneLauncher } = makeManager({ panes: 1, model: undefined });
+      await manager.ensureStarted();
+      await leaseWithModel(manager, paneLauncher, 'conv-1', 'claude-old-model');
+
+      const result = await manager.resolveRoute('conv-1', { contact_id: 'alice', channel: 'telegram' });
+
+      expect(result).toBe('agent:peggy-pool-1');
+      expect(paneLauncher.release).not.toHaveBeenCalled();
+      expect(paneLauncher.launch).not.toHaveBeenCalled();
+    });
+
+    it('concurrency guard: a second resolveRoute() for the same conversation while a relaunch is in flight does not double-relaunch', async () => {
+      const { manager, paneLauncher } = makeManager({ panes: 1, model: 'claude-old-model' });
+      await manager.ensureStarted();
+      const { paneId } = await leaseWithModel(manager, paneLauncher, 'conv-1', 'claude-old-model');
+
+      // Hold launch() open until the test releases it, simulating an
+      // in-flight relaunch that the second concurrent call arrives during.
+      let releaseLaunch: () => void = () => {};
+      const launchGate = new Promise<void>((resolve) => {
+        releaseLaunch = resolve;
+      });
+      paneLauncher.launch.mockImplementationOnce(async () => {
+        await launchGate;
+      });
+
+      const firstCall = manager.resolveRoute('conv-1', {
+        contact_id: 'alice',
+        channel: 'telegram',
+        scheduleModel: 'claude-new-model',
+      });
+      // beginRelaunch()'s atomic DB claim runs synchronously, before the
+      // first call's execution ever reaches an `await` — by the time
+      // `resolveRoute(...)` above returns control to this line, the row is
+      // already 'launching'. Poll microtask flushes (rather than assume a
+      // fixed count) until the first call's own launch() call is actually
+      // pending, so the second call below genuinely races an in-flight
+      // relaunch rather than a not-yet-started one.
+      for (let i = 0; i < 20 && paneLauncher.launch.mock.calls.length === 0; i++) {
+        await Promise.resolve();
+      }
+      expect(paneLauncher.launch).toHaveBeenCalledTimes(1);
+
+      const secondResult = await manager.resolveRoute('conv-1', {
+        contact_id: 'alice',
+        channel: 'telegram',
+        scheduleModel: 'claude-new-model',
+      });
+
+      // The second call must not have triggered its own release()/launch() —
+      // only the first (still in-flight) call's single release()/launch()
+      // pair should exist.
+      expect(secondResult).toBe('agent:peggy-pool-1');
+      expect(paneLauncher.release).toHaveBeenCalledTimes(1);
+      expect(paneLauncher.release).toHaveBeenCalledWith(paneId, 'kill');
+
+      releaseLaunch();
+      await firstCall;
+      expect(paneLauncher.launch).toHaveBeenCalledTimes(1);
+
+      const lease = manager.leaseStore.findByConversation(manager.poolId, 'conv-1');
+      expect(lease?.state).toBe('leased');
+      expect(lease?.model).toBe('claude-new-model');
+    });
+
+    it('relaunch failure: marks the pane dead and returns the parked id, following the existing launch-failure path', async () => {
+      const { manager, paneLauncher } = makeManager({ panes: 1, model: 'claude-old-model' });
+      await manager.ensureStarted();
+      await leaseWithModel(manager, paneLauncher, 'conv-1', 'claude-old-model');
+      paneLauncher.launch.mockRejectedValueOnce(new Error('boom'));
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const result = await manager.resolveRoute('conv-1', {
+        contact_id: 'alice',
+        channel: 'telegram',
+        scheduleModel: 'claude-new-model',
+      });
+
+      expect(result).toBe(manager.parkedRecipientId());
+      const lease = manager.leaseStore.findByConversation(manager.poolId, 'conv-1');
+      expect(lease?.state).toBe('dead');
       errSpy.mockRestore();
     });
   });

@@ -32,16 +32,22 @@ function formatDurationMs(ms: number): string {
 }
 
 /**
- * One pane's line: "  <pane_id>: <state>  conv=<short>  idle=<age>".
- * `conv=` and `idle=` are each omitted when the underlying value is null — a
- * free pane has neither. `conversation_id` is truncated to its first 8 hex
- * chars: the full sha256 hex is unreadable in a chat message, and 8 chars is
- * plenty to eyeball-match across two truncated displays (e.g. /sessions).
+ * One pane's line: "  <pane_id>: <state>  conv=<short>  model=<m>  idle=<age>".
+ * `conv=`, `model=`, and `idle=` are each omitted when the underlying value
+ * is null — a free pane has none of them. `conversation_id` is truncated to
+ * its first 8 hex chars: the full sha256 hex is unreadable in a chat
+ * message, and 8 chars is plenty to eyeball-match across two truncated
+ * displays (e.g. /sessions). `model=` (E53) is the model the pane's current
+ * Claude session was launched with — `pool_leases.model`, `null` when the
+ * pane launched with no `--model` flag (CLI default).
  */
 function formatPaneLine(pane: PoolLeaseRow, now: Date): string {
   const parts: string[] = [pane.state];
   if (pane.conversation_id) {
     parts.push(`conv=${pane.conversation_id.slice(0, 8)}`);
+  }
+  if (pane.model) {
+    parts.push(`model=${pane.model}`);
   }
   if (pane.last_activity_at) {
     parts.push(`idle=${formatDurationMs(now.getTime() - new Date(pane.last_activity_at).getTime())}`);

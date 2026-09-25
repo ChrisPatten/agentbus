@@ -114,6 +114,14 @@ function loadMigrations(): Migration[] {
       description: 'Pool pane watchdog: pool_leases.last_turn_ended_at + pane_incidents (E52)',
       sql: readFileSync(join(migrationsDir, '020_pane_watchdog.sql'), 'utf-8'),
     },
+    // Versions 21 (model_overrides) and 22 (scheduled_items.model) are owned
+    // by sibling E53 stories (S53.1, S53.3) landing in parallel worktrees —
+    // expected to appear here once merged. This story only adds 23.
+    {
+      version: 23,
+      description: 'Pool leases model column (E53 S53.4)',
+      sql: readFileSync(join(migrationsDir, '023_pool_leases_model.sql'), 'utf-8'),
+    },
   ];
 }
 

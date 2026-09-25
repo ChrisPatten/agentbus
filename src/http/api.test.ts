@@ -1877,6 +1877,36 @@ describe('GET /api/v1/pool', () => {
     expect(pool.parked).toEqual({ count: 0, oldest_parked_at: null });
   });
 
+  it('includes each pane\'s model (E53): the leased session\'s model, null for a free pane', async () => {
+    const fixtureDb = makeDb();
+    const manager = makeManager(fixtureDb);
+    manager.leaseStore.seedPanes('peggy', [
+      { paneId: 'peggy-pool:1', agentId: 'agent:peggy-pool-1' },
+      { paneId: 'peggy-pool:2', agentId: 'agent:peggy-pool-2' },
+    ]);
+    const acquired = manager.leaseStore.acquire('peggy', 'conv-a', {
+      poolAgentId: 'peggy',
+      panes: 2,
+      maxPanes: 2,
+      growth: 'fixed',
+      idleEvictMs: 1_800_000,
+    });
+    if (acquired.kind !== 'bound') throw new Error(`test setup: expected "bound", got "${acquired.kind}"`);
+    manager.leaseStore.confirmReady('peggy', acquired.lease.pane_id);
+    manager.leaseStore.setModel('peggy', acquired.lease.pane_id, 'claude-haiku-5');
+
+    const poolManagers = new Map([['agent:peggy', manager]]);
+    ({ server } = await makeServer({ poolManagers }));
+
+    const res = await server.inject({ method: 'GET', url: '/api/v1/pool' });
+    const body = JSON.parse(res.body) as {
+      pools: Array<{ panes: Array<{ pane_id: string; model: string | null }> }>;
+    };
+    const pool = body.pools[0]!;
+    expect(pool.panes.find((p) => p.pane_id === 'peggy-pool:1')!.model).toBe('claude-haiku-5');
+    expect(pool.panes.find((p) => p.pane_id === 'peggy-pool:2')!.model).toBeNull();
+  });
+
   it('?pool= narrows the result to the matching pool', async () => {
     const fixtureDb = makeDb();
     const peggy = makeManager(fixtureDb, { agent_id: 'peggy', tmux_session: 'peggy-pool' });
