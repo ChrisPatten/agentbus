@@ -39,16 +39,17 @@ Temp files are written immediately before the spawn and deleted after the result
 
 ### Runtime model overrides
 
-The `headless_model_overrides` table (migration 015) lets an agent change the model without editing `config.yaml` or restarting. `resolveModelOverride()` (`src/adapters/model-override-loader.ts`) runs on every spawn and returns the first match in this order:
+`resolveModel()` (`src/adapters/model-override-loader.ts`) runs on every spawn and resolves the model in this order:
 
-1. `schedule_id` and `agent_id`
-2. `agent_id` only
-3. `schedule_id` only
-4. Global (both `NULL`)
+1. The batch's own `metadata.schedule_model` — set when the message that started this turn came from a scheduled job with its own `model` (see [SCHEDULING.md](SCHEDULING.md)).
+2. An override scoped to this agent, in the `model_overrides` table (migration 021).
+3. The global override (`model_overrides` row with a `NULL` agent).
+4. `adapters.cc-headless.model`.
+5. Nothing: no `--model` flag, so the CLI falls back to its own default or a `model` key in `working_dir/.claude/settings.json`.
 
-Ties within a scope break on `priority` (higher wins), then `updated_at` (newest wins). A match overrides `adapters.cc-headless.model`. No match falls through to it, and then to the CLI's own default or a `model` key in `working_dir/.claude/settings.json`.
+`agent_id` is the full recipient ID, for example `agent:claude`, not the bare `agent_id` config value. Manage overrides through `POST`, `GET`, and `DELETE /api/v1/model-overrides` ([HTTP_API.md](HTTP_API.md#model-overrides)) or the `set_model_override`, `get_model_override`, `list_model_overrides`, and `delete_model_override` tools ([MCP_TOOLS.md](MCP_TOOLS.md#model-overrides)). The store only ever holds agent-scoped and global rows — a job's own model lives on its schedule, not here.
 
-`agent_id` is the full recipient ID, for example `agent:claude`, not the bare `agent_id` config value. `schedule_id` is not passed from scheduled turns yet, so schedule-scoped overrides never match. Manage overrides through `POST`, `GET`, and `DELETE /api/v1/model-overrides` ([HTTP_API.md](HTTP_API.md#model-overrides)) or the `set_headless_model`, `get_headless_model`, `list_headless_model`, and `delete_headless_model` tools ([MCP_TOOLS.md](MCP_TOOLS.md#model-overrides)). The `POST` route has a known bug that makes every write fail; see `_bmad-output/maintenance-backlog.md`.
+The resolved model and its source are logged on every spawn (`Resolved model: <model> (source=<schedule|agent-override|global-override|config|cli-default>)`).
 
 ### MCP config file
 
@@ -79,7 +80,7 @@ Every tool except `get_adapter_status`, which has no meaning without a poll loop
 | `create_telegram_topic` | When a Telegram adapter is configured |
 | `list_channels`, `get_session`, `list_sessions`, `get_transcript`, `search_transcripts`, `fetch_attachment` | Discovery and history |
 | `schedule_message`, `list_schedules`, `cancel_schedule` | Scheduling |
-| `set_headless_model`, `get_headless_model`, `list_headless_model`, `delete_headless_model` | Model overrides |
+| `set_model_override`, `get_model_override`, `list_model_overrides`, `delete_model_override` | Model overrides. `set_headless_model`/`get_headless_model`/`list_headless_model`/`delete_headless_model` are deprecated aliases |
 | `recall_memory`, `log_memory` | Legacy. Read and write your memory files instead |
 
 ## Response delivery

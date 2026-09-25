@@ -11,6 +11,15 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 ## [Unreleased]
 
 ### Added
+- **Adapter-neutral model override tools (E53 S53.1).** New MCP tools
+  `set_model_override`, `get_model_override`, `list_model_overrides`, and
+  `delete_model_override` manage the agent-wide and global model overrides
+  shared by `cc-headless` and (once S53.4 lands) `cc-pool`. `resolveModel()`
+  (`src/adapters/model-override-loader.ts`) resolves, in order: a fired
+  schedule's own model (`metadata.schedule_model`), an agent-scoped
+  override, the global override, the caller's configured model, then the
+  CLI default. See
+  [docs/CC_HEADLESS_ADAPTER.md](docs/CC_HEADLESS_ADAPTER.md#runtime-model-overrides).
 - **Stall watchdog for `cc-pool` panes, observe-only (E52, S52.1–S52.2).**
   A leased pane with unhandled work and a screen unchanged for
   `watchdog.stall_after_ms` (default 5 minutes) is recorded as an incident in
@@ -114,6 +123,14 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
   [docs/CC_POOL_ADAPTER.md#cold-start-placeholder](docs/CC_POOL_ADAPTER.md#cold-start-placeholder).
 
 ### Fixed
+- **`POST /api/v1/model-overrides` no longer 500s (E53 S53.1).** The old
+  `headless_model_overrides` table's unique index was partial (`WHERE
+  schedule_id IS NOT NULL OR agent_id IS NOT NULL`) and excluded the global
+  (all-NULL) row, so no `ON CONFLICT` target could ever match a global
+  upsert and every write failed. The replacement `model_overrides` table
+  (migration 021) indexes on `COALESCE(agent_id, '')`, so one conflict
+  target covers both an agent-scoped and the global row. Covered by new
+  HTTP-level tests in `src/http/api.test.ts`.
 - **cc-pool: pane `last_activity_at` no longer goes stale during a long turn.**
   Activity was previously only bumped when a message was routed *in* to a
   pane, never when the pane's own turn finished — so a long-running reply or
@@ -229,6 +246,21 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
   string parses it. See [docs/CC_ADAPTER.md](docs/CC_ADAPTER.md#message-format).
 
 ### Changed
+- **Model override store renamed and simplified; schedule scope removed
+  (E53 S53.1).** `headless_model_overrides` (migration 015) is replaced by
+  `model_overrides` (migration 021): one row per agent plus one global row,
+  no `priority` column. Schedule-scoped overrides are gone — a job's own
+  model now lives on its schedule (`scheduled_items.model`, landing in
+  S53.3), not in the override store. `POST /api/v1/model-overrides` rejects
+  a `schedule_id` in the body with `400`, pointing at the schedule's `model`
+  field; `DELETE` now takes `agent_id` or `scope=global` in place of
+  `schedule_id`/`agent_id` pairs. `set_headless_model`, `get_headless_model`,
+  `list_headless_model`, and `delete_headless_model` are kept as deprecated
+  aliases for `set_model_override`/`get_model_override`/
+  `list_model_overrides`/`delete_model_override` and reject `schedule_id`
+  the same way. Existing schedule-less overrides migrate automatically
+  (newest wins per agent); schedule-scoped rows, unused in production, are
+  dropped.
 - `make kill` now also stops pm2's `bus-core`. Previously pm2 restarted the
   process it had just killed. `make dev` and `make debug-payloads` use the
   local `tsx` instead of `npx`.

@@ -1,41 +1,37 @@
 /**
- * Tests for model override resolution logic.
- *
- * Verifies priority ordering, query results, and CRUD operations.
+ * Tests for the model_overrides store and resolveModel().
  */
 import Database from 'better-sqlite3';
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   resolveModelOverride,
+  resolveModel,
   listModelOverrides,
   setModelOverride,
   deleteModelOverride,
   clearAllModelOverrides,
 } from './model-override-loader.js';
 
+function makeDb(): Database.Database {
+  const db = new Database(':memory:');
+  db.exec(`
+    CREATE TABLE model_overrides (
+      id          INTEGER PRIMARY KEY,
+      agent_id    TEXT,
+      model       TEXT NOT NULL,
+      created_at  TEXT NOT NULL,
+      updated_at  TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX idx_model_overrides_agent ON model_overrides (COALESCE(agent_id, ''));
+  `);
+  return db;
+}
+
 describe('model-override-loader', () => {
   let db: Database.Database;
 
   beforeEach(() => {
-    db = new Database(':memory:');
-    db.exec(`
-      CREATE TABLE headless_model_overrides (
-        id            INTEGER PRIMARY KEY,
-        schedule_id   TEXT,
-        agent_id      TEXT,
-        model         TEXT NOT NULL,
-        priority      INTEGER DEFAULT 0,
-        created_at    TEXT NOT NULL,
-        updated_at    TEXT NOT NULL
-      );
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_model_overrides_schedule_agent
-        ON headless_model_overrides (schedule_id, agent_id)
-        WHERE schedule_id IS NOT NULL OR agent_id IS NOT NULL;
-      CREATE INDEX IF NOT EXISTS idx_model_overrides_agent
-        ON headless_model_overrides (agent_id);
-      CREATE INDEX IF NOT EXISTS idx_model_overrides_schedule
-        ON headless_model_overrides (schedule_id);
-    `);
+    db = makeDb();
   });
 
   afterEach(() => {
@@ -43,212 +39,174 @@ describe('model-override-loader', () => {
   });
 
   describe('setModelOverride', () => {
-    it('should set a global override', () => {
-      const id = setModelOverride(db, 'claude-opus');
+    it('sets a global override', () => {
+      const id = setModelOverride(db, 'opus');
       expect(id).toBeGreaterThan(0);
-
-      const row = db
-        .prepare(`SELECT model FROM headless_model_overrides WHERE id = ?`)
-        .get(id) as { model: string } | undefined;
-      expect(row?.model).toBe('claude-opus');
+      const row = db.prepare(`SELECT model, agent_id FROM model_overrides WHERE id = ?`).get(id) as {
+        model: string;
+        agent_id: string | null;
+      };
+      expect(row.model).toBe('opus');
+      expect(row.agent_id).toBeNull();
     });
 
-    it('should set an agent-specific override', () => {
-      const id = setModelOverride(db, 'claude-opus', null, 'agent-foo');
-      expect(id).toBeGreaterThan(0);
-
-      const row = db
-        .prepare(`SELECT model, agent_id FROM headless_model_overrides WHERE id = ?`)
-        .get(id) as { model: string; agent_id: string } | undefined;
-      expect(row?.model).toBe('claude-opus');
-      expect(row?.agent_id).toBe('agent-foo');
+    it('sets an agent-scoped override', () => {
+      const id = setModelOverride(db, 'sonnet', 'agent:peggy');
+      const row = db.prepare(`SELECT model, agent_id FROM model_overrides WHERE id = ?`).get(id) as {
+        model: string;
+        agent_id: string | null;
+      };
+      expect(row.model).toBe('sonnet');
+      expect(row.agent_id).toBe('agent:peggy');
     });
 
-    it('should set a schedule-specific override', () => {
-      const id = setModelOverride(db, 'claude-opus', 'schedule-123');
-      expect(id).toBeGreaterThan(0);
-
-      const row = db
-        .prepare(`SELECT model, schedule_id FROM headless_model_overrides WHERE id = ?`)
-        .get(id) as { model: string; schedule_id: string } | undefined;
-      expect(row?.model).toBe('claude-opus');
-      expect(row?.schedule_id).toBe('schedule-123');
-    });
-
-    it('should set a schedule + agent-specific override', () => {
-      const id = setModelOverride(db, 'claude-opus', 'schedule-123', 'agent-foo');
-      expect(id).toBeGreaterThan(0);
-
-      const row = db
-        .prepare(
-          `SELECT model, schedule_id, agent_id FROM headless_model_overrides WHERE id = ?`
-        )
-        .get(id) as { model: string; schedule_id: string; agent_id: string } | undefined;
-      expect(row?.model).toBe('claude-opus');
-      expect(row?.schedule_id).toBe('schedule-123');
-      expect(row?.agent_id).toBe('agent-foo');
-    });
-
-    it('should update an existing override', () => {
-      const id1 = setModelOverride(db, 'claude-opus', null, 'agent-foo');
-      const id2 = setModelOverride(db, 'claude-sonnet', null, 'agent-foo');
-
-      // Should be the same ID (upsert)
+    it('upserts on the same agent scope (same row id, new model)', () => {
+      const id1 = setModelOverride(db, 'opus', 'agent:peggy');
+      const id2 = setModelOverride(db, 'sonnet', 'agent:peggy');
       expect(id1).toBe(id2);
-
-      const row = db
-        .prepare(`SELECT model FROM headless_model_overrides WHERE id = ?`)
-        .get(id1) as { model: string } | undefined;
-      expect(row?.model).toBe('claude-sonnet');
+      const row = db.prepare(`SELECT model FROM model_overrides WHERE id = ?`).get(id1) as { model: string };
+      expect(row.model).toBe('sonnet');
     });
 
-    it('should set priority', () => {
-      const id = setModelOverride(db, 'claude-opus', null, 'agent-foo', 10);
+    it('upserts on the global scope independently of agent scopes', () => {
+      setModelOverride(db, 'opus');
+      setModelOverride(db, 'haiku');
+      setModelOverride(db, 'sonnet', 'agent:peggy');
 
-      const row = db
-        .prepare(`SELECT priority FROM headless_model_overrides WHERE id = ?`)
-        .get(id) as { priority: number } | undefined;
-      expect(row?.priority).toBe(10);
+      const rows = db.prepare(`SELECT agent_id, model FROM model_overrides ORDER BY agent_id`).all();
+      expect(rows).toEqual([
+        { agent_id: null, model: 'haiku' },
+        { agent_id: 'agent:peggy', model: 'sonnet' },
+      ]);
     });
   });
 
   describe('resolveModelOverride', () => {
-    it('should resolve to global override when no scope specified', () => {
-      setModelOverride(db, 'claude-opus-global');
-      const result = resolveModelOverride(db);
-      expect(result).toBe('claude-opus-global');
+    it('returns null when nothing is set', () => {
+      expect(resolveModelOverride(db, 'agent:peggy')).toBeNull();
+      expect(resolveModelOverride(db, null)).toBeNull();
     });
 
-    it('should resolve to agent override over global', () => {
-      setModelOverride(db, 'claude-opus-global');
-      setModelOverride(db, 'claude-sonnet-agent', null, 'agent-foo');
-
-      const result = resolveModelOverride(db, undefined, 'agent-foo');
-      expect(result).toBe('claude-sonnet-agent');
+    it('resolves the global override when no agent override exists', () => {
+      setModelOverride(db, 'opus');
+      expect(resolveModelOverride(db, 'agent:peggy')).toBe('opus');
+      expect(resolveModelOverride(db, null)).toBe('opus');
     });
 
-    it('should resolve to schedule override over global', () => {
-      setModelOverride(db, 'claude-opus-global');
-      setModelOverride(db, 'claude-haiku-schedule', 'schedule-123');
+    it('resolves the agent override over the global one', () => {
+      setModelOverride(db, 'opus');
+      setModelOverride(db, 'sonnet', 'agent:peggy');
+      expect(resolveModelOverride(db, 'agent:peggy')).toBe('sonnet');
+      expect(resolveModelOverride(db, 'agent:other')).toBe('opus');
+    });
+  });
 
-      const result = resolveModelOverride(db, 'schedule-123');
-      expect(result).toBe('claude-haiku-schedule');
+  describe('resolveModel', () => {
+    it('prefers a non-empty scheduleModel over everything else', () => {
+      setModelOverride(db, 'opus', 'agent:peggy');
+      const result = resolveModel({ scheduleModel: 'haiku', db, agentId: 'agent:peggy', configModel: 'sonnet' });
+      expect(result).toEqual({ model: 'haiku', source: 'schedule' });
     });
 
-    it('should resolve to schedule+agent override as most specific', () => {
-      setModelOverride(db, 'claude-opus-global');
-      setModelOverride(db, 'claude-sonnet-agent', null, 'agent-foo');
-      setModelOverride(db, 'claude-haiku-schedule', 'schedule-123');
-      setModelOverride(db, 'claude-haiku-both', 'schedule-123', 'agent-foo');
-
-      const result = resolveModelOverride(db, 'schedule-123', 'agent-foo');
-      expect(result).toBe('claude-haiku-both');
+    it('ignores an empty or whitespace-only scheduleModel', () => {
+      setModelOverride(db, 'opus', 'agent:peggy');
+      const result = resolveModel({ scheduleModel: '   ', db, agentId: 'agent:peggy' });
+      expect(result).toEqual({ model: 'opus', source: 'agent-override' });
     });
 
-    it('should return null when no override found', () => {
-      const result = resolveModelOverride(db, 'schedule-999', 'agent-999');
-      expect(result).toBeNull();
+    it('falls back to the agent override when there is no schedule model', () => {
+      setModelOverride(db, 'sonnet', 'agent:peggy');
+      const result = resolveModel({ db, agentId: 'agent:peggy', configModel: 'haiku' });
+      expect(result).toEqual({ model: 'sonnet', source: 'agent-override' });
     });
 
-    it('should respect priority field on ties', () => {
-      // Two global overrides with different priorities
-      setModelOverride(db, 'claude-opus', null, null, 0);
-      setModelOverride(db, 'claude-sonnet', null, null, 5);
-
-      const result = resolveModelOverride(db);
-      // Should return the one with higher priority
-      expect(result).toBe('claude-sonnet');
+    it('falls back to the global override when there is no agent override', () => {
+      setModelOverride(db, 'opus');
+      const result = resolveModel({ db, agentId: 'agent:peggy', configModel: 'haiku' });
+      expect(result).toEqual({ model: 'opus', source: 'global-override' });
     });
 
-    it('should respect update timestamp on equal priority', () => {
-      const now = new Date().toISOString();
-      db.prepare(
-        `INSERT INTO headless_model_overrides (schedule_id, agent_id, model, priority, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?)`
-      ).run(null, null, 'claude-opus', 0, now, now);
+    it('falls back to configModel when there is no override at all', () => {
+      const result = resolveModel({ db, agentId: 'agent:peggy', configModel: 'haiku' });
+      expect(result).toEqual({ model: 'haiku', source: 'config' });
+    });
 
-      // Wait a tiny bit and insert another
-      const later = new Date(new Date().getTime() + 1).toISOString();
-      db.prepare(
-        `INSERT INTO headless_model_overrides (schedule_id, agent_id, model, priority, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?)`
-      ).run(null, 'agent-bar', 'claude-sonnet', 0, later, later);
+    it('falls back to cli-default when nothing resolves', () => {
+      const result = resolveModel({ db, agentId: 'agent:peggy' });
+      expect(result).toEqual({ model: undefined, source: 'cli-default' });
+    });
 
-      const result = resolveModelOverride(db, undefined, 'agent-bar');
-      expect(result).toBe('claude-sonnet');
+    it('works without a db at all, using configModel', () => {
+      const result = resolveModel({ configModel: 'haiku' });
+      expect(result).toEqual({ model: 'haiku', source: 'config' });
+    });
+
+    it('never throws when the override table is missing, falling through to configModel', () => {
+      const brokenDb = new Database(':memory:'); // no model_overrides table
+      const consoleErr = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const result = resolveModel({ db: brokenDb, agentId: 'agent:peggy', configModel: 'haiku' });
+      expect(result).toEqual({ model: 'haiku', source: 'config' });
+      expect(consoleErr).toHaveBeenCalled();
+      consoleErr.mockRestore();
+      brokenDb.close();
+    });
+
+    it('never throws when the override table is missing and there is no configModel either', () => {
+      const brokenDb = new Database(':memory:');
+      const consoleErr = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const result = resolveModel({ db: brokenDb, agentId: 'agent:peggy' });
+      expect(result).toEqual({ model: undefined, source: 'cli-default' });
+      consoleErr.mockRestore();
+      brokenDb.close();
     });
   });
 
   describe('listModelOverrides', () => {
-    it('should list all overrides ordered by specificity', () => {
-      setModelOverride(db, 'global', null, null);
-      setModelOverride(db, 'agent-only', null, 'agent-a');
-      setModelOverride(db, 'schedule-only', 'schedule-1');
-      setModelOverride(db, 'both', 'schedule-1', 'agent-a');
+    it('lists agent-scoped rows before the global row', () => {
+      setModelOverride(db, 'global-model');
+      setModelOverride(db, 'agent-model', 'agent:peggy');
 
       const list = listModelOverrides(db);
-
-      expect(list.length).toBe(4);
-      // Most specific first
-      expect(list[0]?.model).toBe('both');
-      expect(list[1]?.model).toBe('agent-only');
-      expect(list[2]?.model).toBe('schedule-only');
-      expect(list[3]?.model).toBe('global');
+      expect(list.length).toBe(2);
+      expect(list[0]?.model).toBe('agent-model');
+      expect(list[1]?.model).toBe('global-model');
     });
 
-    it('should return empty list when no overrides', () => {
-      const list = listModelOverrides(db);
-      expect(list).toEqual([]);
+    it('returns an empty list when there are no overrides', () => {
+      expect(listModelOverrides(db)).toEqual([]);
     });
   });
 
   describe('deleteModelOverride', () => {
-    it('should delete a specific override', () => {
-      const id = setModelOverride(db, 'claude-opus', null, 'agent-foo');
-      const deleted = deleteModelOverride(db, null, 'agent-foo');
-
-      expect(deleted).toBe(1);
-
-      const row = db
-        .prepare(`SELECT id FROM headless_model_overrides WHERE id = ?`)
-        .get(id) as { id: number } | undefined;
-      expect(row).toBeUndefined();
+    it('deletes the agent-scoped override', () => {
+      setModelOverride(db, 'opus', 'agent:peggy');
+      expect(deleteModelOverride(db, 'agent:peggy')).toBe(1);
+      expect(resolveModelOverride(db, 'agent:peggy')).toBeNull();
     });
 
-    it('should delete multiple overrides matching scope', () => {
-      setModelOverride(db, 'model-1', 'schedule-123', 'agent-a');
-      setModelOverride(db, 'model-2', 'schedule-123', 'agent-b');
-
-      const deleted = deleteModelOverride(db, 'schedule-123');
-
-      expect(deleted).toBe(2);
+    it('deletes only the global override', () => {
+      setModelOverride(db, 'opus');
+      setModelOverride(db, 'sonnet', 'agent:peggy');
+      expect(deleteModelOverride(db, null)).toBe(1);
+      expect(resolveModelOverride(db, null)).toBeNull();
+      expect(resolveModelOverride(db, 'agent:peggy')).toBe('sonnet');
     });
 
-    it('should return 0 when no match', () => {
-      const deleted = deleteModelOverride(db, 'schedule-999', 'agent-999');
-      expect(deleted).toBe(0);
+    it('returns 0 when there is no match', () => {
+      expect(deleteModelOverride(db, 'agent:nobody')).toBe(0);
     });
   });
 
   describe('clearAllModelOverrides', () => {
-    it('should delete all overrides', () => {
-      setModelOverride(db, 'model-1');
-      setModelOverride(db, 'model-2', null, 'agent-a');
-      setModelOverride(db, 'model-3', 'schedule-1');
-
-      const deleted = clearAllModelOverrides(db);
-
-      expect(deleted).toBe(3);
-
-      const count = db
-        .prepare(`SELECT COUNT(*) as cnt FROM headless_model_overrides`)
-        .get() as { cnt: number };
-      expect(count.cnt).toBe(0);
+    it('deletes every override', () => {
+      setModelOverride(db, 'opus');
+      setModelOverride(db, 'sonnet', 'agent:peggy');
+      expect(clearAllModelOverrides(db)).toBe(2);
+      expect(listModelOverrides(db)).toEqual([]);
     });
 
-    it('should return 0 when table is empty', () => {
-      const deleted = clearAllModelOverrides(db);
-      expect(deleted).toBe(0);
+    it('returns 0 when the table is already empty', () => {
+      expect(clearAllModelOverrides(db)).toBe(0);
     });
   });
 });

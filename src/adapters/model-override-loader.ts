@@ -1,214 +1,167 @@
 /**
- * Headless model override loader.
+ * Model override store and resolution (E53 S53.1).
  *
- * Queries the headless_model_overrides table on spawn to resolve which model
- * to use for a Claude invocation, respecting priority ordering.
+ * Backs the `model_overrides` table (migration 021): one row per agent, plus
+ * at most one global row (agent_id IS NULL). Replaces the old
+ * headless_model_overrides table, which also carried a schedule scope and a
+ * priority column — both dropped. A job's model now lives on the schedule
+ * itself (`scheduled_items.model`), carried to the adapters as
+ * `metadata.schedule_model` on the fired envelope; see `resolveModel` below.
  *
- * Priority (first match wins):
- *   1. (schedule_id + agent_id) — most specific override
- *   2. agent_id only
- *   3. schedule_id only
- *   4. global (both null)
+ * Shared by `cc-headless` and `cc-pool`.
  */
 import type Database from 'better-sqlite3';
 
-interface ModelOverride {
+export interface ModelOverride {
   id: number;
-  schedule_id: string | null;
   agent_id: string | null;
   model: string;
-  priority: number;
   created_at: string;
   updated_at: string;
 }
 
 /**
- * Resolve the model for a headless Claude spawn, querying the override table.
+ * Resolve a model override for an agent, querying the `model_overrides`
+ * table. Checks the agent-scoped row first, then falls back to the global
+ * row (agent_id IS NULL).
  *
  * @param db - SQLite database connection
- * @param scheduleId - Optional schedule ID (for time-based or recurring spawns)
- * @param agentId - Optional agent ID (for agent-specific overrides)
- * @returns The override model name, or null if no override found
+ * @param agentId - The agent's full recipient id (e.g. "agent:claude"), or
+ *   null to only consider the global override
+ * @returns The override model name, or null if no override is set
  */
-export function resolveModelOverride(
-  db: Database.Database,
-  scheduleId?: string | null,
-  agentId?: string | null,
-): string | null {
-  // Priority 1: both schedule_id and agent_id match
-  if (scheduleId && agentId) {
-    const row = db
-      .prepare(
-        `SELECT model FROM headless_model_overrides
-         WHERE schedule_id = ? AND agent_id = ?
-         ORDER BY priority DESC, updated_at DESC LIMIT 1`,
-      )
-      .get(scheduleId, agentId) as { model: string } | undefined;
-    if (row) return row.model;
-  }
-
-  // Priority 2: agent_id only (any schedule)
+export function resolveModelOverride(db: Database.Database, agentId: string | null): string | null {
   if (agentId) {
     const row = db
-      .prepare(
-        `SELECT model FROM headless_model_overrides
-         WHERE agent_id = ? AND schedule_id IS NULL
-         ORDER BY priority DESC, updated_at DESC LIMIT 1`,
-      )
+      .prepare(`SELECT model FROM model_overrides WHERE agent_id = ?`)
       .get(agentId) as { model: string } | undefined;
     if (row) return row.model;
   }
 
-  // Priority 3: schedule_id only (any agent)
-  if (scheduleId) {
-    const row = db
-      .prepare(
-        `SELECT model FROM headless_model_overrides
-         WHERE schedule_id = ? AND agent_id IS NULL
-         ORDER BY priority DESC, updated_at DESC LIMIT 1`,
-      )
-      .get(scheduleId) as { model: string } | undefined;
-    if (row) return row.model;
-  }
-
-  // Priority 4: global override (both null)
   const row = db
-    .prepare(
-      `SELECT model FROM headless_model_overrides
-       WHERE schedule_id IS NULL AND agent_id IS NULL
-       ORDER BY priority DESC, updated_at DESC LIMIT 1`,
-    )
+    .prepare(`SELECT model FROM model_overrides WHERE agent_id IS NULL`)
     .get() as { model: string } | undefined;
   return row?.model ?? null;
 }
 
+export type ModelSource = 'schedule' | 'agent-override' | 'global-override' | 'config' | 'cli-default';
+
+export interface ResolvedModel {
+  model: string | undefined;
+  source: ModelSource;
+}
+
 /**
- * List all active model overrides.
+ * Resolve the model to launch/spawn with, in priority order:
  *
- * @param db - SQLite database connection
- * @returns Array of all overrides, ordered by specificity
+ *   1. `opts.scheduleModel`, if it's a non-empty string — the fired
+ *      schedule's own `model`.
+ *   2. An override scoped to `opts.agentId`.
+ *   3. The global override.
+ *   4. `opts.configModel` — the pool's or headless instance's configured
+ *      `model`.
+ *   5. Nothing (`undefined`) — the CLI's own default (`--model` omitted).
+ *
+ * Runs on the message hot path (every pane launch / headless spawn), so a
+ * DB error here must never fail the caller: it's caught, logged, and
+ * resolution falls through to `configModel` / `cli-default` as if no
+ * override table existed.
+ */
+export function resolveModel(opts: {
+  scheduleModel?: string | null;
+  db?: Database.Database;
+  agentId?: string | null;
+  configModel?: string;
+}): ResolvedModel {
+  if (opts.scheduleModel && opts.scheduleModel.trim().length > 0) {
+    return { model: opts.scheduleModel, source: 'schedule' };
+  }
+
+  if (opts.db) {
+    try {
+      const agentId = opts.agentId ?? null;
+      if (agentId) {
+        const row = opts.db
+          .prepare(`SELECT model FROM model_overrides WHERE agent_id = ?`)
+          .get(agentId) as { model: string } | undefined;
+        if (row) return { model: row.model, source: 'agent-override' };
+      }
+
+      const globalRow = opts.db
+        .prepare(`SELECT model FROM model_overrides WHERE agent_id IS NULL`)
+        .get() as { model: string } | undefined;
+      if (globalRow) return { model: globalRow.model, source: 'global-override' };
+    } catch (err) {
+      console.error('[model-override-loader] resolveModel: override lookup failed, falling through:', err);
+    }
+  }
+
+  if (opts.configModel) {
+    return { model: opts.configModel, source: 'config' };
+  }
+
+  return { model: undefined, source: 'cli-default' };
+}
+
+/**
+ * List all active model overrides (agent-scoped rows first, then global),
+ * newest-updated first within each group.
  */
 export function listModelOverrides(db: Database.Database): ModelOverride[] {
   return db
     .prepare(
-      `SELECT id, schedule_id, agent_id, model, priority, created_at, updated_at
-       FROM headless_model_overrides
-       ORDER BY
-         CASE
-           WHEN schedule_id IS NOT NULL AND agent_id IS NOT NULL THEN 1
-           WHEN agent_id IS NOT NULL THEN 2
-           WHEN schedule_id IS NOT NULL THEN 3
-           ELSE 4
-         END,
-         priority DESC,
-         updated_at DESC`,
+      `SELECT id, agent_id, model, created_at, updated_at
+       FROM model_overrides
+       ORDER BY agent_id IS NULL, updated_at DESC`,
     )
     .all() as ModelOverride[];
 }
 
 /**
- * Set a model override. Replaces any existing override for the same (schedule_id, agent_id) combo.
+ * Set (or update) a model override, scoped to an agent or global.
  *
  * @param db - SQLite database connection
- * @param model - The model name (e.g. "claude-3-5-opus-20241022")
- * @param scheduleId - Optional schedule ID
- * @param agentId - Optional agent ID
- * @param priority - Optional priority (default 0); higher wins on tie
- * @returns The updated/inserted override row ID
+ * @param model - The model name (e.g. "sonnet")
+ * @param agentId - Agent id to scope to, or null/omitted for a global override
+ * @returns The row id of the inserted/updated override
  */
-export function setModelOverride(
-  db: Database.Database,
-  model: string,
-  scheduleId?: string | null,
-  agentId?: string | null,
-  priority?: number,
-): number {
+export function setModelOverride(db: Database.Database, model: string, agentId?: string | null): number {
   const now = new Date().toISOString();
-  const p = priority ?? 0;
-  const sId = scheduleId ?? null;
   const aId = agentId ?? null;
 
-  // Check if a row exists for this (schedule_id, agent_id) combo
-  const existing = db
-    .prepare(
-      `SELECT id FROM headless_model_overrides
-       WHERE schedule_id IS ? AND agent_id IS ?`,
-    )
-    .get(sId, aId) as { id: number } | undefined;
+  db.prepare(
+    `INSERT INTO model_overrides (agent_id, model, created_at, updated_at)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(COALESCE(agent_id, '')) DO UPDATE SET
+       model = excluded.model,
+       updated_at = excluded.updated_at`,
+  ).run(aId, model, now, now);
 
-  if (existing) {
-    // Update existing
-    db.prepare(
-      `UPDATE headless_model_overrides
-       SET model = ?, priority = ?, updated_at = ?
-       WHERE id = ?`,
-    ).run(model, p, now, existing.id);
-    return existing.id;
-  } else {
-    // Insert new
-    db.prepare(
-      `INSERT INTO headless_model_overrides (schedule_id, agent_id, model, priority, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-    ).run(sId, aId, model, p, now, now);
-
-    // Fetch the ID of the row we just inserted
-    const row = db
-      .prepare(
-        `SELECT id FROM headless_model_overrides
-         WHERE schedule_id IS ? AND agent_id IS ? AND model = ?`,
-      )
-      .get(sId, aId, model) as { id: number } | undefined;
-
-    return row?.id ?? 0;
-  }
+  const row = db.prepare(`SELECT id FROM model_overrides WHERE agent_id IS ?`).get(aId) as
+    | { id: number }
+    | undefined;
+  return row?.id ?? 0;
 }
 
 /**
- * Clear a specific model override or group of overrides by scope.
- *
- * If both scheduleId and agentId are provided, deletes the specific (schedule_id, agent_id) pair.
- * If only scheduleId is provided, deletes all overrides for that schedule (any agent).
- * If only agentId is provided, deletes all overrides for that agent (any schedule).
+ * Delete a model override by scope.
  *
  * @param db - SQLite database connection
- * @param scheduleId - Optional schedule ID
- * @param agentId - Optional agent ID
- * @returns Number of rows deleted
+ * @param agentId - Agent id to delete, or null to delete the global override
+ * @returns Number of rows deleted (0 or 1)
  */
-export function deleteModelOverride(
-  db: Database.Database,
-  scheduleId?: string | null,
-  agentId?: string | null,
-): number {
-  let where = '';
-  const params: Array<string | null> = [];
-
-  if (scheduleId && agentId) {
-    where = 'WHERE schedule_id IS ? AND agent_id IS ?';
-    params.push(scheduleId, agentId);
-  } else if (scheduleId) {
-    where = 'WHERE schedule_id IS ?';
-    params.push(scheduleId);
-  } else if (agentId) {
-    where = 'WHERE agent_id IS ?';
-    params.push(agentId);
-  } else {
-    // Neither specified — delete nothing to prevent accidental wipe
-    return 0;
-  }
-
-  const stmt = db.prepare(`DELETE FROM headless_model_overrides ${where}`);
-  const result = stmt.run(...params);
+export function deleteModelOverride(db: Database.Database, agentId: string | null): number {
+  const result = db.prepare(`DELETE FROM model_overrides WHERE agent_id IS ?`).run(agentId);
   return result.changes;
 }
 
 /**
- * Clear all model overrides (caution: irreversible).
+ * Clear all model overrides (agent-scoped and global). Irreversible.
  *
  * @param db - SQLite database connection
  * @returns Number of rows deleted
  */
 export function clearAllModelOverrides(db: Database.Database): number {
-  const result = db.prepare(`DELETE FROM headless_model_overrides`).run();
+  const result = db.prepare(`DELETE FROM model_overrides`).run();
   return result.changes;
 }

@@ -1816,55 +1816,61 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     return result;
   });
 
-  // ── Headless Model Override endpoints ──────────────────────────────────────
+  // ── Model override endpoints (E53 S53.1) ────────────────────────────────────
   //
-  // POST   /api/v1/model-overrides       — Set a model override
+  // POST   /api/v1/model-overrides       — Set an agent or global model override
   // GET    /api/v1/model-overrides       — List all overrides
   // DELETE /api/v1/model-overrides       — Delete a specific override or all
   //
-  // Used by agents to manage runtime model selections for headless Claude spawns.
+  // Backs the `model_overrides` table (migration 021). A job's own model
+  // lives on its schedule (`scheduled_items.model`), not here — see
+  // docs/SCHEDULING.md. These endpoints only manage the agent-wide and
+  // global fallbacks that both cc-headless and cc-pool consult.
 
   interface ModelOverrideRow {
     id: number;
-    schedule_id: string | null;
     agent_id: string | null;
     model: string;
-    priority: number;
     created_at: string;
     updated_at: string;
   }
 
-  // POST /api/v1/model-overrides — Set or update a model override
-  server.post<{ Body: { model: string; schedule_id?: string | null; agent_id?: string | null; priority?: number } }>(
+  // POST /api/v1/model-overrides — Set or update an agent or global model override
+  server.post<{ Body: { model: string; agent_id?: string | null; schedule_id?: string | null } }>(
     '/api/v1/model-overrides',
     async (req, reply) => {
       try {
-        const { model, schedule_id, agent_id, priority } = req.body;
+        const { model, agent_id, schedule_id } = req.body;
+
+        if (schedule_id) {
+          return reply.status(400).send({
+            ok: false,
+            error:
+              "A job's model now lives on its schedule (the schedule's `model` field), not on a schedule-scoped " +
+              'override. Use PATCH /api/v1/schedules/:id with { "model": ... } instead.',
+          });
+        }
 
         if (!model || typeof model !== 'string' || model.trim().length === 0) {
           return reply.status(400).send({ ok: false, error: 'model is required and must be a non-empty string' });
         }
 
+        const aId = agent_id ?? null;
         const now = new Date().toISOString();
-        const p = priority ?? 0;
 
         db.prepare(
-          `INSERT INTO headless_model_overrides (schedule_id, agent_id, model, priority, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?)
-           ON CONFLICT(schedule_id, agent_id) DO UPDATE SET
+          `INSERT INTO model_overrides (agent_id, model, created_at, updated_at)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(COALESCE(agent_id, '')) DO UPDATE SET
              model = excluded.model,
-             priority = excluded.priority,
              updated_at = excluded.updated_at`,
-        ).run(schedule_id ?? null, agent_id ?? null, model, p, now, now);
+        ).run(aId, model, now, now);
 
         const row = db
           .prepare(
-            `SELECT id, schedule_id, agent_id, model, priority, created_at, updated_at
-             FROM headless_model_overrides
-             WHERE schedule_id IS ? AND agent_id IS ? AND model = ?
-             ORDER BY updated_at DESC LIMIT 1`,
+            `SELECT id, agent_id, model, created_at, updated_at FROM model_overrides WHERE agent_id IS ?`,
           )
-          .get(schedule_id ?? null, agent_id ?? null, model) as ModelOverrideRow | undefined;
+          .get(aId) as ModelOverrideRow | undefined;
 
         return reply.status(201).send({
           ok: true,
@@ -1883,17 +1889,9 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     try {
       const rows = db
         .prepare(
-          `SELECT id, schedule_id, agent_id, model, priority, created_at, updated_at
-           FROM headless_model_overrides
-           ORDER BY
-             CASE
-               WHEN schedule_id IS NOT NULL AND agent_id IS NOT NULL THEN 1
-               WHEN agent_id IS NOT NULL THEN 2
-               WHEN schedule_id IS NOT NULL THEN 3
-               ELSE 4
-             END,
-             priority DESC,
-             updated_at DESC`,
+          `SELECT id, agent_id, model, created_at, updated_at
+           FROM model_overrides
+           ORDER BY agent_id IS NULL, updated_at DESC`,
         )
         .all() as ModelOverrideRow[];
 
@@ -1909,14 +1907,14 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
   });
 
   // DELETE /api/v1/model-overrides — Delete a specific override or all overrides
-  server.delete<{ Querystring: { schedule_id?: string; agent_id?: string; all?: string } }>(
+  server.delete<{ Querystring: { agent_id?: string; scope?: string; all?: string } }>(
     '/api/v1/model-overrides',
     async (req, reply) => {
       try {
-        const { schedule_id, agent_id, all } = req.query;
+        const { agent_id, scope, all } = req.query;
 
         if (all === 'true') {
-          const result = db.prepare(`DELETE FROM headless_model_overrides`).run();
+          const result = db.prepare(`DELETE FROM model_overrides`).run();
           return reply.send({
             ok: true,
             deleted_count: result.changes,
@@ -1924,24 +1922,20 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
           });
         }
 
-        if (!schedule_id && !agent_id) {
+        if (!agent_id && scope !== 'global') {
           return reply.status(400).send({
             ok: false,
-            error: 'Provide schedule_id or agent_id to delete, or pass all=true to clear all',
+            error: 'Provide agent_id, or scope=global, to delete, or pass all=true to clear all',
           });
         }
 
-        const result = db
-          .prepare(
-            `DELETE FROM headless_model_overrides
-             WHERE schedule_id IS ? AND agent_id IS ?`,
-          )
-          .run(schedule_id ?? null, agent_id ?? null);
+        const aId = scope === 'global' ? null : (agent_id as string);
+        const result = db.prepare(`DELETE FROM model_overrides WHERE agent_id IS ?`).run(aId);
 
         return reply.send({
           ok: true,
           deleted_count: result.changes,
-          message: `Deleted ${result.changes} override(s) for schedule_id=${schedule_id}, agent_id=${agent_id}`,
+          message: `Deleted ${result.changes} override(s) for ${aId === null ? 'scope=global' : `agent_id=${aId}`}`,
         });
       } catch (err) {
         console.error('[http:model-overrides] DELETE failed:', err);

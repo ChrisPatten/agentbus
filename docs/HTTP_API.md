@@ -57,7 +57,7 @@ Set `bus.host: 0.0.0.0` to accept connections from other hosts, for example a re
 | GET | `/api/v1/schedules/:id` | Fetch a schedule |
 | PATCH | `/api/v1/schedules/:id` | Update label, max fires, or pause state |
 | DELETE | `/api/v1/schedules/:id` | Cancel a schedule |
-| POST | `/api/v1/model-overrides` | Set a headless model override |
+| POST | `/api/v1/model-overrides` | Set an agent or global model override |
 | GET | `/api/v1/model-overrides` | List model overrides |
 | DELETE | `/api/v1/model-overrides` | Delete model overrides |
 
@@ -430,18 +430,16 @@ Marks the schedule `cancelled`. `404` if unknown, completed, or already cancelle
 
 ## Model overrides
 
-Runtime model selection for `cc-headless` spawns. See [CC_HEADLESS_ADAPTER.md](CC_HEADLESS_ADAPTER.md#runtime-model-overrides) for resolution order. `agent_id` values are the full recipient ID, for example `agent:claude`.
+Agent-wide and global runtime model overrides, shared by `cc-headless` and `cc-pool`. See [CC_HEADLESS_ADAPTER.md](CC_HEADLESS_ADAPTER.md#runtime-model-overrides) for resolution order. `agent_id` values are the full recipient ID, for example `agent:claude`. A job's own model lives on its schedule (`model` field) instead — see [SCHEDULING.md](SCHEDULING.md).
 
 ### `POST /api/v1/model-overrides`
 
-Body `{ "model": string, "schedule_id"?: string, "agent_id"?: string, "priority"?: number }`. Omit both IDs for a global override. Returns `201 { "ok": true, "id", "override": {...} }`; `400` without `model`.
-
-Known issue: this route returns `500` for every request because its upsert does not match the table's partial unique index. It is tracked as P0 in `_bmad-output/maintenance-backlog.md`.
+Body `{ "model": string, "agent_id"?: string }`. Omit `agent_id` for a global override. Upserts on the agent (or global) scope. Returns `201 { "ok": true, "id", "override": {...} }`; `400` without `model`; `400` if `schedule_id` is given, pointing at the schedule's `model` field instead.
 
 ### `GET /api/v1/model-overrides`
 
-Returns `{ "ok": true, "overrides": [...], "count": n }` ordered by specificity (schedule and agent, agent only, schedule only, global), then `priority` descending, then `updated_at` descending.
+Returns `{ "ok": true, "overrides": [...], "count": n }`, agent-scoped rows first (newest `updated_at` first), then the global row.
 
 ### `DELETE /api/v1/model-overrides`
 
-Query `schedule_id` and/or `agent_id` deletes that exact scope; `all=true` deletes everything. `400` when neither is given. Returns `{ "ok": true, "deleted_count": n, "message" }`.
+Query `agent_id` deletes that agent's override; `scope=global` deletes the global override; `all=true` deletes everything. `400` when none of these is given. Returns `{ "ok": true, "deleted_count": n, "message" }`.

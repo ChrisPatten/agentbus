@@ -1,13 +1,20 @@
 /**
- * Headless model override tools.
+ * Model override tools (E53 S53.1).
  *
- * Provides tools to manage runtime model overrides for headless Claude spawns:
- * - set_headless_model: Set or update a model override
- * - get_headless_model: Get the current model for a given scope
- * - list_headless_model: List all active model overrides
- * - delete_headless_model: Remove a specific override
+ * Agent-wide and global runtime model overrides, shared by cc-headless and
+ * cc-pool:
+ * - set_model_override / get_model_override / list_model_overrides / delete_model_override
  *
- * These tools call the bus-core HTTP API to manage the headless_model_overrides table.
+ * A job's own model lives on its schedule (`scheduled_items.model`), not
+ * here — see the scheduling tools and docs/SCHEDULING.md.
+ *
+ * `set_headless_model`, `get_headless_model`, `list_headless_model`, and
+ * `delete_headless_model` are kept as deprecated aliases for the equivalent
+ * *_model_override tools, for one minor release. Passing `schedule_id` to
+ * any of them returns an error pointing at the schedule's `model` field.
+ *
+ * All of these call the bus-core HTTP API to manage the `model_overrides`
+ * table.
  */
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -15,10 +22,8 @@ import { toolError, toolSuccess } from './helpers.js';
 
 interface ModelOverrideRow {
   id: number;
-  schedule_id: string | null;
   agent_id: string | null;
   model: string;
-  priority: number;
   created_at: string;
   updated_at: string;
 }
@@ -44,52 +49,38 @@ interface DeleteOverrideResponse {
   error?: string;
 }
 
+const SCHEDULE_ID_REJECTION =
+  "A job's model now lives on its schedule (the schedule's `model` field), not on a schedule-scoped override. " +
+  'Use the scheduling tools (e.g. `update_schedule` / PATCH /api/v1/schedules/:id) to set it there instead.';
+
 export function registerModelOverrideTools(server: McpServer, busBaseUrl: string): void {
-  // ── set_headless_model ─────────────────────────────────────────────────────
+  // ── set_model_override ───────────────────────────────────────────────────
 
   server.registerTool(
-    'set_headless_model',
+    'set_model_override',
     {
       description:
-        'Set or update a model override for headless Claude spawns. ' +
-        'Specify model (required) and optionally schedule_id and/or agent_id to scope the override. ' +
-        'If both are omitted, sets a global default. ' +
-        'Priority field (default 0) is used to break ties when multiple overrides could apply.',
+        'Set or update a runtime model override. Specify model (required) and optionally agent_id to scope ' +
+        'the override to one agent. Omit agent_id for a global default. Used by cc-headless and cc-pool.',
       inputSchema: {
-        model: z.string().min(1).describe('Model name (e.g. "claude-3-5-opus-20241022")'),
-        schedule_id: z.string().optional().describe('Limit override to a specific schedule ID'),
-        agent_id: z.string().optional().describe('Limit override to a specific agent'),
-        priority: z.number().int().optional().describe('Priority for tie-breaking (higher wins; default: 0)'),
+        model: z.string().min(1).describe('Model name (e.g. "sonnet", "opus")'),
+        agent_id: z.string().optional().describe('Limit the override to one agent (e.g. "agent:claude")'),
       },
     },
-    async ({ model, schedule_id, agent_id, priority }) => {
+    async ({ model, agent_id }) => {
       try {
         const res = await fetch(`${busBaseUrl}/api/v1/model-overrides`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            model,
-            schedule_id,
-            agent_id,
-            priority,
-          }),
+          body: JSON.stringify({ model, agent_id }),
         });
 
-        if (!res.ok) {
-          const err = (await res.json().catch(() => ({ error: `HTTP ${res.status}` }))) as {
-            error?: string;
-          };
-          return toolError(`Failed to set model override: ${err.error ?? `HTTP ${res.status}`}`);
+        const data = (await res.json().catch(() => ({ error: `HTTP ${res.status}` }))) as SetOverrideResponse;
+        if (!res.ok || !data.ok) {
+          return toolError(`Failed to set model override: ${data.error ?? `HTTP ${res.status}`}`);
         }
 
-        const data = (await res.json()) as SetOverrideResponse;
-        if (!data.ok) {
-          return toolError(`Bus rejected override: ${data.error ?? 'unknown error'}`);
-        }
-
-        const scope = [schedule_id && `schedule=${schedule_id}`, agent_id && `agent=${agent_id}`]
-          .filter(Boolean)
-          .join(', ') || 'global';
+        const scope = agent_id ? `agent=${agent_id}` : 'global';
         return toolSuccess({
           ok: true,
           id: data.id,
@@ -103,21 +94,19 @@ export function registerModelOverrideTools(server: McpServer, busBaseUrl: string
     }
   );
 
-  // ── get_headless_model ─────────────────────────────────────────────────────
+  // ── get_model_override ───────────────────────────────────────────────────
 
   server.registerTool(
-    'get_headless_model',
+    'get_model_override',
     {
       description:
-        'Get the currently active model for a given scope. ' +
-        'Queries the override table with priority: (schedule + agent) > agent > schedule > global. ' +
-        'Returns the model name if an override is found, or "not set, using config default" if none.',
+        'Get the currently active model override for a scope. Checks the agent-scoped override first, then ' +
+        'the global one. Returns null if neither is set (the caller falls back to its configured model).',
       inputSchema: {
-        schedule_id: z.string().optional().describe('Schedule ID to query'),
-        agent_id: z.string().optional().describe('Agent ID to query'),
+        agent_id: z.string().optional().describe('Agent id to query (e.g. "agent:claude")'),
       },
     },
-    async ({ schedule_id, agent_id }) => {
+    async ({ agent_id }) => {
       try {
         const res = await fetch(`${busBaseUrl}/api/v1/model-overrides`);
         if (!res.ok) {
@@ -129,39 +118,20 @@ export function registerModelOverrideTools(server: McpServer, busBaseUrl: string
           return toolError('Failed to list model overrides');
         }
 
-        // Resolve model with priority logic matching server-side implementation
-        let match: ModelOverrideRow | null = null;
-
-        // Priority 1: both schedule_id and agent_id match
-        if (schedule_id && agent_id) {
-          match = data.overrides.find(
-            (o) => o.schedule_id === schedule_id && o.agent_id === agent_id
-          ) ?? null;
-          if (match) return toolSuccess({ ok: true, model: match.model, scope: 'schedule+agent' });
-        }
-
-        // Priority 2: agent_id only
         if (agent_id) {
-          match = data.overrides.find((o) => o.agent_id === agent_id && !o.schedule_id) ?? null;
+          const match = data.overrides.find((o) => o.agent_id === agent_id);
           if (match) return toolSuccess({ ok: true, model: match.model, scope: 'agent' });
         }
 
-        // Priority 3: schedule_id only
-        if (schedule_id) {
-          match = data.overrides.find((o) => o.schedule_id === schedule_id && !o.agent_id) ?? null;
-          if (match) return toolSuccess({ ok: true, model: match.model, scope: 'schedule' });
-        }
-
-        // Priority 4: global
-        match = data.overrides.find((o) => !o.schedule_id && !o.agent_id) ?? null;
-        if (match) {
-          return toolSuccess({ ok: true, model: match.model, scope: 'global' });
+        const global = data.overrides.find((o) => !o.agent_id);
+        if (global) {
+          return toolSuccess({ ok: true, model: global.model, scope: 'global' });
         }
 
         return toolSuccess({
           ok: true,
           model: null,
-          message: 'No override found; using config default model',
+          message: 'No override found; using the configured default model',
         });
       } catch (err) {
         return toolError(`Failed to get model: ${String(err)}`);
@@ -169,14 +139,12 @@ export function registerModelOverrideTools(server: McpServer, busBaseUrl: string
     }
   );
 
-  // ── list_headless_model ────────────────────────────────────────────────────
+  // ── list_model_overrides ─────────────────────────────────────────────────
 
   server.registerTool(
-    'list_headless_model',
+    'list_model_overrides',
     {
-      description:
-        'List all active model overrides, ordered by specificity (schedule+agent > agent > schedule > global) ' +
-        'and then by priority and recency.',
+      description: 'List all active model overrides, agent-scoped rows first, then the global override.',
       inputSchema: {},
     },
     async () => {
@@ -192,86 +160,193 @@ export function registerModelOverrideTools(server: McpServer, busBaseUrl: string
         }
 
         if (data.overrides.length === 0) {
-          return toolSuccess({
-            ok: true,
-            overrides: [],
-            count: 0,
-            message: 'No model overrides configured',
-          });
+          return toolSuccess({ ok: true, overrides: [], count: 0, message: 'No model overrides configured' });
         }
 
         const formatted = data.overrides.map((o) => ({
           id: o.id,
-          scope:
-            o.schedule_id && o.agent_id
-              ? `schedule=${o.schedule_id}, agent=${o.agent_id}`
-              : o.schedule_id
-              ? `schedule=${o.schedule_id}`
-              : o.agent_id
-              ? `agent=${o.agent_id}`
-              : 'global',
+          scope: o.agent_id ? `agent=${o.agent_id}` : 'global',
           model: o.model,
-          priority: o.priority,
           created_at: o.created_at,
           updated_at: o.updated_at,
         }));
 
-        return toolSuccess({
-          ok: true,
-          overrides: formatted,
-          count: formatted.length,
-        });
+        return toolSuccess({ ok: true, overrides: formatted, count: formatted.length });
       } catch (err) {
         return toolError(`Failed to list model overrides: ${String(err)}`);
       }
     }
   );
 
-  // ── delete_headless_model ──────────────────────────────────────────────────
+  // ── delete_model_override ────────────────────────────────────────────────
 
   server.registerTool(
-    'delete_headless_model',
+    'delete_model_override',
     {
       description:
-        'Delete a specific model override by scope, or clear all overrides. ' +
-        'Pass schedule_id and/or agent_id to delete a specific override. ' +
-        'Pass all=true to delete all overrides at once (irreversible).',
+        'Delete a model override by scope, or clear all of them. Pass agent_id to delete one agent\'s ' +
+        'override, scope="global" to delete the global one, or all=true to delete every override (irreversible).',
       inputSchema: {
-        schedule_id: z.string().optional().describe('Schedule ID to delete'),
-        agent_id: z.string().optional().describe('Agent ID to delete'),
-        all: z
-          .boolean()
-          .optional()
-          .describe('If true, delete all overrides (overrides schedule_id/agent_id; irreversible)'),
+        agent_id: z.string().optional().describe('Agent id to delete'),
+        scope: z.literal('global').optional().describe('Pass "global" to delete the global override'),
+        all: z.boolean().optional().describe('If true, delete every override (irreversible)'),
       },
     },
-    async ({ schedule_id, agent_id, all }) => {
+    async ({ agent_id, scope, all }) => {
       try {
         const params = new URLSearchParams();
         if (all) {
           params.set('all', 'true');
+        } else if (scope === 'global') {
+          params.set('scope', 'global');
+        } else if (agent_id) {
+          params.set('agent_id', agent_id);
         } else {
-          if (schedule_id) params.set('schedule_id', schedule_id);
-          if (agent_id) params.set('agent_id', agent_id);
-
-          if (!schedule_id && !agent_id) {
-            return toolError('Provide schedule_id or agent_id, or pass all=true to clear all');
-          }
+          return toolError('Provide agent_id, or scope="global", or all=true to clear all');
         }
 
-        const qs = params.toString();
-        const res = await fetch(`${busBaseUrl}/api/v1/model-overrides${qs ? `?${qs}` : ''}`, {
-          method: 'DELETE',
+        const res = await fetch(`${busBaseUrl}/api/v1/model-overrides?${params.toString()}`, { method: 'DELETE' });
+        const data = (await res.json().catch(() => ({ error: `HTTP ${res.status}` }))) as DeleteOverrideResponse;
+        if (!res.ok || !data.ok) {
+          return toolError(`Failed to delete override: ${data.error ?? `HTTP ${res.status}`}`);
+        }
+
+        return toolSuccess({
+          ok: true,
+          deleted_count: data.deleted_count,
+          message: data.message ?? 'Override(s) deleted',
         });
+      } catch (err) {
+        return toolError(`Failed to delete model override: ${String(err)}`);
+      }
+    }
+  );
 
-        if (!res.ok) {
-          const err = (await res.json().catch(() => ({ error: `HTTP ${res.status}` }))) as {
-            error?: string;
-          };
-          return toolError(`Failed to delete override: ${err.error ?? `HTTP ${res.status}`}`);
+  // ── Deprecated aliases (headless_model naming, kept for one minor release) ──
+
+  server.registerTool(
+    'set_headless_model',
+    {
+      description:
+        'Deprecated: use set_model_override instead. Set or update a runtime model override, scoped to an ' +
+        'agent or global.',
+      inputSchema: {
+        model: z.string().min(1).describe('Model name (e.g. "sonnet", "opus")'),
+        agent_id: z.string().optional().describe('Limit the override to one agent'),
+        schedule_id: z.string().optional().describe('Deprecated and unsupported; see the error this returns'),
+      },
+    },
+    async ({ model, agent_id, schedule_id }) => {
+      if (schedule_id) return toolError(SCHEDULE_ID_REJECTION);
+      try {
+        const res = await fetch(`${busBaseUrl}/api/v1/model-overrides`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model, agent_id }),
+        });
+        const data = (await res.json().catch(() => ({ error: `HTTP ${res.status}` }))) as SetOverrideResponse;
+        if (!res.ok || !data.ok) {
+          return toolError(`Failed to set model override: ${data.error ?? `HTTP ${res.status}`}`);
         }
+        const scope = agent_id ? `agent=${agent_id}` : 'global';
+        return toolSuccess({
+          ok: true,
+          id: data.id,
+          model,
+          scope,
+          message: `Model override set to ${model} (${scope})`,
+        });
+      } catch (err) {
+        return toolError(`Failed to set model override: ${String(err)}`);
+      }
+    }
+  );
 
-        const data = (await res.json()) as DeleteOverrideResponse;
+  server.registerTool(
+    'get_headless_model',
+    {
+      description: 'Deprecated: use get_model_override instead. Get the currently active model override.',
+      inputSchema: {
+        agent_id: z.string().optional().describe('Agent id to query'),
+        schedule_id: z.string().optional().describe('Deprecated and unsupported; see the error this returns'),
+      },
+    },
+    async ({ agent_id, schedule_id }) => {
+      if (schedule_id) return toolError(SCHEDULE_ID_REJECTION);
+      try {
+        const res = await fetch(`${busBaseUrl}/api/v1/model-overrides`);
+        if (!res.ok) return toolError(`Failed to fetch model overrides: HTTP ${res.status}`);
+        const data = (await res.json()) as ListOverrideResponse;
+        if (!data.ok || !data.overrides) return toolError('Failed to list model overrides');
+
+        if (agent_id) {
+          const match = data.overrides.find((o) => o.agent_id === agent_id);
+          if (match) return toolSuccess({ ok: true, model: match.model, scope: 'agent' });
+        }
+        const global = data.overrides.find((o) => !o.agent_id);
+        if (global) return toolSuccess({ ok: true, model: global.model, scope: 'global' });
+        return toolSuccess({ ok: true, model: null, message: 'No override found; using config default model' });
+      } catch (err) {
+        return toolError(`Failed to get model: ${String(err)}`);
+      }
+    }
+  );
+
+  server.registerTool(
+    'list_headless_model',
+    {
+      description: 'Deprecated: use list_model_overrides instead. List all active model overrides.',
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        const res = await fetch(`${busBaseUrl}/api/v1/model-overrides`);
+        if (!res.ok) return toolError(`Failed to fetch model overrides: HTTP ${res.status}`);
+        const data = (await res.json()) as ListOverrideResponse;
+        if (!data.ok || !data.overrides) return toolError('Failed to list model overrides');
+        if (data.overrides.length === 0) {
+          return toolSuccess({ ok: true, overrides: [], count: 0, message: 'No model overrides configured' });
+        }
+        const formatted = data.overrides.map((o) => ({
+          id: o.id,
+          scope: o.agent_id ? `agent=${o.agent_id}` : 'global',
+          model: o.model,
+          created_at: o.created_at,
+          updated_at: o.updated_at,
+        }));
+        return toolSuccess({ ok: true, overrides: formatted, count: formatted.length });
+      } catch (err) {
+        return toolError(`Failed to list model overrides: ${String(err)}`);
+      }
+    }
+  );
+
+  server.registerTool(
+    'delete_headless_model',
+    {
+      description: 'Deprecated: use delete_model_override instead. Delete a model override, or clear all.',
+      inputSchema: {
+        agent_id: z.string().optional().describe('Agent id to delete'),
+        schedule_id: z.string().optional().describe('Deprecated and unsupported; see the error this returns'),
+        all: z.boolean().optional().describe('If true, delete every override (irreversible)'),
+      },
+    },
+    async ({ agent_id, schedule_id, all }) => {
+      if (schedule_id) return toolError(SCHEDULE_ID_REJECTION);
+      try {
+        const params = new URLSearchParams();
+        if (all) {
+          params.set('all', 'true');
+        } else if (agent_id) {
+          params.set('agent_id', agent_id);
+        } else {
+          return toolError('Provide agent_id, or all=true to clear all');
+        }
+        const res = await fetch(`${busBaseUrl}/api/v1/model-overrides?${params.toString()}`, { method: 'DELETE' });
+        const data = (await res.json().catch(() => ({ error: `HTTP ${res.status}` }))) as DeleteOverrideResponse;
+        if (!res.ok || !data.ok) {
+          return toolError(`Failed to delete override: ${data.error ?? `HTTP ${res.status}`}`);
+        }
         return toolSuccess({
           ok: true,
           deleted_count: data.deleted_count,
