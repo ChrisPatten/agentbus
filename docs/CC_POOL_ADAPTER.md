@@ -47,7 +47,7 @@ Every field of `adapters.cc-pool`:
 | `growth` | `fixed` \| `dynamic` | `fixed` | `fixed` keeps exactly `panes` panes for the pool's lifetime. `dynamic` starts at `panes` and grows on demand up to `max_panes`. |
 | `max_panes` | number | = `panes` | Upper bound on pane count when `growth: dynamic`. Ignored when `growth: fixed` — setting it below `panes` there fails validation at startup. |
 | `claude_bin` | string | required, absolute path | Absolute path to the `claude` CLI binary. Unlike `cc-headless`, there's no default: a bare `claude` typed into a tmux pane resolves through your shell profile, which commonly aliases `claude` to a tmux-wrapping function rather than the CLI itself. |
-| `model` | string | unset | Passed as `--model` to each pane's `claude` invocation. Omit to use the CLI's own default. |
+| `model` | string | unset | Passed as `--model` to each pane's `claude` invocation, on both launch and `--resume`. Set it: when omitted, the CLI falls back to the `model` in `~/.claude/settings.json`, which `/model` in any interactive session rewrites. |
 | `working_dir` | string | bus-core cwd | Working directory shared by every pane in the pool. Determines the auto-loaded `CLAUDE.md` hierarchy. |
 | `launch_args` | list of strings | `[]` | Extra CLI args appended verbatim to every launch/resume invocation. |
 | `poll_interval_ms` | number | `1000` | Poll interval passed through to each pane's `cc.ts` process. |

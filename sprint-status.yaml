@@ -895,4 +895,22 @@ epics:
       S52.4: pending  # Actions: alert, auto-answer (alerts if it fails)
       S52.5: pending  # Observability: /pool, incidents endpoint
       S52.6: pending  # Docs
+  E53:
+    status: pending
+    notes: >
+      Pool model selection: resolve a model per cc-pool pane launch from the
+      override store (schedule, agent, global) before falling back to the
+      pool's model, so e.g. Email Watch runs on Haiku while Peggy stays on
+      Sonnet. Reuses and repairs cc-headless's override store (absorbs the
+      P0 POST bug and the P1 schedule_id gap), gives scheduled jobs their own
+      conversations, and relaunches a leased pane on a model change between
+      turns. Stopgap applied 2026-09-25: model: sonnet pinned on both pools.
+      Epic file only; open decisions D1-D3.
+    stories:
+      S53.1: pending  # Repair and generalize the override store (migration 021)
+      S53.2: pending  # Carry schedule_id to cc-pool and cc-headless
+      S53.3: pending  # One conversation per scheduled job (schedule topic)
+      S53.4: pending  # Per-launch model resolution in the pool
+      S53.5: pending  # Model change on a leased pane
+      S53.6: pending  # Observability and docs
 last_updated: 2026-09-23  # E52 (pool pane watchdog): S52.1 and S52.2 implemented on feat/e52-pool-watchdog, not yet merged; S52.3 waits on real captured stalls. Prior note preserved: E51 (approval requests) merged to dev and live, awaiting a real end-to-end check. Prior note preserved: E49 (context-block ledger) + E50 (agent-managed knowledge store, Phase 1) implemented end-to-end on claude/agent-knowledge-database-xiqn29, not yet merged, not yet pushed. Both from a design spike (_bmad-output/planning-artifacts/design-spike-agent-knowledge-store.md) worked out conversationally with the operator. Prior note preserved: 2026-09-17  # E48 (interactive Claude Code session pool over tmux) implemented end-to-end and marked complete — all 10 stories, on feat/e48-cc-session-pool, not yet merged to dev/main. current_epic stays E42/E44 (Siri Bridge) since that's the operator's ongoing focus; E48 was a self-contained side branch, now finished. Prior note preserved: Backfilled E36, E38, E39, E40 (complete, merged to dev 2026-08-31/09-01) and E37, E41 (pending, epic files only). Added the Siri Bridge package E42–E47 (renumbered from E36–E41 on arrival to avoid the collision): E42 complete, E44 in-progress (S44.5 on-device is the operator's), E43/E45/E46/E47 pending. E23's S23.5 still pending operator sign-off.
