@@ -10,6 +10,8 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-09-25
+
 ### Added
 - **Per-job model and dedicated conversation for scheduled jobs (E53 S53.3).**
   `scheduled_items` gains a `model` column (migration 022). `POST
@@ -865,7 +867,8 @@ Baseline release. Core bus, pipeline, adapters, memory, scheduling.
 - Built-in slash commands + plugin command registry. (E6)
 - Scheduled messages (cron + one-shot) via background scheduler. (E18)
 
-[Unreleased]: https://github.com/ChrisPatten/agentbus/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/ChrisPatten/agentbus/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/ChrisPatten/agentbus/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/ChrisPatten/agentbus/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/ChrisPatten/agentbus/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/ChrisPatten/agentbus/compare/v0.8.0...v0.10.0
