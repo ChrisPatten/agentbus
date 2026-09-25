@@ -21,20 +21,7 @@ Effort: S (under an hour), M (an afternoon), L (a day or more).
 
 ## P0: Broken behavior
 
-- [ ] **`POST /api/v1/model-overrides` always returns 500.** (S)
-  `src/http/api.ts:1461` upserts with `ON CONFLICT(schedule_id, agent_id)`, but
-  the only unique index on `headless_model_overrides` is partial
-  (`WHERE schedule_id IS NOT NULL OR agent_id IS NOT NULL`, migration 015).
-  SQLite rejects the statement with `ON CONFLICT clause does not match any
-  PRIMARY KEY or UNIQUE constraint`, so every call fails. This breaks the
-  `set_headless_model` MCP tool end to end. Verified against a migrated
-  in-memory database: both a scoped and a global override return
-  `{"ok":false,"error":"Failed to set model override"}`.
-  Fix: call `setModelOverride()` from `src/adapters/model-override-loader.ts`
-  (it uses `IS ?` matching and handles NULL scopes), or add the index's
-  `WHERE` clause to the conflict target and handle the global case separately.
-  Add an HTTP-level test in `src/http/api.test.ts`; today the route has none
-  (the tool test mocks `fetch`, the loader test never hits the route).
+(none currently — the `POST /api/v1/model-overrides` 500 was fixed by E53 S53.1.)
 
 ## P1: Correctness and operational risk
 
@@ -56,12 +43,6 @@ Effort: S (under an hour), M (an afternoon), L (a day or more).
   `src/index.ts:69-71` rebuilds the index and then continues normal startup.
   Docs said the process exits. Decide which behavior you want; a dedicated
   maintenance subcommand that exits is the safer choice for a pm2 deployment.
-
-- [ ] **Schedule-scoped model overrides never apply.** (S)
-  `src/adapters/cc-headless.ts:660` passes `scheduleId: undefined` (see the
-  TODO). The scheduler already stamps `metadata.schedule_id` on every fired
-  message, so `processBatch()` can read it from the first envelope and pass it
-  through.
 
 - [ ] **Delivered rows are never purged from `message_queue`.** (S)
   `sweepExpired()` only touches `pending` rows with an `expires_at`. Delivered
@@ -91,12 +72,6 @@ Effort: S (under an hour), M (an afternoon), L (a day or more).
   `src/pipeline/stages/contact-resolve.ts:63` falls back to a username map, but
   the adapter always submits the numeric user id as `sender`. Remove the map or
   make the adapter send usernames when present.
-
-- [ ] **Global model overrides accumulate and can't be deleted individually.** (S)
-  The partial unique index deliberately allows many `(NULL, NULL)` rows, but
-  `DELETE /api/v1/model-overrides` rejects a request with neither id, so a
-  global override can only be removed with `all=true`. Enforce one global row
-  (or allow `scope=global` on delete) once the P0 item lands.
 
 - [ ] **`buildMcpConfig()` doesn't set `AGENTBUS_AGENT_ID` for its spawned tools-only MCP subset.** (S)
   `src/adapters/cc-headless.ts:143-157` builds the `claude -p` child's MCP env

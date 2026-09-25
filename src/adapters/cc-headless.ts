@@ -40,7 +40,7 @@ import { assembleMemoryContext, assembleMemoryBlocks, formatLocalDate } from './
 import type { MessageEnvelope } from '../types/envelope.js';
 import { formatMessagesForSampling } from './cc.js';
 import { formatToolCallSummary } from './tool-call-summary.js';
-import { resolveModelOverride } from './model-override-loader.js';
+import { resolveModel } from './model-override-loader.js';
 import { hashBlock, shouldSendBlock, markBlockSent, clearLedger, detectCompaction } from './context-ledger.js';
 
 const configPath = process.env['AGENTBUS_CONFIG'] ?? resolve(process.cwd(), 'config.yaml');
@@ -330,7 +330,7 @@ class HeadlessInstance {
      * session the first message just created.
      */
     onSessionId?: (id: string) => void,
-    opts?: { db?: Database.Database; scheduleId?: string | null; agentId?: string | null },
+    opts?: { db?: Database.Database; scheduleModel?: string | null; agentId?: string | null },
   ): Promise<SpawnResult> {
     const args = [
       '-p', prompt,
@@ -341,17 +341,16 @@ class HeadlessInstance {
       '--system-prompt-file', systemPromptPath,
     ];
 
-    // Resolve model: check overrides first, then fall back to config
-    let model = this.cfg.model;
-    if (opts?.db) {
-      const overrideModel = resolveModelOverride(opts.db, opts.scheduleId, opts.agentId);
-      if (overrideModel) {
-        model = overrideModel;
-        console.error(
-          `[${this.label}] Model override applied: ${overrideModel} (schedule=${opts.scheduleId}, agent=${opts.agentId})`,
-        );
-      }
-    }
+    // Resolve model: the fired schedule's own model, then an agent/global
+    // override, then this instance's configured model. See
+    // src/adapters/model-override-loader.ts and docs/CC_HEADLESS_ADAPTER.md.
+    const { model, source } = resolveModel({
+      scheduleModel: opts?.scheduleModel,
+      db: opts?.db,
+      agentId: opts?.agentId,
+      configModel: this.cfg.model,
+    });
+    console.error(`[${this.label}] Resolved model: ${model ?? '(cli default)'} (source=${source})`);
 
     if (model) {
       args.push('--model', model);
@@ -594,6 +593,13 @@ class HeadlessInstance {
     onToolCall?: (call: { name: string; input: Record<string, unknown> }) => void;
     /** E30 — see `invokeClaude`'s `onDelivered` param. */
     onDelivered?: () => void;
+    /**
+     * E53 — the fired schedule's own model, stamped by the scheduler as
+     * `metadata.schedule_model` on the first envelope of the batch. Takes
+     * priority over any agent/global override or this instance's configured
+     * model. See `resolveModel` in model-override-loader.ts.
+     */
+    scheduleModel?: string | null;
   }): Promise<SpawnResult> {
     const now = new Date();
 
@@ -706,7 +712,7 @@ class HeadlessInstance {
         {
           db: opts.db,
           agentId: this.agentId,
-          scheduleId: undefined, // TODO: pass schedule_id when available from scheduled turns
+          scheduleModel: opts.scheduleModel,
         },
       );
       // Final persist covers the case where the session id changed (rare) or
@@ -752,6 +758,13 @@ class HeadlessInstance {
     // the Stage-85 <memory> block in the user message to avoid double injection.
     const prompt = formatMessagesForSampling(envelopes, { includeMemoryContext: false });
 
+    // E53: the scheduler stamps metadata.schedule_model on the fired envelope
+    // when the schedule that triggered this batch has its own `model`. Only
+    // a non-empty string counts — anything else falls through to an agent/
+    // global override or this instance's configured model.
+    const rawScheduleModel = first.metadata?.['schedule_model'];
+    const scheduleModel = typeof rawScheduleModel === 'string' && rawScheduleModel.trim().length > 0 ? rawScheduleModel : undefined;
+
     // E30 (S30.4): the per-contact queue (`enqueue`) should advance as soon
     // as the user has their answer, not after the whole claude -p process
     // exits — S30.1 already stops the *agent* from doing real work after
@@ -777,6 +790,7 @@ class HeadlessInstance {
       onToolCall: (call) =>
         this.reportToolCall(channel, contactId, formatToolCallSummary(call.name, call.input), topic),
       onDelivered: () => resolveDelivered(),
+      scheduleModel,
     });
     // Settle `delivered` on any outcome so a run that never calls a delivery
     // tool doesn't block the queue past its own completion. The rejection

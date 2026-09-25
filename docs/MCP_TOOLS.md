@@ -19,7 +19,7 @@ Errors come back as `{ "content": [{ "type": "text", "text": "Error: ..." }], "i
 | `search_transcripts` | Full-text search across transcripts | Always |
 | `fetch_attachment` | Resolve an attachment ID to a file path | Always |
 | `schedule_message`, `list_schedules`, `cancel_schedule`, `update_schedule` | Scheduled messages | Always |
-| `set_headless_model`, `get_headless_model`, `list_headless_model`, `delete_headless_model` | Runtime model overrides for headless spawns | Always |
+| `set_model_override`, `get_model_override`, `list_model_overrides`, `delete_model_override` | Runtime model overrides (agent or global) | Always |
 | `recall_memory`, `log_memory` | Legacy structured memory store | Always; dormant unless `memory.structured_extraction` |
 | `write_knowledge`, `get_knowledge`, `forget_knowledge`, `search_knowledge` | Agent-managed structured knowledge store (Phase 1) | Always |
 | `get_adapter_status` | Health of the polling MCP adapter | Polling mode only |
@@ -151,27 +151,27 @@ Output: `{ "ok": true, "schedule": {...} }`.
 
 ## Model overrides
 
-Change which model `cc-headless` passes to `claude -p` without editing config. Resolution order: schedule and agent, agent only, schedule only, global. `agent_id` is the full recipient ID, for example `agent:claude`. See [CC_HEADLESS_ADAPTER.md](CC_HEADLESS_ADAPTER.md#runtime-model-overrides).
+Agent-wide and global runtime model overrides, shared by `cc-headless` and `cc-pool`. `agent_id` is the full recipient ID, for example `agent:claude`. A job's own model lives on its schedule (`model` field), not here — use the scheduling tools. See [CC_HEADLESS_ADAPTER.md](CC_HEADLESS_ADAPTER.md#runtime-model-overrides).
 
-Two limitations, both tracked in `_bmad-output/maintenance-backlog.md`: schedule-scoped overrides can be stored but never apply, and `set_headless_model` fails because the server route returns `500`.
+`set_headless_model`, `get_headless_model`, `list_headless_model`, and `delete_headless_model` are deprecated aliases for the tools below, kept for one minor release. Passing them `schedule_id` returns an error pointing at the schedule's `model` field.
 
-### `set_headless_model`
+### `set_model_override`
 
-Input: `{ "model": "sonnet", "schedule_id"?, "agent_id"?: "agent:claude", "priority"?: 0 }`
-Output: `{ "ok": true, "id", "model", "scope": "agent=agent:claude", "message" }`
+Input: `{ "model": "sonnet", "agent_id"?: "agent:claude" }`. Omit `agent_id` for a global override.
+Output: `{ "ok": true, "id", "model", "scope": "agent=agent:claude" | "global", "message" }`
 
-### `get_headless_model`
+### `get_model_override`
 
-Input: `{ "schedule_id"?, "agent_id"? }`
-Output: `{ "ok": true, "model": "sonnet", "scope": "agent" }`, or `{ "ok": true, "model": null, "message": "No override found; using config default model" }`.
+Input: `{ "agent_id"? }`
+Output: `{ "ok": true, "model": "sonnet", "scope": "agent" | "global" }`, or `{ "ok": true, "model": null, "message": "No override found; using the configured default model" }`.
 
-### `list_headless_model`
+### `list_model_overrides`
 
-Output: `{ "ok": true, "overrides": [{ "id", "scope", "model", "priority", "created_at", "updated_at" }], "count": n }`.
+Output: `{ "ok": true, "overrides": [{ "id", "scope", "model", "created_at", "updated_at" }], "count": n }`, agent-scoped rows first.
 
-### `delete_headless_model`
+### `delete_model_override`
 
-Input: `{ "schedule_id"?, "agent_id"? }` deletes one scope; `{ "all": true }` deletes every override.
+Input: `{ "agent_id"? }` deletes that agent's override; `{ "scope": "global" }` deletes the global one; `{ "all": true }` deletes every override.
 Output: `{ "ok": true, "deleted_count": n, "message" }`.
 
 ## Legacy memory store

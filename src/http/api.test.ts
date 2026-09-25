@@ -1949,6 +1949,161 @@ describe('Schedule CRUD endpoints', () => {
   });
 });
 
+// ── /api/v1/model-overrides (E53 S53.1) ──────────────────────────────────────
+
+describe('Model override endpoints', () => {
+  let server: FastifyInstance;
+  let db: Database.Database;
+
+  beforeEach(async () => {
+    ({ server, db } = await makeServer());
+  });
+
+  afterEach(async () => {
+    await server.close();
+  });
+
+  // ── POST ──────────────────────────────────────────────────────────────────
+
+  it('creates a global override on POST with no agent_id', async () => {
+    const res = await server.inject({ method: 'POST', url: '/api/v1/model-overrides', payload: { model: 'opus' } });
+    expect(res.statusCode).toBe(201);
+    const body = JSON.parse(res.body) as { ok: boolean; id: number; override: { agent_id: string | null; model: string } };
+    expect(body.ok).toBe(true);
+    expect(body.override.agent_id).toBeNull();
+    expect(body.override.model).toBe('opus');
+  });
+
+  it('creates an agent-scoped override on POST with agent_id', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/model-overrides',
+      payload: { model: 'sonnet', agent_id: 'agent:peggy' },
+    });
+    expect(res.statusCode).toBe(201);
+    const body = JSON.parse(res.body) as { ok: boolean; override: { agent_id: string | null; model: string } };
+    expect(body.override.agent_id).toBe('agent:peggy');
+    expect(body.override.model).toBe('sonnet');
+  });
+
+  it('upserts on a repeat POST for the same scope instead of erroring', async () => {
+    const first = await server.inject({
+      method: 'POST',
+      url: '/api/v1/model-overrides',
+      payload: { model: 'opus', agent_id: 'agent:peggy' },
+    });
+    const second = await server.inject({
+      method: 'POST',
+      url: '/api/v1/model-overrides',
+      payload: { model: 'haiku', agent_id: 'agent:peggy' },
+    });
+    expect(first.statusCode).toBe(201);
+    expect(second.statusCode).toBe(201);
+    const firstBody = JSON.parse(first.body) as { id: number };
+    const secondBody = JSON.parse(second.body) as { id: number; override: { model: string } };
+    expect(secondBody.id).toBe(firstBody.id);
+    expect(secondBody.override.model).toBe('haiku');
+
+    const rows = db.prepare(`SELECT COUNT(*) as cnt FROM model_overrides`).get() as { cnt: number };
+    expect(rows.cnt).toBe(1);
+  });
+
+  it('rejects POST without model', async () => {
+    const res = await server.inject({ method: 'POST', url: '/api/v1/model-overrides', payload: {} });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('rejects POST with schedule_id, pointing at the schedule field', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/model-overrides',
+      payload: { model: 'opus', schedule_id: 'sched-1' },
+    });
+    expect(res.statusCode).toBe(400);
+    const body = JSON.parse(res.body) as { error: string };
+    expect(body.error).toMatch(/schedule/i);
+  });
+
+  // ── GET ───────────────────────────────────────────────────────────────────
+
+  it('lists agent-scoped rows before the global row', async () => {
+    await server.inject({ method: 'POST', url: '/api/v1/model-overrides', payload: { model: 'opus' } });
+    await server.inject({
+      method: 'POST',
+      url: '/api/v1/model-overrides',
+      payload: { model: 'sonnet', agent_id: 'agent:peggy' },
+    });
+
+    const res = await server.inject({ method: 'GET', url: '/api/v1/model-overrides' });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body) as { ok: boolean; count: number; overrides: Array<{ agent_id: string | null; model: string }> };
+    expect(body.count).toBe(2);
+    expect(body.overrides[0]!.agent_id).toBe('agent:peggy');
+    expect(body.overrides[1]!.agent_id).toBeNull();
+  });
+
+  it('returns an empty list with no overrides set', async () => {
+    const res = await server.inject({ method: 'GET', url: '/api/v1/model-overrides' });
+    const body = JSON.parse(res.body) as { overrides: unknown[]; count: number };
+    expect(body.overrides).toEqual([]);
+    expect(body.count).toBe(0);
+  });
+
+  // ── DELETE ────────────────────────────────────────────────────────────────
+
+  it('deletes an agent-scoped override by agent_id', async () => {
+    await server.inject({
+      method: 'POST',
+      url: '/api/v1/model-overrides',
+      payload: { model: 'sonnet', agent_id: 'agent:peggy' },
+    });
+
+    const res = await server.inject({ method: 'DELETE', url: '/api/v1/model-overrides?agent_id=agent:peggy' });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body) as { deleted_count: number };
+    expect(body.deleted_count).toBe(1);
+
+    const remaining = db.prepare(`SELECT COUNT(*) as cnt FROM model_overrides`).get() as { cnt: number };
+    expect(remaining.cnt).toBe(0);
+  });
+
+  it('deletes the global override with scope=global', async () => {
+    await server.inject({ method: 'POST', url: '/api/v1/model-overrides', payload: { model: 'opus' } });
+    await server.inject({
+      method: 'POST',
+      url: '/api/v1/model-overrides',
+      payload: { model: 'sonnet', agent_id: 'agent:peggy' },
+    });
+
+    const res = await server.inject({ method: 'DELETE', url: '/api/v1/model-overrides?scope=global' });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body) as { deleted_count: number };
+    expect(body.deleted_count).toBe(1);
+
+    const remaining = db.prepare(`SELECT agent_id FROM model_overrides`).all() as Array<{ agent_id: string }>;
+    expect(remaining).toEqual([{ agent_id: 'agent:peggy' }]);
+  });
+
+  it('deletes everything with all=true', async () => {
+    await server.inject({ method: 'POST', url: '/api/v1/model-overrides', payload: { model: 'opus' } });
+    await server.inject({
+      method: 'POST',
+      url: '/api/v1/model-overrides',
+      payload: { model: 'sonnet', agent_id: 'agent:peggy' },
+    });
+
+    const res = await server.inject({ method: 'DELETE', url: '/api/v1/model-overrides?all=true' });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body) as { deleted_count: number };
+    expect(body.deleted_count).toBe(2);
+  });
+
+  it('rejects DELETE with neither agent_id, scope=global, nor all=true', async () => {
+    const res = await server.inject({ method: 'DELETE', url: '/api/v1/model-overrides' });
+    expect(res.statusCode).toBe(400);
+  });
+});
+
 // ── GET /api/v1/pool (E48 S48.8) ─────────────────────────────────────────────
 
 describe('GET /api/v1/pool', () => {
