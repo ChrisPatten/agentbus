@@ -351,6 +351,21 @@ export class LeaseStore {
     return row ?? null;
   }
 
+  /**
+   * E53 (follow-up fix) — look up a row by its exact `pane_id`, for
+   * `PoolManager.awaitInFlightThenResolve()`'s re-read after waiting out an
+   * in-flight launch/relaunch. `pane_id` is already scoped to one pool by
+   * construction (it's derived from `pool_id`/`tmux_session`), but the
+   * `pool_id` filter is still applied for defense in depth and consistency
+   * with every other lookup in this class.
+   */
+  findByPane(poolId: string, paneId: string): PoolLeaseRow | null {
+    const row = this.db
+      .prepare(`SELECT * FROM pool_leases WHERE pool_id = ? AND pane_id = ?`)
+      .get(poolId, paneId) as PoolLeaseRow | undefined;
+    return row ?? null;
+  }
+
   list(poolId: string): PoolLeaseRow[] {
     return this.db
       .prepare(`SELECT * FROM pool_leases WHERE pool_id = ? ORDER BY pane_id ASC`)

@@ -13,6 +13,7 @@ import type { LaunchParams } from './pane.js';
 import type { AppConfig, CcPoolAdapterConfig, CcPoolInstanceConfig } from '../config/schema.js';
 import { MessageQueue } from '../core/queue.js';
 import type { MessageEnvelope } from '../types/envelope.js';
+import { setModelOverride, resolveModel as resolveModelFromStore } from '../adapters/model-override-loader.js';
 
 function makeDb(): Database.Database {
   const db = new Database(':memory:');
@@ -204,6 +205,47 @@ describe('PoolManager', () => {
       const lease = manager.leaseStore.findByConversation(manager.poolId, 'conv-new');
       expect(lease?.state).toBe('leased');
       expect(lease?.claude_session_id).toBe(launchArgs.sessionId);
+    });
+
+    it('E53 (follow-up fix): a second resolveRoute() for a brand-new conversation mid-initial-launch waits for it instead of binding a second pane', async () => {
+      const { manager, paneLauncher } = makeManager({ panes: 2 });
+      await manager.ensureStarted();
+
+      let releaseLaunch: () => void = () => {};
+      const launchGate = new Promise<void>((resolve) => {
+        releaseLaunch = resolve;
+      });
+      paneLauncher.launch.mockImplementationOnce(async () => {
+        await launchGate;
+      });
+
+      const firstCall = manager.resolveRoute('conv-new', { contact_id: 'alice', channel: 'telegram' });
+      for (let i = 0; i < 20 && paneLauncher.launch.mock.calls.length === 0; i++) {
+        await Promise.resolve();
+      }
+      expect(paneLauncher.launch).toHaveBeenCalledTimes(1);
+
+      const secondCall = manager.resolveRoute('conv-new', { contact_id: 'alice', channel: 'telegram' });
+      let secondSettledEarly = false;
+      secondCall.then(() => {
+        secondSettledEarly = true;
+      });
+      for (let i = 0; i < 20; i++) {
+        await Promise.resolve();
+      }
+      expect(secondSettledEarly).toBe(false);
+      // Still only one launch — the second call never bound its own (free)
+      // pane while the first was still 'launching'.
+      expect(paneLauncher.launch).toHaveBeenCalledTimes(1);
+
+      releaseLaunch();
+      const [firstResult, secondResult] = await Promise.all([firstCall, secondCall]);
+
+      expect(firstResult).toBe('agent:peggy-pool-1');
+      expect(secondResult).toBe('agent:peggy-pool-1');
+      expect(paneLauncher.launch).toHaveBeenCalledTimes(1);
+      // The pool's second pane must still be free.
+      expect(manager.leaseStore.findByAgent(manager.poolId, 'agent:peggy-pool-2')?.state).toBe('free');
     });
 
     it('bound: posts a "One moment" placeholder tool-status line before launching', async () => {
@@ -572,7 +614,7 @@ describe('PoolManager', () => {
       expect(paneLauncher.launch).not.toHaveBeenCalled();
     });
 
-    it('concurrency guard: a second resolveRoute() for the same conversation while a relaunch is in flight does not double-relaunch', async () => {
+    it('concurrency guard: a second resolveRoute() for the same conversation while a relaunch is in flight does not double-relaunch, and does not resolve before the relaunch finishes', async () => {
       const { manager, paneLauncher } = makeManager({ panes: 1, model: 'claude-old-model' });
       await manager.ensureStarted();
       const { paneId } = await leaseWithModel(manager, paneLauncher, 'conv-1', 'claude-old-model');
@@ -604,26 +646,84 @@ describe('PoolManager', () => {
       }
       expect(paneLauncher.launch).toHaveBeenCalledTimes(1);
 
-      const secondResult = await manager.resolveRoute('conv-1', {
+      // The second call must not trigger its own release()/launch() — but it
+      // also must NOT resolve while the first call's relaunch is still in
+      // flight (the bug this follow-up fixes: enqueuing a message before the
+      // old session is actually killed). Race it against a sentinel that
+      // resolves first if `secondCall` settles too early.
+      const secondCall = manager.resolveRoute('conv-1', {
         contact_id: 'alice',
         channel: 'telegram',
         scheduleModel: 'claude-new-model',
       });
-
-      // The second call must not have triggered its own release()/launch() —
-      // only the first (still in-flight) call's single release()/launch()
-      // pair should exist.
-      expect(secondResult).toBe('agent:peggy-pool-1');
+      let secondSettledEarly = false;
+      secondCall.then(() => {
+        secondSettledEarly = true;
+      });
+      // A handful of microtask flushes — long enough for secondCall to have
+      // settled already if it were (wrongly) resolving immediately, but
+      // nothing here ever advances real time, so it can't be a false pass
+      // due to a timer racing ahead.
+      for (let i = 0; i < 20; i++) {
+        await Promise.resolve();
+      }
+      expect(secondSettledEarly).toBe(false);
       expect(paneLauncher.release).toHaveBeenCalledTimes(1);
       expect(paneLauncher.release).toHaveBeenCalledWith(paneId, 'kill');
+      expect(paneLauncher.launch).toHaveBeenCalledTimes(1);
 
       releaseLaunch();
-      await firstCall;
+      const [firstResult, secondResult] = await Promise.all([firstCall, secondCall]);
+
+      expect(firstResult).toBe('agent:peggy-pool-1');
+      expect(secondResult).toBe('agent:peggy-pool-1');
+      // Still only the one release()/launch() pair — the second call never
+      // triggered its own.
+      expect(paneLauncher.release).toHaveBeenCalledTimes(1);
       expect(paneLauncher.launch).toHaveBeenCalledTimes(1);
 
       const lease = manager.leaseStore.findByConversation(manager.poolId, 'conv-1');
       expect(lease?.state).toBe('leased');
       expect(lease?.model).toBe('claude-new-model');
+    });
+
+    it('concurrency guard: if the in-flight relaunch fails, a second resolveRoute() waiting on it gets parked too', async () => {
+      const { manager, paneLauncher } = makeManager({ panes: 1, model: 'claude-old-model' });
+      await manager.ensureStarted();
+      await leaseWithModel(manager, paneLauncher, 'conv-1', 'claude-old-model');
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      let rejectLaunch: (err: Error) => void = () => {};
+      const launchGate = new Promise<void>((_resolve, reject) => {
+        rejectLaunch = reject;
+      });
+      paneLauncher.launch.mockImplementationOnce(async () => {
+        await launchGate;
+      });
+
+      const firstCall = manager.resolveRoute('conv-1', {
+        contact_id: 'alice',
+        channel: 'telegram',
+        scheduleModel: 'claude-new-model',
+      });
+      for (let i = 0; i < 20 && paneLauncher.launch.mock.calls.length === 0; i++) {
+        await Promise.resolve();
+      }
+
+      const secondCall = manager.resolveRoute('conv-1', {
+        contact_id: 'alice',
+        channel: 'telegram',
+        scheduleModel: 'claude-new-model',
+      });
+
+      rejectLaunch(new Error('boom'));
+      const [firstResult, secondResult] = await Promise.all([firstCall, secondCall]);
+
+      expect(firstResult).toBe(manager.parkedRecipientId());
+      expect(secondResult).toBe(manager.parkedRecipientId());
+      const lease = manager.leaseStore.findByConversation(manager.poolId, 'conv-1');
+      expect(lease?.state).toBe('dead');
+      errSpy.mockRestore();
     });
 
     it('relaunch failure: marks the pane dead and returns the parked id, following the existing launch-failure path', async () => {
@@ -643,6 +743,78 @@ describe('PoolManager', () => {
       const lease = manager.leaseStore.findByConversation(manager.poolId, 'conv-1');
       expect(lease?.state).toBe('dead');
       errSpy.mockRestore();
+    });
+
+    it('bad-resume-id fix: falls back to sessions.claude_session_id when pool_leases.claude_session_id is missing', async () => {
+      const { manager, paneLauncher, db } = makeManager({ panes: 1, model: 'claude-old-model' });
+      await manager.ensureStarted();
+      const { paneId } = await leaseWithModel(manager, paneLauncher, 'conv-1', 'claude-old-model');
+      // Simulate the pane's transient cache going missing while the durable
+      // sessions record still has the real id (the exact inconsistency the
+      // old `lease.claude_session_id ?? randomUUID()` would have papered
+      // over with a doomed-to-fail random UUID resume). resolveRoute() never
+      // creates a `sessions` row itself when none exists (that's Stage 80's
+      // job in the real pipeline — see persistSessionId()'s own doc comment
+      // and pool-manager.test.ts's other `bound (conversation with a prior
+      // sessions.claude_session_id)` fixture for the same pattern), so this
+      // test inserts one by hand, mirroring what a real second message would
+      // find already in place.
+      const durableSessionId = manager.leaseStore.findByPane(manager.poolId, paneId)!.claude_session_id!;
+      const now = new Date().toISOString();
+      db.prepare(
+        `INSERT INTO sessions (id, conversation_id, channel, contact_id, started_at, last_activity, message_count, claude_session_id)
+         VALUES ('sess-fixture-durable', 'conv-1', 'telegram', 'alice', ?, ?, 1, ?)`,
+      ).run(now, now, durableSessionId);
+      db.prepare(`UPDATE pool_leases SET claude_session_id = NULL WHERE pool_id = ? AND pane_id = ?`).run(
+        manager.poolId,
+        paneId,
+      );
+
+      await manager.resolveRoute('conv-1', {
+        contact_id: 'alice',
+        channel: 'telegram',
+        scheduleModel: 'claude-new-model',
+      });
+
+      const launchArgs = paneLauncher.launch.mock.calls[0]![0];
+      expect(launchArgs.resume).toBe(true);
+      expect(launchArgs.sessionId).toBe(durableSessionId);
+    });
+
+    it('bad-resume-id fix: launches fresh (never --resume a random id) when neither pool_leases nor sessions has a claude_session_id', async () => {
+      const { manager, paneLauncher, db } = makeManager({ panes: 1, model: 'claude-old-model' });
+      await manager.ensureStarted();
+      const { paneId } = await leaseWithModel(manager, paneLauncher, 'conv-1', 'claude-old-model');
+      db.prepare(`UPDATE pool_leases SET claude_session_id = NULL WHERE pool_id = ? AND pane_id = ?`).run(
+        manager.poolId,
+        paneId,
+      );
+      // A `sessions` row exists (as it would by the conversation's second
+      // real message, once Stage 80 has run) but with no claude_session_id
+      // recorded yet either — the genuine "neither has one" case.
+      const now = new Date().toISOString();
+      db.prepare(
+        `INSERT INTO sessions (id, conversation_id, channel, contact_id, started_at, last_activity, message_count, claude_session_id)
+         VALUES ('sess-fixture-empty', 'conv-1', 'telegram', 'alice', ?, ?, 1, NULL)`,
+      ).run(now, now);
+
+      await manager.resolveRoute('conv-1', {
+        contact_id: 'alice',
+        channel: 'telegram',
+        scheduleModel: 'claude-new-model',
+      });
+
+      const launchArgs = paneLauncher.launch.mock.calls[0]![0];
+      expect(launchArgs.resume).toBe(false);
+      expect(launchArgs.sessionId).toMatch(/^[0-9a-f-]{36}$/);
+      // The freshly-minted id is persisted to both records, same as the
+      // bound path does for a genuinely new conversation.
+      const lease = manager.leaseStore.findByPane(manager.poolId, paneId);
+      expect(lease?.claude_session_id).toBe(launchArgs.sessionId);
+      const sessionRow = db
+        .prepare(`SELECT claude_session_id FROM sessions WHERE conversation_id = ?`)
+        .get('conv-1') as { claude_session_id: string | null };
+      expect(sessionRow.claude_session_id).toBe(launchArgs.sessionId);
     });
   });
 
@@ -672,6 +844,82 @@ describe('PoolManager', () => {
       expect(managers.has('agent:jarvis')).toBe(true);
       expect(managers.get('agent:peggy')?.poolId).toBe('peggy');
       expect(managers.get('agent:jarvis')?.poolId).toBe('jarvis');
+    });
+
+    it('E53: wires a resolveModel that honors an agent-scoped override, scoped to the right agent only', () => {
+      const db = makeDb();
+      setModelOverride(db, 'claude-peggy-override', 'agent:peggy');
+      const config = {
+        adapters: {
+          'cc-pool': {
+            peggy: makeAdapterEntry({ agent_id: 'peggy', tmux_session: 'peggy-pool', model: 'claude-config-model' }),
+            jarvis: makeAdapterEntry({ agent_id: 'jarvis', tmux_session: 'jarvis-pool', model: 'claude-config-model' }),
+          },
+        },
+      } as unknown as AppConfig;
+
+      const managers = createPoolManagers(config, db, 'http://127.0.0.1:3000');
+
+      // peggy has an agent-scoped override — it wins over cfg.model.
+      expect(managers.get('agent:peggy')!.resolveModelFn(null)).toEqual({
+        model: 'claude-peggy-override',
+        source: 'agent-override',
+      });
+      // jarvis has no override of its own — falls through to its cfg.model.
+      expect(managers.get('agent:jarvis')!.resolveModelFn(null)).toEqual({
+        model: 'claude-config-model',
+        source: 'config',
+      });
+      // A schedule model still outranks the override for either pool.
+      expect(managers.get('agent:peggy')!.resolveModelFn('claude-schedule-model')).toEqual({
+        model: 'claude-schedule-model',
+        source: 'schedule',
+      });
+    });
+
+    it('E53: wires a resolveModel that falls back to a global override when no agent-scoped one exists', () => {
+      const db = makeDb();
+      setModelOverride(db, 'claude-global-override', null);
+      const config = {
+        adapters: {
+          'cc-pool': { peggy: makeAdapterEntry({ agent_id: 'peggy', tmux_session: 'peggy-pool', model: 'claude-config-model' }) },
+        },
+      } as unknown as AppConfig;
+
+      const managers = createPoolManagers(config, db, 'http://127.0.0.1:3000');
+
+      expect(managers.get('agent:peggy')!.resolveModelFn(null)).toEqual({
+        model: 'claude-global-override',
+        source: 'global-override',
+      });
+    });
+
+    it('E53: an agent override reaches the actual launch line through the wired resolveModel path', async () => {
+      // Replicates createPoolManagers()'s own wiring (db + agentId +
+      // configModel) but with an injected fake paneLauncher, so this
+      // exercises the exact production resolver end to end — through
+      // resolveRoute() and into what's passed to launch() — without needing
+      // a real tmux/claude process.
+      const db = makeDb();
+      setModelOverride(db, 'claude-peggy-override', 'agent:peggy');
+      const cfg = makeCfg({ panes: 1, agent_id: 'peggy', model: 'claude-config-model' });
+      const paneLauncher = makeFakeLauncher();
+      const manager = new PoolManager({
+        cfg,
+        db,
+        busBaseUrl: 'http://127.0.0.1:3000',
+        paneLauncher,
+        resolveModel: (scheduleModel) =>
+          resolveModelFromStore({ scheduleModel, db, agentId: 'agent:peggy', configModel: cfg.model }),
+      });
+      await manager.ensureStarted();
+
+      await manager.resolveRoute('conv-new', { contact_id: 'alice', channel: 'telegram' });
+
+      const launchArgs = paneLauncher.launch.mock.calls[0]![0];
+      expect(launchArgs.model).toBe('claude-peggy-override');
+      const lease = manager.leaseStore.findByConversation(manager.poolId, 'conv-new');
+      expect(lease?.model).toBe('claude-peggy-override');
     });
   });
 
