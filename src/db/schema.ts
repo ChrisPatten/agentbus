@@ -114,6 +114,11 @@ function loadMigrations(): Migration[] {
       description: 'Pool pane watchdog: pool_leases.last_turn_ended_at + pane_incidents (E52)',
       sql: readFileSync(join(migrationsDir, '020_pane_watchdog.sql'), 'utf-8'),
     },
+    {
+      version: 22,
+      description: 'Scheduled items model column (E53 S53.3)',
+      sql: readFileSync(join(migrationsDir, '022_scheduled_items_model.sql'), 'utf-8'),
+    },
   ];
 }
 

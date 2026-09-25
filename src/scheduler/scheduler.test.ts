@@ -74,6 +74,7 @@ function insertItem(
     topic?: string;
     priority?: 'normal' | 'high' | 'urgent';
     label?: string | null;
+    model?: string | null;
     created_by?: string;
     fire_count?: number;
     max_fires?: number | null;
@@ -86,9 +87,9 @@ function insertItem(
   db.prepare(
     `INSERT INTO scheduled_items
        (id, type, cron_expr, timezone, fire_at, channel, sender, payload_body,
-        topic, priority, label, created_at, created_by, fire_count, max_fires,
+        topic, priority, label, model, created_at, created_by, fire_count, max_fires,
         stale_after_ms, status)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?, ?)`,
   ).run(
     id,
     opts.type ?? 'once',
@@ -101,6 +102,7 @@ function insertItem(
     opts.topic ?? 'general',
     opts.priority ?? 'normal',
     opts.label ?? null,
+    opts.model ?? null,
     opts.created_by ?? 'http',
     opts.fire_count ?? 0,
     opts.max_fires ?? null,
@@ -275,6 +277,26 @@ describe('Scheduler.tick()', () => {
     expect(call.metadata['schedule_label']).toBeUndefined();
   });
 
+  it('stamps metadata.schedule_model when the job has a model (E53 S53.3)', async () => {
+    insertItem(db, { model: 'haiku' });
+    const scheduler = new Scheduler(makeDeps(db, processInbound as ProcessInboundFn));
+
+    await scheduler.tick();
+
+    const call = processInbound.mock.calls[0]![0] as { metadata: Record<string, unknown> };
+    expect(call.metadata['schedule_model']).toBe('haiku');
+  });
+
+  it('omits schedule_model when the job has no model', async () => {
+    insertItem(db, { model: null });
+    const scheduler = new Scheduler(makeDeps(db, processInbound as ProcessInboundFn));
+
+    await scheduler.tick();
+
+    const call = processInbound.mock.calls[0]![0] as { metadata: Record<string, unknown> };
+    expect(call.metadata['schedule_model']).toBeUndefined();
+  });
+
   it('logs a warning when processInbound returns queued:false', async () => {
     processInbound.mockResolvedValue({ ok: true, queued: false, reason: 'no_routes' });
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -388,6 +410,75 @@ describe('Scheduler.loadConfig()', () => {
     expect(row).toBeTruthy();
     expect(row!['type']).toBe('cron');
     expect(row!['cron_expr']).toBe('0 8 * * 1-5');
+  });
+
+  it('defaults a cron config schedule with no topic to sched:<label-slug> (E53 D1)', () => {
+    const config = {
+      ...baseConfig,
+      schedules: [
+        {
+          id: 'cfg-cron-notopic',
+          cron: '0 8 * * 1-5',
+          timezone: 'UTC',
+          channel: 'telegram',
+          sender: 'contact:chris',
+          prompt: 'Morning',
+          label: 'Morning Brief!',
+          priority: 'normal' as const,
+        },
+      ],
+    } as unknown as AppConfig;
+
+    new Scheduler(makeDeps(db, noop, config)).loadConfig();
+
+    const row = getItem(db, 'cfg-cron-notopic');
+    expect(row!['topic']).toBe('sched:morning-brief');
+  });
+
+  it('leaves a once config schedule with no topic as general', () => {
+    const config = {
+      ...baseConfig,
+      schedules: [
+        {
+          id: 'cfg-once-notopic',
+          fire_at: new Date(Date.now() + 60_000).toISOString(),
+          timezone: 'UTC',
+          channel: 'telegram',
+          sender: 'contact:chris',
+          prompt: 'Reminder',
+          priority: 'normal' as const,
+        },
+      ],
+    } as unknown as AppConfig;
+
+    new Scheduler(makeDeps(db, noop, config)).loadConfig();
+
+    const row = getItem(db, 'cfg-once-notopic');
+    expect(row!['topic']).toBe('general');
+  });
+
+  it('persists a model from a config schedule entry', () => {
+    const config = {
+      ...baseConfig,
+      schedules: [
+        {
+          id: 'cfg-model',
+          cron: '0 8 * * 1-5',
+          timezone: 'UTC',
+          channel: 'telegram',
+          sender: 'contact:chris',
+          prompt: 'Morning',
+          topic: 'general',
+          priority: 'normal' as const,
+          model: 'haiku',
+        },
+      ],
+    } as unknown as AppConfig;
+
+    new Scheduler(makeDeps(db, noop, config)).loadConfig();
+
+    const row = getItem(db, 'cfg-model');
+    expect(row!['model']).toBe('haiku');
   });
 
   it('is idempotent — re-running loadConfig does not change fire_at', () => {

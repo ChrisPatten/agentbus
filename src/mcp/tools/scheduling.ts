@@ -12,6 +12,7 @@ interface ScheduleCreateResponse {
   ok: boolean;
   id?: string;
   fire_at?: string;
+  topic?: string;
   error?: string;
 }
 
@@ -27,6 +28,7 @@ interface ScheduleRow {
   topic: string;
   priority: string;
   label: string | null;
+  model: string | null;
   created_by: string;
   fire_count: number;
   max_fires: number | null;
@@ -45,6 +47,12 @@ interface ScheduleListResponse {
 interface ScheduleDeleteResponse {
   ok: boolean;
   id?: string;
+  error?: string;
+}
+
+interface ScheduleUpdateResponse {
+  ok: boolean;
+  schedule?: ScheduleRow;
   error?: string;
 }
 
@@ -86,7 +94,14 @@ export function registerScheduleTools(server: McpServer, busBaseUrl: string): vo
           .optional()
           .default('UTC')
           .describe('IANA timezone for cron scheduling (e.g. "America/New_York"). Default: UTC'),
-        topic: z.string().optional().default('general').describe('Message topic (default: general)'),
+        topic: z
+          .string()
+          .optional()
+          .describe(
+            'Message topic. Omitted: one-shot schedules default to "general"; recurring (cron) ' +
+              'schedules default to their own sched:<label-slug> topic, so the job gets its own ' +
+              'conversation and pane — a model is fixed per Claude session.',
+          ),
         priority: z
           .enum(['normal', 'high', 'urgent'])
           .optional()
@@ -112,6 +127,15 @@ export function registerScheduleTools(server: McpServer, busBaseUrl: string): vo
               'unfired more than this long after fire_at, it dead-letters instead of firing late. ' +
               'Omitted = no staleness limit (fires no matter how overdue).',
           ),
+        model: z
+          .string()
+          .min(1)
+          .max(100)
+          .optional()
+          .describe(
+            'Model this job\'s pane should launch with (e.g. "haiku"). Omitted = fall back to an ' +
+              'agent or global model override, then the pool\'s own model.',
+          ),
       },
     },
     async ({
@@ -127,6 +151,7 @@ export function registerScheduleTools(server: McpServer, busBaseUrl: string): vo
       label,
       max_fires,
       stale_after_ms,
+      model,
     }) => {
       try {
         const res = await fetch(`${busBaseUrl}/api/v1/schedules`, {
@@ -145,6 +170,7 @@ export function registerScheduleTools(server: McpServer, busBaseUrl: string): vo
             label,
             max_fires,
             stale_after_ms,
+            model,
             created_by: 'agent',
           }),
         });
@@ -156,6 +182,7 @@ export function registerScheduleTools(server: McpServer, busBaseUrl: string): vo
           ok: true,
           id: data.id,
           fire_at: data.fire_at,
+          topic: data.topic ?? topic ?? null,
           label: label ?? null,
         });
       } catch (err) {
@@ -238,6 +265,59 @@ export function registerScheduleTools(server: McpServer, busBaseUrl: string): vo
         return toolSuccess({ ok: true, id: data.id });
       } catch (err) {
         return toolError(`Failed to cancel schedule: ${String(err)}`);
+      }
+    },
+  );
+
+  // ── update_schedule ────────────────────────────────────────────────────────
+
+  server.registerTool(
+    'update_schedule',
+    {
+      description:
+        'Update a schedule\'s label, topic, model, max_fires, or status (active/paused). ' +
+        'Only the fields provided are changed. Pass model: null to clear a job\'s model and fall ' +
+        'back to an override or the pool\'s model.',
+      inputSchema: {
+        id: z.string().min(1).describe('Schedule ID to update'),
+        label: z.string().optional().describe('New human-readable name'),
+        topic: z
+          .string()
+          .min(1)
+          .optional()
+          .describe('New topic — moves the job to its own (or a shared) conversation'),
+        model: z
+          .string()
+          .min(1)
+          .max(100)
+          .nullable()
+          .optional()
+          .describe('New model, or null to clear the job\'s model'),
+        max_fires: z.number().int().positive().nullable().optional().describe('New fire-count cap'),
+        status: z.enum(['active', 'paused']).optional().describe('New status'),
+      },
+    },
+    async ({ id, label, topic, model, max_fires, status }) => {
+      const body: Record<string, unknown> = {};
+      if (label !== undefined) body.label = label;
+      if (topic !== undefined) body.topic = topic;
+      if (model !== undefined) body.model = model;
+      if (max_fires !== undefined) body.max_fires = max_fires;
+      if (status !== undefined) body.status = status;
+
+      try {
+        const res = await fetch(`${busBaseUrl}/api/v1/schedules/${encodeURIComponent(id)}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const data = (await res.json()) as ScheduleUpdateResponse;
+        if (!res.ok) {
+          return toolError(`Failed to update schedule: ${data.error ?? `HTTP ${res.status}`}`);
+        }
+        return toolSuccess({ ok: true, schedule: data.schedule });
+      } catch (err) {
+        return toolError(`Failed to update schedule: ${String(err)}`);
       }
     },
   );

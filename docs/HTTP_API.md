@@ -406,11 +406,13 @@ See [SCHEDULING.md](SCHEDULING.md) for semantics.
 | `cron_expr` | if `cron` | 5-part cron. `400` if invalid or with no future occurrence |
 | `channel`, `sender`, `payload_body` | yes | Where the message appears to come from, and its text |
 | `timezone` | no | IANA name, default `UTC` |
-| `topic`, `priority`, `label`, `max_fires` | no | |
+| `topic` | no | Omitted: `general` for `once`; `sched:<label-slug>` (or `sched:<id8>`) for `cron` — see [SCHEDULING.md](SCHEDULING.md#topic-and-model) |
+| `priority`, `label`, `max_fires` | no | |
+| `model` | no | Non-empty string, ≤100 chars. Pane model for this job's fires; unset falls back to an override, then the pool's model |
 | `stale_after_ms` | no | `once` only; `400` on `cron` |
 | `created_by` | no | Default `http` |
 
-Returns `201 { "ok": true, "id", "fire_at" }`.
+Returns `201 { "ok": true, "id", "fire_at", "topic" }` — `topic` is the resolved value, including the D1 default when none was given.
 
 ### `GET /api/v1/schedules`
 
@@ -422,7 +424,7 @@ Returns `{ "ok": true, "schedule": {...} }` or `404`.
 
 ### `PATCH /api/v1/schedules/:id`
 
-Body may include `label`, `max_fires` (integer or `null`), and `status` (`active` or `paused`). Setting `max_fires` at or below the current `fire_count` completes the schedule. `400` for a completed or cancelled schedule or an empty body. Returns the updated row.
+Body may include `label`, `max_fires` (integer or `null`), `status` (`active` or `paused`), `topic` (non-empty string), and `model` (non-empty string ≤100 chars, or `null` to clear it). Setting `max_fires` at or below the current `fire_count` completes the schedule. `400` for a completed or cancelled schedule or an empty body. Returns the updated row.
 
 ### `DELETE /api/v1/schedules/:id`
 

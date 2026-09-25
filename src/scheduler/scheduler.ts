@@ -33,6 +33,7 @@ import type { CommandRegistry } from '../commands/registry.js';
 import { processInbound as defaultProcessInbound } from '../http/api.js';
 import type { InboundMessage, InboundResult, InboundAbort } from '../http/api.js';
 import type { ScheduledItem } from './types.js';
+import { defaultScheduleTopic } from './default-topic.js';
 
 export interface ProcessInboundDeps {
   queue: MessageQueue;
@@ -197,6 +198,7 @@ export class Scheduler {
           scheduled: true,
           schedule_id: item.id,
           ...(item.label ? { schedule_label: item.label } : {}),
+          ...(item.model ? { schedule_model: item.model } : {}),
         },
       },
       {
@@ -326,6 +328,10 @@ export class Scheduler {
         initialFireAt = entry.fire_at!;
       }
 
+      // D1: a schedule with no explicit topic in config gets its own
+      // sched:<slug> topic (cron only — see default-topic.ts).
+      const topic = entry.topic ?? defaultScheduleTopic(type, entry.label ?? null, entry.id);
+
       // Insert new rows. For existing rows: update payload/label/cron but
       // preserve fire_at (so we don't re-trigger an already-scheduled item).
       // Skips cancelled items — see doc comment above.
@@ -333,15 +339,16 @@ export class Scheduler {
         .prepare(
           `INSERT INTO scheduled_items
              (id, type, cron_expr, timezone, fire_at, channel, sender, payload_body,
-              topic, priority, label, created_at, created_by, fire_count, status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'config', 0, 'active')
+              topic, priority, label, model, created_at, created_by, fire_count, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'config', 0, 'active')
            ON CONFLICT(id) DO UPDATE SET
              cron_expr    = excluded.cron_expr,
              timezone     = excluded.timezone,
              payload_body = excluded.payload_body,
              topic        = excluded.topic,
              priority     = excluded.priority,
-             label        = excluded.label
+             label        = excluded.label,
+             model        = excluded.model
            WHERE status != 'cancelled'`,
         )
         .run(
@@ -353,9 +360,10 @@ export class Scheduler {
           entry.channel,
           entry.sender,
           entry.prompt,
-          entry.topic,
+          topic,
           entry.priority,
           entry.label ?? null,
+          entry.model ?? null,
           now,
         );
     }

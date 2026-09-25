@@ -18,7 +18,7 @@ Errors come back as `{ "content": [{ "type": "text", "text": "Error: ..." }], "i
 | `get_transcript` | Full ordered transcript for one session | Always |
 | `search_transcripts` | Full-text search across transcripts | Always |
 | `fetch_attachment` | Resolve an attachment ID to a file path | Always |
-| `schedule_message`, `list_schedules`, `cancel_schedule` | Scheduled messages | Always |
+| `schedule_message`, `list_schedules`, `cancel_schedule`, `update_schedule` | Scheduled messages | Always |
 | `set_headless_model`, `get_headless_model`, `list_headless_model`, `delete_headless_model` | Runtime model overrides for headless spawns | Always |
 | `recall_memory`, `log_memory` | Legacy structured memory store | Always; dormant unless `memory.structured_extraction` |
 | `write_knowledge`, `get_knowledge`, `forget_knowledge`, `search_knowledge` | Agent-managed structured knowledge store (Phase 1) | Always |
@@ -126,19 +126,28 @@ See [SCHEDULING.md](SCHEDULING.md) for semantics and the cron format.
 | `fire_at` | if `once` | ISO 8601, in the future |
 | `cron_expr` | if `cron` | For example `0 8 * * 1-5` |
 | `timezone` | no | IANA name, default `UTC` |
-| `topic`, `priority`, `label`, `max_fires` | no | |
+| `topic` | no | Omitted: `general` for `once`; `sched:<label-slug>` for `cron` — see [SCHEDULING.md](SCHEDULING.md#topic-and-model) |
+| `priority`, `label`, `max_fires` | no | |
+| `model` | no | Pane model for this job's fires (e.g. `"haiku"`); unset falls back to an override, then the pool's model |
 | `stale_after_ms` | no | `once` only. Dead-letter instead of firing if overdue by more than this |
 
-Output: `{ "ok": true, "id", "fire_at", "label" }`. Schedules created here have `created_by: agent`.
+Output: `{ "ok": true, "id", "fire_at", "topic", "label" }`. Schedules created here have `created_by: agent`.
 
 ### `list_schedules`
 
 Input: `{ "status"?: "active", "channel"?, "created_by"?, "limit"?: 20 }`. `status` is one of `active`, `paused`, `cancelled`, or `completed`; `limit` max 200.
-Output: `{ "schedules": [...], "count": n }`.
+Output: `{ "schedules": [...], "count": n }`. Each schedule row includes `topic` and `model`.
 
 ### `cancel_schedule`
 
 Input: `{ "id": "<uuid>" }`. Output: `{ "ok": true, "id" }`.
+
+### `update_schedule`
+
+Update a schedule's label, topic, model, `max_fires`, or status. Only the fields provided are changed.
+
+Input: `{ "id": "<uuid>", "label"?, "topic"?, "model"?: string | null, "max_fires"?: number | null, "status"?: "active" | "paused" }`. `model: null` clears the job's model.
+Output: `{ "ok": true, "schedule": {...} }`.
 
 ## Model overrides
 

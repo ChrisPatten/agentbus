@@ -496,6 +496,7 @@ describe('command handlers', () => {
         max_fires?: number | null;
         status?: string;
         created_by?: string;
+        model?: string | null;
       } = {},
     ): string {
       const id = opts.id ?? `sched-${Math.random().toString(36).slice(2)}`;
@@ -503,8 +504,8 @@ describe('command handlers', () => {
       db.prepare(
         `INSERT INTO scheduled_items
            (id, type, cron_expr, timezone, fire_at, channel, sender, payload_body,
-            topic, priority, label, created_at, created_by, fire_count, max_fires, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?)`,
+            topic, priority, label, model, created_at, created_by, fire_count, max_fires, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?)`,
       ).run(
         id,
         opts.type ?? 'once',
@@ -517,6 +518,7 @@ describe('command handlers', () => {
         'general',
         'normal',
         opts.label ?? null,
+        opts.model ?? null,
         opts.created_by ?? 'http',
         opts.fire_count ?? 0,
         opts.max_fires ?? null,
@@ -561,6 +563,30 @@ describe('command handlers', () => {
       const result = await schedule.handler(['list'], makeCtx(db, { channel: 'telegram' }));
 
       expect(result.body).toContain('America/New_York');
+    });
+
+    it('shows the model in brackets when the job has one', async () => {
+      const db = makeDb();
+      insertSchedule(db, { channel: 'telegram', label: 'Email Watch', model: 'haiku' });
+
+      const deps = makeDeps({ db });
+      const commands = createBuiltinCommands(deps);
+      const schedule = commands.find((c) => c.name === 'schedule')!;
+      const result = await schedule.handler(['list'], makeCtx(db, { channel: 'telegram' }));
+
+      expect(result.body).toContain('[haiku]');
+    });
+
+    it('omits the bracket when the job has no model', async () => {
+      const db = makeDb();
+      insertSchedule(db, { channel: 'telegram', label: 'No model job' });
+
+      const deps = makeDeps({ db });
+      const commands = createBuiltinCommands(deps);
+      const schedule = commands.find((c) => c.name === 'schedule')!;
+      const result = await schedule.handler(['list'], makeCtx(db, { channel: 'telegram' }));
+
+      expect(result.body).not.toContain('[');
     });
 
     it('shows "No active schedules" when there are none', async () => {
