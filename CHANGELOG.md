@@ -10,21 +10,7 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
-### Fixed
-- **`cc-pool` agent/global model overrides now actually apply, and a
-  model-switch relaunch can no longer lose a message (E53 follow-up).**
-  `src/index.ts` wires the real, override-aware `resolveModel()` into every
-  `PoolManager` (previously only the schedule-model/pool-config fallback was
-  wired for `cc-pool`, so an agent or global override never reached a pane).
-  A second `resolveRoute()` call for a conversation whose pane is already
-  mid-launch or mid-relaunch now waits for that launch to actually finish,
-  and re-reads the pane's state, instead of handing back the pane id
-  immediately — the immediate-return behavior could let a message enqueue
-  while a relaunch's old, about-to-be-killed Claude session was still alive
-  to ack (and lose) it. A relaunch also no longer risks `--resume`-ing a
-  made-up session id: it now falls back to the conversation's durable
-  session record, or launches fresh, if the pane's own cached session id is
-  missing.
+### Added
 - **Per-job model and dedicated conversation for scheduled jobs (E53 S53.3).**
   `scheduled_items` gains a `model` column (migration 022). `POST
   /api/v1/schedules`, `PATCH /api/v1/schedules/:id`, and the
