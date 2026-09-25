@@ -124,6 +124,11 @@ function loadMigrations(): Migration[] {
       description: 'Scheduled items model column (E53 S53.3)',
       sql: readFileSync(join(migrationsDir, '022_scheduled_items_model.sql'), 'utf-8'),
     },
+    {
+      version: 23,
+      description: 'Pool leases model column (E53 S53.4)',
+      sql: readFileSync(join(migrationsDir, '023_pool_leases_model.sql'), 'utf-8'),
+    },
   ];
 }
 

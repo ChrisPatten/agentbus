@@ -21,7 +21,6 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
   `/schedule list` now show `model`.
 - Config-defined schedules (`config.yaml` `schedules:`) also accept an
   optional `model` field.
-
 - **Adapter-neutral model override tools (E53 S53.1).** New MCP tools
   `set_model_override`, `get_model_override`, `list_model_overrides`, and
   `delete_model_override` manage the agent-wide and global model overrides
@@ -31,6 +30,21 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
   override, the global override, the caller's configured model, then the
   CLI default. See
   [docs/CC_HEADLESS_ADAPTER.md](docs/CC_HEADLESS_ADAPTER.md#runtime-model-overrides).
+- **Per-job models for `cc-pool` panes (E53 S53.2, S53.4, S53.5,
+  S53.6).** A pane's `--model` is now resolved per launch, in order: a
+  fired schedule's own model (carried as `metadata.schedule_model`), an
+  agent-scoped override, a global override, then the pool's own
+  `adapters.cc-pool.<name>.model` — never a bare read of `cfg.model` inside
+  the launch line anymore. The resolved model is persisted to the new
+  `pool_leases.model` column (migration 023) and logged on every launch. A
+  model change is applied to an already-leased pane's *next* message: if the
+  pane is between turns it is relaunched in place (`--resume` on the same
+  Claude session, new `--model`); a turn in flight is never interrupted — the
+  switch is deferred to the pane's next message. `/pool` and
+  `GET /api/v1/pool` now show each pane's `model`. bus-core logs a startup
+  warning for a pool with no `model` configured, since panes then silently
+  inherit `~/.claude/settings.json`. See "Model selection" in
+  [docs/CC_POOL_ADAPTER.md](docs/CC_POOL_ADAPTER.md#model-selection).
 
 - **Stall watchdog for `cc-pool` panes, observe-only (E52, S52.1–S52.2).**
   A leased pane with unhandled work and a screen unchanged for

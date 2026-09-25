@@ -84,6 +84,27 @@ describe('LeaseStore', () => {
       expect(rows[0]?.last_activity_at).toBe(t1.toISOString());
     });
 
+    it('reuse: also matches a row already "launching" for this conversation (E53 S53.5 concurrency guard) — never claims a second pane', () => {
+      const db = makeDb();
+      const store = new LeaseStore(db);
+      store.seedPanes('peggy-pool', [
+        { paneId: 'peggy-pool:1', agentId: 'agent:peggy-pool-1' },
+        { paneId: 'peggy-pool:2', agentId: 'agent:peggy-pool-2' },
+      ]);
+      const bound = assertKind(store.acquire('peggy-pool', 'conv-1', baseOpts()), 'bound');
+      store.confirmReady('peggy-pool', bound.lease.pane_id);
+      // Simulate an in-flight relaunch (or an in-flight initial launch):
+      // the row is 'launching' again, still for conv-1.
+      expect(store.beginRelaunch('peggy-pool', bound.lease.pane_id, 'conv-1')).toBe(true);
+
+      const second = assertKind(store.acquire('peggy-pool', 'conv-1', baseOpts()), 'reuse');
+
+      expect(second.lease.pane_id).toBe(bound.lease.pane_id);
+      // The pool's second pane must still be free — conv-1 was never bound
+      // to it while its actual pane was 'launching'.
+      expect(store.findByAgent('peggy-pool', 'agent:peggy-pool-2')?.state).toBe('free');
+    });
+
     it('bound: claims a free pane, transitioning it to launching with the right fields', () => {
       const db = makeDb();
       const store = new LeaseStore(db);
@@ -293,6 +314,72 @@ describe('LeaseStore', () => {
 
       store.markDraining('peggy-pool', bound.lease.pane_id);
       expect(store.findByAgent('peggy-pool', 'agent:peggy-pool-1')?.state).toBe('draining');
+    });
+
+    it('setModel writes the model column, and null clears it (E53)', () => {
+      const db = makeDb();
+      const store = new LeaseStore(db);
+      store.seedPanes('peggy-pool', [{ paneId: 'peggy-pool:1', agentId: 'agent:peggy-pool-1' }]);
+      const bound = assertKind(store.acquire('peggy-pool', 'conv-1', baseOpts()), 'bound');
+      store.confirmReady('peggy-pool', bound.lease.pane_id);
+
+      store.setModel('peggy-pool', bound.lease.pane_id, 'claude-sonnet-5');
+      expect(store.findByAgent('peggy-pool', 'agent:peggy-pool-1')?.model).toBe('claude-sonnet-5');
+
+      store.setModel('peggy-pool', bound.lease.pane_id, null);
+      expect(store.findByAgent('peggy-pool', 'agent:peggy-pool-1')?.model).toBeNull();
+    });
+
+    it('release also clears model (E53)', () => {
+      const db = makeDb();
+      const store = new LeaseStore(db);
+      store.seedPanes('peggy-pool', [{ paneId: 'peggy-pool:1', agentId: 'agent:peggy-pool-1' }]);
+      const bound = assertKind(store.acquire('peggy-pool', 'conv-1', baseOpts()), 'bound');
+      store.confirmReady('peggy-pool', bound.lease.pane_id);
+      store.setModel('peggy-pool', bound.lease.pane_id, 'claude-sonnet-5');
+
+      store.release('peggy-pool', bound.lease.pane_id);
+
+      expect(store.findByAgent('peggy-pool', 'agent:peggy-pool-1')?.model).toBeNull();
+    });
+
+    it('a fresh bound/evict claim resets a pane\'s stale model to NULL (E53)', () => {
+      const db = makeDb();
+      const store = new LeaseStore(db);
+      store.seedPanes('peggy-pool', [{ paneId: 'peggy-pool:1', agentId: 'agent:peggy-pool-1' }]);
+      const bound = assertKind(store.acquire('peggy-pool', 'conv-1', baseOpts()), 'bound');
+      store.confirmReady('peggy-pool', bound.lease.pane_id);
+      store.setModel('peggy-pool', bound.lease.pane_id, 'claude-old-model');
+
+      // Force evict-eligible, then claim the pane for a different conversation.
+      store.touch('peggy-pool', bound.lease.pane_id, new Date('2000-01-01T00:00:00.000Z'));
+      const evicted = assertKind(
+        store.acquire('peggy-pool', 'conv-2', baseOpts({ idleEvictMs: 1000, now: () => new Date() })),
+        'evict',
+      );
+
+      expect(evicted.lease.model).toBeNull();
+      expect(store.findByAgent('peggy-pool', 'agent:peggy-pool-1')?.model).toBeNull();
+    });
+
+    it('beginRelaunch atomically claims leased -> launching only for the exact conversation, and fails otherwise (E53 S53.5)', () => {
+      const db = makeDb();
+      const store = new LeaseStore(db);
+      store.seedPanes('peggy-pool', [{ paneId: 'peggy-pool:1', agentId: 'agent:peggy-pool-1' }]);
+      const bound = assertKind(store.acquire('peggy-pool', 'conv-1', baseOpts()), 'bound');
+      store.confirmReady('peggy-pool', bound.lease.pane_id);
+
+      // Wrong conversation: fails, row untouched.
+      expect(store.beginRelaunch('peggy-pool', bound.lease.pane_id, 'conv-other')).toBe(false);
+      expect(store.findByAgent('peggy-pool', 'agent:peggy-pool-1')?.state).toBe('leased');
+
+      // Right conversation, currently leased: succeeds.
+      expect(store.beginRelaunch('peggy-pool', bound.lease.pane_id, 'conv-1')).toBe(true);
+      expect(store.findByAgent('peggy-pool', 'agent:peggy-pool-1')?.state).toBe('launching');
+
+      // Already launching (a second concurrent call): fails — the row is no
+      // longer 'leased'.
+      expect(store.beginRelaunch('peggy-pool', bound.lease.pane_id, 'conv-1')).toBe(false);
     });
   });
 

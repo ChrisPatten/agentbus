@@ -111,6 +111,7 @@ When no `cc-pool` instances are configured at all, always returns `200 { "ok": t
           "state": "leased",
           "conversation_id": "a3f9c21e...",
           "claude_session_id": "b7e1...",
+          "model": "claude-sonnet-5",
           "leased_at": "2026-09-17T10:00:00.000Z",
           "last_activity_at": "2026-09-17T10:05:00.000Z"
         },
@@ -120,6 +121,7 @@ When no `cc-pool` instances are configured at all, always returns `200 { "ok": t
           "state": "free",
           "conversation_id": null,
           "claude_session_id": null,
+          "model": null,
           "leased_at": null,
           "last_activity_at": null
         }
@@ -131,6 +133,8 @@ When no `cc-pool` instances are configured at all, always returns `200 { "ok": t
 ```
 
 `conversation_id` is the raw sha256 hex — resolving it to a human-readable contact/channel/topic would require an extra join against `sessions`/`transcripts` per pane, which this route deliberately skips (see the `/pool` command for where that lookup is cheap to add per-row). `?pool=<key>` for a pool that isn't in `poolManagers` returns `404 { "ok": false, "error": "No cc-pool instance for \"<key>\"" }`.
+
+`model` (E53) is the model this pane's current Claude session was launched with — `null` for a free pane, or a leased pane launched with no `--model` flag (CLI default via `~/.claude/settings.json`). See [CC_POOL_ADAPTER.md#model-selection](CC_POOL_ADAPTER.md#model-selection).
 
 ### `POST /api/v1/pool/:agentId/turn-ended`
 

@@ -608,6 +608,9 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
           state: p.state,
           conversation_id: p.conversation_id,
           claude_session_id: p.claude_session_id,
+          // E53 — model this pane's current Claude session was launched
+          // with; null when free, or launched with no --model (CLI default).
+          model: p.model,
           leased_at: p.leased_at,
           last_activity_at: p.last_activity_at,
         })),

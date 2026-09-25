@@ -68,10 +68,17 @@ export class LeaseStore {
       const now = opts.now?.() ?? new Date();
       const nowIso = now.toISOString();
 
-      // 1. Reuse: an existing live lease for this exact conversation.
+      // 1. Reuse: an existing live lease for this exact conversation. Also
+      // matches a row already 'launching' for this same conversation_id
+      // (E53 S53.5) — a second concurrent acquire() call for a conversation
+      // whose pane is mid-launch (a brand-new conversation's first message,
+      // or a model-mismatch relaunch already in flight — see
+      // PoolManager.resolveRoute()'s reuse branch and LeaseStore.beginRelaunch())
+      // must not claim a SECOND pane for the same conversation while the
+      // first is still being set up.
       const reuseRow = this.db
         .prepare(
-          `SELECT * FROM pool_leases WHERE pool_id = ? AND conversation_id = ? AND state = 'leased'`,
+          `SELECT * FROM pool_leases WHERE pool_id = ? AND conversation_id = ? AND state IN ('leased', 'launching')`,
         )
         .get(poolId, conversationId) as PoolLeaseRow | undefined;
       if (reuseRow) {
@@ -90,7 +97,7 @@ export class LeaseStore {
         this.db
           .prepare(
             `UPDATE pool_leases
-             SET state = 'launching', conversation_id = ?, claude_session_id = NULL,
+             SET state = 'launching', conversation_id = ?, claude_session_id = NULL, model = NULL,
                  leased_at = ?, last_activity_at = ?, last_turn_ended_at = NULL
              WHERE pool_id = ? AND pane_id = ? AND state = 'free'`,
           )
@@ -100,6 +107,7 @@ export class LeaseStore {
           state: 'launching',
           conversation_id: conversationId,
           claude_session_id: null,
+          model: null,
           leased_at: nowIso,
           last_activity_at: nowIso,
           last_turn_ended_at: null,
@@ -128,8 +136,8 @@ export class LeaseStore {
           this.db
             .prepare(
               `INSERT INTO pool_leases
-                 (pool_id, pane_id, agent_id, conversation_id, claude_session_id, state, leased_at, last_activity_at)
-               VALUES (?, ?, ?, ?, NULL, 'launching', ?, ?)`,
+                 (pool_id, pane_id, agent_id, conversation_id, claude_session_id, model, state, leased_at, last_activity_at)
+               VALUES (?, ?, ?, ?, NULL, NULL, 'launching', ?, ?)`,
             )
             .run(poolId, newPaneId, newAgentId, conversationId, nowIso, nowIso);
 
@@ -139,6 +147,7 @@ export class LeaseStore {
             agent_id: newAgentId,
             conversation_id: conversationId,
             claude_session_id: null,
+            model: null,
             state: 'launching',
             leased_at: nowIso,
             last_activity_at: nowIso,
@@ -171,7 +180,7 @@ export class LeaseStore {
         this.db
           .prepare(
             `UPDATE pool_leases
-             SET state = 'launching', conversation_id = ?, claude_session_id = NULL,
+             SET state = 'launching', conversation_id = ?, claude_session_id = NULL, model = NULL,
                  leased_at = ?, last_activity_at = ?, last_turn_ended_at = NULL
              WHERE pool_id = ? AND pane_id = ? AND state = 'leased'`,
           )
@@ -181,6 +190,7 @@ export class LeaseStore {
           state: 'launching',
           conversation_id: conversationId,
           claude_session_id: null,
+          model: null,
           leased_at: nowIso,
           last_activity_at: nowIso,
           last_turn_ended_at: null,
@@ -228,7 +238,7 @@ export class LeaseStore {
     this.db
       .prepare(
         `UPDATE pool_leases
-         SET state = 'free', conversation_id = NULL, claude_session_id = NULL, leased_at = NULL,
+         SET state = 'free', conversation_id = NULL, claude_session_id = NULL, model = NULL, leased_at = NULL,
              last_turn_ended_at = NULL
          WHERE pool_id = ? AND pane_id = ?`,
       )
@@ -265,6 +275,44 @@ export class LeaseStore {
     this.db
       .prepare(`UPDATE pool_leases SET claude_session_id = ? WHERE pool_id = ? AND pane_id = ?`)
       .run(claudeSessionId, poolId, paneId);
+  }
+
+  /**
+   * E53 S53.4/S53.5 — record the model the pane's current Claude session was
+   * (re)launched with. `null` clears it (CLI default / no --model). Called by
+   * `PoolManager.resolveRoute()` alongside `confirmReady()`, on both a fresh
+   * bound/grow/evict launch and an in-place model-mismatch relaunch.
+   */
+  setModel(poolId: string, paneId: string, model: string | null): void {
+    this.db.prepare(`UPDATE pool_leases SET model = ? WHERE pool_id = ? AND pane_id = ?`).run(model, poolId, paneId);
+  }
+
+  /**
+   * E53 S53.5 — the concurrency guard for an in-place model-switch relaunch
+   * on `reuse`. Atomically transitions a row from `leased` to `launching`
+   * ONLY if it is still `leased` for exactly this `conversationId` at the
+   * moment of the call, returning whether the transition happened.
+   *
+   * This reuses the same 'launching' state `acquire()`'s `bound`/`grow`/
+   * `evict` claims already use, and — combined with `acquire()`'s `reuse`
+   * query above now also matching a `launching` row for the same
+   * conversation — is what prevents two concurrent `resolveRoute()` calls
+   * for the same conversation from both relaunching the pane, or from a
+   * second call routing to (or claiming) a different pane while the first
+   * call's relaunch is in flight: the loser's `beginRelaunch()` call returns
+   * `false` (the row is no longer `leased` by the time it runs) and it
+   * simply returns the pane's existing agent id unchanged, leaving the
+   * winner's relaunch to finish and `confirmReady()` the row back to
+   * `leased` on its own.
+   */
+  beginRelaunch(poolId: string, paneId: string, conversationId: string): boolean {
+    const result = this.db
+      .prepare(
+        `UPDATE pool_leases SET state = 'launching'
+         WHERE pool_id = ? AND pane_id = ? AND conversation_id = ? AND state = 'leased'`,
+      )
+      .run(poolId, paneId, conversationId);
+    return result.changes > 0;
   }
 
   findByConversation(poolId: string, conversationId: string): PoolLeaseRow | null {

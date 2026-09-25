@@ -153,7 +153,7 @@ Renders pane leases and parked-queue depth for each configured `cc-pool` instanc
 ```
 /pool
 -> Pool peggy (agent:peggy) — 2 panes
-     peggy-pool-1: leased  conv=a3f9c21e  idle=12s
+     peggy-pool-1: leased  conv=a3f9c21e  model=claude-sonnet-5  idle=12s
      peggy-pool-2: free
      parked: 1 (oldest 42s)
 ```
@@ -172,7 +172,7 @@ An optional first argument narrows the output to one pool, matched against eithe
 ```
 A name that matches no configured pool replies `No cc-pool instance for "<name>".` instead of silently showing nothing.
 
-Each pane line shows its state, then `conv=<first 8 hex chars of conversation_id>` when the pane is bound to a conversation, then `idle=<age>` when it has a recorded `last_activity_at` — both are omitted for a `free` pane, which has neither. The trailing `parked: N` line adds `(oldest <age>)` only when `N > 0`.
+Each pane line shows its state, then `conv=<first 8 hex chars of conversation_id>` when the pane is bound to a conversation, then `model=<name>` (E53) when the pane's current session was launched with a model, then `idle=<age>` when it has a recorded `last_activity_at` — all three are omitted for a `free` pane, which has none of them. See [CC_POOL_ADAPTER.md#model-selection](CC_POOL_ADAPTER.md#model-selection) for what `model=` means and when it changes. The trailing `parked: N` line adds `(oldest <age>)` only when `N > 0`.
 
 ### `/torrent [magnet-link]`
 

@@ -47,7 +47,7 @@ Every field of `adapters.cc-pool`:
 | `growth` | `fixed` \| `dynamic` | `fixed` | `fixed` keeps exactly `panes` panes for the pool's lifetime. `dynamic` starts at `panes` and grows on demand up to `max_panes`. |
 | `max_panes` | number | = `panes` | Upper bound on pane count when `growth: dynamic`. Ignored when `growth: fixed` — setting it below `panes` there fails validation at startup. |
 | `claude_bin` | string | required, absolute path | Absolute path to the `claude` CLI binary. Unlike `cc-headless`, there's no default: a bare `claude` typed into a tmux pane resolves through your shell profile, which commonly aliases `claude` to a tmux-wrapping function rather than the CLI itself. |
-| `model` | string | unset | Passed as `--model` to each pane's `claude` invocation, on both launch and `--resume`. Set it: when omitted, the CLI falls back to the `model` in `~/.claude/settings.json`, which `/model` in any interactive session rewrites. |
+| `model` | string | unset | The pool's fallback `--model` — the last step of the resolution order in [Model selection](#model-selection) below, used only when no schedule model or override applies. Set it: when unset (and nothing else resolves a model either), the CLI falls back to the `model` in `~/.claude/settings.json`, which `/model` in any interactive session rewrites. bus-core logs a startup warning for a pool with no `model` configured. |
 | `working_dir` | string | bus-core cwd | Working directory shared by every pane in the pool. Determines the auto-loaded `CLAUDE.md` hierarchy. |
 | `launch_args` | list of strings | `[]` | Extra CLI args appended verbatim to every launch/resume invocation. |
 | `poll_interval_ms` | number | `1000` | Poll interval passed through to each pane's `cc.ts` process. |
@@ -138,7 +138,7 @@ Each pane's lease moves through a small state machine, stored per pane in the `p
 
 1. **Ensure the window exists.** If the pane's tmux window is already alive (a warm restart, or a pane being reused), this step is skipped. Otherwise the tmux session is created if needed, and the window is created with `TERM`, `COLORTERM`, and any `pane_env` set at creation time — tmux can't add environment variables to a window after it exists, and the TUI depends on these being present from the start.
 2. **Write a per-pane MCP config.** A JSON file is generated — the project's own `.mcp.json` is never edited — that copies in any other MCP servers the project already configures, then overwrites the `agentbus` entry with this pane's own `AGENTBUS_AGENT_ID`. The pane launches with `--mcp-config <file> --strict-mcp-config`, so this generated file, not the project's `.mcp.json`, is authoritative for that pane. Without the copy step, `--strict-mcp-config` would silently drop the project's other servers.
-3. **Send the launch line.** `claude --session-id <uuid>` (fresh) or `claude --resume <uuid>` (returning), plus `--permission-mode auto`, the generated `--mcp-config`, an optional `--append-system-prompt-file`, `--model` if configured, and `--dangerously-load-development-channels server:agentbus` — the flag that makes this pane's `cc.ts` act as a channel source at all. `launch_args` is appended last.
+3. **Send the launch line.** `claude --session-id <uuid>` (fresh) or `claude --resume <uuid>` (returning), plus `--permission-mode auto`, the generated `--mcp-config`, an optional `--append-system-prompt-file`, `--model <resolved model>` when one resolved (see [Model selection](#model-selection) — never a direct read of the pool's own `model` config field; every launch's model is resolved by `PoolManager` first), and `--dangerously-load-development-channels server:agentbus` — the flag that makes this pane's `cc.ts` act as a channel source at all. `launch_args` is appended last.
 4. **Acknowledge the development-channels prompt.** A freshly started session — fresh or resumed — blocks on a confirmation prompt for `--dangerously-load-development-channels` (a real captured example, v2.1.274-276: `WARNING: Loading development channels ... ❯ 1. I am using this for local development / 2. Exit`). The pane first *polls* `capture-pane` output for `launch_ack_pattern` to actually appear — up to `launch_ack_delay_ms` total — rather than blindly waiting a fixed time and hoping the prompt has rendered by then; measured against the real CLI, the prompt can take over a second to render, and a blind guess that lands too early looks identical, from `capture-pane`'s point of view, to "already dismissed" (see Troubleshooting below for the bug this caused). Only once the prompt is confirmed showing does it send `Enter` and recheck; if it's still showing, it retries on a short backoff, up to `launch_ack_max_attempts` times, before giving up. If the prompt never appears within `launch_ack_delay_ms` at all, there's nothing to dismiss and this step is a no-op. This phase shares the same overall `LAUNCH_READY_TIMEOUT_MS` (30s) budget as step 5, not a separate one — a pathologically large `launch_ack_max_attempts` (or `launch_ack_delay_ms`) can still exhaust the launch deadline on its own.
 5. **Confirm readiness.** The pane isn't handed a message until its `cc.ts` has actually polled the bus: `PoolManager` checks `GET /api/v1/agents/<pane agent id>/last-poll` until it reports a poll at or after the launch started, or the 30-second launch timeout elapses. This bound is enforced by wall-clock deadline, not by counting polls — it holds even if an individual `/last-poll` request stalls.
 
@@ -154,6 +154,29 @@ Two records track a Claude session id, at different lifetimes:
 | Conversation record | `sessions.claude_session_id` | Durable — scoped to the conversation | Never, by `cc-pool` |
 
 `pool_leases.claude_session_id` only answers "what's loaded in this pane right now" — it says nothing about whether the conversation itself is new. When a lease resolves with no session id cached in the pane, `PoolManager` still checks `sessions` for that conversation before deciding `--session-id` (nothing found — a genuinely new conversation) versus `--resume` (found — a conversation returning to a pane, possibly a different one than it last used). Once launch succeeds, the id is written to both places: `pool_leases` for the pool's own hot-path reads, and `sessions.claude_session_id` so cross-cutting consumers (`SessionTracker`, `/clear`, `/cost`) see it too.
+
+## Model selection
+
+Every pane launch — a fresh `bound`/`grow`/`evict` claim, and every `reuse` of an already-leased pane, to detect a change — resolves the model to pass as `--model` from, in order:
+
+1. **The scheduled job's own `model`.** A schedule fired with a `model` set stamps it onto the envelope as `metadata.schedule_model`; `pool-route-resolve` (Stage 72) carries it into `PoolManager.resolveRoute()`. See `docs/SCHEDULING.md`.
+2. **An agent-scoped override** — `agent:<pool agent_id>` (the pool's logical id, e.g. `agent:peggy`, not a specific pane) in the override store.
+3. **A global override.**
+4. **The pool's own `model`** (`adapters.cc-pool.<name>.model`).
+5. **Nothing** — no `--model` flag at all. The CLI falls back to whatever `model` is set in `~/.claude/settings.json`, and any interactive `/model` typed into ANY Claude session (this pool's or an entirely unrelated one) rewrites that file — so which model a pane actually runs can change for reasons that have nothing to do with this pool's own configuration. bus-core logs a startup warning (`[pool:<id>] No 'model' configured for this pool — ...`) for every configured pool whose `model` is unset, precisely because this fallback is a leak, not a feature.
+
+Overrides (steps 2–3) live in the same store `cc-headless` uses (`src/adapters/model-override-loader.ts`) — see `docs/MCP_TOOLS.md` and [HTTP_API.md](HTTP_API.md#model-overrides) for managing them. The resolved model, and which of the five steps produced it, is logged on every launch: `[pool:<id>] launching <pane> model=<m> (source=<s>)`.
+
+**The model is fixed per Claude session, not per message.** `--model` only takes effect at process start (fresh `--session-id`) or resume (`--resume`) — there is no way to change a running session's model mid-turn. `pool_leases.model` (migration 023) records what the pane's *current* session was actually launched with, so a `reuse` can compare against it without re-deriving anything.
+
+**Changing a job's model or an override takes effect on the next message**, even for a conversation whose pane is already leased — decision D2 ("apply at once"):
+
+- If the newly-resolved model differs from `pool_leases.model` for that pane, and the pane is between turns (no unhandled work — the same signal the [stall watchdog](#stall-watchdog) uses, `src/pool/unhandled-work.ts`), the pane is relaunched in place before the message is handed off: released with kill semantics (`Ctrl-C` then kill the window — the same as `on_evict: kill`, regardless of the pool's own `on_evict` setting), then relaunched with `--resume <same session id>` and the new `--model`. This is the same E48 launch path (ack handshake, readiness poll, cold-start "One moment…" placeholder) a fresh `bound`/`grow`/`evict` claim uses — from the outside, a model-switch relaunch looks exactly like any other cold start. `pool_leases.model` is updated once the relaunch confirms ready. A `pool_leases.model` of `NULL` counts as "unknown", not "no model" — it always mismatches a newly-resolved, defined model (covers a lease from before migration 023, or a pane launched before this feature existed), and is relaunched as if switching.
+- If a turn is in flight (unhandled work exists for the pane), the switch is deferred — the current message is delivered on the current model, unchanged, and bus-core logs that the switch is deferred to the pane's next message. A running turn is never interrupted to change the model.
+- Two messages for the same conversation arriving while a relaunch is in progress can't trigger two relaunches or get routed to a different pane: the relaunch first atomically claims the lease row (`leased` -> `launching`, scoped to that exact conversation), the same state a fresh claim already uses — a second concurrent call either loses that claim (and just returns the pane's id unchanged, letting the first call's relaunch finish) or, if it arrives before the claim, matches the row as still-`launching` for this conversation and is treated as a `reuse` rather than being sent to a different free pane.
+- If the relaunch itself fails, the pane is marked `dead` and the message is parked — the same failure path a fresh launch failure takes; `reconcileLiveness()` revives a `dead` pane back to `free` on the next sweep tick.
+
+**Using `/model` inside a pane is not a supported way to switch.** It only rewrites `~/.claude/settings.json` — exactly the leak this feature exists to close — and has no effect on what `PoolManager` resolves or persists to `pool_leases.model` for the next relaunch; a later resolution can silently override it back.
 
 ## Allocation and eviction
 
@@ -215,7 +238,7 @@ On the adapter side (`TelegramAdapter.appendToolCallLine`, `src/adapters/telegra
 ```
 /pool
 -> Pool peggy (agent:peggy) — 2 panes
-     peggy-pool-1: leased  conv=a3f9c21e  idle=12s
+     peggy-pool-1: leased  conv=a3f9c21e  model=claude-sonnet-5  idle=12s
      peggy-pool-2: free
      parked: 1 (oldest 42s)
 ```
@@ -240,6 +263,7 @@ The same data as JSON, optionally filtered with `?pool=<agent id>`:
           "state": "leased",
           "conversation_id": "a3f9c21e...",
           "claude_session_id": "b7e1...",
+          "model": "claude-sonnet-5",
           "leased_at": "2026-09-17T10:00:00.000Z",
           "last_activity_at": "2026-09-17T10:05:00.000Z"
         },
@@ -249,6 +273,7 @@ The same data as JSON, optionally filtered with `?pool=<agent id>`:
           "state": "free",
           "conversation_id": null,
           "claude_session_id": null,
+          "model": null,
           "leased_at": null,
           "last_activity_at": null
         }

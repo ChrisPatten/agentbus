@@ -75,6 +75,15 @@ export interface PoolLeaseRow {
   last_activity_at: string | null;
   /** Set by the Stop hook (`markTurnEnded`); cleared when the pane is (re)assigned or released. */
   last_turn_ended_at: string | null;
+  /**
+   * The model this pane's current Claude session was launched with (E53,
+   * migration 023). `null` means either the pane is free/unclaimed, or it
+   * was launched with no `--model` flag (CLI default via `~/.claude/settings.json`).
+   * Cleared on `release()`, reset to `NULL` on every fresh claim (`bound`/
+   * `evict`), and written by `PoolManager.resolveRoute()` once a launch (or
+   * relaunch — see S53.5) actually completes, via `setModel()`.
+   */
+  model: string | null;
 }
 
 /**
