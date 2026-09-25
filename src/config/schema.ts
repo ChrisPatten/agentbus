@@ -683,9 +683,13 @@ const ScheduleEntrySchema = z
     sender: z.string(),
     prompt: z.string(),
     label: z.string().optional(),
-    topic: z.string().default('general'),
+    // No default here (E53 D1) — undefined means "the scheduler decides",
+    // which for a cron entry is sched:<label-slug>; see default-topic.ts.
+    topic: z.string().min(1).optional(),
     priority: z.enum(['normal', 'high', 'urgent']).default('normal'),
     max_fires: z.number().int().positive().optional(),
+    /** Model this job's pane should launch with, e.g. "haiku" (E53). Unset = pool/override default. */
+    model: z.string().min(1).max(100).optional(),
   })
   .refine((d) => !!(d.cron ?? d.fire_at), {
     message: 'Each schedule entry must specify either cron or fire_at',

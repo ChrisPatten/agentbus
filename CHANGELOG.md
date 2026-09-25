@@ -11,6 +11,28 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 ## [Unreleased]
 
 ### Added
+- **Per-job model and dedicated conversation for scheduled jobs (E53 S53.3).**
+  `scheduled_items` gains a `model` column (migration 022). `POST
+  /api/v1/schedules`, `PATCH /api/v1/schedules/:id`, and the
+  `schedule_message`/`update_schedule` MCP tools accept `model`; a fire stamps
+  it onto the envelope as `metadata.schedule_model` for the pool/headless
+  adapters to resolve. A new `update_schedule` MCP tool patches `label`,
+  `topic`, `model`, `max_fires`, and `status`. Schedule list/get output and
+  `/schedule list` now show `model`.
+- Config-defined schedules (`config.yaml` `schedules:`) also accept an
+  optional `model` field.
+
+### Changed
+- **New recurring schedules default to their own topic (E53 S53.3, D1).** A
+  `type: cron` schedule created without an explicit `topic` — via `POST
+  /api/v1/schedules`, `schedule_message`, or `config.yaml` — now defaults to
+  `sched:<label-slug>` (or `sched:<id8>` with no label) instead of `general`,
+  so it gets its own conversation and pane rather than sharing one with
+  whatever else uses `general`. One-shot (`type: once`) schedules still
+  default to `general`. Existing schedules are unaffected; move one with
+  `PATCH /api/v1/schedules/:id`. See the "Topic and model" section of
+  [docs/SCHEDULING.md](docs/SCHEDULING.md).
+
 - **Stall watchdog for `cc-pool` panes, observe-only (E52, S52.1–S52.2).**
   A leased pane with unhandled work and a screen unchanged for
   `watchdog.stall_after_ms` (default 5 minutes) is recorded as an incident in

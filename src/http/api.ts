@@ -73,6 +73,7 @@ import { LeaseStore } from '../pool/lease-store.js';
 import { computeConversationId } from '../pipeline/conversation-id.js';
 import type { PoolManager } from '../pool/pool-manager.js';
 import { ApprovalStore } from '../approvals/store.js';
+import { defaultScheduleTopic } from '../scheduler/default-topic.js';
 import { resolveApprovalTarget } from '../approvals/resolve-target.js';
 import { dispatchApproval } from '../approvals/dispatch.js';
 import { resolveApproval } from '../approvals/resolve.js';
@@ -1584,12 +1585,15 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       channel: z.string().min(1),
       sender: z.string().min(1),
       payload_body: z.string().min(1),
-      topic: z.string().default('general'),
+      // No default here (E53 D1) — omitted means "the scheduler decides":
+      // sched:<label-slug> for a cron schedule, general for a one-shot.
+      topic: z.string().min(1).optional(),
       priority: z.enum(['normal', 'high', 'urgent']).default('normal'),
       label: z.string().optional(),
       created_by: z.string().default('http'),
       max_fires: z.number().int().positive().optional(),
       stale_after_ms: z.number().int().positive().optional(),
+      model: z.string().min(1).max(100).optional(),
     })
     .refine(
       (d) => {
@@ -1607,6 +1611,9 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     label: z.string().optional(),
     max_fires: z.number().int().positive().nullable().optional(),
     status: z.enum(['active', 'paused']).optional(),
+    topic: z.string().min(1).optional(),
+    /** null clears the job's model, falling back to the agent/global override or the pool's model. */
+    model: z.string().min(1).max(100).nullable().optional(),
   });
 
   // POST /api/v1/schedules — create a schedule
@@ -1647,13 +1654,16 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
 
     const id = randomUUID();
     const now = new Date().toISOString();
+    // E53 D1: a recurring schedule with no explicit topic gets its own
+    // sched:<slug> conversation; one-shots stay in general.
+    const topic = data.topic ?? defaultScheduleTopic(data.type, data.label ?? null, id);
 
     db.prepare(
       `INSERT INTO scheduled_items
          (id, type, cron_expr, timezone, fire_at, channel, sender, payload_body,
-          topic, priority, label, created_at, created_by, fire_count, max_fires,
+          topic, priority, label, model, created_at, created_by, fire_count, max_fires,
           stale_after_ms, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'active')`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'active')`,
     ).run(
       id,
       data.type,
@@ -1663,16 +1673,17 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       data.channel,
       data.sender,
       data.payload_body,
-      data.topic,
+      topic,
       data.priority,
       data.label ?? null,
+      data.model ?? null,
       now,
       data.created_by,
       data.max_fires ?? null,
       data.stale_after_ms ?? null,
     );
 
-    return reply.status(201).send({ ok: true, id, fire_at: fireAt });
+    return reply.status(201).send({ ok: true, id, fire_at: fireAt, topic });
   });
 
   // GET /api/v1/schedules — list schedules
@@ -1738,7 +1749,7 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     if (!parsed.success) {
       return reply.status(400).send({ ok: false, error: parsed.error.message });
     }
-    const { label, max_fires, status: newStatus } = parsed.data;
+    const { label, max_fires, status: newStatus, topic, model } = parsed.data;
 
     const existing = db
       .prepare(`SELECT status, fire_count FROM scheduled_items WHERE id = ?`)
@@ -1758,6 +1769,8 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     const values: unknown[] = [];
 
     if (label !== undefined) { updates.push('label = ?'); values.push(label); }
+    if (topic !== undefined) { updates.push('topic = ?'); values.push(topic); }
+    if (model !== undefined) { updates.push('model = ?'); values.push(model); }
     if (max_fires !== undefined) {
       updates.push('max_fires = ?');
       values.push(max_fires);

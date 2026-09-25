@@ -257,7 +257,7 @@ async function scheduleHandler(
 
     const rows = deps.db
       .prepare(
-        `SELECT id, type, label, fire_at, cron_expr, timezone, fire_count, max_fires, status
+        `SELECT id, type, label, fire_at, cron_expr, timezone, fire_count, max_fires, status, model
          FROM scheduled_items
          WHERE channel = ? AND status = 'active'
          ORDER BY fire_at ASC LIMIT 20`,
@@ -272,6 +272,7 @@ async function scheduleHandler(
       fire_count: number;
       max_fires: number | null;
       status: string;
+      model: string | null;
     }>;
 
     if (rows.length === 0) {
@@ -286,7 +287,8 @@ async function scheduleHandler(
       const tz = row.timezone && row.timezone !== 'UTC' ? ` (${row.timezone})` : ' UTC';
       const fires =
         row.max_fires !== null ? `${row.fire_count}/${row.max_fires}` : `${row.fire_count} fired`;
-      lines.push(`  ${shortId}  ${name}  next: ${nextFire}${tz}  (${fires})`);
+      const model = row.model ? `  [${row.model}]` : '';
+      lines.push(`  ${shortId}  ${name}  next: ${nextFire}${tz}  (${fires})${model}`);
     }
     lines.push('\nUse /schedule cancel <id> to cancel a schedule.');
     return { body: lines.join('\n') };

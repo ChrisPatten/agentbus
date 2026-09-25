@@ -11,6 +11,8 @@ export interface ScheduledItem {
   topic: string;
   priority: 'normal' | 'high' | 'urgent';
   label: string | null;
+  /** Model this job's pane should launch with, e.g. "haiku". NULL = no job-level model (E53). */
+  model: string | null;
   created_at: string;
   created_by: string;
   last_fired_at: string | null;

@@ -1578,6 +1578,137 @@ describe('Schedule CRUD endpoints', () => {
     expect(row.stale_after_ms).toBe(45 * 60 * 1000);
   });
 
+  // ── E53 S53.3: model + default topic ──────────────────────────────────────
+
+  it('creates a schedule with a model and persists it', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/schedules',
+      payload: {
+        type: 'once',
+        fire_at: futureAt,
+        channel: 'telegram',
+        sender: 'contact:chris',
+        payload_body: 'Wake up',
+        model: 'haiku',
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const body = JSON.parse(res.body) as { id: string };
+    const row = db.prepare(`SELECT model FROM scheduled_items WHERE id = ?`).get(body.id) as {
+      model: string | null;
+    };
+    expect(row.model).toBe('haiku');
+  });
+
+  it('rejects an empty-string model', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/schedules',
+      payload: {
+        type: 'once',
+        fire_at: futureAt,
+        channel: 'telegram',
+        sender: 'contact:chris',
+        payload_body: 'Wake up',
+        model: '',
+      },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('rejects a model longer than 100 characters', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/schedules',
+      payload: {
+        type: 'once',
+        fire_at: futureAt,
+        channel: 'telegram',
+        sender: 'contact:chris',
+        payload_body: 'Wake up',
+        model: 'x'.repeat(101),
+      },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('a cron schedule created without a topic gets sched:<label-slug>', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/schedules',
+      payload: {
+        type: 'cron',
+        cron_expr: '0 8 * * 1-5',
+        channel: 'telegram',
+        sender: 'system:scheduler',
+        payload_body: 'Check the inbox',
+        label: 'Email Watch!!',
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const body = JSON.parse(res.body) as { id: string; topic: string };
+    expect(body.topic).toBe('sched:email-watch');
+    const row = db.prepare(`SELECT topic FROM scheduled_items WHERE id = ?`).get(body.id) as {
+      topic: string;
+    };
+    expect(row.topic).toBe('sched:email-watch');
+  });
+
+  it('a cron schedule created without a topic or label falls back to sched:<id8>', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/schedules',
+      payload: {
+        type: 'cron',
+        cron_expr: '0 8 * * 1-5',
+        channel: 'telegram',
+        sender: 'system:scheduler',
+        payload_body: 'Check the inbox',
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const body = JSON.parse(res.body) as { id: string; topic: string };
+    expect(body.topic).toBe(`sched:${body.id.slice(0, 8)}`);
+  });
+
+  it('a once schedule created without a topic stays general', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/schedules',
+      payload: {
+        type: 'once',
+        fire_at: futureAt,
+        channel: 'telegram',
+        sender: 'contact:chris',
+        payload_body: 'Reminder',
+        label: 'Some label',
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const body = JSON.parse(res.body) as { id: string; topic: string };
+    expect(body.topic).toBe('general');
+  });
+
+  it('honors an explicit topic over the D1 default', async () => {
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/schedules',
+      payload: {
+        type: 'cron',
+        cron_expr: '0 8 * * 1-5',
+        channel: 'telegram',
+        sender: 'system:scheduler',
+        payload_body: 'Check the inbox',
+        label: 'Email Watch',
+        topic: 'custom-topic',
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const body = JSON.parse(res.body) as { topic: string };
+    expect(body.topic).toBe('custom-topic');
+  });
+
   it('rejects stale_after_ms set alongside type: cron', async () => {
     const res = await server.inject({
       method: 'POST',
@@ -1745,6 +1876,66 @@ describe('Schedule CRUD endpoints', () => {
     const { id } = JSON.parse(createRes.body) as { id: string };
 
     const res = await server.inject({ method: 'PATCH', url: `/api/v1/schedules/${id}`, payload: {} });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('updates topic and model on an active schedule', async () => {
+    const createRes = await server.inject({
+      method: 'POST',
+      url: '/api/v1/schedules',
+      payload: { type: 'once', fire_at: futureAt, channel: 'telegram', sender: 'contact:chris', payload_body: 'Q' },
+    });
+    const { id } = JSON.parse(createRes.body) as { id: string };
+
+    const res = await server.inject({
+      method: 'PATCH',
+      url: `/api/v1/schedules/${id}`,
+      payload: { topic: 'sched:custom', model: 'haiku' },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body) as { ok: boolean; schedule: { topic: string; model: string } };
+    expect(body.schedule.topic).toBe('sched:custom');
+    expect(body.schedule.model).toBe('haiku');
+  });
+
+  it('clears model via PATCH with model: null', async () => {
+    const createRes = await server.inject({
+      method: 'POST',
+      url: '/api/v1/schedules',
+      payload: {
+        type: 'once',
+        fire_at: futureAt,
+        channel: 'telegram',
+        sender: 'contact:chris',
+        payload_body: 'R',
+        model: 'haiku',
+      },
+    });
+    const { id } = JSON.parse(createRes.body) as { id: string };
+
+    const res = await server.inject({
+      method: 'PATCH',
+      url: `/api/v1/schedules/${id}`,
+      payload: { model: null },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body) as { ok: boolean; schedule: { model: string | null } };
+    expect(body.schedule.model).toBeNull();
+  });
+
+  it('rejects an empty-string topic via PATCH', async () => {
+    const createRes = await server.inject({
+      method: 'POST',
+      url: '/api/v1/schedules',
+      payload: { type: 'once', fire_at: futureAt, channel: 'telegram', sender: 'contact:chris', payload_body: 'S' },
+    });
+    const { id } = JSON.parse(createRes.body) as { id: string };
+
+    const res = await server.inject({
+      method: 'PATCH',
+      url: `/api/v1/schedules/${id}`,
+      payload: { topic: '' },
+    });
     expect(res.statusCode).toBe(400);
   });
 
