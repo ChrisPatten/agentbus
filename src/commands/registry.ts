@@ -47,12 +47,22 @@ export interface SlashCommandContext {
   config: AppConfig;
 }
 
+/** A PNG a command wants delivered as an image reply. */
+export interface CommandImage {
+  png: Buffer;
+  caption: string;
+  /** Sent as plain text instead when the originating adapter can't send images (or the send fails). */
+  fallbackText: string;
+}
+
 /** Response returned by a command handler */
 export interface CommandResponse {
   /** Omit to send no reply at all — e.g. when a side effect (like finalizing
    * a Telegram draft) already gave the user their confirmation. */
   body?: string;
   metadata?: Record<string, unknown>;
+  /** Images to send as photo replies, in order; `body`, if also set, is sent as text alongside them. */
+  images?: CommandImage[];
 }
 
 /** Async handler function — receives parsed args array and full context */

@@ -59,6 +59,12 @@ export interface AdapterInstance {
   stop(): Promise<void>;
   health(): Promise<HealthStatus>;
   send(envelope: MessageEnvelope): Promise<DeliveryResult>;
+  /**
+   * Send a PNG as an image reply to `envelope`'s recipient/channel/topic
+   * (routing resolved exactly as `send()` does). Optional — adapters without
+   * it get the caller's plain-text fallback instead.
+   */
+  sendImage?(envelope: MessageEnvelope, image: { png: Buffer; caption: string; filename: string }): Promise<DeliveryResult>;
   poll?(): Promise<MessageEnvelope[]>;
   markRead?(platformMessageId: string): Promise<void>;
   react?(platformMessageId: string, reaction: string): Promise<void>;

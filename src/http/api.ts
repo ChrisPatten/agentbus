@@ -60,7 +60,7 @@ import type { MessageEnvelope } from '../types/envelope.js';
 import type { PipelineEngine } from '../pipeline/engine.js';
 import type { PipelineContext } from '../pipeline/types.js';
 import type Database from 'better-sqlite3';
-import type { CommandRegistry, SlashCommandContext } from '../commands/registry.js';
+import type { CommandImage, CommandRegistry, SlashCommandContext } from '../commands/registry.js';
 import { createSafeDatabase } from '../db/safe-database.js';
 import { logOutboundTranscript } from '../pipeline/outbound-transcript.js';
 import { logWebhookRequest } from './webhook-log.js';
@@ -245,6 +245,7 @@ export async function sendCommandResponse(
   commandName: string,
   responseBody: string,
   extraMetadata: Record<string, unknown> = {},
+  images: CommandImage[] = [],
 ): Promise<void> {
   const originAdapter = deps.registry?.lookupPrimaryByChannel(result.envelope.channel);
   const adapterId = originAdapter?.id ?? 'unknown';
@@ -256,7 +257,7 @@ export async function sendCommandResponse(
 
   const metadata = { command_response: true, command: commandName, ...extraMetadata };
 
-  const responseEnvelope: MessageEnvelope = {
+  const buildEnvelope = (body: string): MessageEnvelope => ({
     id: randomUUID(),
     timestamp: new Date().toISOString(),
     channel: result.envelope.channel,
@@ -265,14 +266,43 @@ export async function sendCommandResponse(
     recipient: result.envelope.sender,
     reply_to: result.envelope.id,
     priority: 'normal',
-    payload: { type: 'text', body: responseBody },
+    payload: { type: 'text', body },
     metadata,
+  });
+
+  const sendText = async (body: string, envelope: MessageEnvelope = buildEnvelope(body)): Promise<void> => {
+    try {
+      await originAdapter.send(envelope);
+    } catch (err) {
+      console.error(`[inbound] Failed to send command response via ${adapterId}: ${String(err)}`);
+    }
   };
 
-  try {
-    await originAdapter.send(responseEnvelope);
-  } catch (err) {
-    console.error(`[inbound] Failed to send command response via ${adapterId}: ${String(err)}`);
+  const responseEnvelope = buildEnvelope(responseBody);
+  if (responseBody.length > 0 || images.length === 0) {
+    await sendText(responseBody, responseEnvelope);
+  }
+
+  // Image replies (e.g. /pane). An adapter without sendImage, or a failed
+  // image send, gets the image's plain-text fallback instead — the reply is
+  // never silently dropped. Image bytes and fallback text are deliberately
+  // not logged or written to the transcript.
+  for (const [i, image] of images.entries()) {
+    let sent = false;
+    if (originAdapter.sendImage) {
+      try {
+        const res = await originAdapter.sendImage(buildEnvelope(image.caption), {
+          png: image.png,
+          caption: image.caption,
+          filename: `${commandName}-${i + 1}.png`,
+        });
+        sent = res.success;
+        if (!res.success) console.error(`[inbound] Image reply via ${adapterId} failed: ${res.error ?? 'unknown error'}`);
+      } catch (err) {
+        console.error(`[inbound] Failed to send image reply via ${adapterId}: ${String(err)}`);
+      }
+    }
+    if (!sent) await sendText(image.fallbackText);
   }
 
   // Log command response to transcripts for auditability.
@@ -288,7 +318,7 @@ export async function sendCommandResponse(
         sessionId: result.sessionId,
         channel: result.envelope.channel,
         contactId,
-        body: responseBody,
+        body: responseBody.length > 0 || images.length === 0 ? responseBody : `[${images.length} image reply(s) sent]`,
         metadata,
       });
     } catch (err) {
@@ -398,15 +428,18 @@ export async function processInbound(
           };
 
           let responseBody: string | undefined;
+          let responseImages: CommandImage[] | undefined;
           try {
             const response = await cmd.handler([body.trim()], cmdCtx);
             responseBody = response.body;
+            responseImages = response.images;
           } catch (err) {
             responseBody = `Command error: ${String(err)}`;
           }
 
+          if (responseImages?.length) responseBody ??= '';
           if (responseBody !== undefined) {
-            await sendCommandResponse(deps, result, followUp.command, responseBody);
+            await sendCommandResponse(deps, result, followUp.command, responseBody, {}, responseImages);
           }
 
           return { ok: true, queued: false, reason: 'command_handled' };
@@ -444,11 +477,13 @@ export async function processInbound(
     };
 
     let responseBody: string | undefined;
+    let responseImages: CommandImage[] | undefined;
 
     if (cmd && cmd.scope === 'bus') {
       try {
         const response = await cmd.handler(result.slashCommand.args, cmdCtx);
         responseBody = response.body;
+        responseImages = response.images;
       } catch (err) {
         responseBody = `Command error: ${String(err)}`;
       }
@@ -457,8 +492,9 @@ export async function processInbound(
     }
     // scope: 'agent' falls through to normal fan-out enqueue below
 
+    if (responseImages?.length) responseBody ??= '';
     if (responseBody !== undefined) {
-      await sendCommandResponse(deps, result, commandName, responseBody);
+      await sendCommandResponse(deps, result, commandName, responseBody, {}, responseImages);
       return { ok: true, queued: false, reason: 'command_handled' };
     }
   }

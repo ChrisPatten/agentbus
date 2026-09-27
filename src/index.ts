@@ -47,6 +47,7 @@ import { createCommandSystem } from './commands/index.js';
 import { createTorrentCommand } from './commands/torrent.js';
 import { createCostCommand } from './commands/cost.js';
 import { createPoolCommand } from './commands/pool.js';
+import { createPaneCommand } from './commands/pane.js';
 import { Summarizer } from './memory/summarizer.js';
 import { SessionTracker } from './memory/session-tracker.js';
 import { Scheduler } from './scheduler/scheduler.js';
@@ -103,6 +104,7 @@ const { registry: commandRegistry, pauseSet, headlessControl } = createCommandSy
 commandRegistry.register(createTorrentCommand({ commandRegistry, db, registry }));
 commandRegistry.register(createCostCommand({ db, headlessControl }));
 commandRegistry.register(createPoolCommand({ poolManagers }));
+commandRegistry.register(createPaneCommand({ poolManagers }));
 
 const pipeline = new PipelineEngine();
 pipeline.use({ slot: 10, name: 'normalize',        stage: normalize });
