@@ -52,6 +52,7 @@ export function createPoolRouteResolve(poolManagers: Map<string, PoolManager>): 
         channel: ctx.envelope.channel,
         topic: ctx.envelope.topic,
         scheduleModel,
+        background: ctx.envelope.metadata?.['scheduled'] === true,
       });
       // Replace the array element with a fresh object rather than mutating
       // `route` in place — defense in depth. Even with route-resolve.ts now

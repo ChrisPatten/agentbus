@@ -104,6 +104,7 @@ describe('pool-route-resolve stage', () => {
       channel: 'telegram',
       topic: 'general',
       scheduleModel: null,
+      background: false,
     });
   });
 
@@ -121,7 +122,16 @@ describe('pool-route-resolve stage', () => {
       channel: 'telegram',
       topic: 'general',
       scheduleModel: 'haiku',
+      background: false,
     });
+  });
+
+  it('flags scheduler-fired envelopes (metadata.scheduled) as background', async () => {
+    const manager = makeFakeManager('agent:peggy-pool-3');
+    const stage = createPoolRouteResolve(new Map([['agent:peggy', manager]]));
+    const routes: RouteTarget[] = [{ adapterId: 'cc-pool', recipientId: 'agent:peggy' }];
+    await stage(makeCtx({ routes, conversationId: 'conv-1' }, { metadata: { scheduled: true } }));
+    expect(manager.resolveRoute).toHaveBeenCalledWith('conv-1', expect.objectContaining({ background: true }));
   });
 
   it('normalizes an absent, non-string, or empty-string metadata.schedule_model to null', async () => {

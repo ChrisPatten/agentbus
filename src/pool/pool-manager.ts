@@ -23,7 +23,8 @@
  * pane mechanics go through the injected `PaneLauncher` seam.
  */
 import { randomUUID } from 'node:crypto';
-import { tmpdir } from 'node:os';
+import { existsSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type Database from 'better-sqlite3';
 import { getCcPoolInstances, type AppConfig, type CcPoolInstanceConfig } from '../config/schema.js';
@@ -67,6 +68,13 @@ export type PoolResolvedModel = ResolvedModel;
  * behavior. `createPoolManagers()` below — the factory `src/index.ts`
  * actually calls — wires the real, override-aware resolver instead.
  */
+function defaultTranscriptExists(sessionId: string, cwd: string): boolean {
+  // Claude names the project dir after the cwd with every non-alphanumeric
+  // character replaced by '-'.
+  const slug = cwd.replace(/[^a-zA-Z0-9]/g, '-');
+  return existsSync(join(homedir(), '.claude', 'projects', slug, `${sessionId}.jsonl`));
+}
+
 function defaultResolveModel(cfgModel: string | undefined): (scheduleModel: string | null) => PoolResolvedModel {
   return (scheduleModel) => resolveModelFromStore({ scheduleModel, configModel: cfgModel });
 }
@@ -156,6 +164,12 @@ export interface PoolManagerDeps {
    * file — gets the narrower default above instead.
    */
   resolveModel?: (scheduleModel: string | null) => PoolResolvedModel;
+  /**
+   * Whether Claude has a resumable transcript for `sessionId` under `cwd`.
+   * Defaults to checking `~/.claude/projects/<cwd-slug>/<id>.jsonl`; tests
+   * inject a stub.
+   */
+  transcriptExists?: (sessionId: string, cwd: string) => boolean;
 }
 
 /**
@@ -166,6 +180,16 @@ export interface PoolManagerDeps {
 interface ActiveSessionRow {
   id: string;
   claude_session_id: string | null;
+}
+
+/** Per-message context `resolveRoute()` needs to launch a pane. */
+export interface PoolPromptContext {
+  contact_id: string;
+  channel: string;
+  topic?: string;
+  scheduleModel?: string | null;
+  /** True for scheduler-fired (background) messages — suppresses the "One moment" placeholder. */
+  background?: boolean;
 }
 
 export class PoolManager {
@@ -193,6 +217,7 @@ export class PoolManager {
    * wiring reaches an agent/global override — without needing a full launch.
    */
   readonly resolveModelFn: (scheduleModel: string | null) => PoolResolvedModel;
+  private readonly transcriptExistsFn: (sessionId: string, cwd: string) => boolean;
   /**
    * E53 (follow-up fix, round 2) — the in-flight release-then-launch
    * operation per pane, keyed by `pane_id`. Set by `trackPaneOperation()`
@@ -229,6 +254,7 @@ export class PoolManager {
     this.fetchFn = deps.fetchFn ?? fetch;
     this.sweepIntervalMs = deps.sweepIntervalMs ?? DEFAULT_SWEEP_INTERVAL_MS;
     this.resolveModelFn = deps.resolveModel ?? defaultResolveModel(deps.cfg.model);
+    this.transcriptExistsFn = deps.transcriptExists ?? defaultTranscriptExists;
 
     // E53 S53.4 — startup warning: no pane launch should silently depend on
     // ~/.claude/settings.json for its model. Logged once, at construction,
@@ -361,7 +387,7 @@ export class PoolManager {
    */
   async resolveRoute(
     conversationId: string,
-    promptContext: { contact_id: string; channel: string; topic?: string; scheduleModel?: string | null },
+    promptContext: PoolPromptContext,
   ): Promise<string> {
     try {
       const result = this.leaseStore.acquire(this.poolId, conversationId, {
@@ -408,8 +434,7 @@ export class PoolManager {
       const lease = result.lease;
 
       const priorRow = this.getActiveSessionRow(conversationId);
-      const sessionId = priorRow?.claude_session_id ?? randomUUID();
-      const resume = priorRow?.claude_session_id != null;
+      const { sessionId, resume } = this.pickSession(priorRow?.claude_session_id ?? null);
 
       // E53 S53.4 — resolve BEFORE launching, so the very first launch of a
       // pane already carries the right --model (never a plain cfg.model
@@ -423,7 +448,9 @@ export class PoolManager {
       // immediately instead of silence; the pane's own tool-status hook (or
       // its final reply, if no tool calls happen) then replaces it once real
       // activity starts. Fire-and-forget — must never add to launch latency.
-      this.notifyColdStart(promptContext.channel, promptContext.contact_id, promptContext.topic);
+      if (!promptContext.background) {
+        this.notifyColdStart(promptContext.channel, promptContext.contact_id, promptContext.topic);
+      }
 
       // E53 (follow-up fix, round 2) — trackPaneOperation() registers this
       // pane's in-flight entry SYNCHRONOUSLY, right now, before the 'evict'
@@ -562,10 +589,26 @@ export class PoolManager {
    * doc comment for why this can't result in two relaunches or two panes
    * for one conversation.
    */
+  /**
+   * Resume `candidate` only if Claude still has its transcript on disk.
+   * `claude --resume <id>` exits immediately ("No conversation found") for a
+   * missing transcript, so the pane never registers and every retry fails the
+   * same way. Fall back to a fresh session id instead.
+   */
+  private pickSession(candidate: string | null): { sessionId: string; resume: boolean } {
+    if (candidate == null) return { sessionId: randomUUID(), resume: false };
+    const cwd = this.cfg.working_dir ?? process.cwd();
+    if (this.transcriptExistsFn(candidate, cwd)) return { sessionId: candidate, resume: true };
+    console.warn(
+      `[pool:${this.poolId}] No transcript for Claude session ${candidate} in ${cwd} — launching a fresh session instead of --resume`,
+    );
+    return { sessionId: randomUUID(), resume: false };
+  }
+
   private async handleReuse(
     conversationId: string,
     lease: PoolLeaseRow,
-    promptContext: { contact_id: string; channel: string; topic?: string; scheduleModel?: string | null },
+    promptContext: PoolPromptContext,
   ): Promise<string> {
     const resolved = this.resolveModelFn(promptContext.scheduleModel ?? null);
     const mismatch = resolved.model !== undefined && resolved.model !== lease.model;
@@ -602,10 +645,11 @@ export class PoolManager {
     // fails outright, so launch fresh rather than gamble). Mirrors
     // resolveRoute()'s own bound-path priorRow/resume logic exactly.
     const priorRow = this.getActiveSessionRow(conversationId);
-    const sessionId = lease.claude_session_id ?? priorRow?.claude_session_id ?? randomUUID();
-    const resume = lease.claude_session_id != null || priorRow?.claude_session_id != null;
+    const { sessionId, resume } = this.pickSession(lease.claude_session_id ?? priorRow?.claude_session_id ?? null);
 
-    this.notifyColdStart(promptContext.channel, promptContext.contact_id, promptContext.topic);
+    if (!promptContext.background) {
+      this.notifyColdStart(promptContext.channel, promptContext.contact_id, promptContext.topic);
+    }
 
     // E53 (follow-up fix, round 2) — trackPaneOperation() registers this
     // pane's in-flight entry SYNCHRONOUSLY, right after beginRelaunch()
@@ -885,8 +929,9 @@ export class PoolManager {
    * state for any pane that hasn't been claimed yet (`ensureStarted()` only
    * seeds DB rows; tmux windows/claude processes are created lazily on
    * first claim — see that method's own doc comment), not a problem to fix.
-   * A 'launching' row is left alone too — it's mid-claim, handled by
-   * whichever `resolveRoute()` call is already in flight for it.
+   * A 'launching' row is left alone too while its launch is in flight — it's
+   * mid-claim, handled by whichever `resolveRoute()` call owns it. One with
+   * no in-flight operation is orphaned (restart mid-launch) and is released.
    */
   async reconcileLiveness(): Promise<void> {
     const allRows = this.leaseStore.list(this.poolId);
@@ -920,6 +965,28 @@ export class PoolManager {
         await this.notifySystem(body);
       } catch (err) {
         console.error(`[pool:${this.poolId}] reconcileLiveness: failed to reconcile pane ${row.pane_id}:`, err);
+      }
+    }
+
+    // A 'launching' row with no in-flight operation is orphaned: the launch
+    // that claimed it died with the previous process (a restart mid-launch).
+    // trackPaneOperation() registers in-flight entries synchronously at claim
+    // time, so a live claim always has one. Left alone, every message for
+    // that conversation would wait on nothing and never be routed.
+    const orphanedRows = allRows.filter((row) => row.state === 'launching' && !this.inFlightLaunches.has(row.pane_id));
+    for (const row of orphanedRows) {
+      try {
+        try {
+          await this.tmux.killWindow(row.pane_id);
+        } catch (err) {
+          console.error(`[pool:${this.poolId}] reconcileLiveness: killWindow failed for orphaned pane ${row.pane_id}:`, err);
+        }
+        this.leaseStore.release(this.poolId, row.pane_id);
+        console.warn(
+          `[pool:${this.poolId}] Released orphaned 'launching' pane ${row.pane_id} (conversation ${row.conversation_id ?? 'unknown'})`,
+        );
+      } catch (err) {
+        console.error(`[pool:${this.poolId}] reconcileLiveness: failed to release orphaned pane ${row.pane_id}:`, err);
       }
     }
 

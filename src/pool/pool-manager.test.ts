@@ -65,7 +65,7 @@ function makeFakeLauncher() {
 function makeManager(cfgOverrides: Partial<CcPoolInstanceConfig> = {}, db: Database.Database = makeDb()) {
   const cfg = makeCfg(cfgOverrides);
   const paneLauncher = makeFakeLauncher();
-  const manager = new PoolManager({ cfg, db, busBaseUrl: 'http://127.0.0.1:3000', paneLauncher });
+  const manager = new PoolManager({ transcriptExists: () => true, cfg, db, busBaseUrl: 'http://127.0.0.1:3000', paneLauncher });
   return { manager, paneLauncher, db, cfg };
 }
 
@@ -253,7 +253,7 @@ describe('PoolManager', () => {
       const cfg = makeCfg({ panes: 2 });
       const paneLauncher = makeFakeLauncher();
       const fetchFn = makeFakeFetch();
-      const manager = new PoolManager({
+      const manager = new PoolManager({ transcriptExists: () => true,
         cfg,
         db,
         busBaseUrl: 'http://127.0.0.1:3000',
@@ -276,12 +276,32 @@ describe('PoolManager', () => {
       });
     });
 
+    it('background: scheduler-fired cold start never posts the placeholder', async () => {
+      const db = makeDb();
+      const cfg = makeCfg({ panes: 2 });
+      const paneLauncher = makeFakeLauncher();
+      const fetchFn = makeFakeFetch();
+      const manager = new PoolManager({ transcriptExists: () => true,
+        cfg,
+        db,
+        busBaseUrl: 'http://127.0.0.1:3000',
+        paneLauncher,
+        fetchFn: fetchFn as unknown as typeof fetch,
+      });
+      await manager.ensureStarted();
+
+      await manager.resolveRoute('conv-bg', { contact_id: 'alice', channel: 'telegram', background: true });
+
+      expect(paneLauncher.launch).toHaveBeenCalledTimes(1);
+      expect(fetchFn.mock.calls.filter(([url]) => String(url).endsWith('/tool-status'))).toHaveLength(0);
+    });
+
     it('reuse: never posts the cold-start placeholder — there is no launch to cover', async () => {
       const db = makeDb();
       const cfg = makeCfg({ panes: 2 });
       const paneLauncher = makeFakeLauncher();
       const fetchFn = makeFakeFetch();
-      const manager = new PoolManager({
+      const manager = new PoolManager({ transcriptExists: () => true,
         cfg,
         db,
         busBaseUrl: 'http://127.0.0.1:3000',
@@ -357,7 +377,7 @@ describe('PoolManager', () => {
           callOrder.push('release');
         }),
       };
-      const manager = new PoolManager({ cfg, db, busBaseUrl: 'http://127.0.0.1:3000', paneLauncher });
+      const manager = new PoolManager({ transcriptExists: () => true, cfg, db, busBaseUrl: 'http://127.0.0.1:3000', paneLauncher });
       await manager.ensureStarted();
 
       const first = await manager.resolveRoute('conv-old', { contact_id: 'alice', channel: 'telegram' });
@@ -519,7 +539,7 @@ describe('PoolManager', () => {
             ? { model: `override-for-${scheduleModel}`, source: 'schedule' }
             : { model: 'agent-override-model', source: 'agent-override' },
       );
-      const manager = new PoolManager({ cfg, db, busBaseUrl: 'http://127.0.0.1:3000', paneLauncher, resolveModel });
+      const manager = new PoolManager({ transcriptExists: () => true, cfg, db, busBaseUrl: 'http://127.0.0.1:3000', paneLauncher, resolveModel });
       await manager.ensureStarted();
 
       await manager.resolveRoute('conv-new', { contact_id: 'alice', channel: 'telegram' });
@@ -854,6 +874,23 @@ describe('PoolManager', () => {
       errSpy.mockRestore();
     });
 
+    it('missing transcript: launches a fresh session instead of --resume', async () => {
+      const { manager, paneLauncher, db } = makeManager();
+      (manager as unknown as { transcriptExistsFn: () => boolean }).transcriptExistsFn = () => false;
+      await manager.ensureStarted();
+      const now = new Date().toISOString();
+      db.prepare(
+        `INSERT INTO sessions (id, conversation_id, channel, contact_id, started_at, last_activity, message_count, claude_session_id)
+         VALUES ('sess-stale', 'conv-stale', 'telegram', 'alice', ?, ?, 1, 'stale-claude-id')`,
+      ).run(now, now);
+
+      await manager.resolveRoute('conv-stale', { contact_id: 'alice', channel: 'telegram' });
+
+      const launchArgs = paneLauncher.launch.mock.calls[0]![0];
+      expect(launchArgs.resume).toBe(false);
+      expect(launchArgs.sessionId).not.toBe('stale-claude-id');
+    });
+
     it('bad-resume-id fix: falls back to sessions.claude_session_id when pool_leases.claude_session_id is missing', async () => {
       const { manager, paneLauncher, db } = makeManager({ panes: 1, model: 'claude-old-model' });
       await manager.ensureStarted();
@@ -1013,7 +1050,7 @@ describe('PoolManager', () => {
       setModelOverride(db, 'claude-peggy-override', 'agent:peggy');
       const cfg = makeCfg({ panes: 1, agent_id: 'peggy', model: 'claude-config-model' });
       const paneLauncher = makeFakeLauncher();
-      const manager = new PoolManager({
+      const manager = new PoolManager({ transcriptExists: () => true,
         cfg,
         db,
         busBaseUrl: 'http://127.0.0.1:3000',
@@ -1039,7 +1076,7 @@ describe('PoolManager', () => {
       const paneLauncher = makeFakeLauncher();
       const tmux = makeFakeTmux();
       const fetchFn = makeFakeFetch();
-      const manager = new PoolManager({
+      const manager = new PoolManager({ transcriptExists: () => true,
         cfg,
         db,
         busBaseUrl: 'http://127.0.0.1:3000',
@@ -1097,6 +1134,27 @@ describe('PoolManager', () => {
       expect(freed?.state).toBe('free');
       expect(freed?.conversation_id).toBeNull();
       expect(fetchFn).toHaveBeenCalledTimes(1);
+    });
+
+    it('orphaned launching row (no in-flight launch): window killed, released back to free', async () => {
+      const { manager, tmux } = makeManagerWithTmux();
+      await manager.ensureStarted();
+      const bound = manager.leaseStore.acquire(manager.poolId, 'conv-1', {
+        poolAgentId: 'peggy',
+        panes: 2,
+        maxPanes: 2,
+        growth: 'fixed',
+        idleEvictMs: 1_800_000,
+      });
+      if (bound.kind !== 'bound') throw new Error(`expected bound, got ${bound.kind}`);
+      // Row is 'launching' and nothing registered an in-flight launch for it.
+
+      await manager.reconcileLiveness();
+
+      expect(tmux.killWindow).toHaveBeenCalledWith(bound.lease.pane_id);
+      const freed = manager.leaseStore.list(manager.poolId).find((r) => r.pane_id === bound.lease.pane_id);
+      expect(freed?.state).toBe('free');
+      expect(freed?.conversation_id).toBeNull();
     });
 
     it('free row: tmux.paneAlive() is never called', async () => {
@@ -1255,7 +1313,7 @@ describe('PoolManager', () => {
       const paneLauncher = makeFakeLauncher();
       const fetchFn = makeFakeFetch();
       const queue = new MessageQueue(db);
-      const manager = new PoolManager({
+      const manager = new PoolManager({ transcriptExists: () => true,
         cfg,
         db,
         busBaseUrl: 'http://127.0.0.1:3000',
@@ -1372,7 +1430,7 @@ describe('PoolManager', () => {
       const cfg = makeCfg({ panes: 1, ...cfgOverrides });
       const paneLauncher = makeFakeLauncher();
       const queue = new MessageQueue(db);
-      const manager = new PoolManager({ cfg, db, busBaseUrl: 'http://127.0.0.1:3000', paneLauncher, queue });
+      const manager = new PoolManager({ transcriptExists: () => true, cfg, db, busBaseUrl: 'http://127.0.0.1:3000', paneLauncher, queue });
       return { manager, queue };
     }
 
@@ -1413,7 +1471,7 @@ describe('PoolManager', () => {
       const db = makeDb();
       const cfg = makeCfg({ panes: 1 });
       const paneLauncher = makeFakeLauncher();
-      const manager = new PoolManager({
+      const manager = new PoolManager({ transcriptExists: () => true,
         cfg,
         db,
         busBaseUrl: 'http://127.0.0.1:3000',
@@ -1457,7 +1515,7 @@ describe('PoolManager', () => {
       const db = makeDb();
       const cfg = makeCfg({ panes: 1 });
       const paneLauncher = makeFakeLauncher();
-      const manager = new PoolManager({
+      const manager = new PoolManager({ transcriptExists: () => true,
         cfg,
         db,
         busBaseUrl: 'http://127.0.0.1:3000',
@@ -1484,7 +1542,7 @@ describe('PoolManager', () => {
       const db = makeDb();
       const cfg = makeCfg({ panes: 1 });
       const paneLauncher = makeFakeLauncher();
-      const manager = new PoolManager({
+      const manager = new PoolManager({ transcriptExists: () => true,
         cfg,
         db,
         busBaseUrl: 'http://127.0.0.1:3000',

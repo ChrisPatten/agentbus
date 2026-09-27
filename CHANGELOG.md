@@ -11,6 +11,14 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 ## [Unreleased]
 
 ### Fixed
+- **Pool lease orphaned by a restart mid-launch is now released.** A pane left
+  `launching` when bus-core restarted was never launched again, so every message
+  for its conversation went unanswered. The reconcile sweep now frees it.
+- **Pool panes no longer retry a `--resume` whose transcript is gone.** If Claude
+  has no transcript for a conversation's stored session id, the pane launches a
+  fresh session instead of failing readiness every minute and dropping messages.
+- **"One moment…" placeholder only for user-triggered cold starts.** Scheduler-fired
+  background jobs that start a new pool pane no longer post it.
 - **Pool panes no longer inherit Claude Code session markers.** When
   bus-core was started from inside a Claude Code session, every pane's
   `claude` ran as a "child session" with transcript saving off. Relaunches
