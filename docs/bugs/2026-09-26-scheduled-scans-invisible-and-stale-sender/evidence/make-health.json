@@ -1,0 +1,76 @@
+{
+  "ok": true,
+  "status": "healthy",
+  "version": "0.13.0",
+  "adapters": {
+    "siri": {
+      "status": "online",
+      "capabilities": {
+        "send": true,
+        "typing": false,
+        "toolStatus": false,
+        "maxMessageLength": 4000,
+        "channels": [
+          "siri"
+        ]
+      },
+      "details": {
+        "pending": 0,
+        "answered": 0,
+        "timed_out": 0,
+        "unmatched": 0
+      }
+    },
+    "telegram:peggy": {
+      "status": "online",
+      "capabilities": {
+        "send": true,
+        "react": true,
+        "markRead": false,
+        "typing": true,
+        "toolStatus": true,
+        "interactiveApproval": true,
+        "registerCommands": true,
+        "channels": [
+          "telegram:peggy"
+        ]
+      },
+      "lastActivity": "2026-09-27T02:37:04.019Z"
+    },
+    "telegram:pokeclaude": {
+      "status": "online",
+      "capabilities": {
+        "send": true,
+        "react": true,
+        "markRead": false,
+        "typing": true,
+        "toolStatus": true,
+        "interactiveApproval": true,
+        "registerCommands": true,
+        "channels": [
+          "telegram:pokeclaude"
+        ]
+      }
+    },
+    "email:peggy": {
+      "status": "online",
+      "capabilities": {
+        "send": true,
+        "react": false,
+        "markRead": false,
+        "typing": false,
+        "registerCommands": false,
+        "maxMessageLength": 5000000,
+        "channels": [
+          "email:peggy"
+        ]
+      }
+    }
+  },
+  "queue": {
+    "pending": 320,
+    "processing": 0,
+    "delivered": 5019,
+    "dead_letter": 0
+  }
+}

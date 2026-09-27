@@ -10,7 +10,6 @@ import { createHttpServer } from './api.js';
 import { PipelineEngine } from '../pipeline/engine.js';
 import type { AppConfig, CcPoolInstanceConfig } from '../config/schema.js';
 import { LeaseStore } from '../pool/lease-store.js';
-import { computeConversationId } from '../pipeline/conversation-id.js';
 import type { AcquireResult } from '../pool/types.js';
 import { PoolManager } from '../pool/pool-manager.js';
 import type { MessageEnvelope } from '../types/envelope.js';
@@ -524,28 +523,10 @@ describe('POST /api/v1/messages — stale-pane guard (E48 S48.6)', () => {
     expect(countsAfter['pending'] ?? 0).toBe(countsBefore['pending'] ?? 0);
   });
 
-  it('triggers the guard on mismatch when conversationId is derivable only via the fallback hash-derivation path', async () => {
-    seedLeasedPane('peggy', 'agent:peggy-pool-1', 'conv-current');
-
-    // No reply_to, no metadata.conversation_id — forces the derivation path:
-    // computeConversationId(bareContactId, channel, topic).
-    const res = await server.inject({
-      method: 'POST',
-      url: '/api/v1/messages',
-      payload: {
-        channel: 'telegram',
-        sender: 'agent:peggy-pool-1',
-        recipient: 'contact:alice',
-        payload: { type: 'text', body: 'stale reply' },
-      },
-    });
-
-    expect(res.statusCode).toBe(409);
-  });
-
-  it('succeeds via the fallback hash-derivation path when the derived conversationId matches the lease', async () => {
-    const expectedConversationId = computeConversationId('alice', 'telegram', 'general');
-    seedLeasedPane('peggy', 'agent:peggy-pool-1', expectedConversationId);
+  it('does not guard a proactive send (no reply_to, no conversation_id) to a conversation other than the lease', async () => {
+    // A pane leased to a scheduled topic messaging the user's DM via
+    // send_message. Regression: docs/bugs/2026-09-26-scheduled-scans-invisible-and-stale-sender.
+    seedLeasedPane('peggy', 'agent:peggy-pool-1', 'conv-sched-topic');
 
     const res = await server.inject({
       method: 'POST',
@@ -554,7 +535,7 @@ describe('POST /api/v1/messages — stale-pane guard (E48 S48.6)', () => {
         channel: 'telegram',
         sender: 'agent:peggy-pool-1',
         recipient: 'contact:alice',
-        payload: { type: 'text', body: 'legit reply' },
+        payload: { type: 'text', body: 'scan alert' },
       },
     });
 

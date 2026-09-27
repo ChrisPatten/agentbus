@@ -1,0 +1,156 @@
+⏺ Write(scripts/send_direct_email.py)
+  ⎿  Wrote 128 lines to scripts/send_direct_email.py
+       1 #!/usr/bin/env python3
+       2 """Last-resort email to Mr. Patten straight over iCloud SMTP, bypassing AgentBus.
+       3
+       4 Use when mcp__agentbus__send_message / send_email cannot deliver: bus-core down,
+       5 or the pool's outbound lease guard rejecting every send ("stale sender").
+       6 Skips AgentBus transcripts and threading, so it is not for routine use.
+       7
+       8 Credentials come from ~/workspace/agentbus/.env (ICLOUD_APP_PW_PEGGY,
+       9 DIRECT_EMAIL_USER, DIRECT_EMAIL_FROM); environment variables take precedence.
+      10 Recipients are restricted to Mr. Patten's allowlist.
+     … +118 lines (ctrl+o to expand)
+
+⏺ Bash(chmod 755 scripts/send_direct_email.py && python3 scripts/send_direct_email.py --check; echo "exit=$?"; python3 scripts/send_direct_email.py --subject
+      T --body…)
+  ⎿  SMTP login OK. Nothing sent.
+     exit=0
+     Content-Type: text/plain; charset="utf-8"
+     … +9 lines (ctrl+o to expand)
+
+⏺ The From header is double-wrapped because DIRECT_EMAIL_FROM already contains a display name. Fixing.
+
+⏺ Update(scripts/send_direct_email.py)
+  ⎿  Added 1 line, removed 1 line
+       94
+       95      msg = MIMEText(body, "plain", "utf-8")
+       96      msg["Subject"] = args.subject
+       97 -    msg["From"] = f"Peggy <{from_addr}>"
+       97 +    msg["From"] = from_addr if "<" in from_addr else f"Peggy <{from_addr}>"
+       98      msg["To"] = args.to
+       99      msg["Date"] = formatdate(localtime=True)
+      100      msg["Message-ID"] = make_msgid(domain="peggy.local")
+
+⏺ Bash(python3 scripts/send_direct_email.py --subject T --body hi --dry-run | grep ^From)
+  ⎿  From: Peggy <peggy.pattenbot@icloud.com>
+
+⏺ Script works. Now the 2:00 PM scan.
+
+⏺ Bash(zsh scripts/email_scan_agent.sh 2>&1 | head -60; echo ---; for id in 750 1301 1275 1563 1371 1562 745; do echo "chat $id"; imsg history --chat-id $id
+      --start 20…)
+  ⎿  [EMAIL_SCAN] No new emails in the last 2 hour(s).
+     ---
+     chat 750
+     … +32 lines (ctrl+o to expand)
+
+⏺ A low-balance alert on Chris's tracked checking (CHKG*877, $172.52) is actionable. Sending it via the normal path first.
+  ⎿  Error: Bus rejected message: stale sender: pane agent:peggy-pool-1 is no longer leased to this conversation
+
+⏺ The pool guard is still rejecting sends, so I'll use the new script. It also carries the still-undelivered morning brief items.
+
+⏺ Bash(python3 scripts/send_direct_email.py --subject "Peggy: low balance alert + missed Sep 25 brief (sent via SMTP bypass)" <<'EOF'
+      Mr. Patten,…)
+  ⎿  Email sent to chris@chrispatten.dev (attempt 1).
+     exit=0
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ I've written the new bypass script at scripts/send_direct_email.py in this repo. Sorry, I skipped your request earlier with "no response requested."
+
+  - Original script: it wasn't gone. It's still at agentbus/scripts/send_direct_email.py, so my "not on disk" check was looking in the wrong repo.
+  - What's new:
+    - It only sends to your two allowlisted addresses.
+    - It retries three times.
+    - --check tests the SMTP login without sending anything.
+    - --dry-run prints the message without sending it.
+    - The wording no longer says it's only for when bus-core is down.
+  - Testing: the login check passed, the dry run looked right, and a non-allowlisted recipient is rejected. I fixed a doubled "Peggy" in the From header along
+    the way.
+  - Alert: the 2:00 PM scan found a low-balance alert on checking CHKG*877, now at $172.52. Telegram was rejected again with the stale-sender error, so I
+    emailed it to chris@chrispatten.dev with the script. That email also carries the morning brief you never got.
+
+  The pool lease bug itself is still open, so Telegram sends from peggy-pool-1 will keep failing.
+
+✻ Cooked for 1m 18s · done Friday 2:06 PM
+  The pool lease bug itself is still open, so Telegram sends from peggy-pool-1 will keep failing.
+
+✻ Cooked for 1m 18s · done Friday 2:06 PM
+
+← agentbus: New message from system:scheduler via system:peggy (topic: …
+
+⏺ 5:00 PM scan for 14:00-17:00 window.
+
+⏺ Bash(zsh scripts/email_scan_agent.sh 2>&1 | head -20; echo '---'; imsg history --chat-id 745 --start 2026-09-25T14:00:00Z --end 2026-09-25T17:00:00Z --json
+      2>&1)
+  ⎿  [EMAIL_SCAN] No new emails in the last 2 hour(s).
+     ---
+
+⏺ No emails or iMessages in the 14:00-17:00 window. Staying silent.
+
+✻ Churned for 11s · done Friday 5:00 PM
+
+
+⏺ 8:00 PM scan for 17:00-20:00 window.
+
+⏺ Bash(zsh scripts/email_scan_agent.sh 2>&1 | head -20; echo '---'; for id in 750 1301 1275 1563 1371 1562 745; do imsg history --chat-id $id --start
+      2026-09-25T17:00:…)
+  ⎿  [EMAIL_SCAN] No new emails in the last 2 hour(s).
+     ---
+     {
+     … +22 lines (ctrl+o to expand)
+
+⏺ Low-balance alert already sent via SMTP. No new items in 17:00-20:00. Silent.
+
+✻ Brewed for 12s · done Friday 8:00 PM
+
+← agentbus: New message from system:scheduler via system:peggy (topic: …
+
+⏺ Bash(cd /Users/chrispatten/workspace/peggy-claude-code/scripts/kindle && python3 -c "import
+      json;d=json.load(open('out/spec.json'));print(d.get('generated_at'))"; ls…)
+  ⎿  2026-09-26T17:10:00-04:00
+     644  out/current.png  47.9K
+     Sat Sep 26 20:20:33 EDT 2026
+     … +17 lines (ctrl+o to expand)
+
+  Read 1 file (ctrl+o to expand)
+  ⎿  1 skill available
+
+⏺ The image is stale: generated 5:10 PM, not around 8 PM. The Kindle did fetch at 8:19 PM. Checking why the 8 PM scan didn't refresh it.
+
+⏺ Bash(cd /Users/chrispatten/workspace/peggy-claude-code && grep -n -i "step 5\|kindle" .claude/skills/email-scan/SKILL.md | head -20; echo ---; tail -25
+      memory/daily/…)
+  ⎿  100:## Step 5 — Refresh the Kindle dashboard
+     102:After Steps 3–4 (the Telegram message, if any, is already sent), refresh Mr. Patten's Kindle display with the `kindle-dashboard` skill. This run
+     s **every scan, even a quiet one**, so the "Last refreshed" footer time is never stale.
+     … +29 lines (ctrl+o to expand)
+
+  Called agentbus (ctrl+o to expand)
+
+⏺ Still blocked by the lease guard, so I'll use the SMTP bypass.
+
+⏺ Bash(python3 scripts/send_direct_email.py --subject "Peggy: Kindle 8 PM refresh did NOT run (via SMTP bypass)" <<'EOF'
+      Mr. Patten,…)
+  ⎿  Email sent to chris@chrispatten.dev (attempt 1).
+     exit=0
+  ⎿  Allowed by auto mode classifier
+
+⏺ The 8 PM Kindle refresh didn't run, and I've told you by email because Telegram sends are still rejected as stale sender.
+
+  - What's on the display: the image still reads "Last refreshed 5:10 PM", and the spec was generated at 17:10.
+  - The 8 PM scan: it fired at 20:00:22 and finished about 24 seconds later. It wrote no daily-memory entry and skipped Step 5 (the Kindle refresh), and I
+    don't know why.
+  - The Kindle itself: it fetched current.png at 8:19 PM, so it's healthy and just showing the older image.
+
+  I didn't refresh the image myself. I asked in the email whether to rebuild it now and watch the next scan.
+
+✻ Baked for 33s · done 8:21 PM
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ yes, rebuild it now
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⚠ Transcript saving is off — inherited CLAUDE_CODE_CHILD_SESSION marker · restart with CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1 to keep future transcripts
+  peggy-claude-code git:(main) Sonnet 5 ctx:77%                                                                       ~234k uncached · /clear to start fresh
+  ⏵⏵ auto mode on (shift+tab to cycle)                                                                                new task? /clear to save 234.2k tokens
+
+

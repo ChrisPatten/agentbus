@@ -25,6 +25,25 @@ Effort: S (under an hour), M (an afternoon), L (a day or more).
 
 ## P1: Correctness and operational risk
 
+- [ ] **Scheduled fires can't be traced to a pane, and a silent turn raises no alert.** (M)
+  From `docs/bugs/2026-09-26-scheduled-scans-invisible-and-stale-sender`.
+  No `make` target or log line answers "which pane and Claude session ran the
+  20:00 fire". Log or store schedule id -> message id -> pane id ->
+  `claude_session_id` at delivery, and expose it via `GET /api/v1/schedules/:id`.
+  Then consider failing a scheduled delivery whose turn ends with no tool
+  calls, and alerting out-of-band.
+
+- [ ] **Cron topics resume one long-lived Claude session, so skill edits don't take effect.** (M)
+  A scheduled conversation (e.g. `sched:email-watch`) resumes the same
+  `claude_session_id` indefinitely, carrying stale skill text in context.
+  Option: a per-schedule `fresh_session` flag that launches with a new
+  `--session-id` (or sends `/clear`) on each fire.
+
+- [ ] **`cc-headless` spawns `claude` with the full inherited `process.env`.** (S)
+  Same Claude Code session-marker leak fixed for pool panes
+  (`INHERITED_CLAUDE_SESSION_VARS` in `src/pool/pane.ts`). Strip those vars
+  in `src/adapters/cc-headless.ts` before re-enabling the adapter.
+
 - [ ] **`dead_letter` count is always 0 in `/status` and `/api/v1/health`.** (S)
   `MessageQueue.counts()` (`src/core/queue.ts:376`) groups `message_queue.status`,
   but dead-lettered rows are moved to the separate `dead_letter` table. Count
@@ -249,6 +268,9 @@ Effort: S (under an hour), M (an afternoon), L (a day or more).
   deprecation notice and a cleanup migration.
 
 ## P3: Tooling and repository hygiene
+
+- [ ] **`make logs`/`logs-err` follow forever and hang non-interactive callers.** (S)
+  Add a `make logs-dump LINES=<n>` target using `pm2 logs bus-core --nostream`.
 
 - [ ] **No CI runs the tests.** (S)
   `.github/workflows/` contains only the Pages deploy. Add `ci.yml` that runs

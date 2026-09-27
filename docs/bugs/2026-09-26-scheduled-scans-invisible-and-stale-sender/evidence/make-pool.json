@@ -1,0 +1,85 @@
+{
+  "ok": true,
+  "pools": [
+    {
+      "pool_id": "peggy",
+      "agent_id": "agent:peggy",
+      "panes": [
+        {
+          "pane_id": "peggy-pool:1",
+          "agent_id": "agent:peggy-pool-1",
+          "state": "leased",
+          "conversation_id": "d923645cc0e0dd7c832e172112af76a4ba1f5eef0cb4a111a94750264b6ade77",
+          "claude_session_id": "e70912fb-c814-4eb5-a7f1-081517860d5c",
+          "model": "sonnet",
+          "leased_at": "2026-09-26T19:09:21.199Z",
+          "last_activity_at": "2026-09-27T02:37:04.015Z"
+        },
+        {
+          "pane_id": "peggy-pool:2",
+          "agent_id": "agent:peggy-pool-2",
+          "state": "leased",
+          "conversation_id": "44040e8121c6eeb543009ddaaa18541907608cc8ec9ffff099d609e1416ab307",
+          "claude_session_id": "bd558a9d-9297-466b-9146-8f2ffd8e0106",
+          "model": "sonnet",
+          "leased_at": "2026-09-26T21:00:21.423Z",
+          "last_activity_at": "2026-09-27T00:21:00.813Z"
+        },
+        {
+          "pane_id": "peggy-pool:3",
+          "agent_id": "agent:peggy-pool-3",
+          "state": "leased",
+          "conversation_id": "6a8faccec3b5b43f4611606eb792f19a6872a986f207a4622600a4c561db7674",
+          "claude_session_id": "a13795e2-8ccd-4653-8b9f-d8a6cee95bb8",
+          "model": "sonnet",
+          "leased_at": "2026-09-26T22:26:39.322Z",
+          "last_activity_at": "2026-09-27T00:34:16.065Z"
+        },
+        {
+          "pane_id": "peggy:grow-1",
+          "agent_id": "agent:peggy-pool-4",
+          "state": "free",
+          "conversation_id": null,
+          "claude_session_id": null,
+          "model": null,
+          "leased_at": null,
+          "last_activity_at": "2026-09-25T01:38:16.818Z"
+        },
+        {
+          "pane_id": "peggy:grow-2",
+          "agent_id": "agent:peggy-pool-5",
+          "state": "free",
+          "conversation_id": null,
+          "claude_session_id": null,
+          "model": null,
+          "leased_at": null,
+          "last_activity_at": "2026-09-18T17:17:25.277Z"
+        }
+      ],
+      "parked": {
+        "count": 0,
+        "oldest_parked_at": null
+      }
+    },
+    {
+      "pool_id": "pokeclaude",
+      "agent_id": "agent:pokeclaude",
+      "panes": [
+        {
+          "pane_id": "pokeclaude-pool:1",
+          "agent_id": "agent:pokeclaude-pool-1",
+          "state": "free",
+          "conversation_id": null,
+          "claude_session_id": null,
+          "model": null,
+          "leased_at": null,
+          "last_activity_at": "2026-09-26T03:04:53.502Z"
+        }
+      ],
+      "parked": {
+        "count": 0,
+        "oldest_parked_at": null
+      }
+    }
+  ]
+}
