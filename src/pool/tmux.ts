@@ -201,10 +201,50 @@ export function createTmuxController(exec: TmuxExec): TmuxController {
   };
 }
 
+/**
+ * The visible screen of a pane with ANSI colors (`capture-pane -p -e`) plus
+ * its real size (`#{pane_width}` x `#{pane_height}`). Never includes
+ * scrollback. Rejects if the target doesn't exist. Standalone (not on
+ * `TmuxController`) so the many controller fakes in tests don't need it.
+ * Leading blank rows are only preserved when `exec` doesn't trim its output
+ * — see `realTmuxExecRaw`.
+ */
+export async function captureScreen(
+  exec: TmuxExec,
+  target: string,
+): Promise<{ text: string; cols: number; rows: number }> {
+  // list-panes (not display-message) for the size, for the same reason as
+  // paneCommand(): it reliably rejects for a target that doesn't exist.
+  const sizeOut = await exec(['list-panes', '-t', target, '-F', '#{pane_width}\t#{pane_height}']);
+  const [colsStr = '', rowsStr = ''] = (sizeOut.split('\n')[0] ?? '').trim().split('\t');
+  const cols = Number(colsStr);
+  const rows = Number(rowsStr);
+  if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols <= 0 || rows <= 0) {
+    throw new Error(`captureScreen: could not read the size of tmux target "${target}"`);
+  }
+  const out = await exec(['capture-pane', '-t', target, '-p', '-e']);
+  // capture-pane terminates every row with \n; drop only that final one.
+  const text = out.endsWith('\n') ? out.slice(0, -1) : out;
+  return { text, cols, rows };
+}
+
 // ── Real exec ─────────────────────────────────────────────────────────────────
 
 /** A real TmuxExec backed by node:child_process, for production use (tests never use this). */
 export function realTmuxExec(args: string[]): Promise<string> {
+  return runTmux(args, true);
+}
+
+/**
+ * Like `realTmuxExec` but returns stdout untrimmed. Needed when leading
+ * whitespace is significant — i.e. `captureScreen`, where trimming would
+ * shift the rendered screen up by however many blank rows it starts with.
+ */
+export function realTmuxExecRaw(args: string[]): Promise<string> {
+  return runTmux(args, false);
+}
+
+function runTmux(args: string[], trim: boolean): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile('tmux', args, { maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
       if (error) {
@@ -212,7 +252,7 @@ export function realTmuxExec(args: string[]): Promise<string> {
         reject(new Error(stderrText ? `tmux ${args.join(' ')} failed: ${stderrText}` : error.message));
         return;
       }
-      resolve(stdout.toString().trim());
+      resolve(trim ? stdout.toString().trim() : stdout.toString());
     });
   });
 }

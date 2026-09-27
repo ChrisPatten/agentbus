@@ -10,6 +10,18 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+### Added
+- **`/rc` command: switch a pool pane to Remote Control from chat.** `/rc`
+  types `/remote-control` and Enter into the pane leased to your conversation;
+  `/rc <n>` targets pane `n`. Only `leased` or `free` panes are targeted.
+- **`/pane` command: PNG snapshot of the cc-pool's tmux panes.** `/pane`
+  sends the pane leased to your conversation (or every pane), `/pane <n>` one
+  pane, `/pane all` up to 8. Each image is captioned with pane id, lease
+  state, conversation, model, and capture time. Adds an optional
+  `AdapterInstance.sendImage()` (implemented for Telegram via `sendPhoto`);
+  channels without it get the plain-text capture in a code block. Adds the
+  `@resvg/resvg-js` dependency (prebuilt binary, about 3.4 MB).
+
 ### Fixed
 - **Pool lease orphaned by a restart mid-launch is now released.** A pane left
   `launching` when bus-core restarted was never launched again, so every message

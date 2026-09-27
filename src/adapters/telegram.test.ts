@@ -2224,3 +2224,61 @@ describe('TelegramAdapter interactive approvals (E51)', () => {
     expect(bodyOf(callsTo(telegramFetch.fn, 'answerCallbackQuery')[0]).text).toMatch(/Failed/);
   });
 });
+
+describe('TelegramAdapter sendImage()', () => {
+  let adapter: TelegramAdapter;
+  let fetchMock: ReturnType<typeof vi.fn>;
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+
+  beforeEach(() => {
+    adapter = new TelegramAdapter({
+      config: makeTestConfig('/tmp/unused-sendimage'),
+      queue: {} as unknown as MessageQueue,
+      pipeline: {} as unknown as PipelineEngine,
+      db: {} as unknown as Database.Database,
+      instanceConfig: { token: 'test:token', poll_timeout: 30 },
+    });
+    fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ ok: true, result: { message_id: 321 } }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('uploads the PNG to sendPhoto as multipart with chat_id and caption', async () => {
+    const result = await adapter.sendImage(makeTextEnvelope('x'), { png, caption: 'pane 1 · bound', filename: 'pane-1.png' });
+
+    expect(result).toEqual({ success: true, platformMessageId: '321' });
+    const [url, init] = fetchMock.mock.calls[0]! as unknown as [string, { body: FormData }];
+    expect(url).toMatch(/\/bottest:token\/sendPhoto$/);
+    expect(init.body.get('chat_id')).toBe('12345');
+    expect(init.body.get('caption')).toBe('pane 1 · bound');
+    const photo = init.body.get('photo') as File;
+    expect(photo.name).toBe('pane-1.png');
+    expect(photo.type).toBe('image/png');
+  });
+
+  it('truncates captions to Telegram\'s 1024-character limit', async () => {
+    await adapter.sendImage(makeTextEnvelope('x'), { png, caption: 'c'.repeat(2000), filename: 'a.png' });
+    const init = fetchMock.mock.calls[0]![1] as { body: FormData };
+    expect((init.body.get('caption') as string).length).toBe(1024);
+  });
+
+  it('returns a non-retryable failure for an unknown contact, without calling Telegram', async () => {
+    const result = await adapter.sendImage(makeTextEnvelope('x', { recipient: 'contact:nobody' }), { png, caption: 'c', filename: 'a.png' });
+    expect(result.success).toBe(false);
+    expect(result.retryable).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a Telegram API rejection as a failed DeliveryResult', async () => {
+    fetchMock.mockResolvedValueOnce({ ok: false, status: 400, json: async () => ({ ok: false, description: 'Bad Request: PHOTO_INVALID' }) });
+    const result = await adapter.sendImage(makeTextEnvelope('x'), { png, caption: 'c', filename: 'a.png' });
+    expect(result).toMatchObject({ success: false, error: expect.stringContaining('PHOTO_INVALID') });
+  });
+});

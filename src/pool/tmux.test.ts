@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { createTmuxController } from './tmux.js';
+import { createTmuxController, captureScreen } from './tmux.js';
 import type { TmuxExec } from './tmux.js';
 
 // ── ensureSession ────────────────────────────────────────────────────────────
@@ -247,5 +247,38 @@ describe('capturePane', () => {
     const tmux = createTmuxController(exec as unknown as TmuxExec);
 
     await expect(tmux.capturePane('mysession:peggy')).resolves.toBe(raw);
+  });
+});
+
+// ── captureScreen ─────────────────────────────────────────────────────────────
+
+describe('captureScreen', () => {
+  it('captures with ANSI colors and reads the pane\'s real size', async () => {
+    const exec = vi.fn(async (args: string[]) => (args[0] === 'list-panes' ? '132\t43\n' : '\x1b[31mred\x1b[0m\n\nlast\n'));
+
+    const screen = await captureScreen(exec as unknown as TmuxExec, 'mysession:2');
+
+    expect(screen).toEqual({ text: '\x1b[31mred\x1b[0m\n\nlast', cols: 132, rows: 43 });
+    expect(exec).toHaveBeenCalledWith(['list-panes', '-t', 'mysession:2', '-F', '#{pane_width}\t#{pane_height}']);
+    expect(exec).toHaveBeenCalledWith(['capture-pane', '-t', 'mysession:2', '-p', '-e']);
+  });
+
+  it('preserves leading blank rows (only the final newline is dropped)', async () => {
+    const exec = vi.fn(async (args: string[]) => (args[0] === 'list-panes' ? '80\t24\n' : '\n\nhi\n'));
+    const screen = await captureScreen(exec as unknown as TmuxExec, 'mysession:2');
+    expect(screen.text).toBe('\n\nhi');
+  });
+
+  it('rejects when the target does not exist, without attempting a capture', async () => {
+    const exec = vi.fn(async () => {
+      throw new Error("tmux list-panes failed: can't find window: 9");
+    });
+    await expect(captureScreen(exec as unknown as TmuxExec, 'mysession:9')).rejects.toThrow(/can't find window/);
+    expect(exec).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects on an unparseable size', async () => {
+    const exec = vi.fn(async () => '\n');
+    await expect(captureScreen(exec as unknown as TmuxExec, 'mysession:2')).rejects.toThrow(/could not read the size/);
   });
 });

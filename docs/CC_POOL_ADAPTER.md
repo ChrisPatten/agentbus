@@ -247,6 +247,20 @@ On the adapter side (`TelegramAdapter.appendToolCallLine`, `src/adapters/telegra
 
 An optional argument narrows the output to one pool, matched against either the bare or `agent:`-prefixed form of its logical agent id. `/status` also gets a one-line summary per configured pool (`pool peggy: 3/4 leased, 1 parked`), omitted entirely on a deployment with no `cc-pool` instances configured.
 
+### `/pane` command
+
+`/pane [n|all]` sends a PNG of the visible tmux screen of one or more panes, for diagnosing a stuck pane without attaching. With no argument it snapshots the pane leased to the caller's conversation, or every pane if there is none.
+
+The capture reads the pane ids from `pool_leases` and runs `tmux capture-pane -p -e` (visible screen, with ANSI colors) plus `list-panes -F '#{pane_width} #{pane_height}'` for the real size, through an injected `TmuxExec` (`captureScreen()` in `src/pool/tmux.ts`). The session name comes from each pool's `tmux_session` config, never a hardcoded value. `src/pool/pane-render.ts` renders the capture to SVG and rasterizes it with `@resvg/resvg-js`. The image size is `cols` x `rows` of the pane, capped at 400 x 150 cells.
+
+The captioned image shows pane id, lease state (`leased` reads as `bound`), conversation, resolved model, and capture time. The capture body is never logged. See [SLASH_COMMANDS.md#pane-nall](SLASH_COMMANDS.md#pane-nall) for usage, errors, and the plain-text fallback for channels that can't show images.
+
+The renderer needs a monospace font. It looks for Menlo, DejaVu Sans Mono, Liberation Mono, or Consolas among the system fonts. On a Linux host, install one (for example `fonts-dejavu-core`), or the text won't render.
+
+### `/rc` command
+
+`/rc [n]` sends `/remote-control` plus Enter to a pane through the tmux controller (`sendCommand`), using the pane id from `pool_leases`. It targets the caller's leased pane, or pane index `n`, and refuses panes that aren't `leased` or `free`. See [SLASH_COMMANDS.md#rc-n](SLASH_COMMANDS.md#rc-n).
+
 ### `GET /api/v1/pool`
 
 The same data as JSON, optionally filtered with `?pool=<agent id>`:
