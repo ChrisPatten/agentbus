@@ -126,6 +126,29 @@ export interface LaunchParams {
   ensureWindow: { cwd: string; env?: Record<string, string> };
 }
 
+/**
+ * Per-session markers a parent Claude Code process exports to its children.
+ * bus-core started from inside a Claude Code session (e.g. `pm2 restart` run
+ * by an agent) inherits them, and so does any tmux server it spawns — so
+ * every pane's `claude` believed it was a child session. The visible effect:
+ * `CLAUDE_CODE_CHILD_SESSION` turns transcript saving off, so `--resume`
+ * replays a stale JSONL and every turn since is lost on relaunch.
+ * Unset them before launch so each pane is a top-level session.
+ */
+export const INHERITED_CLAUDE_SESSION_VARS = [
+  'CLAUDECODE',
+  'CLAUDE_CODE_CHILD_SESSION',
+  'CLAUDE_CODE_SESSION_ID',
+  'CLAUDE_CODE_BRIDGE_SESSION_ID',
+  'CLAUDE_CODE_SESSION_ATTENDED',
+  'CLAUDE_CODE_ENTRYPOINT',
+  'CLAUDE_CODE_EXECPATH',
+  'CLAUDE_CODE_MESSAGING_SOCKET',
+  'CLAUDE_CODE_MESSAGING_TOKEN',
+  'CLAUDE_PID',
+  'AI_AGENT',
+] as const;
+
 export class PaneLaunchError extends Error {
   constructor(
     message: string,
@@ -344,7 +367,9 @@ export class PaneLifecycle {
     }
 
     const quoted = args.map(shellQuoteArg).join(' ');
-    return `unset TMUX; ${quoted}`;
+    // Pool panes are resumed by session id, so the transcript must persist
+    // even if some other inherited marker would turn saving off.
+    return `unset TMUX ${INHERITED_CLAUDE_SESSION_VARS.join(' ')}; export CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1; ${quoted}`;
   }
 
   /**

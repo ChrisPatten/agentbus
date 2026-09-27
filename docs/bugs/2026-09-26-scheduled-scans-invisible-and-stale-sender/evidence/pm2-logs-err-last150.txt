@@ -1,0 +1,153 @@
+[TAILING] Tailing last 150 lines for [bus-core] process (change the value with --lines option)
+/Users/chrispatten/.agentbus/logs/bus-core-error.log last 150 lines:
+2|bus-core | 2026-09-26 15:04:07:       at ChildProcess.exithandler (node:child_process:424:5)
+2|bus-core | 2026-09-26 15:04:07:       at ChildProcess.emit (node:events:508:20)
+2|bus-core | 2026-09-26 15:04:07:       at maybeClose (node:internal/child_process:1084:16)
+2|bus-core | 2026-09-26 15:04:07:       at ChildProcess._handle.onexit (node:internal/child_process:304:5)
+2|bus-core | 2026-09-26 15:04:07: }
+2|bus-core | 2026-09-26 15:04:07: [pool:peggy] Pane launch failed for peggy-pool:1 — parking conversation d923645cc0e0dd7c832e172112af76a4ba1f5eef0cb4a111a94750264b6ade77
+2|bus-core | 2026-09-26 15:04:21: [pool:peggy] reconcileLiveness: killWindow failed for dead pane peggy-pool:1: Error: tmux kill-window -t peggy-pool:1 failed: error connecting to /private/tmp/tmux-501/default (No such file or directory)
+2|bus-core | 2026-09-26 15:04:21:     at <anonymous> (/Users/chrispatten/workspace/agentbus/src/pool/tmux.ts:212:16)
+2|bus-core | 2026-09-26 15:04:21:     at ChildProcess.exithandler (node:child_process:424:5)
+2|bus-core | 2026-09-26 15:04:21:     at ChildProcess.emit (node:events:508:20)
+2|bus-core | 2026-09-26 15:04:21:     at maybeClose (node:internal/child_process:1084:16)
+2|bus-core | 2026-09-26 15:04:21:     at Socket.<anonymous> (node:internal/child_process:456:11)
+2|bus-core | 2026-09-26 15:04:21:     at Socket.emit (node:events:508:20)
+2|bus-core | 2026-09-26 15:04:21:     at Pipe.<anonymous> (node:net:347:12)
+2|bus-core | 2026-09-26 15:05:48: [pool:peggy] Pane launch failed for peggy-pool:1: PaneLaunchError: Pane launch failed for peggy-pool:1: Error: tmux new-window -t peggy-pool -n 1 -c /Users/chrispatten/workspace/peggy-claude-code -e TERM=xterm-256color -e COLORTERM=truecolor failed: error connecting to /private/tmp/tmux-501/default (No such file or directory)
+2|bus-core | 2026-09-26 15:05:48:     at PaneLifecycle.launch (/Users/chrispatten/workspace/agentbus/src/pool/pane.ts:234:13)
+2|bus-core | 2026-09-26 15:05:48:     at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+2|bus-core | 2026-09-26 15:05:48:     at async PoolManager.runTrackedLaunch (/Users/chrispatten/workspace/agentbus/src/pool/pool-manager.ts:736:7)
+2|bus-core | 2026-09-26 15:05:48:     at async PoolManager.trackPaneOperation (/Users/chrispatten/workspace/agentbus/src/pool/pool-manager.ts:697:14)
+2|bus-core | 2026-09-26 15:05:48:     at async PoolManager.resolveRoute (/Users/chrispatten/workspace/agentbus/src/pool/pool-manager.ts:433:24)
+2|bus-core | 2026-09-26 15:05:48:     at async <anonymous> (/Users/chrispatten/workspace/agentbus/src/pipeline/stages/pool-route-resolve.ts:50:27)
+2|bus-core | 2026-09-26 15:05:48:     at async PipelineEngine.process (/Users/chrispatten/workspace/agentbus/src/pipeline/engine.ts:32:18)
+2|bus-core | 2026-09-26 15:05:48:     at async processInbound (/Users/chrispatten/workspace/agentbus/src/http/api.ts:369:18)
+2|bus-core | 2026-09-26 15:05:48:     at async TelegramAdapter.processUpdate (/Users/chrispatten/workspace/agentbus/src/adapters/telegram.ts:1464:7)
+2|bus-core | 2026-09-26 15:05:48:     at async TelegramAdapter.inboundLoop (/Users/chrispatten/workspace/agentbus/src/adapters/telegram.ts:1485:27) {
+2|bus-core | 2026-09-26 15:05:48:   cause: Error: tmux new-window -t peggy-pool -n 1 -c /Users/chrispatten/workspace/peggy-claude-code -e TERM=xterm-256color -e COLORTERM=truecolor failed: error connecting to /private/tmp/tmux-501/default (No such file or directory)
+2|bus-core | 2026-09-26 15:05:48:       at <anonymous> (/Users/chrispatten/workspace/agentbus/src/pool/tmux.ts:212:16)
+2|bus-core | 2026-09-26 15:05:48:       at ChildProcess.exithandler (node:child_process:424:5)
+2|bus-core | 2026-09-26 15:05:48:       at ChildProcess.emit (node:events:508:20)
+2|bus-core | 2026-09-26 15:05:48:       at maybeClose (node:internal/child_process:1084:16)
+2|bus-core | 2026-09-26 15:05:48:       at ChildProcess._handle.onexit (node:internal/child_process:304:5)
+2|bus-core | 2026-09-26 15:05:48: }
+2|bus-core | 2026-09-26 15:05:48: [pool:peggy] Pane launch failed for peggy-pool:1 — parking conversation d923645cc0e0dd7c832e172112af76a4ba1f5eef0cb4a111a94750264b6ade77
+2|bus-core | 2026-09-26 15:06:21: [pool:peggy] reconcileLiveness: killWindow failed for dead pane peggy-pool:1: Error: tmux kill-window -t peggy-pool:1 failed: error connecting to /private/tmp/tmux-501/default (No such file or directory)
+2|bus-core | 2026-09-26 15:06:21:     at <anonymous> (/Users/chrispatten/workspace/agentbus/src/pool/tmux.ts:212:16)
+2|bus-core | 2026-09-26 15:06:21:     at ChildProcess.exithandler (node:child_process:424:5)
+2|bus-core | 2026-09-26 15:06:21:     at ChildProcess.emit (node:events:508:20)
+2|bus-core | 2026-09-26 15:06:21:     at maybeClose (node:internal/child_process:1084:16)
+2|bus-core | 2026-09-26 15:06:21:     at Socket.<anonymous> (node:internal/child_process:456:11)
+2|bus-core | 2026-09-26 15:06:21:     at Socket.emit (node:events:508:20)
+2|bus-core | 2026-09-26 15:06:21:     at Pipe.<anonymous> (node:net:347:12)
+2|bus-core | 2026-09-26 15:06:21: [pool:peggy] Pane launch failed for peggy-pool:1: PaneLaunchError: Pane launch failed for peggy-pool:1: Error: tmux new-window -t peggy-pool -n 1 -c /Users/chrispatten/workspace/peggy-claude-code -e TERM=xterm-256color -e COLORTERM=truecolor failed: error connecting to /private/tmp/tmux-501/default (No such file or directory)
+2|bus-core | 2026-09-26 15:06:21:     at PaneLifecycle.launch (/Users/chrispatten/workspace/agentbus/src/pool/pane.ts:234:13)
+2|bus-core | 2026-09-26 15:06:21:     at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+2|bus-core | 2026-09-26 15:06:21:     at async PoolManager.runTrackedLaunch (/Users/chrispatten/workspace/agentbus/src/pool/pool-manager.ts:736:7)
+2|bus-core | 2026-09-26 15:06:21:     at async PoolManager.trackPaneOperation (/Users/chrispatten/workspace/agentbus/src/pool/pool-manager.ts:697:14)
+2|bus-core | 2026-09-26 15:06:21:     at async PoolManager.resolveRoute (/Users/chrispatten/workspace/agentbus/src/pool/pool-manager.ts:433:24)
+2|bus-core | 2026-09-26 15:06:21:     at async PoolManager.drainParked (/Users/chrispatten/workspace/agentbus/src/pool/pool-manager.ts:1013:26)
+2|bus-core | 2026-09-26 15:06:21:     at async PoolManager.sweepTick (/Users/chrispatten/workspace/agentbus/src/pool/pool-manager.ts:1128:7) {
+2|bus-core | 2026-09-26 15:06:21:   cause: Error: tmux new-window -t peggy-pool -n 1 -c /Users/chrispatten/workspace/peggy-claude-code -e TERM=xterm-256color -e COLORTERM=truecolor failed: error connecting to /private/tmp/tmux-501/default (No such file or directory)
+2|bus-core | 2026-09-26 15:06:21:       at <anonymous> (/Users/chrispatten/workspace/agentbus/src/pool/tmux.ts:212:16)
+2|bus-core | 2026-09-26 15:06:21:       at ChildProcess.exithandler (node:child_process:424:5)
+2|bus-core | 2026-09-26 15:06:21:       at ChildProcess.emit (node:events:508:20)
+2|bus-core | 2026-09-26 15:06:21:       at maybeClose (node:internal/child_process:1084:16)
+2|bus-core | 2026-09-26 15:06:21:       at ChildProcess._handle.onexit (node:internal/child_process:304:5)
+2|bus-core | 2026-09-26 15:06:21: }
+2|bus-core | 2026-09-26 15:06:21: [pool:peggy] Pane launch failed for peggy-pool:1 — parking conversation d923645cc0e0dd7c832e172112af76a4ba1f5eef0cb4a111a94750264b6ade77
+2|bus-core | 2026-09-26 15:07:21: [pool:peggy] reconcileLiveness: killWindow failed for dead pane peggy-pool:1: Error: tmux kill-window -t peggy-pool:1 failed: error connecting to /private/tmp/tmux-501/default (No such file or directory)
+2|bus-core | 2026-09-26 15:07:21:     at <anonymous> (/Users/chrispatten/workspace/agentbus/src/pool/tmux.ts:212:16)
+2|bus-core | 2026-09-26 15:07:21:     at ChildProcess.exithandler (node:child_process:424:5)
+2|bus-core | 2026-09-26 15:07:21:     at ChildProcess.emit (node:events:508:20)
+2|bus-core | 2026-09-26 15:07:21:     at maybeClose (node:internal/child_process:1084:16)
+2|bus-core | 2026-09-26 15:07:21:     at Socket.<anonymous> (node:internal/child_process:456:11)
+2|bus-core | 2026-09-26 15:07:21:     at Socket.emit (node:events:508:20)
+2|bus-core | 2026-09-26 15:07:21:     at Pipe.<anonymous> (node:net:347:12)
+2|bus-core | 2026-09-26 15:07:21: [pool:peggy] Pane launch failed for peggy-pool:1: PaneLaunchError: Pane launch failed for peggy-pool:1: Error: tmux new-window -t peggy-pool -n 1 -c /Users/chrispatten/workspace/peggy-claude-code -e TERM=xterm-256color -e COLORTERM=truecolor failed: error connecting to /private/tmp/tmux-501/default (No such file or directory)
+2|bus-core | 2026-09-26 15:07:21:     at PaneLifecycle.launch (/Users/chrispatten/workspace/agentbus/src/pool/pane.ts:234:13)
+2|bus-core | 2026-09-26 15:07:21:     at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+2|bus-core | 2026-09-26 15:07:21:     at async PoolManager.runTrackedLaunch (/Users/chrispatten/workspace/agentbus/src/pool/pool-manager.ts:736:7)
+2|bus-core | 2026-09-26 15:07:21:     at async PoolManager.trackPaneOperation (/Users/chrispatten/workspace/agentbus/src/pool/pool-manager.ts:697:14)
+2|bus-core | 2026-09-26 15:07:21:     at async PoolManager.resolveRoute (/Users/chrispatten/workspace/agentbus/src/pool/pool-manager.ts:433:24)
+2|bus-core | 2026-09-26 15:07:21:     at async PoolManager.drainParked (/Users/chrispatten/workspace/agentbus/src/pool/pool-manager.ts:1013:26)
+2|bus-core | 2026-09-26 15:07:21:     at async PoolManager.sweepTick (/Users/chrispatten/workspace/agentbus/src/pool/pool-manager.ts:1128:7) {
+2|bus-core | 2026-09-26 15:07:21:   cause: Error: tmux new-window -t peggy-pool -n 1 -c /Users/chrispatten/workspace/peggy-claude-code -e TERM=xterm-256color -e COLORTERM=truecolor failed: error connecting to /private/tmp/tmux-501/default (No such file or directory)
+2|bus-core | 2026-09-26 15:07:21:       at <anonymous> (/Users/chrispatten/workspace/agentbus/src/pool/tmux.ts:212:16)
+2|bus-core | 2026-09-26 15:07:21:       at ChildProcess.exithandler (node:child_process:424:5)
+2|bus-core | 2026-09-26 15:07:21:       at ChildProcess.emit (node:events:508:20)
+2|bus-core | 2026-09-26 15:07:21:       at maybeClose (node:internal/child_process:1084:16)
+2|bus-core | 2026-09-26 15:07:21:       at ChildProcess._handle.onexit (node:internal/child_process:304:5)
+2|bus-core | 2026-09-26 15:07:21: }
+2|bus-core | 2026-09-26 15:07:21: [pool:peggy] Pane launch failed for peggy-pool:1 — parking conversation d923645cc0e0dd7c832e172112af76a4ba1f5eef0cb4a111a94750264b6ade77
+2|bus-core | 2026-09-26 15:07:22: [telegram:peggy] Markdown parse error for editMessageText, retrying plain text
+2|bus-core | 2026-09-26 15:07:22: [telegram:peggy] Draft edit failed for chat -1003977797157: Error: Telegram API error: Bad Request: message is not modified: specified new message content and reply markup are exactly the same as a current content and reply markup of the message
+2|bus-core | 2026-09-26 15:08:21: [pool:peggy] reconcileLiveness: killWindow failed for dead pane peggy-pool:1: Error: tmux kill-window -t peggy-pool:1 failed: error connecting to /private/tmp/tmux-501/default (No such file or directory)
+2|bus-core | 2026-09-26 15:08:21:     at <anonymous> (/Users/chrispatten/workspace/agentbus/src/pool/tmux.ts:212:16)
+2|bus-core | 2026-09-26 15:08:21:     at ChildProcess.exithandler (node:child_process:424:5)
+2|bus-core | 2026-09-26 15:08:21:     at ChildProcess.emit (node:events:508:20)
+2|bus-core | 2026-09-26 15:08:21:     at maybeClose (node:internal/child_process:1084:16)
+2|bus-core | 2026-09-26 15:08:21:     at ChildProcess._handle.onexit (node:internal/child_process:304:5)
+2|bus-core | 2026-09-26 15:08:21: [pool:peggy] Pane launch failed for peggy-pool:1: PaneLaunchError: Pane launch failed for peggy-pool:1: Error: tmux new-window -t peggy-pool -n 1 -c /Users/chrispatten/workspace/peggy-claude-code -e TERM=xterm-256color -e COLORTERM=truecolor failed: error connecting to /private/tmp/tmux-501/default (No such file or directory)
+2|bus-core | 2026-09-26 15:08:21:     at PaneLifecycle.launch (/Users/chrispatten/workspace/agentbus/src/pool/pane.ts:234:13)
+2|bus-core | 2026-09-26 15:08:21:     at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+2|bus-core | 2026-09-26 15:08:21:     at async PoolManager.runTrackedLaunch (/Users/chrispatten/workspace/agentbus/src/pool/pool-manager.ts:736:7)
+2|bus-core | 2026-09-26 15:08:21:     at async PoolManager.trackPaneOperation (/Users/chrispatten/workspace/agentbus/src/pool/pool-manager.ts:697:14)
+2|bus-core | 2026-09-26 15:08:21:     at async PoolManager.resolveRoute (/Users/chrispatten/workspace/agentbus/src/pool/pool-manager.ts:433:24)
+2|bus-core | 2026-09-26 15:08:21:     at async PoolManager.drainParked (/Users/chrispatten/workspace/agentbus/src/pool/pool-manager.ts:1013:26)
+2|bus-core | 2026-09-26 15:08:21:     at async PoolManager.sweepTick (/Users/chrispatten/workspace/agentbus/src/pool/pool-manager.ts:1128:7) {
+2|bus-core | 2026-09-26 15:08:21:   cause: Error: tmux new-window -t peggy-pool -n 1 -c /Users/chrispatten/workspace/peggy-claude-code -e TERM=xterm-256color -e COLORTERM=truecolor failed: error connecting to /private/tmp/tmux-501/default (No such file or directory)
+2|bus-core | 2026-09-26 15:08:21:       at <anonymous> (/Users/chrispatten/workspace/agentbus/src/pool/tmux.ts:212:16)
+2|bus-core | 2026-09-26 15:08:21:       at ChildProcess.exithandler (node:child_process:424:5)
+2|bus-core | 2026-09-26 15:08:21:       at ChildProcess.emit (node:events:508:20)
+2|bus-core | 2026-09-26 15:08:21:       at maybeClose (node:internal/child_process:1084:16)
+2|bus-core | 2026-09-26 15:08:21:       at ChildProcess._handle.onexit (node:internal/child_process:304:5)
+2|bus-core | 2026-09-26 15:08:21: }
+2|bus-core | 2026-09-26 15:08:21: [pool:peggy] Pane launch failed for peggy-pool:1 — parking conversation d923645cc0e0dd7c832e172112af76a4ba1f5eef0cb4a111a94750264b6ade77
+2|bus-core | 2026-09-26 15:09:21: [pool:peggy] reconcileLiveness: killWindow failed for dead pane peggy-pool:1: Error: tmux kill-window -t peggy-pool:1 failed: error connecting to /private/tmp/tmux-501/default (No such file or directory)
+2|bus-core | 2026-09-26 15:09:21:     at <anonymous> (/Users/chrispatten/workspace/agentbus/src/pool/tmux.ts:212:16)
+2|bus-core | 2026-09-26 15:09:21:     at ChildProcess.exithandler (node:child_process:424:5)
+2|bus-core | 2026-09-26 15:09:21:     at ChildProcess.emit (node:events:508:20)
+2|bus-core | 2026-09-26 15:09:21:     at maybeClose (node:internal/child_process:1084:16)
+2|bus-core | 2026-09-26 15:09:21:     at ChildProcess._handle.onexit (node:internal/child_process:304:5)
+2|bus-core | 2026-09-26 15:14:44: [telegram:pokeclaude] Inbound poll error: TypeError: fetch failed
+2|bus-core | 2026-09-26 15:36:15: [telegram:peggy] Markdown parse error for editMessageText, retrying plain text
+2|bus-core | 2026-09-26 15:52:14: [telegram:peggy] Markdown parse error for editMessageText, retrying plain text
+2|bus-core | 2026-09-26 15:53:47: [telegram:peggy] Typing indicator failed for chat -1003977797157: TypeError: fetch failed
+2|bus-core | 2026-09-26 16:06:47: [telegram:peggy] Markdown parse error for editMessageText, retrying plain text
+2|bus-core | 2026-09-26 16:11:39: [telegram:peggy] Markdown parse error for editMessageText, retrying plain text
+2|bus-core | 2026-09-26 16:11:59: [telegram:peggy] Markdown parse error for editMessageText, retrying plain text
+2|bus-core | 2026-09-26 16:17:58: [telegram:peggy] Markdown parse error for sendMessage, retrying plain text
+2|bus-core | 2026-09-26 16:18:06: [telegram:peggy] Markdown parse error for editMessageText, retrying plain text
+2|bus-core | 2026-09-26 16:20:21: [telegram:peggy] Markdown parse error for sendMessage, retrying plain text
+2|bus-core | 2026-09-26 16:23:54: [telegram:peggy] Markdown parse error for editMessageText, retrying plain text
+2|bus-core | 2026-09-26 17:06:39: [telegram:peggy] Markdown parse error for editMessageText, retrying plain text
+2|bus-core | 2026-09-26 17:06:46: [telegram:peggy] Markdown parse error for editMessageText, retrying plain text
+2|bus-core | 2026-09-26 17:18:00: [telegram:peggy] Markdown parse error for editMessageText, retrying plain text
+2|bus-core | 2026-09-26 17:18:32: [telegram:peggy] Markdown parse error for editMessageText, retrying plain text
+2|bus-core | 2026-09-26 17:22:41: [telegram:peggy] Markdown parse error for editMessageText, retrying plain text
+2|bus-core | 2026-09-26 17:25:23: [telegram:peggy] Markdown parse error for editMessageText, retrying plain text
+2|bus-core | 2026-09-26 17:25:31: [telegram:peggy] Markdown parse error for editMessageText, retrying plain text
+2|bus-core | 2026-09-26 17:25:51: [telegram:peggy] Markdown parse error for editMessageText, retrying plain text
+2|bus-core | 2026-09-26 17:28:44: [telegram:peggy] Markdown parse error for editMessageText, retrying plain text
+2|bus-core | 2026-09-26 17:29:29: [telegram:peggy] Inbound poll error: TypeError: fetch failed
+2|bus-core | 2026-09-26 17:35:34: [telegram:peggy] Markdown parse error for editMessageText, retrying plain text
+2|bus-core | 2026-09-26 17:35:47: [telegram:peggy] Markdown parse error for editMessageText, retrying plain text
+2|bus-core | 2026-09-26 17:57:22: [telegram:peggy] Markdown parse error for editMessageText, retrying plain text
+2|bus-core | 2026-09-26 18:43:46: [telegram:peggy] Markdown parse error for sendMessage, retrying plain text
+2|bus-core | 2026-09-26 18:44:01: [telegram:peggy] Markdown parse error for editMessageText, retrying plain text
+2|bus-core | 2026-09-26 18:44:19: [telegram:peggy] Markdown parse error for editMessageText, retrying plain text
+2|bus-core | 2026-09-26 19:26:29: [telegram:pokeclaude] Inbound poll error: TypeError: fetch failed
+2|bus-core | 2026-09-26 19:42:36: [telegram:peggy] Inbound poll error: TypeError: fetch failed
+2|bus-core | 2026-09-26 20:20:25: [telegram:peggy] Markdown parse error for editMessageText, retrying plain text
+2|bus-core | 2026-09-26 20:20:32: [telegram:peggy] Markdown parse error for editMessageText, retrying plain text
+2|bus-core | 2026-09-26 20:20:38: [telegram:peggy] Markdown parse error for editMessageText, retrying plain text
+2|bus-core | 2026-09-26 20:20:48: [pool-guard] stale sender: sender=agent:peggy-pool-2 expected_conversation_id=6a8faccec3b5b43f4611606eb792f19a6872a986f207a4622600a4c561db7674 actual_conversation_id=44040e8121c6eeb543009ddaaa18541907608cc8ec9ffff099d609e1416ab307 — rejecting
+2|bus-core | 2026-09-26 20:20:49: [telegram:peggy] Markdown parse error for editMessageText, retrying plain text
+2|bus-core | 2026-09-26 20:25:44: [telegram:peggy] Markdown parse error for editMessageText, retrying plain text
+2|bus-core | 2026-09-26 20:58:27: [telegram:peggy] Inbound poll error: TypeError: fetch failed
+2|bus-core | 2026-09-26 21:11:41: [telegram:peggy] Inbound poll error: Error: Telegram API error: Bad Gateway
+2|bus-core | 2026-09-26 21:11:42: [telegram:peggy] Inbound poll error: Error: Telegram API error: Bad Gateway
+2|bus-core | 2026-09-26 21:11:45: [telegram:peggy] Inbound poll error: Error: Telegram API error: Bad Gateway
+

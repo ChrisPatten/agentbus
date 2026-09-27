@@ -70,7 +70,6 @@ import { VERSION } from '../version.js';
 import { recordAgentPoll, getLastPollAt } from './agent-liveness.js';
 import { toBareAgentId, toPrefixedAgentId } from '../pool/types.js';
 import { LeaseStore } from '../pool/lease-store.js';
-import { computeConversationId } from '../pipeline/conversation-id.js';
 import type { PoolManager } from '../pool/pool-manager.js';
 import { ApprovalStore } from '../approvals/store.js';
 import { defaultScheduleTopic } from '../scheduler/default-topic.js';
@@ -868,18 +867,20 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     // E48 (S48.6) — stale-pane guard. A pool pane (e.g. "agent:peggy-pool-3")
     // can be evicted (its pool_leases row reassigned to a different
     // conversation) while a reply it generated for its PREVIOUS conversation
-    // is still in flight. Resolve which conversation this send targets, then
-    // reject if the sending pane's lease has already moved on to a different
-    // conversation — before the message is ever enqueued.
+    // is still in flight. Reject a reply whose conversation no longer matches
+    // the sending pane's lease — before the message is ever enqueued.
     //
-    // conversationId resolution order:
-    //   1. Reuse the reply_to -> transcripts.conversation_id lookup above.
+    // Only reply-linked sends are guarded. The conversation comes from:
+    //   1. The reply_to -> transcripts.conversation_id lookup above.
     //   2. Else data.metadata.conversation_id, when a non-empty string (set
     //      by the `reply` MCP tool — see src/mcp/tools/index.ts).
-    //   3. Else derive it the same way Stage 70 (route-resolve) does for
-    //      inbound — this covers send_message/send_email, which never set
-    //      reply_to.
-    let conversationId: string | null;
+    // Proactive sends (send_message/send_email: no reply_to, no
+    // conversation_id) are deliberately NOT guarded. The agent addresses
+    // them explicitly, and a pane leased to one conversation routinely
+    // messages another — e.g. a scheduled-topic pane notifying the user's
+    // DM. Deriving a conversation id for those rejected every such send as
+    // a "stale sender" (docs/bugs/2026-09-26-scheduled-scans-invisible-and-stale-sender).
+    let conversationId: string | null = null;
     if (replyToConversationId) {
       conversationId = replyToConversationId;
     } else if (
@@ -887,11 +888,6 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       data.metadata['conversation_id'].length > 0
     ) {
       conversationId = data.metadata['conversation_id'];
-    } else {
-      const bareContactId = data.recipient.startsWith('contact:')
-        ? data.recipient.slice('contact:'.length)
-        : data.recipient;
-      conversationId = computeConversationId(bareContactId, data.channel, data.topic ?? 'general');
     }
 
     if (conversationId) {
@@ -899,8 +895,8 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       const leaseRow = leaseStore.findByAgentAnyPool(data.sender);
       if (leaseRow && leaseRow.state === 'leased' && leaseRow.conversation_id !== conversationId) {
         console.error(
-          `[pool-guard] stale sender: sender=${data.sender} expected_conversation_id=${conversationId} ` +
-            `actual_conversation_id=${leaseRow.conversation_id} — rejecting`,
+          `[pool-guard] stale sender: sender=${data.sender} reply_conversation_id=${conversationId} ` +
+            `lease_conversation_id=${leaseRow.conversation_id} — rejecting`,
         );
         return reply.status(409).send({
           ok: false,

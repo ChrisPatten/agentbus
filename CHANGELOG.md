@@ -10,6 +10,19 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+### Fixed
+- **Pool panes no longer inherit Claude Code session markers.** When
+  bus-core was started from inside a Claude Code session, every pane's
+  `claude` ran as a "child session" with transcript saving off. Relaunches
+  then resumed a stale JSONL, and scheduled turns seemed to vanish. The launch
+  line now unsets those markers and sets
+  `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1`.
+- **Proactive sends from pool panes are no longer rejected as `stale
+  sender`.** The outbound lease guard now applies only to reply-linked sends
+  (`reply_to` or `metadata.conversation_id`). A pane leased to a scheduled
+  topic can `send_message` to the user again. The guard's log fields are
+  renamed `reply_conversation_id` and `lease_conversation_id`.
+
 ## [0.13.0] - 2026-09-25
 
 ### Added

@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import type { TmuxController } from './tmux.js';
 import type { CcPoolInstanceConfig } from '../config/schema.js';
 import { writePaneMcpConfig, cleanupPaneMcpConfig } from './mcp-config.js';
-import { PaneLifecycle, PaneLaunchError, LAUNCH_READY_TIMEOUT_MS, type LaunchParams } from './pane.js';
+import { PaneLifecycle, PaneLaunchError, LAUNCH_READY_TIMEOUT_MS, INHERITED_CLAUDE_SESSION_VARS, type LaunchParams } from './pane.js';
 
 // writePaneMcpConfig/cleanupPaneMcpConfig are mocked wholesale (rather than
 // exercising the real fs-touching module) — pane.ts's own responsibility is
@@ -153,7 +153,9 @@ describe('PaneLifecycle.launch — fresh vs resume', () => {
     expect(createOrder).toBeLessThan(sendOrder);
 
     const line = tmux.sendCommand.mock.calls[0]![1] as string;
-    expect(line.startsWith('unset TMUX; ')).toBe(true);
+    expect(line.startsWith(`unset TMUX ${INHERITED_CLAUDE_SESSION_VARS.join(' ')}; `)).toBe(true);
+    expect(line).toContain('unset TMUX CLAUDECODE CLAUDE_CODE_CHILD_SESSION ');
+    expect(line).toContain('export CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1; ');
     expect(line).toContain(`${q('--session-id')} ${q('11111111-1111-1111-1111-111111111111')}`);
     expect(line).not.toContain(q('--resume'));
     expect(line).toContain(`${q('--mcp-config')} ${q(FAKE_MCP_CONFIG_PATH)} ${q('--strict-mcp-config')}`);
