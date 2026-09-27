@@ -257,6 +257,10 @@ The captioned image shows pane id, lease state (`leased` reads as `bound`), conv
 
 The renderer needs a monospace font. It looks for Menlo, DejaVu Sans Mono, Liberation Mono, or Consolas among the system fonts. On a Linux host, install one (for example `fonts-dejavu-core`), or the text won't render.
 
+### `/rc` command
+
+`/rc [n]` sends `/remote-control` plus Enter to a pane through the tmux controller (`sendCommand`), using the pane id from `pool_leases`. It targets the caller's leased pane, or pane index `n`, and refuses panes that aren't `leased` or `free`. See [SLASH_COMMANDS.md#rc-n](SLASH_COMMANDS.md#rc-n).
+
 ### `GET /api/v1/pool`
 
 The same data as JSON, optionally filtered with `?pool=<agent id>`:

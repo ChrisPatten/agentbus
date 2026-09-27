@@ -16,6 +16,7 @@ Slash commands let you operate AgentBus from any connected channel without SSH a
 | `/cost` | Show day/week/month API cost for this agent | `/cost` |
 | `/pool [pool-agent-id]` | Show cc-pool pane leases and parked-queue depth | `/pool peggy` |
 | `/pane [n\|all]` | Send a PNG snapshot of the cc-pool tmux pane(s) | `/pane 2` |
+| `/rc [n]` | Type `/remote-control` into a cc-pool Claude pane | `/rc` |
 
 ### `/status`
 
@@ -204,6 +205,15 @@ One unreachable pane doesn't block the others: the reachable panes' images are s
 **Channels without image support.** The reply falls back to the plain-text capture in a code block, prefixed by the same caption. The same fallback applies if an image upload fails. Telegram sends images with `sendPhoto`.
 
 **Privacy.** A screen can contain sensitive text. The capture is never logged, and the transcript records only `[N image reply(s) sent]`. `/pane` uses the same sender handling as every other bus command; it adds no separate allowlist.
+
+### `/rc [n]`
+
+Types `/remote-control` and Enter into a `cc-pool` Claude pane with tmux `send-keys`, so you can switch a pane to Remote Control from chat. Registered in `src/index.ts` via `createRcCommand` in `src/commands/rc.ts`.
+
+- `/rc` targets the pane leased to the conversation you're typing in. With no such pane it replies `No pane is leased to this conversation. Use /rc <n> (see /pool).` and sends nothing.
+- `/rc <n>` targets the pane with index `n` (the number after the `:` in `peggy-pool:2`).
+
+It only sends to a pane that is `leased` or `free`. A `launching`, `draining`, or `dead` pane, an unknown index, or an index shared by two pools gets a short text reply and no keys. The keys are typed literally, so if the pane is sitting at a confirmation prompt they land in that prompt; check with `/pane` first.
 
 ### `/torrent [magnet-link]`
 

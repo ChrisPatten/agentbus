@@ -34,7 +34,7 @@ function stateLabel(pane: PoolLeaseRow): string {
 }
 
 /** "peggy-pool:2" -> "2" — the pane's index within its tmux session. */
-function paneIndex(paneId: string): string {
+export function paneIndex(paneId: string): string {
   return paneId.slice(paneId.lastIndexOf(':') + 1);
 }
 
