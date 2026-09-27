@@ -15,6 +15,7 @@ Slash commands let you operate AgentBus from any connected channel without SSH a
 | `/stop` | Cancel the current in-flight turn | `/stop` |
 | `/cost` | Show day/week/month API cost for this agent | `/cost` |
 | `/pool [pool-agent-id]` | Show cc-pool pane leases and parked-queue depth | `/pool peggy` |
+| `/pane [n\|all]` | Send a PNG snapshot of the cc-pool tmux pane(s) | `/pane 2` |
 
 ### `/status`
 
@@ -174,6 +175,36 @@ A name that matches no configured pool replies `No cc-pool instance for "<name>"
 
 Each pane line shows its state, then `conv=<first 8 hex chars of conversation_id>` when the pane is bound to a conversation, then `model=<name>` (E53) when the pane's current session was launched with a model, then `idle=<age>` when it has a recorded `last_activity_at` — all three are omitted for a `free` pane, which has none of them. See [CC_POOL_ADAPTER.md#model-selection](CC_POOL_ADAPTER.md#model-selection) for what `model=` means and when it changes. The trailing `parked: N` line adds `(oldest <age>)` only when `N > 0`.
 
+### `/pane [n|all]`
+
+Sends a PNG of what a `cc-pool` pane is showing right now, so you can see a stuck pane (a frozen confirmation prompt, a stale-sender loop) without attaching to tmux. Registered in `src/index.ts` via `createPaneCommand` in `src/commands/pane.ts`.
+
+| Form | Snapshots |
+|------|-----------|
+| `/pane` | The pane leased to the conversation you're typing in. If none, every pane. |
+| `/pane <n>` | The pane whose index is `n` (the number after the `:` in `peggy-pool:2`). |
+| `/pane all` | Every pane, one image each. |
+
+A reply carries at most 8 images. Each image is captioned with the pane id, lease state (`bound`, `free`, `launching`, `draining`, or `dead`), `conv=<first 8 hex chars>` and topic (topic only for your own conversation's pane), resolved model (`default` when the pane launched without `--model`), and the capture time.
+
+The image shows the pane's visible screen only, with ANSI colors, at the pane's real width and height. Scrollback isn't included. The command is read-only: it never sends keystrokes to a pane.
+
+Errors are short plain-text replies, not crashes:
+```
+/pane 9
+-> No pane with index 9. Try /pool to list panes.
+/pane
+-> No cc-pool instances configured.
+/pane 1        (tmux window gone)
+-> peggy-pool:1: tmux session "peggy-pool" or window not found (state dead).
+```
+
+One unreachable pane doesn't block the others: the reachable panes' images are sent, and the errors follow as text.
+
+**Channels without image support.** The reply falls back to the plain-text capture in a code block, prefixed by the same caption. The same fallback applies if an image upload fails. Telegram sends images with `sendPhoto`.
+
+**Privacy.** A screen can contain sensitive text. The capture is never logged, and the transcript records only `[N image reply(s) sent]`. `/pane` uses the same sender handling as every other bus command; it adds no separate allowlist.
+
 ### `/torrent [magnet-link]`
 
 An operator-specific custom command (registered in `src/index.ts` via
@@ -271,6 +302,18 @@ commandRegistry.register(myCommand);
 ```
 
 The registry throws if a command name is already taken, preventing accidental overwrites. Custom commands appear in `/help` automatically.
+
+### Replying with images
+
+A handler can return `images` alongside (or instead of) `body`:
+
+```typescript
+handler: async () => ({
+  images: [{ png, caption: 'pane 1 · bound', fallbackText: 'pane 1 · bound\n```\n...\n```' }],
+}),
+```
+
+`sendCommandResponse` (`src/http/api.ts`) sends each image through the originating adapter's optional `sendImage()`. If the adapter doesn't implement it, or the send fails, it sends `fallbackText` as a normal text reply. Image bytes and fallback text are not written to the transcript.
 
 ---
 

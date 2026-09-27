@@ -411,3 +411,79 @@ describe('processInbound — slash command dispatch', () => {
     expect(sentBody).toContain('handler exploded');
   });
 });
+
+describe('processInbound — command image replies', () => {
+  const image = { png: Buffer.from('png-bytes'), caption: 'pane 1 · bound', fallbackText: 'pane 1 · bound\n```\nscreen\n```' };
+
+  function setup(telegram: AdapterInstance) {
+    const db = makeDb();
+    const queue = new MessageQueue(db);
+    const adapterRegistry = new AdapterRegistry();
+    adapterRegistry.register(telegram);
+    const pipeline = new PipelineEngine();
+    pipeline.use({ slot: 10, name: 'normalize', stage: normalize });
+    pipeline.use({ slot: 40, name: 'slash-command', stage: slashCommandDetect });
+    pipeline.use({ slot: 70, name: 'route-resolve', stage: createRouteResolve(stubConfig, db) });
+    pipeline.use({ slot: 80, name: 'transcript-log', stage: createTranscriptLog(db, stubConfig), critical: false });
+    const { registry: commandRegistry, pauseSet } = createCommandSystem({ adapterRegistry, queue, db, config: stubConfig });
+    commandRegistry.register({
+      name: 'snap',
+      description: 'test',
+      usage: '/snap',
+      scope: 'bus',
+      handler: async () => ({ images: [image] }),
+    });
+    const run = () =>
+      processInbound(
+        { channel: 'telegram', sender: 'contact:chris', payload: { type: 'text', body: '/snap' } },
+        { queue, pipeline, config: stubConfig, db, registry: adapterRegistry, commandRegistry, pauseSet },
+      );
+    return { db, run };
+  }
+
+  it('sends an image-only reply through sendImage, with no text message', async () => {
+    const telegram = makeStubAdapter('telegram', 'telegram');
+    telegram.sendImage = vi.fn().mockResolvedValue({ success: true });
+    const { run } = setup(telegram);
+
+    const result = await run();
+
+    expect(result).toMatchObject({ ok: true, queued: false, reason: 'command_handled' });
+    expect(telegram.sendImage).toHaveBeenCalledTimes(1);
+    const [envelope, sent] = vi.mocked(telegram.sendImage!).mock.calls[0]!;
+    expect(envelope.recipient).toBe('contact:chris');
+    expect(sent).toEqual({ png: image.png, caption: image.caption, filename: 'snap-1.png' });
+    expect(telegram.send).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the plain-text capture when the adapter has no sendImage', async () => {
+    const telegram = makeStubAdapter('telegram', 'telegram');
+    const { run } = setup(telegram);
+
+    await run();
+
+    expect(telegram.send).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(telegram.send).mock.calls[0]![0].payload).toEqual({ type: 'text', body: image.fallbackText });
+  });
+
+  it('falls back to the plain-text capture when sendImage fails', async () => {
+    const telegram = makeStubAdapter('telegram', 'telegram');
+    telegram.sendImage = vi.fn().mockResolvedValue({ success: false, error: 'boom', retryable: false });
+    const { run } = setup(telegram);
+
+    await run();
+
+    expect(telegram.sendImage).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(telegram.send).mock.calls[0]![0].payload).toEqual({ type: 'text', body: image.fallbackText });
+  });
+
+  it('does not write the image fallback text to the transcript', async () => {
+    const telegram = makeStubAdapter('telegram', 'telegram');
+    const { db, run } = setup(telegram);
+
+    await run();
+
+    const rows = db.prepare(`SELECT body FROM transcripts WHERE direction = 'outbound'`).all() as Array<{ body: string }>;
+    expect(rows.map((r) => r.body).join('\n')).not.toContain('screen');
+  });
+});

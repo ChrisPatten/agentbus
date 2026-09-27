@@ -173,6 +173,10 @@ Outbound delivery is handled by the bus-core delivery worker, which calls `adapt
    - Returns `DeliveryResult` with success/failure status
 4. Delivery worker ACKs or dead-letters the message based on the result
 
+### Image replies
+
+`TelegramAdapter.sendImage(envelope, { png, caption, filename })` uploads a PNG with `sendPhoto` (multipart), resolving the chat and forum topic exactly as `send()` does. Captions are truncated to Telegram's 1024-character limit. It's used for command replies that return images, such as `/pane`; it isn't part of the queued outbound path, and a failure returns a `DeliveryResult` rather than throwing.
+
 ---
 
 ## Group topics and replies
@@ -468,6 +472,7 @@ The adapter sends a permission request as a DM with **Approve** and **Deny** inl
 | Slash command registration | Yes (`setMyCommands`) |
 | Reactions | Yes (`sendReaction` with emoji) |
 | Message splitting | Yes (chunks <=4096 chars) |
+| Image replies to commands | Yes (`sendPhoto`) |
 | Markdown formatting | Yes (`parse_mode: "Markdown"`) |
 | Group forum topics | Yes — see [Group topics and replies](#group-topics-and-replies) |
 | Reply-to-message (native quote) | Yes — see [Group topics and replies](#group-topics-and-replies) |

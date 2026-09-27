@@ -689,6 +689,38 @@ export class TelegramAdapter implements AdapterInstance {
     return { success: true, platformMessageId };
   }
 
+  /**
+   * Send a PNG via `sendPhoto` (multipart upload) to the same chat/topic
+   * `send()` would resolve for `envelope`. Captions are capped at Telegram's
+   * 1024-character limit. Used by command replies such as `/pane`.
+   */
+  async sendImage(
+    envelope: MessageEnvelope,
+    image: { png: Buffer; caption: string; filename: string },
+  ): Promise<DeliveryResult> {
+    const target = this.resolveSendTarget(envelope);
+    if ('error' in target) {
+      return { success: false, error: target.error, retryable: false };
+    }
+    const form = new FormData();
+    form.append('chat_id', String(target.chatId));
+    if (target.messageThreadId) form.append('message_thread_id', String(target.messageThreadId));
+    form.append('caption', image.caption.slice(0, 1024));
+    form.append('photo', new Blob([new Uint8Array(image.png)], { type: 'image/png' }), image.filename);
+
+    try {
+      const res = await fetch(`${TELEGRAM_API_BASE}/bot${this.token}/sendPhoto`, { method: 'POST', body: form });
+      const data = (await res.json()) as TelegramApiResponse<TelegramMessage>;
+      if (!res.ok || !data.ok) {
+        return { success: false, error: `Telegram API error: ${data.description ?? res.status}`, retryable: false };
+      }
+      this.lastActivity = new Date().toISOString();
+      return { success: true, platformMessageId: String(data.result?.message_id) };
+    } catch (err) {
+      return { success: false, error: String(err), retryable: true };
+    }
+  }
+
   // ── AdapterInstance createTopic (E28) ─────────────────────────────────────
 
   /**
