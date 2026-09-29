@@ -10,6 +10,8 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-09-29
+
 ### Added
 - **`/rc` command: switch a pool pane to Remote Control from chat.** `/rc`
   types `/remote-control` and Enter into the pane leased to your conversation;
@@ -894,7 +896,8 @@ Baseline release. Core bus, pipeline, adapters, memory, scheduling.
 - Built-in slash commands + plugin command registry. (E6)
 - Scheduled messages (cron + one-shot) via background scheduler. (E18)
 
-[Unreleased]: https://github.com/ChrisPatten/agentbus/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/ChrisPatten/agentbus/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/ChrisPatten/agentbus/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/ChrisPatten/agentbus/compare/v0.11.0...v0.13.0
 [0.11.0]: https://github.com/ChrisPatten/agentbus/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/ChrisPatten/agentbus/compare/v0.8.0...v0.10.0
