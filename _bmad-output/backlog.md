@@ -121,3 +121,15 @@ A Siri ask currently queues behind any in-flight Peggy turn for the same contact
 
 ### Agent knowledge store (E50): move the SQLite database into the agent's own directory, not agentbus's
 Flagged by Chris, 2026-09-22. E50's knowledge tables (`src/db/migrations/018_knowledge.sql`) currently live in the shared `agentbus.db` (`~/.agentbus_data/agentbus.db`) alongside bus-core's own operational data — but knowledge-store content is the *agent's* user data (per-agent facts it chose to remember), not bus infrastructure state, so it shouldn't be colocated with the bus's own db. Should live under the agent's own working directory instead (e.g. `peggy-claude-code/`, alongside `memory/` and `data/`), matching the existing pattern where an agent's memory files live in its own project dir, not in `agentbus/`. Relevant for any future multi-agent setup too — one shared `agentbus.db` for N agents' knowledge stores doesn't scale/isolate cleanly.
+
+### Email: embed a session/thread token in agent-sent outbound email so a Reply routes back to the originating session
+Flagged by Chris, 2026-09-28. When an agent sends email via `send_email`, embed something that survives a human Reply (e.g. a tagged Message-ID / `In-Reply-To` mapping stored in the thread store, a plus-address like `peggy+<token>@…`, or a token in the subject/footer) so the inbound reply is delivered to the session that sent the original rather than starting a cold one. Related: `src/adapters/email-thread.ts`, E27 generic thread store.
+
+### Slack channel adapter
+Flagged by Chris, 2026-09-28. Add a Slack adapter alongside Telegram/email/Siri (inbound messages, replies, threads → sessions, likely via the E27 thread store).
+
+### Telegram topics: include the topic's pinned message as context when a message starts a new session
+Flagged by Chris, 2026-09-28. When a user message in a Telegram group topic spawns a new session, fetch the topic's pinned message (if any) and include it in the initial prompt so the agent has context for the message. Related: E28 (reply-quote-as-context), E33 (session topic exposure). **Promoted to E54 (2026-09-28)** — see `epics/E54-telegram-topic-pinned-context.md` (spike needed: Bot API has no per-topic pinned-message lookup).
+
+### Calendar proposals (iMIP invites with RSVP)
+Spec `peggy-claude-code/data/calendar-invites-spec.md`, requested 2026-09-28. **Promoted to E55 (spike, ledger, outbound), E56 (inbound RSVP + expiry scheduler), E57 (updates, Telegram buttons, /calendar, fallback).** Peggy-side skill/CLAUDE.md/email-scan/morning-brief work (spec §7) is tracked in the peggy repo, not an AgentBus epic.
