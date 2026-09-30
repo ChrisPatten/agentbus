@@ -149,7 +149,7 @@ These are ordered by dependency. The PRD will turn them into requirements.
      (`persistAttachmentBuffer`, per-agent `media` config, TTL sweep), so
      the agent sees the same `[File: …]` and `[Image: …]` lines as on
      Telegram;
-   - declared capabilities (typing, tool status, approvals, slash commands);
+   - declared capabilities (typing, tool status, slash commands);
    - creating and renaming topic sessions.
 3. **Cross-channel session continuation.** Let an inbound message join an
    existing session from a different channel. The session binding comes from
@@ -173,7 +173,6 @@ These are ordered by dependency. The PRD will turn them into requirements.
      for attachments;
    - the agent activity view (typing, tool-call trail, queued for a free
      slot) and a `/stop` button;
-   - Approve/Deny for approval requests (E51);
    - notifications and a Dock badge;
    - reconnecting after sleep and wake.
 
@@ -181,6 +180,8 @@ These are ordered by dependency. The PRD will turn them into requirements.
 
 - **The agent sending files to the user.** No outbound attachments on any
   channel. This may be added later.
+- **Approve/Deny UI.** E51 approvals only resolve for `cc-pool`, and
+  `cc-headless` runs with `--allowedTools all`, so it never asks for one.
 - Remote access. Tailscale exposure is designed for, but not built.
 - An iOS target. The project may add one later, but the MVP is macOS only.
 - Switching between agents in the app.
