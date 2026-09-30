@@ -80,7 +80,7 @@ Connect to `ws://127.0.0.1:3000/api/v1/app/ws` with the same headers, then send 
 
 If `welcome.reset` is `true`, the cursor is outside the retained window. Reload `sessions` and each needed history page, replace the local cache, and resume from `welcome.latest_seq`. The default retention is 30 days. Replay survives a bus restart within that window. App delivery succeeds even when no client is connected; the event remains available for replay.
 
-Send a message with a client-generated UUID. `target` selects Main, a new app topic, or an existing active app session:
+Send a message with a client-generated UUID. `target` selects Main, a new app topic, or a listed session:
 
 ```json
 {"type":"send","client_msg_id":"2f93a416-08a2-4df4-a821-48759a4c15a1","target":{"kind":"main"},"body":"Hello","attachment_ids":[]}
@@ -89,7 +89,11 @@ Send a message with a client-generated UUID. `target` selects Main, a new app to
 {"type":"ack","client_msg_id":"2f93a416-08a2-4df4-a821-48759a4c15a1","message_id":"…","session_id":"…","status":"queued"}
 ```
 
-The body or attachment list must be nonempty. Ack status is `queued`, `command`, or `rejected` (with `reason`). A retry using the same `client_msg_id` returns its original ack and does not enqueue twice, including after a bus restart. Keep the UUID until the ack is stored locally. Bus slash commands such as `/status`, `/clear`, and `/stop` go through the same send frame and return a message event. In E59, a `session` target must be an **active app session**; foreign-channel and Earlier-session sends are added by E60.
+The body or attachment list must be nonempty. Ack status is `queued`, `command`, or `rejected` (with `reason`). A retry using the same `client_msg_id` returns its original ack and does not enqueue twice, including after a bus restart. Keep the UUID until the ack is stored locally. Bus slash commands such as `/status`, `/clear`, and `/stop` go through the same send frame and return a message event.
+
+An active Telegram, email, or Siri session listed for this contact and agent can also be a `session` target. The bus keeps its session and agent identity, records the new message with `app` as its arrival channel, and delivers a direct reply to the app in that session. It does not copy the app exchange back to the original channel; that channel's chat may have gaps. `/clear`, `/stop`, and `/cost` act on the selected session. An unknown or hidden session is rejected.
+
+An Earlier session is read-only unless its Claude transcript is still available to the owning headless agent. Sending to a resumable Earlier session creates a new app topic titled `<original title> (resumed)` and returns the **new** `session_id` in the ack. The original remains in Earlier, and any current active session stays intact. An unavailable transcript returns `status: "rejected", reason: "not_resumable"`. A later Claude resume failure appears as an agent error in the new topic.
 
 The bus durably records a send intent before passing it to the inbound pipeline. It recovers unfinished intents on startup or when the client retries. If the bus crashes after a slash command has a side effect but before its response is correlated, recovery can return `rejected` with an ambiguous-outcome reason. Inspect session history before sending that command again with a new UUID.
 
@@ -106,6 +110,19 @@ Other client frames:
 ```
 
 Only app topic sessions can be renamed; Main and foreign sessions cannot. `mark_read` updates the per-contact read marker and sends a `session` event so other open clients update their unread count. `ping` is an optional application-level check in addition to WebSocket protocol pings.
+
+## Agent guidance and proactive delivery
+
+The agent's `system_prompt` can include this channel guidance:
+
+```markdown
+### App channel
+The app accepts full Markdown without a message length limit. Uploaded attachments arrive as local file paths; read those files before answering questions about them. A message may arrive via app inside a Telegram, email, or Siri session. Use the arrival channel for a direct reply; the session channel describes the existing conversation, not where to send that reply. Explicit `send_message` calls to another channel remain available when the operator asks for them.
+
+For scheduled work, stay in the scheduler session. Send a short update with `send_message(channel: app)` when the operator needs a result. An omitted topic goes to Main. Use `list_sessions` to find the title and `thread:<hash>` topic of a named app session before targeting it. The app can be closed: delivery and replay remain durable.
+```
+
+Named app topics must already exist and be active. An unknown topic returns a clear error rather than creating an unintended conversation. [Proactive delivery](APP_PROACTIVE_DELIVERY.md) has Main and named-topic examples; [scheduling](SCHEDULING.md) describes wake behavior.
 
 ## Reference client walkthrough
 

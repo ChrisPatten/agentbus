@@ -92,6 +92,14 @@ Scheduled messages are logged to transcripts with `metadata.scheduled = true` an
 
 The scheduler uses **at-least-once** delivery. `processInbound()` is called before the database is updated. If the process is killed between those two steps, the item retains its old `fire_at` and will fire again on the next restart.
 
+After a laptop sleeps or the bus is stopped, the first tick on wake or restart
+checks every active item whose `fire_at` is due. A cron item runs **once** on
+that tick, even if several cron occurrences were missed, then computes its next
+`fire_at` from the current time. It does not run a catch-up burst. A one-off
+item also runs once, unless its optional `stale_after_ms` ceiling has elapsed;
+then it is dead-lettered. The scheduler runs an immediate tick at startup and
+subsequent ticks at `scheduler.tick_interval_ms`.
+
 - **Once schedules** (`type: once`): best-effort-once. A crash during firing may cause a duplicate. If exact-once semantics are critical, design prompts to be idempotent.
 - **Cron schedules** (`type: cron`): intended to be periodic; the occasional duplicate is benign for most use cases.
 

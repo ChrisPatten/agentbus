@@ -221,6 +221,52 @@ describe('Scheduler.tick()', () => {
     expect(new Date(row!['fire_at'] as string).getTime()).toBeGreaterThan(Date.now());
   });
 
+  it('fires one overdue cron turn after sleep and advances from wake time', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-09-30T12:00:30.000Z'));
+      const id = insertItem(db, {
+        type: 'cron', cron_expr: '* * * * *', timezone: 'UTC',
+        fire_at: '2026-09-30T10:00:00.000Z',
+      });
+      const scheduler = new Scheduler(makeDeps(db, processInbound as ProcessInboundFn));
+      await scheduler.tick();
+      expect(processInbound).toHaveBeenCalledTimes(1);
+      expect(getItem(db, id)!['fire_count']).toBe(1);
+      expect(getItem(db, id)!['fire_at']).toBe('2026-09-30T12:01:00.000Z');
+
+      // A second tick, including after a bus restart, cannot replay skipped
+      // occurrences from the hours when the laptop was asleep.
+      await new Scheduler(makeDeps(db, processInbound as ProcessInboundFn)).tick();
+      expect(processInbound).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('fires an overdue one-off within its wake ceiling and dead-letters one past it', async () => {
+    vi.useFakeTimers();
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      vi.setSystemTime(new Date('2026-09-30T12:00:00.000Z'));
+      const fresh = insertItem(db, {
+        type: 'once', fire_at: '2026-09-30T11:55:00.000Z', stale_after_ms: 600_000,
+      });
+      const stale = insertItem(db, {
+        type: 'once', fire_at: '2026-09-30T11:49:59.000Z', stale_after_ms: 600_000,
+      });
+      await new Scheduler(makeDeps(db, processInbound as ProcessInboundFn)).tick();
+      expect(processInbound).toHaveBeenCalledTimes(1);
+      expect(getItem(db, fresh)!['status']).toBe('completed');
+      expect(getItem(db, stale)!['status']).toBe('dead_letter');
+      await new Scheduler(makeDeps(db, processInbound as ProcessInboundFn)).tick();
+      expect(processInbound).toHaveBeenCalledTimes(1);
+    } finally {
+      warnSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it('completes a cron item when max_fires is reached', async () => {
     const id = insertItem(db, {
       type: 'cron',

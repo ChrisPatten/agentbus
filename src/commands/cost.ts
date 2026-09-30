@@ -33,6 +33,13 @@ interface SessionAgentRow {
 export function resolveAgentId(deps: CostCommandDeps, ctx: SlashCommandContext): string | null {
   const contactId = ctx.sender.startsWith('contact:') ? ctx.sender.slice('contact:'.length) : ctx.sender;
 
+  const boundId = ctx.channel === 'app' ? ctx.envelope.metadata?.['bound_session_id'] : undefined;
+  if (typeof boundId === 'string') {
+    const bound = deps.db.prepare('SELECT agent_id FROM sessions WHERE id = ? AND contact_id = ?')
+      .get(boundId, contactId) as SessionAgentRow | undefined;
+    if (bound?.agent_id) return bound.agent_id;
+  }
+
   const session = deps.db
     .prepare(
       `SELECT agent_id FROM sessions

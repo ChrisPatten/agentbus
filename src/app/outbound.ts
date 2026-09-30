@@ -7,6 +7,27 @@ export function appConversationId(contactId: string, topic: string): string {
   return computeConversationId(contactId, 'app', topic);
 }
 
+export type AppDestinationValidation = { ok: true } | { ok: false; error: string };
+
+/** Validate an agent-initiated app target before delivery can create a session. */
+export function validateAppDestination(
+  db: Database.Database, contactId: string, agentId: string, topic: string,
+): AppDestinationValidation {
+  if (topic === 'general') return { ok: true };
+  if (!/^thread:[0-9a-f]{16}$/.test(topic)) {
+    return { ok: false, error: `Unknown app topic "${topic}". Use general for Main or list_sessions to find an app topic.` };
+  }
+  const row = db.prepare(`SELECT 1 FROM sessions s
+    JOIN conversation_registry cr ON cr.id = s.conversation_id
+    JOIN threads t ON t.channel = 'app' AND t.topic = cr.topic
+    WHERE s.channel = 'app' AND s.contact_id = ? AND s.agent_id = ?
+      AND s.ended_at IS NULL AND cr.channel = 'app' AND cr.topic = ?
+    LIMIT 1`).get(contactId, agentId, topic);
+  return row
+    ? { ok: true }
+    : { ok: false, error: `Unknown or inactive app topic "${topic}" for this contact and agent. Use list_sessions to find an active app topic.` };
+}
+
 /** Ensure proactive sends have a real session before DeliveryWorker logs them. */
 export function ensureOutboundAppSession(db: Database.Database, contactId: string, agentId: string, topic: string): { conversationId: string; sessionId: string } {
   const conversationId = appConversationId(contactId, topic);

@@ -13,7 +13,8 @@ import { persistAttachmentBuffer, resolveMediaConfig } from '../media/attachment
 import { patchThreadMetadata } from '../pipeline/thread-store.js';
 import { computeConversationId } from '../pipeline/conversation-id.js';
 import { channelMatches } from '../pipeline/types.js';
-import { createAppSession, eventBounds, history, listSessions, readEvents, recordSessionEvent, routedAgent, visibleSession } from '../app/store.js';
+import { createAppSession, eventBounds, history, listSessions, readEvents, recordSessionEvent, routedAgent, sessionInfo, visibleSession } from '../app/store.js';
+import { sessionCanResume } from '../app/resume.js';
 import { VERSION } from '../version.js';
 import type { InboundAbort, InboundMessage, InboundResult } from './api.js';
 
@@ -38,6 +39,7 @@ const Send = z.object({ type: z.literal('send'), client_msg_id: z.string().uuid(
 
 interface StoredIntent {
   message_id: string; topic: string; session_id: string | null; body: string;
+  original_channel?: string;
   attachments: InboundMessage['attachments']; agent_id: string; adapter_id: string;
 }
 
@@ -71,7 +73,7 @@ export async function registerAppRoutes(server: FastifyInstance, deps: AppRouteD
   const drain = (client: Client) => {
     if (!client.ready || client.socket.readyState !== 1) return;
     const high = eventBounds(deps.db, client.contactId).latest;
-    for (const e of readEvents(deps.db, client.contactId, client.agentId, client.cursor, high)) {
+    for (const e of readEvents(deps.db, client.contactId, client.agentId, client.cursor, high, deps.config)) {
       let data = e.data;
       if (e.event === 'session') {
         const row = deps.db.prepare('SELECT conversation_id FROM sessions WHERE id = ?').get(data['session_id']) as {conversation_id:string}|undefined;
@@ -96,23 +98,30 @@ export async function registerAppRoutes(server: FastifyInstance, deps: AppRouteD
       status = response ? 'command' : 'rejected';
       if (!response) reason = 'Command outcome is ambiguous after restart; inspect history before retrying with a new ID';
     } else if (transcript) {
+      const bound = intent.session_id ? deps.db.prepare(`SELECT s.conversation_id, cr.channel, cr.topic
+        FROM sessions s JOIN conversation_registry cr ON cr.id=s.conversation_id WHERE s.id=?`)
+        .get(intent.session_id) as {conversation_id:string;channel:string;topic:string}|undefined : undefined;
       const envelope: MessageEnvelope = { id: intent.message_id, timestamp: transcript.created_at,
         channel: 'app', topic: intent.topic, sender: `contact:${contactId}`, recipient: intent.agent_id,
         reply_to: null, priority: 'normal', payload: { type: 'text', body: intent.body },
         metadata: { source: 'app', client_msg_id: clientMsgId, adapter_id: intent.adapter_id,
-          conversation_id: computeConversationId(contactId, 'app', intent.topic),
+          ...(intent.session_id ? { bound_session_id: intent.session_id } : {}),
+          conversation_id: bound?.conversation_id ?? computeConversationId(contactId, 'app', intent.topic),
+          ...(bound ? { session_channel: intent.original_channel ?? bound.channel, session_topic: bound.topic } : {}),
           attachments: intent.attachments ?? [] } };
       deps.queue.enqueue(envelope);
       status = 'queued';
     } else {
       const result = await deps.submitInbound({ id: intent.message_id, channel: 'app', topic: intent.topic,
         sender: `contact:${contactId}`, payload: { type: 'text', body: intent.body },
-        attachments: intent.attachments, metadata: { source: 'app', client_msg_id: clientMsgId } });
+        attachments: intent.attachments, metadata: { source: 'app', client_msg_id: clientMsgId,
+          ...(intent.session_id ? { bound_session_id: intent.session_id } : {}),
+          ...(intent.original_channel ? { resumed_from_channel: intent.original_channel } : {}) } });
       status = result.queued && result.enqueued_count > 0 ? 'queued'
         : !result.queued && result.reason === 'command_handled' ? 'command' : 'rejected';
       reason = status === 'rejected' ? result.queued ? 'No route accepted the message' : result.reason : undefined;
     }
-    const resolvedSession = transcript?.session_id ?? (deps.db.prepare(`SELECT s.id FROM sessions s
+    const resolvedSession = intent.session_id ?? transcript?.session_id ?? (deps.db.prepare(`SELECT s.id FROM sessions s
       JOIN conversation_registry cr ON cr.id = s.conversation_id
       WHERE cr.contact_id = ? AND cr.channel = 'app' AND cr.topic = ? AND s.ended_at IS NULL
       ORDER BY s.started_at DESC LIMIT 1`).get(contactId, intent.topic) as {id:string}|undefined)?.id ?? intent.session_id;
@@ -172,7 +181,7 @@ export async function registerAppRoutes(server: FastifyInstance, deps: AppRouteD
       if (!agent) return reply.code(422).send({ error: 'No app agent route for this contact' });
       const q = req.query as Record<string, unknown>;
       const state = ['active', 'earlier', 'all'].includes(String(q['state'])) ? String(q['state']) : 'all';
-      const sessions = listSessions(deps.db, contact, agent, state, asNumber(q['limit'], 50, 100), typeof q['before'] === 'string' ? q['before'] : undefined);
+      const sessions = listSessions(deps.db, contact, agent, state, asNumber(q['limit'], 50, 100), typeof q['before'] === 'string' ? q['before'] : undefined, deps.config);
       const projected: Record<string, unknown>[] = sessions.map(item => {
         const row = deps.db.prepare('SELECT conversation_id FROM sessions WHERE id = ?').get(item['session_id']) as {conversation_id:string};
         const activity = currentActivity.get(`${agent}:${row.conversation_id}`);
@@ -257,12 +266,18 @@ export async function registerAppRoutes(server: FastifyInstance, deps: AppRouteD
             send(socket, ack); drain(client); return;
           }
           let topic = 'general'; let sessionId: string | null = null;
+          let earlierTarget: ReturnType<typeof visibleSession> = null;
           if (f.target.kind === 'session') {
             const target = visibleSession(deps.db, contactId, agentId, f.target.session_id);
-            if (!target || target.channel !== 'app' || target.ended_at) {
-              send(socket, { type: 'ack', client_msg_id: f.client_msg_id, status: 'rejected', reason: 'Session is not an active app session' }); return;
+            if (!target) {
+              send(socket, { type: 'ack', client_msg_id: f.client_msg_id, status: 'rejected', reason: 'session_not_found' }); return;
             }
-            topic = target.topic; sessionId = target.id;
+            if (target.ended_at) {
+              if (!sessionCanResume(deps.db, deps.config, target.id)) {
+                send(socket, { type: 'ack', client_msg_id: f.client_msg_id, status: 'rejected', reason: 'not_resumable' }); return;
+              }
+              earlierTarget = target;
+            } else { topic = target.topic; sessionId = target.id; }
           }
           const attachments: NonNullable<InboundMessage['attachments']> = [];
           for (const id of f.attachment_ids) {
@@ -278,6 +293,13 @@ export async function registerAppRoutes(server: FastifyInstance, deps: AppRouteD
             if (f.target.kind === 'new') {
               const created = createAppSession(deps.db, contactId, agentId, f.target.title);
               topic = created.topic; sessionId = created.sessionId;
+            } else if (earlierTarget) {
+              const originalTitle = String(sessionInfo(deps.db, earlierTarget, contactId, deps.config)['title'] ?? 'Conversation');
+              const created = createAppSession(deps.db, contactId, agentId, `${originalTitle} (resumed)`);
+              const old = deps.db.prepare('SELECT claude_session_id FROM sessions WHERE id = ?')
+                .get(earlierTarget.id) as {claude_session_id:string};
+              deps.db.prepare('UPDATE sessions SET claude_session_id = ? WHERE id = ?').run(old.claude_session_id, created.sessionId);
+              topic = created.topic; sessionId = created.sessionId;
             }
             const route = deps.config.pipeline.routes.find(r =>
               (!r.match.sender || r.match.sender === `contact:${contactId}`) &&
@@ -285,13 +307,16 @@ export async function registerAppRoutes(server: FastifyInstance, deps: AppRouteD
               (!r.match.topic || r.match.topic === topic));
             const intent: StoredIntent = { message_id: messageId, topic, session_id: sessionId, body: f.body,
               attachments, agent_id: agentId,
+              ...(earlierTarget ? { original_channel: earlierTarget.channel } : {}),
               adapter_id: route?.target.adapterId ?? 'cc-headless' };
             const pending = { type: 'ack', client_msg_id: f.client_msg_id, message_id: messageId, session_id: sessionId, status: 'pending' };
             deps.db.prepare(`INSERT INTO app_sends(contact_id,client_msg_id,ack_json,intent_json,created_at)
               VALUES (?,?,?,?,?)`).run(contactId, f.client_msg_id, JSON.stringify(pending), JSON.stringify(intent), new Date().toISOString());
           })();
           const result = await deps.submitInbound({ id: messageId, channel: 'app', topic, sender: `contact:${contactId}`,
-            payload: { type: 'text', body: f.body }, attachments, metadata: { source: 'app', client_msg_id: f.client_msg_id } });
+            payload: { type: 'text', body: f.body }, attachments, metadata: { source: 'app', client_msg_id: f.client_msg_id,
+              ...(sessionId ? { bound_session_id: sessionId } : {}),
+              ...(earlierTarget ? { resumed_from_channel: earlierTarget.channel } : {}) } });
           if (!sessionId) {
             sessionId = (deps.db.prepare(`SELECT s.id FROM sessions s JOIN conversation_registry cr ON cr.id=s.conversation_id
               WHERE cr.contact_id=? AND cr.channel='app' AND cr.topic=? AND s.ended_at IS NULL ORDER BY s.started_at DESC LIMIT 1`)

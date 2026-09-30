@@ -63,6 +63,9 @@ import type Database from 'better-sqlite3';
 import type { CommandImage, CommandRegistry, SlashCommandContext } from '../commands/registry.js';
 import { createSafeDatabase } from '../db/safe-database.js';
 import { logOutboundTranscript } from '../pipeline/outbound-transcript.js';
+import { validateAppDestination } from '../app/outbound.js';
+import { boundAppReply } from '../app/binding.js';
+import { routedAgent } from '../app/store.js';
 import { logWebhookRequest } from './webhook-log.js';
 import { registerSiriRoutes } from './siri-routes.js';
 import type { SiriAdapter } from '../adapters/siri.js';
@@ -280,7 +283,11 @@ export async function sendCommandResponse(
 
   const sendText = async (body: string, envelope: MessageEnvelope = buildEnvelope(body)): Promise<void> => {
     try {
-      await originAdapter.send(envelope);
+      if (originAdapter.id === 'app' && 'sendCommandResponse' in originAdapter) {
+        await (originAdapter as typeof originAdapter & {sendCommandResponse: (e: MessageEnvelope) => Promise<unknown>}).sendCommandResponse(envelope);
+      } else {
+        await originAdapter.send(envelope);
+      }
     } catch (err) {
       console.error(`[inbound] Failed to send command response via ${adapterId}: ${String(err)}`);
     }
@@ -908,6 +915,21 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       metadata,
     };
 
+    if (data.channel === 'app') {
+      const contactId = data.recipient.replace(/^contact:/, '');
+      const agentId = routedAgent(config, contactId);
+      if (!agentId) return reply.status(400).send({ ok: false, error: 'App channel is not routed for this contact' });
+      const bound = boundAppReply(db, data.reply_to, contactId, agentId);
+      if (bound) {
+        envelope.metadata['bound_session_id'] = bound.sessionId;
+        envelope.metadata['conversation_id'] = bound.conversationId;
+      } else {
+        delete envelope.metadata['bound_session_id'];
+        const target = validateAppDestination(db, contactId, agentId, data.topic);
+        if (!target.ok) return reply.status(400).send({ ok: false, error: target.error });
+      }
+    }
+
     // E48 (S48.6) — stale-pane guard. A pool pane (e.g. "agent:peggy-pool-3")
     // can be evicted (its pool_leases row reassigned to a different
     // conversation) while a reply it generated for its PREVIOUS conversation
@@ -997,12 +1019,12 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
   // (E28) further targets a specific forum topic within a group channel.
   // Fire-and-forget by callers — always returns 200, even when adapter is not found
   // or doesn't support typing (no-op in those cases).
-  server.post<{ Params: { id: string }; Body: { contact_id?: string; topic?: string } }>(
+  server.post<{ Params: { id: string }; Body: { contact_id?: string; topic?: string; conversation_id?: string } }>(
     '/api/v1/adapters/:id/typing',
     async (req, _reply) => {
       const adapter = registry.lookupPrimaryByChannel(req.params.id);
       if (adapter?.capabilities.typing && typeof adapter.startTyping === 'function') {
-        adapter.startTyping(req.body.contact_id ?? '', req.params.id, req.body.topic);
+        adapter.startTyping(req.body.contact_id ?? '', req.params.id, req.body.topic, req.body.conversation_id);
       }
       return { ok: true };
     },
@@ -1018,11 +1040,11 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
   // doesn't support the capability (no-op in those cases).
   server.post<{
     Params: { id: string };
-    Body: { contact_id?: string; text?: string; topic?: string; placeholder?: boolean };
+    Body: { contact_id?: string; text?: string; topic?: string; placeholder?: boolean; conversation_id?: string };
   }>('/api/v1/adapters/:id/tool-status', async (req, _reply) => {
     const adapter = registry.lookupPrimaryByChannel(req.params.id);
     if (adapter?.capabilities.toolStatus && typeof adapter.reportToolCall === 'function' && req.body.text) {
-      adapter.reportToolCall(req.body.contact_id ?? '', req.body.text, req.params.id, req.body.topic, req.body.placeholder);
+      adapter.reportToolCall(req.body.contact_id ?? '', req.body.text, req.params.id, req.body.topic, req.body.placeholder, req.body.conversation_id);
     }
     return { ok: true };
   });
@@ -1122,7 +1144,11 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       SELECT s.id, s.conversation_id, s.channel, s.contact_id,
              s.started_at, s.last_activity, s.ended_at, s.message_count,
              ss.summary, ss.model, ss.token_count, ss.created_at AS summary_created_at,
-             cr.topic
+             cr.topic,
+             CASE WHEN s.channel = 'app' AND cr.topic = 'general' THEN 'Main'
+                  WHEN s.channel = 'app' THEN json_extract(
+                    (SELECT t.metadata FROM threads t WHERE t.channel = 'app' AND t.topic = cr.topic), '$.title')
+                  ELSE NULL END AS title
       FROM sessions s
       LEFT JOIN session_summaries ss ON ss.session_id = s.id
       LEFT JOIN conversation_registry cr ON cr.id = s.conversation_id
@@ -1160,6 +1186,7 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
         token_count: number | null;
         summary_created_at: string | null;
         topic: string | null;
+        title: string | null;
       }>;
 
       const sessions = rows.map(({ summary, model, token_count, summary_created_at, ...s }) => ({
@@ -1184,7 +1211,11 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
         `SELECT s.id, s.conversation_id, s.channel, s.contact_id,
                 s.started_at, s.last_activity, s.ended_at, s.message_count,
                 ss.summary, ss.model, ss.token_count, ss.created_at AS summary_created_at,
-                cr.topic
+                cr.topic,
+                CASE WHEN s.channel = 'app' AND cr.topic = 'general' THEN 'Main'
+                     WHEN s.channel = 'app' THEN json_extract(
+                       (SELECT t.metadata FROM threads t WHERE t.channel = 'app' AND t.topic = cr.topic), '$.title')
+                     ELSE NULL END AS title
          FROM sessions s
          LEFT JOIN session_summaries ss ON ss.session_id = s.id
          LEFT JOIN conversation_registry cr ON cr.id = s.conversation_id
@@ -1205,6 +1236,7 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
           token_count: number | null;
           summary_created_at: string | null;
           topic: string | null;
+          title: string | null;
         }
       | undefined;
 
@@ -1855,7 +1887,13 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       : payload.body;
     const preview = rawBody.length > 60 ? `${rawBody.slice(0, 60)}…` : rawBody;
     console.log(`[http:inbound] channel=${channel} sender=${sender} body="${preview}"`);
-    const result = await processInbound(parsed.data, {
+    // Session binding is a capability of the authenticated app socket, not a
+    // caller-controlled inbound field on the general API.
+    const inbound = { ...parsed.data, metadata: { ...parsed.data.metadata } };
+    delete inbound.metadata['bound_session_id'];
+    delete inbound.metadata['session_channel'];
+    delete inbound.metadata['session_topic'];
+    const result = await processInbound(inbound, {
       queue,
       pipeline,
       config,

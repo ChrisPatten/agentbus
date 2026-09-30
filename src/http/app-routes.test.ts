@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../adapters/cc-headless.js', () => ({ getHeadlessSnapshots: () => [] }));
+vi.mock('../adapters/claude-transcript.js', () => ({ claudeTranscriptExists: () => true }));
 import Database from 'better-sqlite3';
 import { runMigrations } from '../db/schema.js';
 import { MessageQueue } from '../core/queue.js';
@@ -18,6 +19,9 @@ import { createRouteResolve } from '../pipeline/stages/route-resolve.js';
 import { createTranscriptLog } from '../pipeline/stages/transcript-log.js';
 import { eventBounds } from '../app/store.js';
 import { ensureOutboundAppSession } from '../app/outbound.js';
+import { slashCommandDetect } from '../pipeline/stages/slash-command.js';
+import { CommandRegistry } from '../commands/registry.js';
+import { createBuiltinCommands } from '../commands/handlers.js';
 
 const TOKEN = 'app-contact-token-0123456789';
 const config = {
@@ -33,20 +37,161 @@ const config = {
 const live: { server: FastifyInstance; db: Database.Database }[] = [];
 afterEach(async () => { for (const x of live.splice(0)) { await x.server.close(); x.db.close(); } });
 
-async function fixture(withPipeline = false, localConfig = config, reusedDb?: Database.Database) {
+async function fixture(withPipeline = false, localConfig = config, reusedDb?: Database.Database, withCommands = false) {
   const db = reusedDb ?? new Database(':memory:'); db.pragma('foreign_keys = ON'); runMigrations(db);
   const registry = new AdapterRegistry(); const app = new AppAdapter(db, () => 'agent:work'); registry.register(app);
+  const queue = new MessageQueue(db);
+  const commandRegistry = withCommands ? new CommandRegistry() : undefined;
+  if (commandRegistry) {
+    const clear = createBuiltinCommands({ adapterRegistry: registry, queue, pauseSet: new Set(), db }).find(c => c.name === 'clear')!;
+    commandRegistry.register(clear);
+  }
   const pipeline = new PipelineEngine();
   if (withPipeline) {
     pipeline.use({ slot: 10, name: 'normalize', stage: normalize });
+    if (withCommands) pipeline.use({ slot: 40, name: 'slash', stage: slashCommandDetect });
     pipeline.use({ slot: 70, name: 'route', stage: createRouteResolve(config, db) });
     pipeline.use({ slot: 80, name: 'transcript', stage: createTranscriptLog(db, config) });
   }
-  const server = await createHttpServer({ config: localConfig, db, registry, app, queue: new MessageQueue(db), pipeline });
+  const server = await createHttpServer({ config: localConfig, db, registry, app, queue, pipeline, commandRegistry });
   live.push({ server, db }); return { server, db };
 }
 
 describe('app routes', () => {
+  it('binds an app send to an active Telegram session and routes its reply back to that session', async () => {
+    const { server, db } = await fixture(true);
+    const now = new Date().toISOString();
+    const sessionId = '741320d9-27ef-4e63-a1f2-94744813ab21';
+    db.prepare(`INSERT INTO conversation_registry(id,contact_id,channel,topic,first_seen,last_seen) VALUES (?,?,?,?,?,?)`)
+      .run('telegram-conversation', 'alice', 'telegram', 'general', now, now);
+    db.prepare(`INSERT INTO sessions(id,conversation_id,channel,contact_id,started_at,last_activity,agent_id)
+      VALUES (?,?,?,?,?,?,?)`).run(sessionId, 'telegram-conversation', 'telegram', 'alice', now, now, 'agent:work');
+    db.prepare(`INSERT INTO transcripts(id,message_id,conversation_id,session_id,created_at,channel,contact_id,direction,body,metadata)
+      VALUES (?,?,?,?,?,?,?,?,?,?)`).run('seed-row', 'seed-msg', 'telegram-conversation', sessionId, now, 'telegram', 'alice', 'inbound', 'Earlier hello', '{}');
+    await server.listen({ host: '127.0.0.1', port: 0 });
+    const address = server.server.address(); if (!address || typeof address === 'string') throw new Error('No address');
+    const client = await connect(`ws://127.0.0.1:${address.port}/api/v1/app/ws`);
+    client.socket.send(JSON.stringify({ type: 'hello', cursor: 0 }));
+    await until(() => client.frames.some(f => f['type'] === 'welcome'));
+    client.socket.send(JSON.stringify({ type: 'send', client_msg_id: 'c269dbf0-286f-4b8b-9446-3fab00d69c56',
+      target: { kind: 'session', session_id: sessionId }, body: 'Continue here' }));
+    await until(() => client.frames.some(f => f['type'] === 'ack'));
+    const ack = client.frames.find(f => f['type'] === 'ack')!;
+    expect(ack).toMatchObject({ status: 'queued', session_id: sessionId });
+    const inbound = db.prepare('SELECT * FROM transcripts WHERE message_id = ?').get(ack['message_id']) as {session_id:string;conversation_id:string;channel:string};
+    expect(inbound).toMatchObject({ session_id: sessionId, conversation_id: 'telegram-conversation', channel: 'app' });
+    const queued = new MessageQueue(db).getById(String(ack['message_id']));
+    expect(queued!.envelope.metadata).toMatchObject({ conversation_id: 'telegram-conversation', session_channel: 'telegram', bound_session_id: sessionId });
+    const response = await server.inject({ method: 'POST', url: '/api/v1/messages', payload: {
+      channel: 'app', topic: 'general', sender: 'agent:work', recipient: 'contact:alice', reply_to: ack['message_id'],
+      payload: { type: 'text', body: 'App only reply' }, metadata: {},
+    } });
+    expect(response.statusCode).toBe(201);
+    const app = new AppAdapter(db, () => 'agent:work');
+    const outId = response.json().id as string;
+    const outbound = new MessageQueue(db).getById(outId)!;
+    expect((await app.send(outbound.envelope)).success).toBe(true);
+    expect(db.prepare('SELECT session_id,conversation_id FROM transcripts WHERE message_id = ?').get(outId))
+      .toMatchObject({ session_id: sessionId, conversation_id: 'telegram-conversation' });
+    client.socket.close();
+  });
+
+  it('forks a resumable Earlier session without replacing the current Telegram session', async () => {
+    const localConfig = { ...config, adapters: { ...config.adapters,
+      'cc-headless': { agent_id: 'work', working_dir: '/tmp/project', system_prompt: 'test' } } } as AppConfig;
+    const { server, db } = await fixture(true, localConfig);
+    const now = new Date().toISOString();
+    const oldId = '741320d9-27ef-4e63-a1f2-94744813ab22';
+    const currentId = '741320d9-27ef-4e63-a1f2-94744813ab23';
+    db.prepare(`INSERT INTO conversation_registry(id,contact_id,channel,topic,first_seen,last_seen) VALUES (?,?,?,?,?,?)`)
+      .run('telegram-earlier', 'alice', 'telegram', 'general', now, now);
+    db.prepare(`INSERT INTO sessions(id,conversation_id,channel,contact_id,started_at,last_activity,ended_at,agent_id,claude_session_id)
+      VALUES (?,?,?,?,?,?,?,?,?)`).run(oldId, 'telegram-earlier', 'telegram', 'alice', now, now, now, 'agent:work', 'claude-old');
+    db.prepare(`INSERT INTO sessions(id,conversation_id,channel,contact_id,started_at,last_activity,agent_id,claude_session_id)
+      VALUES (?,?,?,?,?,?,?,?)`).run(currentId, 'telegram-earlier', 'telegram', 'alice', now, now, 'agent:work', 'claude-current');
+    db.prepare(`INSERT INTO transcripts(id,message_id,conversation_id,session_id,created_at,channel,contact_id,direction,body,metadata)
+      VALUES (?,?,?,?,?,?,?,?,?,?)`).run('old-row', 'old-msg', 'telegram-earlier', oldId, now, 'telegram', 'alice', 'inbound', 'Original title', '{}');
+    await server.listen({ host: '127.0.0.1', port: 0 });
+    const address = server.server.address(); if (!address || typeof address === 'string') throw new Error('No address');
+    const client = await connect(`ws://127.0.0.1:${address.port}/api/v1/app/ws`);
+    client.socket.send(JSON.stringify({ type: 'hello', cursor: 0 }));
+    await until(() => client.frames.some(f => f['type'] === 'welcome'));
+    client.socket.send(JSON.stringify({ type: 'send', client_msg_id: 'c269dbf0-286f-4b8b-9446-3fab00d69c57',
+      target: { kind: 'session', session_id: oldId }, body: 'Resume this' }));
+    await until(() => client.frames.some(f => f['type'] === 'ack'));
+    const ack = client.frames.find(f => f['type'] === 'ack')!;
+    expect(ack['status']).toBe('queued');
+    expect(ack['session_id']).not.toBe(oldId);
+    const fork = db.prepare(`SELECT s.id,s.channel,s.claude_session_id,cr.topic FROM sessions s
+      JOIN conversation_registry cr ON cr.id=s.conversation_id WHERE s.id=?`).get(ack['session_id']) as {id:string;channel:string;claude_session_id:string;topic:string};
+    expect(fork).toMatchObject({ channel: 'app', claude_session_id: 'claude-old' });
+    expect(fork.topic).toMatch(/^thread:/);
+    expect(new MessageQueue(db).getById(String(ack['message_id']))?.envelope.metadata)
+      .toMatchObject({ session_channel: 'telegram', resumed_from_channel: 'telegram' });
+    expect(db.prepare('SELECT ended_at FROM sessions WHERE id = ?').get(oldId)).toMatchObject({ ended_at: now });
+    expect(db.prepare('SELECT claude_session_id,ended_at FROM sessions WHERE id = ?').get(currentId))
+      .toMatchObject({ claude_session_id: 'claude-current', ended_at: null });
+    client.socket.close();
+  });
+
+  it('rejects hidden and unresumable session targets before creating an intent', async () => {
+    const { server, db } = await fixture(true);
+    const now = new Date().toISOString();
+    for (const [id, contact, agent, ended] of [
+      ['741320d9-27ef-4e63-a1f2-94744813ab24', 'bob', 'agent:work', false],
+      ['741320d9-27ef-4e63-a1f2-94744813ab25', 'alice', 'agent:other', false],
+      ['741320d9-27ef-4e63-a1f2-94744813ab26', 'alice', 'agent:work', true],
+    ] as const) {
+      db.prepare(`INSERT INTO conversation_registry(id,contact_id,channel,topic,first_seen,last_seen) VALUES (?,?,?,?,?,?)`)
+        .run(`conv-${id}`, contact, 'telegram', 'general', now, now);
+      db.prepare(`INSERT INTO sessions(id,conversation_id,channel,contact_id,started_at,last_activity,ended_at,agent_id)
+        VALUES (?,?,?,?,?,?,?,?)`).run(id, `conv-${id}`, 'telegram', contact, now, now, ended ? now : null, agent);
+      db.prepare(`INSERT INTO transcripts(id,message_id,conversation_id,session_id,created_at,channel,contact_id,direction,body,metadata)
+        VALUES (?,?,?,?,?,?,?,?,?,?)`).run(`row-${id}`, `msg-${id}`, `conv-${id}`, id, now, 'telegram', contact, 'inbound', 'hello', '{}');
+    }
+    await server.listen({ host: '127.0.0.1', port: 0 });
+    const address = server.server.address(); if (!address || typeof address === 'string') throw new Error('No address');
+    const client = await connect(`ws://127.0.0.1:${address.port}/api/v1/app/ws`);
+    client.socket.send(JSON.stringify({ type: 'hello', cursor: 0 }));
+    await until(() => client.frames.some(f => f['type'] === 'welcome'));
+    for (const [i, id] of ['741320d9-27ef-4e63-a1f2-94744813ab24', '741320d9-27ef-4e63-a1f2-94744813ab25', '741320d9-27ef-4e63-a1f2-94744813ab26'].entries()) {
+      const clientId = `c269dbf0-286f-4b8b-9446-${String(i).padStart(12, '0')}`;
+      client.socket.send(JSON.stringify({ type: 'send', client_msg_id: clientId, target: { kind: 'session', session_id: id }, body: 'Guess' }));
+      await until(() => client.frames.some(f => f['type'] === 'ack' && f['client_msg_id'] === clientId));
+      const ack = client.frames.find(f => f['type'] === 'ack' && f['client_msg_id'] === clientId)!;
+      expect(ack['status']).toBe('rejected');
+      expect(ack['reason']).toBe(i === 2 ? 'not_resumable' : 'session_not_found');
+    }
+    expect((db.prepare('SELECT COUNT(*) AS n FROM app_sends').get() as {n:number}).n).toBe(0);
+    client.socket.close();
+  });
+
+  it('sends a bound /clear confirmation into the foreign session after closing it', async () => {
+    const { server, db } = await fixture(true, config, undefined, true);
+    const now = new Date().toISOString();
+    const sessionId = '741320d9-27ef-4e63-a1f2-94744813ab27';
+    db.prepare(`INSERT INTO conversation_registry(id,contact_id,channel,topic,first_seen,last_seen) VALUES (?,?,?,?,?,?)`)
+      .run('telegram-clear', 'alice', 'telegram', 'general', now, now);
+    db.prepare(`INSERT INTO sessions(id,conversation_id,channel,contact_id,started_at,last_activity,agent_id,claude_session_id)
+      VALUES (?,?,?,?,?,?,?,?)`).run(sessionId, 'telegram-clear', 'telegram', 'alice', now, now, 'agent:work', 'claude-clear');
+    db.prepare(`INSERT INTO transcripts(id,message_id,conversation_id,session_id,created_at,channel,contact_id,direction,body,metadata)
+      VALUES (?,?,?,?,?,?,?,?,?,?)`).run('clear-seed', 'clear-seed-msg', 'telegram-clear', sessionId, now, 'telegram', 'alice', 'inbound', 'Original', '{}');
+    await server.listen({ host: '127.0.0.1', port: 0 });
+    const address = server.server.address(); if (!address || typeof address === 'string') throw new Error('No address');
+    const client = await connect(`ws://127.0.0.1:${address.port}/api/v1/app/ws`);
+    client.socket.send(JSON.stringify({ type: 'hello', cursor: 0 }));
+    await until(() => client.frames.some(f => f['type'] === 'welcome'));
+    client.socket.send(JSON.stringify({ type: 'send', client_msg_id: 'c269dbf0-286f-4b8b-9446-3fab00d69c58',
+      target: { kind: 'session', session_id: sessionId }, body: '/clear' }));
+    await until(() => client.frames.some(f => f['type'] === 'ack'));
+    expect(client.frames.find(f => f['type'] === 'ack')).toMatchObject({ status: 'command', session_id: sessionId });
+    expect(db.prepare('SELECT ended_at FROM sessions WHERE id = ?').get(sessionId)).toMatchObject({ ended_at: expect.any(String) });
+    const response = db.prepare(`SELECT session_id,channel,body FROM transcripts WHERE session_id = ? AND direction = 'outbound'
+      AND json_extract(metadata,'$.command') = 'clear'`).get(sessionId) as {session_id:string;channel:string;body:string}|undefined;
+    expect(response).toMatchObject({ session_id: sessionId, channel: 'app', body: expect.stringContaining('Context cleared') });
+    expect((db.prepare('SELECT COUNT(*) AS n FROM app_events WHERE session_id = ? AND kind = ?').get(sessionId, 'message') as {n:number}).n).toBeGreaterThanOrEqual(3);
+    client.socket.close();
+  });
   it('gates every route by contact bearer token and reports routed health', async () => {
     const { server } = await fixture();
     expect((await server.inject('/api/v1/app/health')).statusCode).toBe(401);
@@ -54,6 +199,17 @@ describe('app routes', () => {
     const health = await server.inject({ url: '/api/v1/app/health', headers: { authorization: `Bearer ${TOKEN}` } });
     expect(health.statusCode).toBe(200);
     expect(health.json()).toMatchObject({ ok: true, contact: 'contact:alice', agent: 'agent:work', routed: true });
+  });
+
+  it('rejects an unknown proactive app topic before enqueue', async () => {
+    const { server, db } = await fixture();
+    const res = await server.inject({ method: 'POST', url: '/api/v1/messages', payload: {
+      channel: 'app', topic: 'thread:1234567890abcdef', sender: 'agent:work', recipient: 'contact:alice',
+      payload: { type: 'text', body: 'hello' }, metadata: {},
+    } });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toContain('Unknown or inactive app topic');
+    expect((db.prepare('SELECT COUNT(*) AS n FROM message_queue').get() as {n:number}).n).toBe(0);
   });
 
   it('returns 404 for hidden history and an actionable 422 when media is absent', async () => {

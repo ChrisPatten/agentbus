@@ -1,8 +1,8 @@
-# Mac Client — E58/E59 Architecture Decisions
+# Mac Client — E58–E61 Architecture Decisions
 
-**Status:** In implementation · **Date:** 2026-09-30 · **Sources:** `product-brief.md` v0.4, `PRD.md` v0.1, E58 and E59 epics
+**Status:** Implemented; live acceptance pending · **Date:** 2026-09-30 · **Sources:** `product-brief.md` v0.4, `PRD.md` v0.1, E58–E61 epics
 
-This records the integration contract for the two foundation epics. E60's bound-session and Earlier-resume mechanics remain a separate design gate.
+This records the integration contract for the mac client foundation, cross-channel continuation, and proactive delivery.
 
 ## 1. Headless scheduling and activity (E58)
 
@@ -36,3 +36,18 @@ This records the integration contract for the two foundation epics. E60's bound-
 - E58: four user processes plus one system process, fifth user queued; no two turns in one conversation overlap; stop is scoped; journaling lane holds.
 - E59: invalid token fails before enqueue; idempotent retry survives restart; event replay works across disconnect and restart; a no-client app send still yields a Main transcript/event; a Telegram outbound transcript appears in the app; app uploads obey media and size limits.
 - Integration: activity events from E58 reach an app socket and are snapshotted on reconnect. Run the full bus suite and type check after merging both work streams.
+
+## 5. E60 binding audit and Earlier decision
+
+Only the authenticated app socket may supply a session binding. The app route authorizes the selected session against the token's contact and routed agent before storing a send intent. The bound session row supplies the conversation ID, topic, and owner; `app` remains the arrival and reply channel. Public inbound calls cannot set a binding.
+
+| Path | Prior identity | Bound identity | Verification |
+|---|---|---|---|
+| App send and recovery | app channel/topic | authorized session ID in durable intent | app route tests |
+| Route and transcript | hash(contact, app, topic), active lookup | selected conversation, agent, session; transcript arrival `app` | route/transcript tests |
+| Headless queue, resume, activity | transcript conversation, active session | same selected conversation and session | headless tests |
+| Reply and stale pane guard | `reply_to` transcript conversation | selected conversation plus session in reply metadata | reply/API tests |
+| `/clear`, `/stop`, `/cost` | sender channel/topic | selected conversation/session and owner | command tests |
+| Journaling, SessionTracker, context ledger | conversation/session | selected conversation/session | tracker/headless tests |
+
+An Earlier row remains closed and read-only. On send, if its Claude transcript exists on disk, the app creates a new app topic and session titled `<original title> (resumed)`, copies the Claude session ID to that fork, and returns the fork session ID in the ack. The original history and any current active session remain untouched. A missing transcript yields `not_resumable` before enqueue; a later failed `--resume` is shown as a visible agent error in the fork and does not alter the old row. The sidebar shows both rows, with the original under Earlier and the fork as active.

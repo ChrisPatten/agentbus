@@ -724,6 +724,29 @@ describe('command handlers', () => {
       });
     });
 
+    it('clears the bound Telegram session when the command arrives through app', async () => {
+      const db = makeDb();
+      insertSession(db, { id: 'bound-clear', agentId: 'agent:peggy' });
+      const conversationId = computeConversationId('chris', 'telegram', 'general');
+      const journal = vi.fn();
+      const deps = { ...makeDeps({ db }), headlessControl: { journalResumeId: new Map([['agent:peggy', journal]]) } };
+      const clear = createBuiltinCommands(deps as never).find(c => c.name === 'clear')!;
+      const envelope = { ...makeEnvelope(), channel: 'app', metadata: { bound_session_id: 'bound-clear', conversation_id: conversationId } };
+      await clear.handler([], makeCtx(db, { channel: 'app', adapterId: 'app', envelope }));
+      expect(db.prepare('SELECT ended_at FROM sessions WHERE id = ?').get('bound-clear')).toMatchObject({ ended_at: expect.any(String) });
+      expect(journal).toHaveBeenCalledWith(expect.objectContaining({ channel: 'telegram', conversationId }));
+    });
+
+    it('ignores a forged conversation_id without an authorized binding', async () => {
+      const db = makeDb();
+      insertSession(db, { id: 'foreign-clear', agentId: 'agent:peggy' });
+      const conversationId = computeConversationId('chris', 'telegram', 'general');
+      const clear = createBuiltinCommands(makeDeps({ db }) as never).find(c => c.name === 'clear')!;
+      const envelope = { ...makeEnvelope(), channel: 'app', metadata: { conversation_id: conversationId } };
+      await clear.handler([], makeCtx(db, { channel: 'app', adapterId: 'app', envelope }));
+      expect(db.prepare('SELECT ended_at FROM sessions WHERE id = ?').get('foreign-clear')).toMatchObject({ ended_at: null });
+    });
+
     it('reports nothing to clear when there is no active session', async () => {
       const db = makeDb();
       const journalResumeId = vi.fn();
@@ -882,6 +905,31 @@ describe('command handlers', () => {
       expect(result.body).toBeUndefined();
       expect(stopTurn).toHaveBeenCalledWith(computeConversationId('chris', 'telegram', 'general'));
       expect(telegramAdapter.finalizeDraft).toHaveBeenCalledWith('contact:chris', 'Stopped by user', 'telegram', 'general');
+    });
+
+    it('stops only the bound conversation from an app command', async () => {
+      const db = makeDb();
+      insertSession(db, { id: 'bound-stop', agentId: 'agent:peggy' });
+      const conversationId = computeConversationId('chris', 'telegram', 'general');
+      const stopTurn = vi.fn().mockReturnValue(true);
+      const deps = { ...makeDeps({ db }), headlessControl: { journalResumeId: new Map(), stopTurn: new Map([['agent:peggy', stopTurn]]) } };
+      const stop = createBuiltinCommands(deps as never).find(c => c.name === 'stop')!;
+      const envelope = { ...makeEnvelope(), channel: 'app', metadata: { bound_session_id: 'bound-stop', conversation_id: conversationId } };
+      await stop.handler([], makeCtx(db, { channel: 'app', adapterId: 'app', envelope }));
+      expect(stopTurn).toHaveBeenCalledOnce();
+      expect(stopTurn).toHaveBeenCalledWith(conversationId);
+    });
+
+    it('ignores a forged conversation_id without a bound session', async () => {
+      const db = makeDb();
+      insertSession(db, { id: 'foreign-stop', agentId: 'agent:peggy' });
+      const stopTurn = vi.fn().mockReturnValue(true);
+      const deps = { ...makeDeps({ db }), headlessControl: { journalResumeId: new Map(), stopTurn: new Map([['agent:peggy', stopTurn]]) } };
+      const stop = createBuiltinCommands(deps as never).find(c => c.name === 'stop')!;
+      const envelope = { ...makeEnvelope(), channel: 'app', metadata: { conversation_id: computeConversationId('chris', 'telegram', 'general') } };
+      await stop.handler([], makeCtx(db, { channel: 'app', adapterId: 'app', envelope }));
+      expect(stopTurn).toHaveBeenCalledWith(computeConversationId('chris', 'app', 'general'));
+      expect(stopTurn).not.toHaveBeenCalledWith(computeConversationId('chris', 'telegram', 'general'));
     });
 
     it('falls back to a confirmation message when there was no draft to finalize', async () => {

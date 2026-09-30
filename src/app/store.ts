@@ -4,6 +4,7 @@ import type { AppConfig } from '../config/schema.js';
 import { channelMatches, topicForThreadKey } from '../pipeline/types.js';
 import { getThread, upsertThread } from '../pipeline/thread-store.js';
 import { ensureOutboundAppSession } from './outbound.js';
+import { sessionCanResume } from './resume.js';
 
 export interface AppEvent { seq: number; event: 'message' | 'session'; data: Record<string, unknown> }
 
@@ -42,7 +43,7 @@ export function eventBounds(db: Database.Database, contactId: string): { first: 
   return { first, latest };
 }
 
-export function sessionInfo(db: Database.Database, row: SessionRow, contactId: string): Record<string, unknown> {
+export function sessionInfo(db: Database.Database, row: SessionRow, contactId: string, config?: AppConfig): Record<string, unknown> {
   const title = row.channel === 'app' && row.topic === 'general' ? 'Main'
     : getThread<{ title?: string; name?: string }>(db, row.channel, row.topic)?.metadata.title
       ?? getThread<{ title?: string; name?: string }>(db, row.channel, row.topic)?.metadata.name
@@ -53,11 +54,11 @@ export function sessionInfo(db: Database.Database, row: SessionRow, contactId: s
     WHERE e.contact_id = ? AND e.session_id = ? AND e.kind = 'message' AND t.direction = 'outbound' AND e.seq > ?`).get(contactId, row.id, marker) as {n:number}).n;
   return { session_id: row.id, channel: row.channel, topic: row.topic, title, started_at: row.started_at,
     last_activity: row.last_activity, ended_at: row.ended_at, message_count: row.message_count,
-    unread_count: unread, resumable: row.channel === 'app' && row.ended_at === null,
+    unread_count: unread, resumable: row.ended_at === null || (!!config && sessionCanResume(db, config, row.id)),
     is_main: row.channel === 'app' && row.topic === 'general', activity: 'idle' };
 }
 
-export function listSessions(db: Database.Database, contactId: string, agentId: string, state: string, limit: number, before?: string): Record<string, unknown>[] {
+export function listSessions(db: Database.Database, contactId: string, agentId: string, state: string, limit: number, before?: string, config?: AppConfig): Record<string, unknown>[] {
   const cursor = before ? db.prepare(`SELECT last_activity, id FROM sessions WHERE id = ? AND contact_id = ? AND agent_id = ?`)
     .get(before, contactId, agentId) as {last_activity:string;id:string}|undefined : undefined;
   const rows = db.prepare(`SELECT s.id FROM sessions s WHERE s.contact_id = ? AND s.agent_id = ?
@@ -67,10 +68,10 @@ export function listSessions(db: Database.Database, contactId: string, agentId: 
     .all(contactId, agentId, state, state, state, before ?? null,
       cursor?.last_activity ?? before ?? null, cursor?.last_activity ?? before ?? null, cursor?.id ?? '' ) as {id:string}[];
   return rows.map(({id}) => visibleSession(db, contactId, agentId, id)).filter((r): r is SessionRow => !!r)
-    .slice(0, limit).map(r => sessionInfo(db, r, contactId));
+    .slice(0, limit).map(r => sessionInfo(db, r, contactId, config));
 }
 
-export function readEvents(db: Database.Database, contactId: string, agentId: string, after: number, through: number): AppEvent[] {
+export function readEvents(db: Database.Database, contactId: string, agentId: string, after: number, through: number, config?: AppConfig): AppEvent[] {
   const rows = db.prepare(`SELECT seq, kind, session_id, transcript_id FROM app_events
     WHERE contact_id = ? AND seq > ? AND seq <= ? ORDER BY seq`).all(contactId, after, through) as
     {seq:number;kind:'message'|'session';session_id:string;transcript_id:string|null}[];
@@ -79,7 +80,7 @@ export function readEvents(db: Database.Database, contactId: string, agentId: st
     const session = visibleSession(db, contactId, agentId, row.session_id);
     if (!session) continue;
     if (row.kind === 'session') {
-      events.push({ seq: row.seq, event: 'session', data: sessionInfo(db, session, contactId) });
+      events.push({ seq: row.seq, event: 'session', data: sessionInfo(db, session, contactId, config) });
     } else {
       const message = db.prepare(`SELECT * FROM transcripts WHERE id = ? AND session_id = ?`)
         .get(row.transcript_id, row.session_id) as Record<string, unknown> | undefined;

@@ -64,6 +64,8 @@ adapters:
   #   event_retention_days: 30
   #   max_upload_bytes: 26214400
   #   ping_interval_ms: 30000
+  #   # Scheduled work can notify this contact through send_message(channel: app).
+  #   # An omitted topic lands in Main and remains available while the client is offline.
 
   # ── Headless Claude Code (primary agent runtime) — docs/CC_HEADLESS_ADAPTER.md ─
   # Spawns `claude -p` per message batch and resumes the session on later turns.

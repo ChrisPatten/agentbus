@@ -527,6 +527,44 @@ describe('conversation serialization after early delivery (E58)', () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(handle.snapshot()).toMatchObject({ running_system: 0, waiting: 0 });
   });
+
+  it('serializes an Earlier fork against journaling on the same Claude transcript without holding capacity', async () => {
+    const forkConversation = createHash('sha256').update(['alice', 'app', 'thread:fork'].sort().join(':')).digest('hex');
+    const now = new Date().toISOString();
+    realDb.prepare(`INSERT INTO conversation_registry(id,contact_id,channel,topic,first_seen,last_seen) VALUES (?,?,?,?,?,?)`)
+      .run(forkConversation, 'alice', 'app', 'thread:fork', now, now);
+    realDb.prepare(`INSERT INTO sessions(id,conversation_id,channel,contact_id,started_at,last_activity,agent_id,claude_session_id)
+      VALUES (?,?,?,?,?,?,?,?)`).run('fork-session', forkConversation, 'app', 'alice', now, now, 'agent:peggy', 'shared-claude-id');
+    let polls = 0;
+    fetchMock.mockImplementation((url: string) => {
+      if (String(url).includes('/messages/pending')) {
+        polls++;
+        return Promise.resolve(pendingResponse(polls === 2 ? [{ ...makeEnvelope('fork-message', 'contact:alice', 'thread:fork'), channel: 'app' }] : []));
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) } as Response);
+    });
+    const children: ReturnType<typeof makeFakeChild>[] = [];
+    spawnMock.mockImplementation(() => {
+      const child = makeFakeChild(); children.push(child);
+      return child as unknown as import('node:child_process').ChildProcess;
+    });
+    const { startHeadless } = await import('./cc-headless.js');
+    const handle = startHeadless(realDb as unknown as Database.Database).get('agent:peggy')!;
+    handle.journalResumeId({ claudeSessionId: 'shared-claude-id', contactId: 'alice', channel: 'telegram', conversationId: 'old-conversation' });
+    await new Promise(resolve => setTimeout(resolve, 45));
+    expect(children).toHaveLength(1);
+    expect(handle.snapshot()).toMatchObject({ running_system: 1, running_user: 0, waiting: 1 });
+    writeEvent(children[0]!.stdout, { type: 'result', session_id: 'shared-claude-id', result: 'done' });
+    children[0]!.emit('close', 0);
+    await new Promise(resolve => setTimeout(resolve, 35));
+    expect(children).toHaveLength(2);
+    expect(spawnMock.mock.calls[1]![1]).toContain('shared-claude-id');
+    writeEvent(children[1]!.stdout, { type: 'result', session_id: 'new-claude-id', result: 'done' });
+    children[1]!.emit('close', 0);
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect(realDb.prepare('SELECT claude_session_id FROM sessions WHERE id = ?').get('fork-session'))
+      .toMatchObject({ claude_session_id: 'new-claude-id' });
+  });
 });
 
 describe('model resolution (E53 S53.2)', () => {

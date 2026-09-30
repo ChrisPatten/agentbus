@@ -26,6 +26,8 @@ interface Session {
   summary: SessionSummary | null;
   /** Conversation topic (e.g. "general" or "thread:<hash>"), via conversation_registry (E32). */
   topic: string | null;
+  /** App topic title (Main or the named topic); null for other channels. */
+  title: string | null;
 }
 
 interface SessionResponse {
@@ -62,7 +64,7 @@ export function registerSessionTools(server: McpServer, busBaseUrl: string): voi
     {
       description:
         'Get details for a specific session, or the most recent session if no ID is provided. ' +
-        'Returns session metadata plus any available summary.',
+        'Returns session metadata plus any available summary. App sessions include title and topic for proactive delivery.',
       inputSchema: {
         session_id: z.string().optional().describe('Session ID to fetch. Omit to get the most recent session.'),
       },
@@ -106,7 +108,7 @@ export function registerSessionTools(server: McpServer, busBaseUrl: string): voi
     'list_sessions',
     {
       description:
-        'List recent sessions with their summaries. Supports filtering by channel or contact.',
+        'List recent sessions with their summaries. Supports filtering by channel or contact. App sessions include title and topic; filter channel=app to find a proactive message target.',
       inputSchema: {
         channel: z.string().optional().describe('Filter by channel (e.g. "telegram")'),
         contact_id: z.string().optional().describe('Filter by contact ID (e.g. "contact:chris")'),

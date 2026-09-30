@@ -88,7 +88,7 @@ export interface AdapterInstance {
    * discussed rather than just the right group — omitted, or a non-thread
    * topic, targets the group's general area.
    */
-  startTyping?(contactId: string, channel?: string, topic?: string): void;
+  startTyping?(contactId: string, channel?: string, topic?: string, conversationId?: string): void;
   /**
    * Report a live tool-call status line for a contact's in-flight turn (E29).
    * Fire-and-forget — called once per non-delivery tool call as the agent
@@ -100,7 +100,7 @@ export interface AdapterInstance {
    * next call for the same contact/channel/topic, since it's a stand-in for
    * real activity, not activity itself.
    */
-  reportToolCall?(contactId: string, text: string, channel?: string, topic?: string, placeholder?: boolean): void;
+  reportToolCall?(contactId: string, text: string, channel?: string, topic?: string, placeholder?: boolean, conversationId?: string): void;
   /**
    * Finalize the live tool-call status draft for a contact (E29 / `/stop`):
    * append `note` as a final line and stop treating the message as an

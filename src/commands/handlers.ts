@@ -53,6 +53,16 @@ export interface HandlerDeps {
   poolManagers?: Map<string, import('../pool/pool-manager.js').PoolManager>;
 }
 
+function commandConversationId(ctx: SlashCommandContext, db: Database.Database, contactId: string): string {
+  const boundId = ctx.channel === 'app' ? ctx.envelope.metadata?.['bound_session_id'] : undefined;
+  if (typeof boundId === 'string') {
+    const row = db.prepare(`SELECT conversation_id FROM sessions
+      WHERE id = ? AND contact_id = ? AND ended_at IS NULL`).get(boundId, contactId) as {conversation_id:string}|undefined;
+    if (row) return row.conversation_id;
+  }
+  return computeConversationId(contactId, ctx.channel, ctx.envelope.topic);
+}
+
 // ── /status ──────────────────────────────────────────────────────────────────
 
 async function statusHandler(
@@ -370,17 +380,17 @@ async function clearHandler(
   const contactId = ctx.sender.startsWith('contact:')
     ? ctx.sender.slice('contact:'.length)
     : ctx.sender;
-  const conversationId = computeConversationId(contactId, ctx.channel, ctx.envelope.topic);
+  const conversationId = commandConversationId(ctx, deps.db, contactId);
 
   const session = deps.db
     .prepare(
-      `SELECT id, claude_session_id, agent_id FROM sessions
+      `SELECT id, claude_session_id, agent_id, channel FROM sessions
        WHERE conversation_id = ? AND ended_at IS NULL
          AND claude_session_id IS NOT NULL
        ORDER BY last_activity DESC LIMIT 1`,
     )
     .get(conversationId) as
-    | { id: string; claude_session_id: string; agent_id: string | null }
+    | { id: string; claude_session_id: string; agent_id: string | null; channel: string }
     | undefined;
 
   if (!session) {
@@ -404,7 +414,7 @@ async function clearHandler(
       ? [...runners.values()][0]
       : undefined;
   if (journal) {
-    journal({ claudeSessionId: session.claude_session_id, contactId, channel: ctx.channel, conversationId });
+    journal({ claudeSessionId: session.claude_session_id, contactId, channel: session.channel, conversationId });
     return {
       body: 'Context cleared — your next message starts a fresh session. Journaling the previous session in the background.',
     };
@@ -433,7 +443,7 @@ async function stopHandler(
   deps: HandlerDeps,
 ): Promise<CommandResponse> {
   const contactId = ctx.sender.startsWith('contact:') ? ctx.sender.slice('contact:'.length) : ctx.sender;
-  const conversationId = computeConversationId(contactId, ctx.channel, ctx.envelope.topic);
+  const conversationId = commandConversationId(ctx, deps.db, contactId);
 
   const session = deps.db
     .prepare(

@@ -23,10 +23,11 @@ export function registerMessagingTools(server: McpServer, busBaseUrl: string, ag
       description:
         'Send a message to any contact on any channel. Use list_channels to discover available channels. ' +
         'For proactive sends (not replying to a message you just received), call get_session or ' +
-        'list_sessions first to check the current topic for that conversation rather than guessing one.',
+        'list_sessions first to check the current topic for that conversation rather than guessing one. ' +
+        'For channel app, omit topic to send to Main, or use an existing app session thread:<hash> topic. Unknown app topics are rejected.',
       inputSchema: {
         to: z.string().min(1).describe('Recipient identifier (e.g. "contact:chris", "contact:alice")'),
-        channel: z.string().min(1).describe('Target channel (e.g. "telegram", "bluebubbles")'),
+        channel: z.string().min(1).describe('Target channel (e.g. "telegram", "bluebubbles", "app")'),
         body: z.string().min(1).describe('Message text body'),
         topic: z
           .string()
@@ -37,7 +38,8 @@ export function registerMessagingTools(server: McpServer, busBaseUrl: string, ag
               "session's current `topic` field rather than guessing — it reflects where the " +
               'conversation is actually threaded. To target a specific Telegram forum topic ' +
               '(e.g. one created via create_telegram_topic), pass the `topic` value it returned ' +
-              '(a "thread:<hash>" id) — not the channel or a plain topic name.',
+              '(a "thread:<hash>" id) — not the channel or a plain topic name. For app, ' +
+              'omit topic for Main or use an existing app session thread:<hash> topic from list_sessions.',
           ),
         reply_to: z.string().optional().describe('Bus message ID this message is replying to'),
         priority: z

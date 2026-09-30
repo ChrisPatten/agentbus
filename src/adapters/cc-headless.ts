@@ -116,6 +116,9 @@ function resolveConversationId(db: Database.Database, env: MessageEnvelope): str
     .get(env.id) as { conversation_id: string } | undefined;
   if (row) return row.conversation_id;
 
+  const boundConversation = env.metadata?.['conversation_id'];
+  if (typeof boundConversation === 'string' && boundConversation.length > 0) return boundConversation;
+
   const parts = [normalizeContactId(env.sender), env.channel, env.topic].sort();
   return createHash('sha256').update(parts.join(':')).digest('hex');
 }
@@ -293,6 +296,8 @@ class HeadlessInstance {
   private readonly busBaseUrl: string;
   private readonly label: string;
   private readonly queues = new Map<string, Promise<void>>();
+  /** Serialize turns that resume the same Claude transcript even after an Earlier fork changes conversation ID. */
+  private readonly resumeTails = new Map<string, Promise<void>>();
   private readonly limiter: HeadlessLimiter;
   private readonly waiting = new Map<string, AbortController[]>();
   private readonly listeners = new Set<(event: HeadlessActivityEvent) => void>();
@@ -339,7 +344,7 @@ class HeadlessInstance {
   // ── Per-conversation serialization and per-instance capacity ─────────────
 
   private enqueue(conversationId: string, sessionId: string | undefined, turnClass: TurnClass,
-    journal: boolean, task: () => Promise<void>): Promise<void> {
+    journal: boolean, task: () => Promise<void>, resumeId?: string | null): Promise<void> {
     const previous = (this.queues.get(conversationId) ?? Promise.resolve()).catch(() => {});
     const controller = new AbortController();
     const entries = this.waiting.get(conversationId) ?? [];
@@ -351,11 +356,16 @@ class HeadlessInstance {
     const journalGate = journal ? new Promise<void>((resolve) => { releaseJournal = resolve; }) : undefined;
     const previousJournal = this.journalTail;
     if (journalGate) this.journalTail = journalGate;
+    const previousResume = resumeId ? (this.resumeTails.get(resumeId) ?? Promise.resolve()) : Promise.resolve();
+    let releaseResume: (() => void) | undefined;
+    const resumeGate = resumeId ? new Promise<void>(resolve => { releaseResume = resolve; }) : undefined;
+    if (resumeId && resumeGate) this.resumeTails.set(resumeId, resumeGate);
     const next = previous.then(async () => {
       let release: (() => void) | undefined;
       let startedAt: number | undefined;
       try {
         if (journal) await previousJournal;
+        await previousResume;
         if (controller.signal.aborted) throw new Error('turn cancelled');
         release = await this.limiter.acquire(turnClass, controller.signal);
         const pending = this.waiting.get(conversationId);
@@ -376,6 +386,8 @@ class HeadlessInstance {
           console.log(`[${this.label}] turn settle class=${turnClass} conversation=${conversationId.slice(0, 8)} run_ms=${Date.now() - startedAt}`);
         }
         release?.();
+        releaseResume?.();
+        if (resumeId && this.resumeTails.get(resumeId) === resumeGate) this.resumeTails.delete(resumeId);
         releaseJournal?.();
         const pending = this.waiting.get(conversationId);
         if (pending?.includes(controller)) {
@@ -580,12 +592,12 @@ class HeadlessInstance {
    * Email channels have no typing indicator, so skip the call entirely. `topic`
    * (E28) further targets a specific Telegram forum topic within a group.
    */
-  private startTyping(channel: string, contactId: string, topic?: string): void {
+  private startTyping(channel: string, contactId: string, topic?: string, conversationId?: string): void {
     if (channel === 'email' || channel.startsWith('email:')) return;
     fetch(`${this.busBaseUrl}/api/v1/adapters/${channel}/typing`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contact_id: contactId, topic }),
+      body: JSON.stringify({ contact_id: contactId, topic, conversation_id: conversationId }),
     }).catch(() => {});
   }
 
@@ -596,12 +608,12 @@ class HeadlessInstance {
    * skip the call entirely, matching startTyping's existing email skip.
    * `topic` (E28) further targets a specific Telegram forum topic.
    */
-  private reportToolCall(channel: string, contactId: string, text: string, topic?: string): void {
+  private reportToolCall(channel: string, contactId: string, text: string, topic?: string, conversationId?: string): void {
     if (channel === 'email' || channel.startsWith('email:')) return;
     fetch(`${this.busBaseUrl}/api/v1/adapters/${channel}/tool-status`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contact_id: contactId, text, topic }),
+      body: JSON.stringify({ contact_id: contactId, text, topic, conversation_id: conversationId }),
     }).catch(() => {});
   }
 
@@ -831,7 +843,7 @@ class HeadlessInstance {
 
     // Show activity on the source channel (and forum topic, if any — E28)
     // while the (cold-start) claude -p runs.
-    this.startTyping(channel, contactId, topic);
+    this.startTyping(channel, contactId, topic, conversationId);
 
     // E20: key resume on conversation_id (per-thread sessions, long-lived).
     const session = getActiveSession(db, conversationId);
@@ -860,7 +872,7 @@ class HeadlessInstance {
       prompt,
       resumeId,
       onToolCall: (call) =>
-        this.reportToolCall(channel, contactId, formatToolCallSummary(call.name, call.input), topic),
+        this.reportToolCall(channel, contactId, formatToolCallSummary(call.name, call.input), topic, conversationId),
       scheduleModel,
     });
     if (stoppedByUser) return;
@@ -915,7 +927,7 @@ class HeadlessInstance {
           return;
         }
         resolvePromise({});
-      }).catch(rejectPromise);
+      }, session.claude_session_id).catch(rejectPromise);
     });
   }
 
@@ -946,7 +958,7 @@ class HeadlessInstance {
       } catch (err) {
         console.error(`[${this.label}] /clear journaling threw for ${opts.contactId}:`, err);
       }
-    }).catch((error: unknown) => console.error(`[${this.label}] /clear journaling queue failed:`, error));
+    }, opts.claudeSessionId).catch((error: unknown) => console.error(`[${this.label}] /clear journaling queue failed:`, error));
   }
 
   // ── Poll loop ─────────────────────────────────────────────────────────────
@@ -999,7 +1011,7 @@ class HeadlessInstance {
         const session = getActiveSession(db, conversationId);
         const system = batchCopy.every((env) => env.metadata?.['scheduled'] === true || env.sender.startsWith('system:'));
         void this.enqueue(conversationId, session?.id, system ? 'system' : 'user', false,
-          () => this.processBatch(batchCopy, db, conversationId));
+          () => this.processBatch(batchCopy, db, conversationId), session?.claude_session_id);
       }
     } catch (err) {
       console.error(`[${this.label}] Poll error:`, err);
