@@ -11,6 +11,7 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 ## [Unreleased]
 
 ### Added
+- **Native AgentBus macOS client (E62, in progress).** SwiftUI/XcodeGen source adds Keychain setup, resilient app protocol, SwiftData cache, conversations, files, notifications, and Dock unread state. Xcode and live work-laptop acceptance remain pending.
 - **Cross-channel app continuation (E60).** App messages can continue a listed Telegram, email, or Siri session with replies returned to the app. Resumable Earlier sessions fork into a new app topic while preserving the original history and active session.
 - **Proactive app delivery (E61).** Scheduled work can notify Main or an existing named app topic while the client is offline. Agent session tools expose app titles, and missed cron and one-off work follows documented wake behavior.
 - **Mac app adapter and client API (E59).** Authenticated local WebSocket and HTTP routes provide durable message/session replay, app topics, read state, uploads, health, and command discovery. Offline app delivery persists before queue acknowledgement.

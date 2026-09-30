@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Epic ID | E62 |
-| Status | Planned |
+| Status | In progress — client source implemented; Xcode and live acceptance pending |
 | Dependencies | E59 frozen frame/API contract; E60 foreign/Earlier continuation; E61 proactive delivery; E58 activity states |
 | Story Count | 8 |
 | Estimated Complexity | XL |
