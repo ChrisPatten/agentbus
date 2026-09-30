@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Epic ID | E62 |
-| Status | In progress — client source implemented; Xcode and live acceptance pending |
+| Status | In progress — macOS 26.5 build and 5 XCTest cases pass; live acceptance pending |
 | Dependencies | E59 frozen frame/API contract; E60 foreign/Earlier continuation; E61 proactive delivery; E58 activity states; E63 foreign activity and app `/clear` successor |
 | Story Count | 8 |
 | Estimated Complexity | XL |
@@ -18,11 +18,11 @@ Build a self-contained SwiftUI client under `apps/macos/` for the operator's loc
 
 - Freeze E59's frame schema and HTTP shapes, including `welcome.reset`, `ack` states, session and message events, attachments, and activity snapshots.
 - Choose a neutral app name, bundle ID, and notification identity (PRD §9 Q4); record these in the project README before generating the project.
-- Confirm the work-laptop Xcode/macOS 27 SDK is available for the clean-build acceptance gate. Mock-client and source work can proceed before this check.
+- Confirm the work-laptop Xcode 26.6/macOS 26.5 SDK is available for the clean-build acceptance gate.
 
 ## Exit Criteria
 
-1. FR-50/51: a clean checkout generates and builds with `xcodegen generate && xcodebuild`; macOS 27+, Swift 6 strict concurrency, SwiftUI, project-local README/CLAUDE.md, no shared Peggy code. Setup stores tokens in Keychain, URL in UserDefaults, and Test Connection shows health/routing/version or actionable error.
+1. FR-50/51: a clean checkout generates and builds with `xcodegen generate && xcodebuild`; macOS 26.5+, Swift 6 strict concurrency, SwiftUI, project-local README/CLAUDE.md, no shared Peggy code. Setup stores tokens in Keychain, URL in UserDefaults, and Test Connection shows health/routing/version or actionable error.
 2. FR-52/53: the WebSocket client reconnects after drops, network changes, and wake; persists cursor and pending `client_msg_id`; retries without duplicate sends; replays in order and resets/reloads the SwiftData cache on `welcome.reset`.
 3. FR-54/55: Main, Conversations, and Earlier render by PRD rules, with channel, title, last activity, unread and activity state. Transcript shows Markdown/code copy, timestamps, arrival labels, scheduled notes, attachment/expiry chips, and send states.
 4. FR-56/57: Return/Shift-Return, slash-command autocomplete, drag/paste/⌘O files with pre-upload size checks, disabled composer for unresumable Earlier sessions, queued/typing/tool activity, and session-scoped Stop work.

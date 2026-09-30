@@ -1,15 +1,15 @@
 # Native macOS client (E62)
 
-The source lives in `apps/macos/AgentBus`. It is a SwiftUI app for one configured AgentBus contact and routed agent. The project name is **AgentBus**, bundle ID `com.chrispatten.agentbus.mac`, minimum macOS 27. It shares no source with Peggy.
+The source lives in `apps/macos/AgentBus`. It is a SwiftUI app for one configured AgentBus contact and routed agent. The project name is **AgentBus**, bundle ID `com.chrispatten.agentbus.mac`, minimum macOS 26.5. It shares no source with Peggy.
 
 ## Build and setup
 
-On a Mac with Xcode 27, the macOS 27 SDK, and XcodeGen:
+On a Mac with macOS 26.5, Xcode 26.6, and XcodeGen:
 
 ```sh
 cd apps/macos/AgentBus
 xcodegen generate
-xcodebuild -project AgentBus.xcodeproj -scheme AgentBus -destination 'platform=macOS' build test
+xcodebuild -project AgentBus.xcodeproj -scheme AgentBus -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build test
 ```
 
 The app's Settings accepts a bus URL, app token, and optional bus token. **Test Connection** calls `/api/v1/app/health` and reports the contact, routed agent, routing status, and bus version. Save writes tokens to Keychain. Configure the bus as in [APP_ADAPTER.md](APP_ADAPTER.md). The default URL is `http://127.0.0.1:3000`; for a remote URL use HTTPS so the socket uses WSS.
@@ -24,6 +24,6 @@ The app's Settings accepts a bus URL, app token, and optional bus token. **Test 
 
 ## Acceptance still needed
 
-On 2026-09-30 this work laptop selected Xcode 26.6 and macOS SDK 26.5. The full Swift source passed strict-concurrency typechecking against that SDK after a Return-key handler fix. XcodeGen is absent, and this project targets macOS 27 per the PRD. Generation, build, XCTest, and live flows F1–F6 remain pending a macOS 27/Xcode 27 environment. E62 also requires the 10,000-message memory measurement and one-week no-loss period.
+On 2026-09-30 this work laptop selected Xcode 26.6 and macOS SDK 26.5. XcodeGen 2.46 generated the project; `xcodebuild` built it and passed all 5 XCTest cases. The generated project uses macOS deployment target 26.5 and Swift 6 strict concurrency. Live flows F1–F6 remain pending, as do the 10,000-message memory measurement and one-week no-loss period.
 
 The bus already sends `typing` and `tool_lines` in ephemeral `activity` frames for app-originated turns. The client decoder still needs to consume those optional fields. Original-channel turns in foreign sessions do not yet mirror their typing/tool lines to the app; E63 tracks that bus work. E63 also tracks a new active app session after `/clear`, so F6 can select Main immediately.

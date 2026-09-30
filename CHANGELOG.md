@@ -18,6 +18,7 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 - **Parallel `cc-headless` conversations (E58).** One agent can run turns in separate conversations concurrently. Each instance defaults to five live children, with one slot reserved from user turns for scheduled and journaling work. `/status` and health report running and waiting counts; activity subscriptions expose queued, running, and idle states.
 
 ### Changed
+- **Mac client compatibility (E62).** The native app now targets macOS 26.5 with Xcode 26.6, matching the work laptop.
 - **`/stop` is scoped to its conversation.** In Telegram, stopping one topic no longer interrupts another topic for the same contact. A waiting turn can also be cancelled. Journaling turns share an agent-wide lane, and turns in one conversation never overlap after early delivery.
 
 ### Fixed
