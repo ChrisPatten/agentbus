@@ -4,7 +4,7 @@
 |---|---|
 | Epic ID | E62 |
 | Status | In progress — client source implemented; Xcode and live acceptance pending |
-| Dependencies | E59 frozen frame/API contract; E60 foreign/Earlier continuation; E61 proactive delivery; E58 activity states |
+| Dependencies | E59 frozen frame/API contract; E60 foreign/Earlier continuation; E61 proactive delivery; E58 activity states; E63 foreign activity and app `/clear` successor |
 | Story Count | 8 |
 | Estimated Complexity | XL |
 
