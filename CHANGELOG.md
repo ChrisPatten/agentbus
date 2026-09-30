@@ -10,6 +10,13 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+### Added
+- **Mac app adapter and client API (E59).** Authenticated local WebSocket and HTTP routes provide durable message/session replay, app topics, read state, uploads, health, and command discovery. Offline app delivery persists before queue acknowledgement.
+- **Parallel `cc-headless` conversations (E58).** One agent can run turns in separate conversations concurrently. Each instance defaults to five live children, with one slot reserved from user turns for scheduled and journaling work. `/status` and health report running and waiting counts; activity subscriptions expose queued, running, and idle states.
+
+### Changed
+- **`/stop` is scoped to its conversation.** In Telegram, stopping one topic no longer interrupts another topic for the same contact. A waiting turn can also be cancelled. Journaling turns share an agent-wide lane, and turns in one conversation never overlap after early delivery.
+
 ## [0.14.0] - 2026-09-29
 
 ### Added

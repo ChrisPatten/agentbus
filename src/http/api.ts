@@ -66,6 +66,9 @@ import { logOutboundTranscript } from '../pipeline/outbound-transcript.js';
 import { logWebhookRequest } from './webhook-log.js';
 import { registerSiriRoutes } from './siri-routes.js';
 import type { SiriAdapter } from '../adapters/siri.js';
+import type { AppAdapter } from '../adapters/app.js';
+import type { HeadlessCapacitySnapshot } from '../adapters/cc-headless.js';
+import { registerAppRoutes } from './app-routes.js';
 import { VERSION } from '../version.js';
 import { recordAgentPoll, getLastPollAt } from './agent-liveness.js';
 import { toBareAgentId, toPrefixedAgentId } from '../pool/types.js';
@@ -94,6 +97,8 @@ export interface HttpServerDeps {
    * `config.adapters.siri.enabled`, the `/api/v1/siri/*` routes are mounted.
    */
   siri?: SiriAdapter;
+  app?: AppAdapter;
+  getHeadlessSnapshots?: () => HeadlessCapacitySnapshot[];
   /**
    * Optional — one PoolManager per configured `cc-pool` instance (E48),
    * keyed by the pool's prefixed logical agent id (e.g. "agent:peggy").
@@ -145,6 +150,7 @@ const MessageSubmitSchema = z.object({
  * the file on expiry.
  */
 export interface Attachment {
+  id?: string;
   type: 'image' | 'file';
   local_path: string;
   mime_type?: string;
@@ -152,6 +158,7 @@ export interface Attachment {
 }
 
 const AttachmentSchema = z.object({
+  id: z.string().uuid().optional(),
   type: z.enum(['image', 'file']),
   local_path: z.string().min(1),
   mime_type: z.string().optional(),
@@ -255,7 +262,8 @@ export async function sendCommandResponse(
     return;
   }
 
-  const metadata = { command_response: true, command: commandName, ...extraMetadata };
+  const metadata = { command_response: true, command: commandName,
+    command_source_message_id: result.envelope.id, ...extraMetadata };
 
   const buildEnvelope = (body: string): MessageEnvelope => ({
     id: randomUUID(),
@@ -2149,6 +2157,18 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
           pauseSet: deps.pauseSet,
         }),
     });
+  }
+
+  if (config.adapters.app?.enabled && deps.app) {
+    const bridge = await registerAppRoutes(server, {
+      config, db, queue, app: deps.app, commandRegistry: deps.commandRegistry,
+      getHeadlessSnapshots: deps.getHeadlessSnapshots,
+      submitInbound: (message) => processInbound(message, {
+        queue, pipeline, config, db, registry,
+        commandRegistry: deps.commandRegistry, pauseSet: deps.pauseSet,
+      }),
+    });
+    deps.app.setActivityListener(bridge.activity);
   }
 
   return server;

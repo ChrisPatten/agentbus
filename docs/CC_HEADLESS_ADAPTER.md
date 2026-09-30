@@ -157,7 +157,7 @@ When a conversation goes idle past a per-channel threshold, or too long has pass
   - **Idle debounce.** `last_activity` is older than `journaling.threshold_ms` for the session's channel. A short value (3 to 5 minutes) catches a real pause without journaling after every reply.
   - **Hard ceiling.** Time since `last_journaled_at` (or `started_at`) exceeds `journaling.ceiling_ms`, regardless of idle state, so a continuously active conversation still flushes. Unset disables this leg.
 - **Overlap suppression.** A conversation with a journaling turn in flight is skipped on later ticks.
-- **Turn.** `runJournalingTurn(conversationId)` spawns `claude -p <journaling.prompt> --resume <id>` with the same working directory, MCP config, and memory context as a normal turn, serialized through the same per-contact queue so it never races a live reply. A session with no `claude_session_id` yet is skipped and stamped as journaled.
+- **Turn.** `runJournalingTurn(conversationId)` spawns `claude -p <journaling.prompt> --resume <id>` with the same working directory, MCP config, and memory context as a normal turn, serialized through its conversation queue and the agent-wide journal lane. A session with no `claude_session_id` yet is skipped and stamped as journaled.
 - **Failure.** A failed turn leaves `last_journaled_at` unchanged so a later tick retries, bounded by an in-memory attempt cap that new activity resets.
 - **Ownership.** Each session is routed to the instance recorded in `sessions.agent_id`. See [Multi-instance deployments](#multi-instance-deployments).
 
@@ -174,7 +174,7 @@ Memory-logging work (daily journal, `MEMORY.md`, topic files) belongs to the jou
 1. **The reply-producing turn does not journal.** Do not instruct the agent to update memory files after calling `reply`. The process exits sooner once it stops calling tools.
 2. **The debounced sweep journals.** This is the [journaling mechanism](#journaling-on-pause-or-ceiling) above.
 3. **Why this is safe.** `--resume` keeps the full conversation, so a delayed sweep risks brief staleness in the files, never data loss. The raw conversation is always recoverable with `get_transcript` and `search_transcripts`.
-4. **Queue responsiveness follows.** Because the turn stops at delivery, the per-contact queue advances as soon as the reply is sent. See [Per-contact serialization](#per-contact-serialization).
+4. **Queue safety follows.** The agent should stop work at delivery. The conversation queue starts its next child once the prior process exits and delivery handling settles. See [Per-conversation serialization and capacity](#per-conversation-serialization-and-capacity).
 
 ### High-stakes immediate-logging exception
 
@@ -187,16 +187,15 @@ Some content should never wait on a debounce window. If the turn involves any of
 
 State this directly in the `system_prompt`. See the example in [Configuration schema](#configuration-schema).
 
-## Per-contact serialization
+## Per-conversation serialization and capacity
 
-An in-memory `Map<contactId, Promise<void>>` chains each new batch after the previous one for that contact. Different contacts run concurrently; the same contact's messages run in order.
+An in-memory queue chains each batch after the previous one for its `conversation_id`. Different topics or threads for one contact can run together; turns in one conversation run in arrival order. Delivery may happen before process exit, but the next child for that conversation waits until the prior child exits and fallback delivery settles.
 
-The queue advances at delivery, not at process exit. `processBatch()` resolves as soon as the turn calls `reply` or `send_message`; stdout fallback, error handling, and final session-ID persistence continue in the background. Two consequences:
+Each instance permits up to `max_concurrent_turns` live children (default 5). User turns may use at most `max_concurrent_turns - reserved_system_slots` (default 4); scheduled and journaling turns may use any free slot. A wholly scheduled/system batch is a system turn; a mixed batch is a user turn. The oldest eligible waiter starts when capacity frees. `/stop` can remove a waiting turn or kill the running child in its conversation.
 
-- A turn that never calls a delivery tool (stdout fallback, spawn error, `/stop`) holds the queue until the whole run settles.
-- `claude_session_id` is persisted as soon as it first appears in the stream, so a rapid second message on a brand-new conversation can `--resume` the session the first turn just created.
+Journaling turns also share an agent-wide lane, so two journals never write the same memory files at once. An immediate high-stakes memory write made inside a user turn can still race with another turn; that exception remains accepted.
 
-Two `claude -p` processes for the same `claude_session_id` can overlap briefly if the first keeps calling tools after delivering. This is why the system prompt must stop the agent at delivery.
+Activity subscriptions report `queued`, `running`, and `idle` per conversation, with `session_id` when available. Capacity snapshots expose running user/system turns, waiting turns, the limit, and reserved system slots. `/status` and health expose these counts without message content.
 
 ## Configuration schema
 
@@ -251,6 +250,8 @@ adapters:
 |---|---|---|
 | `agent_id` | `claude` | Which `agent:<id>` queue to dequeue |
 | `poll_interval_ms` | `1000` | Bus poll cadence |
+| `max_concurrent_turns` | `5` | Maximum live `claude -p` children per instance |
+| `reserved_system_slots` | `1` | Slots unavailable to user turns; must be less than the limit |
 | `system_prompt` | required | Persona template with `{{vars}}` and `@path` references |
 | `claude_bin` | `claude` | Path to the `claude` binary |
 | `model` | unset | `--model` for `claude -p`; unset defers to the CLI or `.claude/settings.json` |
@@ -287,7 +288,7 @@ adapters:
 
 Instance names must match `^[a-z0-9_-]+$` and `agent_id` must be unique. `getCcHeadlessInstances()` (`src/config/schema.ts`) rejects duplicates at startup and normalizes both forms into one list.
 
-**Runtime isolation.** Each entry is its own `HeadlessInstance` with a private poll timer, per-contact queue, working directory, and config. `startHeadless(db)` starts one poller per instance and returns a `Map<string, HeadlessHandle>` keyed by `agent:<agent_id>`; `stopHeadless()` stops them all.
+**Runtime isolation.** Each entry is its own `HeadlessInstance` with a private poll timer, per-conversation queue, capacity limiter, working directory, and config. `startHeadless(db)` starts one poller per instance and returns a `Map<string, HeadlessHandle>` keyed by `agent:<agent_id>`; `stopHeadless()` stops them all.
 
 **Session ownership.** Migration 011 adds `sessions.agent_id`, set by the transcript-log stage from the route that created the session. The journaling dispatcher, `/clear`, `/stop`, and `/cost` use it to find the owning instance. Sessions with `agent_id IS NULL` (created before migration 011, or by a single-instance deployment) fall back to the sole configured instance when there is exactly one. With several instances, such a session is skipped rather than guessed.
 

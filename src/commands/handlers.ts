@@ -10,6 +10,8 @@ import type { CommandDefinition, CommandHandler, CommandResponse, SlashCommandCo
 import type { CommandRegistry } from './registry.js';
 import type { AdapterRegistry } from '../core/registry.js';
 import type { MessageQueue } from '../core/queue.js';
+import { computeConversationId } from '../pipeline/conversation-id.js';
+import type { HeadlessCapacitySnapshot } from '../adapters/cc-headless.js';
 
 /**
  * Mutable holder for the headless adapter's control hooks. Populated by
@@ -24,13 +26,14 @@ export interface HeadlessControl {
    * "agent:peggy") so /clear journals the right agent's session when more
    * than one headless instance is running (E23).
    */
-  journalResumeId: Map<string, (opts: { claudeSessionId: string; contactId: string; channel: string }) => void>;
+  journalResumeId: Map<string, (opts: { claudeSessionId: string; contactId: string; channel: string; conversationId?: string }) => void>;
   /**
    * Kill the in-flight `claude -p` turn for a contact, keyed by the owning
    * cc-headless agent_id (e.g. "agent:peggy"). Used by `/stop`. Returns true
    * if a turn was found and killed.
    */
-  stopTurn: Map<string, (contactId: string) => boolean>;
+  stopTurn: Map<string, (conversationId: string) => boolean>;
+  snapshots?: Map<string, () => HeadlessCapacitySnapshot>;
 }
 
 export interface HandlerDeps {
@@ -95,6 +98,11 @@ async function statusHandler(
     `  delivered:  ${counts['delivered'] ?? 0}`,
     `  dead_letter: ${counts['dead_letter'] ?? 0}`,
     ...(poolLines.length > 0 ? ['', 'Pool:', ...poolLines] : []),
+    ...(() => {
+      const snapshots = [...(deps.headlessControl?.snapshots?.values() ?? [])].map((read) => read());
+      return snapshots.length > 0 ? ['', 'Headless:', ...snapshots.map((s) =>
+        `  ${s.agent_id}: ${s.running_user} user, ${s.running_system} system, ${s.waiting} waiting, limit ${s.limit} (${s.reserved_system_slots} reserved)`)] : [];
+    })(),
   ];
 
   return { body: lines.join('\n') };
@@ -362,15 +370,16 @@ async function clearHandler(
   const contactId = ctx.sender.startsWith('contact:')
     ? ctx.sender.slice('contact:'.length)
     : ctx.sender;
+  const conversationId = computeConversationId(contactId, ctx.channel, ctx.envelope.topic);
 
   const session = deps.db
     .prepare(
       `SELECT id, claude_session_id, agent_id FROM sessions
-       WHERE contact_id = ? AND channel = ? AND ended_at IS NULL
+       WHERE conversation_id = ? AND ended_at IS NULL
          AND claude_session_id IS NOT NULL
        ORDER BY last_activity DESC LIMIT 1`,
     )
-    .get(contactId, ctx.channel) as
+    .get(conversationId) as
     | { id: string; claude_session_id: string; agent_id: string | null }
     | undefined;
 
@@ -395,7 +404,7 @@ async function clearHandler(
       ? [...runners.values()][0]
       : undefined;
   if (journal) {
-    journal({ claudeSessionId: session.claude_session_id, contactId, channel: ctx.channel });
+    journal({ claudeSessionId: session.claude_session_id, contactId, channel: ctx.channel, conversationId });
     return {
       body: 'Context cleared — your next message starts a fresh session. Journaling the previous session in the background.',
     };
@@ -424,14 +433,15 @@ async function stopHandler(
   deps: HandlerDeps,
 ): Promise<CommandResponse> {
   const contactId = ctx.sender.startsWith('contact:') ? ctx.sender.slice('contact:'.length) : ctx.sender;
+  const conversationId = computeConversationId(contactId, ctx.channel, ctx.envelope.topic);
 
   const session = deps.db
     .prepare(
       `SELECT agent_id FROM sessions
-       WHERE contact_id = ? AND channel = ? AND ended_at IS NULL
+       WHERE conversation_id = ? AND ended_at IS NULL
        ORDER BY last_activity DESC LIMIT 1`,
     )
-    .get(contactId, ctx.channel) as { agent_id: string | null } | undefined;
+    .get(conversationId) as { agent_id: string | null } | undefined;
 
   const runners = deps.headlessControl?.stopTurn;
   const stop = session?.agent_id
@@ -440,7 +450,7 @@ async function stopHandler(
       ? [...runners.values()][0]
       : undefined;
 
-  const stopped = stop ? stop(ctx.sender) : false;
+  const stopped = stop ? stop(conversationId) : false;
 
   if (!stopped) {
     return { body: 'No active turn to stop.' };

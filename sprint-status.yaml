@@ -916,4 +916,57 @@ epics:
       S53.4: complete  # Per-launch resolution, pool_leases.model (023), startup warning
       S53.5: complete  # Relaunch between turns on mismatch; concurrency guard
       S53.6: complete  # /pool + GET /api/v1/pool show model; docs
-last_updated: 2026-09-25  # E53 (pool model selection) implemented on feat/e53-pool-model-selection, not yet merged. Prior note preserved: E52 (pool pane watchdog): S52.1 and S52.2 implemented on feat/e52-pool-watchdog, not yet merged; S52.3 waits on real captured stalls. Prior note preserved: E51 (approval requests) merged to dev and live, awaiting a real end-to-end check. Prior note preserved: E49 (context-block ledger) + E50 (agent-managed knowledge store, Phase 1) implemented end-to-end on claude/agent-knowledge-database-xiqn29, not yet merged, not yet pushed. Both from a design spike (_bmad-output/planning-artifacts/design-spike-agent-knowledge-store.md) worked out conversationally with the operator. Prior note preserved: 2026-09-17  # E48 (interactive Claude Code session pool over tmux) implemented end-to-end and marked complete — all 10 stories, on feat/e48-cc-session-pool, not yet merged to dev/main. current_epic stays E42/E44 (Siri Bridge) since that's the operator's ongoing focus; E48 was a self-contained side branch, now finished. Prior note preserved: Backfilled E36, E38, E39, E40 (complete, merged to dev 2026-08-31/09-01) and E37, E41 (pending, epic files only). Added the Siri Bridge package E42–E47 (renumbered from E36–E41 on arrival to avoid the collision): E42 complete, E44 in-progress (S44.5 on-device is the operator's), E43/E45/E46/E47 pending. E23's S23.5 still pending operator sign-off.
+  E58:
+    status: complete
+    completed: 2026-09-30
+    notes: Parallel cc-headless conversations, reserved system capacity, scoped stop, journaling lane, and activity/health reporting implemented and tested.
+    stories:
+      S58.1: complete  # Turn ownership audit and limiter contract
+      S58.2: complete  # Per-conversation queue and reserved capacity
+      S58.3: complete  # Scoped /stop
+      S58.4: complete  # Journaling lane
+      S58.5: complete  # Activity and observability
+      S58.6: complete  # Integration and docs
+  E59:
+    status: in-progress
+    notes: Generic app adapter, authenticated WebSocket and HTTP API, durable replay, sessions, mirror, uploads, and scripted client implemented. Live client walkthrough against a configured bus and contact token remains.
+    stories:
+      S59.1: complete  # Protocol and event-log architecture
+      S59.2: complete  # Adapter, authentication, and transport
+      S59.3: complete  # Durable stream, mirror, offline delivery
+      S59.4: complete  # Targets, sends, idempotency, titles
+      S59.5: complete  # Listing, history, read state
+      S59.6: complete  # Uploads and attachment lifecycle
+      S59.7: complete  # Health, commands, activity, script
+      S59.8: in-progress  # Tests and docs pass; live scripted walkthrough needs configured bus and token
+  E60:
+    status: pending
+    notes: Bind app sends to existing foreign or Earlier sessions; audit channel-keyed identity and decide safe resume semantics first.
+    stories:
+      S60.1: pending  # Identity audit and Earlier resume decision
+      S60.2: pending  # Binding and owner routing
+      S60.3: pending  # Transcript, prompt, and reply path
+      S60.4: pending  # Earlier resume and read-only behavior
+      S60.5: pending  # Bound commands and state propagation
+      S60.6: pending  # End-to-end verification and docs
+  E61:
+    status: pending
+    notes: App destination defaults, topic discovery, offline scheduled delivery, and missed-fire wake semantics.
+    stories:
+      S61.1: pending  # Destination and title discovery
+      S61.2: pending  # Scheduler isolation and offline replay
+      S61.3: pending  # Missed-fire behavior
+      S61.4: pending  # Guidance, config, and verification
+  E62:
+    status: pending
+    notes: SwiftUI macOS client with setup, reconnect/cache, conversations, files, activity, notifications, and work-laptop acceptance.
+    stories:
+      S62.1: pending  # Project, naming, setup
+      S62.2: pending  # Protocol and reconnect
+      S62.3: pending  # SwiftData cache
+      S62.4: pending  # Sidebar and transcript
+      S62.5: pending  # Composer, attachments, activity
+      S62.6: pending  # Notifications, read state, badge
+      S62.7: pending  # Open at login (should priority)
+      S62.8: pending  # Clean build and F1-F6 verification
+last_updated: 2026-09-30  # E58-E62 Mac client epics scoped from the product brief and PRD; all planned. Prior note preserved: E53 (pool model selection) implemented on feat/e53-pool-model-selection, not yet merged. Prior note preserved: E52 (pool pane watchdog): S52.1 and S52.2 implemented on feat/e52-pool-watchdog, not yet merged; S52.3 waits on real captured stalls. Prior note preserved: E51 (approval requests) merged to dev and live, awaiting a real end-to-end check. Prior note preserved: E49 (context-block ledger) + E50 (agent-managed knowledge store, Phase 1) implemented end-to-end on claude/agent-knowledge-database-xiqn29, not yet merged, not yet pushed. Both from a design spike (_bmad-output/planning-artifacts/design-spike-agent-knowledge-store.md) worked out conversationally with the operator. Prior note preserved: 2026-09-17  # E48 (interactive Claude Code session pool over tmux) implemented end-to-end and marked complete — all 10 stories, on feat/e48-cc-session-pool, not yet merged to dev/main. current_epic stays E42/E44 (Siri Bridge) since that's the operator's ongoing focus; E48 was a self-contained side branch, now finished. Prior note preserved: Backfilled E36, E38, E39, E40 (complete, merged to dev 2026-08-31/09-01) and E37, E41 (pending, epic files only). Added the Siri Bridge package E42–E47 (renumbered from E36–E41 on arrival to avoid the collision): E42 complete, E44 in-progress (S44.5 on-device is the operator's), E43/E45/E46/E47 pending. E23's S23.5 still pending operator sign-off.

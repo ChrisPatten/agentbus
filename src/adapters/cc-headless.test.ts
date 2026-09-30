@@ -17,6 +17,8 @@ const stubConfig: AppConfig = {
       peggy: {
         agent_id: 'peggy',
         poll_interval_ms: 1000,
+        max_concurrent_turns: 5,
+        reserved_system_slots: 1,
         system_prompt: 'You are Peggy.',
         claude_bin: 'claude',
         error_reply: 'err',
@@ -27,6 +29,8 @@ const stubConfig: AppConfig = {
       pokeclaude: {
         agent_id: 'pokeclaude',
         poll_interval_ms: 1000,
+        max_concurrent_turns: 5,
+        reserved_system_slots: 1,
         system_prompt: 'You are pokeclaude.',
         claude_bin: 'claude',
         error_reply: 'err',
@@ -49,6 +53,8 @@ const legacySingleConfig: AppConfig = {
     'cc-headless': {
       agent_id: 'peggy',
       poll_interval_ms: 1000,
+      max_concurrent_turns: 5,
+      reserved_system_slots: 1,
       system_prompt: 'You are Peggy.',
       claude_bin: 'claude',
       error_reply: 'err',
@@ -313,13 +319,15 @@ describe('cc-headless multi-instance lifecycle (E23)', () => {
   });
 });
 
-describe('queue responsiveness — advance on delivery, not process exit (E30 / S30.4)', () => {
+describe('conversation serialization after early delivery (E58)', () => {
   const singleInstanceConfig: AppConfig = {
     ...stubConfig,
     adapters: {
       'cc-headless': {
         agent_id: 'peggy',
         poll_interval_ms: 15,
+        max_concurrent_turns: 5,
+        reserved_system_slots: 1,
         system_prompt: 'You are Peggy.',
         claude_bin: 'claude',
         error_reply: 'err',
@@ -354,8 +362,8 @@ describe('queue responsiveness — advance on delivery, not process exit (E30 / 
     return { ok: true, json: async () => ({ ok: true, messages }) } as unknown as Response;
   }
 
-  function makeEnvelope(id: string, sender: string) {
-    return { id, sender, channel: 'telegram', topic: undefined, body: `msg ${id}` };
+  function makeEnvelope(id: string, sender: string, topic = 'general') {
+    return { id, sender, channel: 'telegram', topic, body: `msg ${id}`, metadata: {} };
   }
 
   beforeEach(() => {
@@ -377,7 +385,7 @@ describe('queue responsiveness — advance on delivery, not process exit (E30 / 
     vi.restoreAllMocks();
   });
 
-  it('starts processing message 2 at message 1s delivery, not at message 1s process close', async () => {
+  it('does not overlap two children in one conversation after early delivery', async () => {
     const events: Array<{ label: string; t: number }> = [];
     const t0 = Date.now();
     const mark = (label: string) => events.push({ label, t: Date.now() - t0 });
@@ -410,7 +418,7 @@ describe('queue responsiveness — advance on delivery, not process exit (E30 / 
       if (index === 0) {
         // Turn 1: deliver quickly via the `reply` tool, but keep the process
         // itself alive for a while afterward (simulating trailing teardown /
-        // any lingering work) — the queue must not wait for this.
+        // any lingering work). The next child must wait for process exit.
         setTimeout(() => {
           mark('turn1 delivered');
           writeEvent(child.stdout, {
@@ -455,11 +463,69 @@ describe('queue responsiveness — advance on delivery, not process exit (E30 / 
     expect(turn1Closed).toBeDefined();
     expect(turn2Spawned).toBeDefined();
 
-    // The core S30.4 assertion: turn 2 began (spawn #2) after turn 1
-    // delivered but well before turn 1's process actually closed — proving
-    // the per-contact queue advanced on delivery, not on process exit.
+    // Delivery can complete early, but resuming the same conversation before
+    // the prior process exits would race on the same Claude session.
     expect(turn2Spawned!.t).toBeGreaterThanOrEqual(turn1Delivered!.t);
-    expect(turn2Spawned!.t).toBeLessThan(turn1Closed!.t);
+    expect(turn2Spawned!.t).toBeGreaterThanOrEqual(turn1Closed!.t);
+  });
+
+  it('runs two topics for one contact together and stops only the targeted topic', async () => {
+    const messages = [makeEnvelope('a', 'contact:alice', 'topic-a'), makeEnvelope('b', 'contact:alice', 'topic-b')];
+    let pendingCall = 0;
+    fetchMock.mockImplementation((url: string) => {
+      if (String(url).includes('/messages/pending')) {
+        return Promise.resolve(pendingResponse(++pendingCall === 1 ? messages : []));
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) } as Response);
+    });
+    const children: ReturnType<typeof makeFakeChild>[] = [];
+    spawnMock.mockImplementation(() => {
+      const child = makeFakeChild();
+      children.push(child);
+      return child as unknown as import('node:child_process').ChildProcess;
+    });
+    const { startHeadless } = await import('./cc-headless.js');
+    const handle = startHeadless(realDb as unknown as Database.Database).get('agent:peggy')!;
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(children).toHaveLength(2);
+    expect(handle.snapshot()).toMatchObject({ running_user: 2, waiting: 0 });
+
+    const conversationA = createHash('sha256').update(['alice', 'telegram', 'topic-a'].sort().join(':')).digest('hex');
+    const conversationB = createHash('sha256').update(['alice', 'telegram', 'topic-b'].sort().join(':')).digest('hex');
+    expect(handle.stopTurn(conversationA)).toBe(true);
+    expect(children[0]!.kill).toHaveBeenCalledWith('SIGKILL');
+    expect(children[1]!.kill).not.toHaveBeenCalled();
+    expect(handle.stopTurn('unrelated-conversation')).toBe(false);
+    // The other topic still owns its child and can be stopped independently.
+    expect(handle.stopTurn(conversationB)).toBe(true);
+    children.forEach((child) => child.emit('close', null));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(handle.snapshot()).toMatchObject({ running_user: 0, waiting: 0 });
+  });
+
+  it('serializes journals for two conversations through one agent lane', async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(pendingResponse([])));
+    const children: ReturnType<typeof makeFakeChild>[] = [];
+    spawnMock.mockImplementation(() => {
+      const child = makeFakeChild();
+      children.push(child);
+      return child as unknown as import('node:child_process').ChildProcess;
+    });
+    const { startHeadless } = await import('./cc-headless.js');
+    const handle = startHeadless(realDb as unknown as Database.Database).get('agent:peggy')!;
+    handle.journalResumeId({ claudeSessionId: 'old-a', contactId: 'alice', channel: 'telegram', conversationId: 'conv-a' });
+    handle.journalResumeId({ claudeSessionId: 'old-b', contactId: 'alice', channel: 'telegram', conversationId: 'conv-b' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(children).toHaveLength(1);
+    expect(handle.snapshot()).toMatchObject({ running_system: 1, waiting: 1 });
+    writeEvent(children[0]!.stdout, { type: 'result', session_id: 'old-a', result: 'done' });
+    children[0]!.emit('close', 0);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(children).toHaveLength(2);
+    writeEvent(children[1]!.stdout, { type: 'result', session_id: 'old-b', result: 'done' });
+    children[1]!.emit('close', 0);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(handle.snapshot()).toMatchObject({ running_system: 0, waiting: 0 });
   });
 });
 
@@ -470,6 +536,8 @@ describe('model resolution (E53 S53.2)', () => {
       'cc-headless': {
         agent_id: 'peggy',
         poll_interval_ms: 15,
+        max_concurrent_turns: 5,
+        reserved_system_slots: 1,
         system_prompt: 'You are Peggy.',
         claude_bin: 'claude',
         error_reply: 'err',
@@ -624,6 +692,8 @@ describe('turn cost persistence (E39)', () => {
       'cc-headless': {
         agent_id: 'peggy',
         poll_interval_ms: 15,
+        max_concurrent_turns: 5,
+        reserved_system_slots: 1,
         system_prompt: 'You are Peggy.',
         claude_bin: 'claude',
         error_reply: 'err',
@@ -838,6 +908,8 @@ describe('context-block ledger (per-session memory dedup)', () => {
         'cc-headless': {
           agent_id: 'peggy',
           poll_interval_ms: 15,
+          max_concurrent_turns: 5,
+          reserved_system_slots: 1,
           system_prompt: 'You are Peggy.',
           claude_bin: 'claude',
           error_reply: 'err',

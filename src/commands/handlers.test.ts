@@ -10,6 +10,7 @@ import type { MessageEnvelope } from '../types/envelope.js';
 import { createSafeDatabase } from '../db/safe-database.js';
 import { MessageQueue } from '../core/queue.js';
 import { PoolManager } from '../pool/pool-manager.js';
+import { computeConversationId } from '../pipeline/conversation-id.js';
 
 function makeDb() {
   const db = new Database(':memory:');
@@ -689,7 +690,7 @@ describe('command handlers', () => {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         opts.id,
-        `conv-${opts.id}`,
+        computeConversationId('chris', opts.channel ?? 'telegram', 'general'),
         opts.channel ?? 'telegram',
         'chris',
         now,
@@ -719,6 +720,7 @@ describe('command handlers', () => {
         claudeSessionId: 'claude-abc',
         contactId: 'chris',
         channel: 'telegram',
+        conversationId: computeConversationId('chris', 'telegram', 'general'),
       });
     });
 
@@ -789,6 +791,7 @@ describe('command handlers', () => {
         claudeSessionId: 'claude-poke',
         contactId: 'chris',
         channel: 'telegram',
+        conversationId: computeConversationId('chris', 'telegram', 'general'),
       });
       expect(peggyJournal).not.toHaveBeenCalled();
     });
@@ -843,7 +846,7 @@ describe('command handlers', () => {
       db.prepare(
         `INSERT INTO sessions (id, conversation_id, channel, contact_id, started_at, last_activity, ended_at, claude_session_id, agent_id)
          VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
-      ).run(opts.id, `conv-${opts.id}`, opts.channel ?? 'telegram', 'chris', now, now, opts.agentId ?? null);
+      ).run(opts.id, computeConversationId('chris', opts.channel ?? 'telegram', 'general'), opts.channel ?? 'telegram', 'chris', now, now, opts.agentId ?? null);
     }
 
     function makeTelegramAdapterWithFinalize(finalizeReturns = true) {
@@ -877,7 +880,7 @@ describe('command handlers', () => {
       // The finalized draft ("Stopped by user") is the user's only feedback —
       // a separate command-response message would be duplicative.
       expect(result.body).toBeUndefined();
-      expect(stopTurn).toHaveBeenCalledWith('contact:chris');
+      expect(stopTurn).toHaveBeenCalledWith(computeConversationId('chris', 'telegram', 'general'));
       expect(telegramAdapter.finalizeDraft).toHaveBeenCalledWith('contact:chris', 'Stopped by user', 'telegram', 'general');
     });
 
@@ -951,7 +954,7 @@ describe('command handlers', () => {
 
       await stop.handler([], makeCtx(db));
 
-      expect(pokeclaudeStop).toHaveBeenCalledWith('contact:chris');
+      expect(pokeclaudeStop).toHaveBeenCalledWith(computeConversationId('chris', 'telegram', 'general'));
       expect(peggyStop).not.toHaveBeenCalled();
     });
 
@@ -968,7 +971,7 @@ describe('command handlers', () => {
 
       const result = await stop.handler([], makeCtx(db));
 
-      expect(soloStop).toHaveBeenCalledWith('contact:chris');
+      expect(soloStop).toHaveBeenCalledWith(computeConversationId('chris', 'telegram', 'general'));
       expect(result.body).toContain('Stopped');
     });
 
@@ -1011,7 +1014,7 @@ describe('command handlers', () => {
       const result = await stop.handler([], makeCtx(db, { channel: 'email:peggy', adapterId: 'email:peggy' }));
 
       expect(result.body).toContain('Stopped');
-      expect(stopTurn).toHaveBeenCalledWith('contact:chris');
+      expect(stopTurn).toHaveBeenCalledWith(computeConversationId('chris', 'email:peggy', 'general'));
     });
   });
 });

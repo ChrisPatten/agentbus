@@ -39,7 +39,9 @@ import { createMemoryInject } from './pipeline/stages/memory-inject.js';
 import { TelegramAdapter } from './adapters/telegram.js';
 import { EmailAdapter } from './adapters/email.js';
 import { SiriAdapter } from './adapters/siri.js';
-import { startHeadless, stopHeadless } from './adapters/cc-headless.js';
+import { AppAdapter } from './adapters/app.js';
+import { routedAgent } from './app/store.js';
+import { startHeadless, stopHeadless, getHeadlessSnapshots } from './adapters/cc-headless.js';
 import { createPoolManagers } from './pool/pool-manager.js';
 import { createPoolRouteResolve } from './pipeline/stages/pool-route-resolve.js';
 import { DeliveryWorker } from './core/delivery.js';
@@ -132,8 +134,11 @@ pipeline.use({ slot: 85, name: 'memory-inject',    stage: createMemoryInject(db,
 // with the other platform adapters below.
 const siri = config.adapters.siri?.enabled ? new SiriAdapter(config.adapters.siri) : undefined;
 if (siri) registry.register(siri);
+const app = config.adapters.app?.enabled
+  ? new AppAdapter(db, (contactId) => routedAgent(config, contactId), getHeadlessSnapshots) : undefined;
+if (app) registry.register(app);
 
-const httpServer = await createHttpServer({ queue, registry, config, pipeline, db, commandRegistry, pauseSet, siri, poolManagers });
+const httpServer = await createHttpServer({ queue, registry, config, pipeline, db, commandRegistry, pauseSet, siri, app, poolManagers, getHeadlessSnapshots });
 
 // ── Platform adapter registration ────────────────────────────────────────────
 // Platform adapters run in-process. They are instantiated from config,
@@ -263,6 +268,8 @@ for (const [agentId, headless] of startHeadless(db)) {
   headlessControl.journalResumeId.set(agentId, headless.journalResumeId);
   // Let /stop reach the owning instance's in-flight turn.
   headlessControl.stopTurn.set(agentId, headless.stopTurn);
+  headlessControl.snapshots?.set(agentId, headless.snapshot);
+  if (app) headless.subscribeActivity(app.publishActivity.bind(app));
 }
 
 // Start every configured cc-pool instance (E48): seed pane rows (idempotent

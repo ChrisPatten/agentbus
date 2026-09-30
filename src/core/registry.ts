@@ -14,6 +14,8 @@ export interface AdapterCapabilities {
   /** Live tool-call status stream — a single evolving message showing what the
    * agent is doing mid-turn (E29). Telegram only today. */
   toolStatus?: boolean;
+  /** Queued/running/idle conversation activity from a headless turn (E58). */
+  activityState?: boolean;
   /**
    * Can notify a human of a pending interactive-approval request (Approve/
    * Deny buttons or equivalent) and accept the human's answer back (E51).

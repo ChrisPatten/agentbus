@@ -541,6 +541,9 @@ adapters:
     max_concurrent_turns: 5       # new; total claude -p per instance
     reserved_system_slots: 1      # new; must be < max_concurrent_turns
     # …existing keys…
+
+agents:
+  agent:work:
     media:                        # required for uploads (FR-22)
       download_path: /Users/me/.agentbus/work/media
       ttl_seconds: 604800

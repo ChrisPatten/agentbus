@@ -272,7 +272,9 @@ describe('processInbound — slash command dispatch', () => {
     expect(rows[0]!.contact_id).toBe('chris');
     expect(rows[0]!.channel).toBe('telegram');
     expect(rows[0]!.body).toContain('AgentBus status');
-    expect(JSON.parse(rows[0]!.metadata)).toEqual({ command_response: true, command: 'status' });
+    expect(JSON.parse(rows[0]!.metadata)).toEqual(expect.objectContaining({
+      command_response: true, command: 'status', command_source_message_id: expect.any(String),
+    }));
   });
 
   it('routes a matching follow-up message straight to the target command, short-circuiting fan-out (E36)', async () => {

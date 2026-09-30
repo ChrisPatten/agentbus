@@ -1,5 +1,9 @@
 # HTTP API
 
+## Mac app API
+
+When `adapters.app.enabled` is true, `/api/v1/app/*` uses `Authorization: Bearer <contacts.*.platforms.app.token>` and also `X-Bus-Token` when `bus.auth_token` is set. `GET /api/v1/app/ws` upgrades to the durable JSON WebSocket protocol. `GET /api/v1/app/sessions` lists the routed agent's visible sessions; `GET /api/v1/app/sessions/:id/messages` pages transcript history; `POST /api/v1/app/attachments` uploads one multipart file; `GET /api/v1/app/commands` returns the command manifest; `GET /api/v1/app/health` reports routing and capacity. See [APP_ADAPTER.md](APP_ADAPTER.md) for frame shapes and cursor semantics.
+
 bus-core serves a JSON API on `bus.host:bus.http_port` (default `127.0.0.1:3000`). The MCP tools and agent connectors use it; in-process adapters call the pipeline directly. It is not designed for the public internet.
 
 ## Conventions

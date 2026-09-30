@@ -80,6 +80,7 @@ export function createCommandSystem(deps: CommandSystemDeps): CommandSystem {
   const headlessControl: import('./handlers.js').HeadlessControl = {
     journalResumeId: new Map(),
     stopTurn: new Map(),
+    snapshots: new Map(),
   };
 
   const builtins = createBuiltinCommands({
