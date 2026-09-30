@@ -204,7 +204,8 @@ struct TranscriptView: View {
                     if !files.isEmpty { HStack { ForEach(files, id: \.id) { file in Text(file.originalFilename).font(.caption).padding(5).background(.quaternary) } } }
                     HStack(alignment: .bottom) {
                         TextEditor(text: $draft).frame(minHeight: 48, maxHeight: 110)
-                            .onKeyPress(.return) { press in
+                            .onKeyPress { press in
+                                guard press.key == .return else { return .ignored }
                                 if press.modifiers.contains(.shift) { return .ignored }
                                 send(); return .handled
                             }

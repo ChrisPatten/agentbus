@@ -20,6 +20,9 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 ### Changed
 - **`/stop` is scoped to its conversation.** In Telegram, stopping one topic no longer interrupts another topic for the same contact. A waiting turn can also be cancelled. Journaling turns share an agent-wide lane, and turns in one conversation never overlap after early delivery.
 
+### Fixed
+- **Mac composer Return handling (E62).** Use the SwiftUI key handler signature accepted by Xcode's Swift 6 toolchain, keeping Shift-Return for a newline.
+
 ## [0.14.0] - 2026-09-29
 
 ### Added

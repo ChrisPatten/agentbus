@@ -24,6 +24,6 @@ The app's Settings accepts a bus URL, app token, and optional bus token. **Test 
 
 ## Acceptance still needed
 
-This checkout's selected developer directory is Command Line Tools, without XcodeGen or a full Xcode installation. The protocol source was typechecked with local Swift 6 command line tools. The full SwiftData/SwiftUI target, Xcode project generation, XCTest target, and work-laptop flows F1–F6 need to run on the intended Xcode 27 machine. E62 remains in progress until those checks, the 10,000-message memory measurement, and the one-week no-loss period pass.
+On 2026-09-30 this work laptop selected Xcode 26.6 and macOS SDK 26.5. The full Swift source passed strict-concurrency typechecking against that SDK after a Return-key handler fix. XcodeGen is absent, and this project targets macOS 27 per the PRD. Generation, build, XCTest, and live flows F1–F6 remain pending a macOS 27/Xcode 27 environment. E62 also requires the 10,000-message memory measurement and one-week no-loss period.
 
 The bus already sends `typing` and `tool_lines` in ephemeral `activity` frames for app-originated turns. The client decoder still needs to consume those optional fields. Original-channel turns in foreign sessions do not yet mirror their typing/tool lines to the app; E63 tracks that bus work. E63 also tracks a new active app session after `/clear`, so F6 can select Main immediately.
