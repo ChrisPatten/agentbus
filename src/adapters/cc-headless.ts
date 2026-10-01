@@ -148,8 +148,8 @@ function cleanTmp(...paths: string[]): void {
   }
 }
 
-/** Build the stdio MCP config that exposes the headless tool subset to claude -p. Shared across instances — same config file, same tool subset. */
-function buildMcpConfig(): unknown {
+/** Build the stdio MCP config for this headless agent's tool subprocess. */
+function buildMcpConfig(agentId: string): unknown {
   return {
     mcpServers: {
       agentbus: {
@@ -159,6 +159,7 @@ function buildMcpConfig(): unknown {
         env: {
           AGENTBUS_TOOLS_ONLY: 'true',
           AGENTBUS_CONFIG: configPath,
+          AGENTBUS_AGENT_ID: agentId,
         },
       },
     },
@@ -764,7 +765,7 @@ class HeadlessInstance {
     );
 
     const spPath = writeTmp(systemPromptText, '.txt');
-    const mcpPath = writeTmp(JSON.stringify(buildMcpConfig()), '.json');
+    const mcpPath = writeTmp(JSON.stringify(buildMcpConfig(this.cfg.agent_id)), '.json');
 
     // Persist claude_session_id as soon as known so session observers have it
     // before child exit. The final write below is idempotent.

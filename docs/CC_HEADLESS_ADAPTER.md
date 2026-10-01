@@ -64,13 +64,14 @@ The resolved model and its source are logged on every spawn (`Resolved model: <m
       "type": "stdio",
       "command": "npx",
       "args": ["tsx", "/abs/path/to/agentbus/src/adapters/cc.js"],
-      "env": { "AGENTBUS_TOOLS_ONLY": "true", "AGENTBUS_CONFIG": "/path/to/config.yaml" }
+      "env": { "AGENTBUS_TOOLS_ONLY": "true", "AGENTBUS_CONFIG": "/path/to/config.yaml", "AGENTBUS_AGENT_ID": "baxter" }
     }
   }
 }
 ```
 
 The path is resolved from the bus-core working directory; `tsx` maps the `.js` extension to the `.ts` source. Tools-only mode skips the polling loop and only serves tool calls. See [CC_ADAPTER.md](CC_ADAPTER.md).
+The generated config sets the bare agent ID for the routed headless instance, so agent-scoped tools run as that agent.
 
 ## Tools available to Claude
 

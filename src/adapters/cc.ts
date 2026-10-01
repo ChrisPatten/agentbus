@@ -10,8 +10,8 @@
  * IMPORTANT: All logging uses console.error() (stderr).
  * console.log() writes to stdout, which is reserved for the MCP protocol stream.
  *
- * AGENTBUS_TOOLS_ONLY=true — skip the polling loop and serve only the headless
- * tool subset (no reply/send_message/get_adapter_status). Used by cc-headless.ts
+ * AGENTBUS_TOOLS_ONLY=true — skip the polling loop and serve the headless
+ * tool subset (including reply/send_message, excluding get_adapter_status). Used by cc-headless.ts
  * to provide MCP tools to `claude -p` subprocesses via --mcp-config.
  */
 import { resolve } from 'node:path';

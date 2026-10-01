@@ -54,7 +54,9 @@ function substituteEnvVars(obj: unknown): unknown {
  * Throws on any validation or substitution failure; process should exit non-zero.
  */
 export function loadConfig(path: string, envPath?: string): AppConfig {
-  dotenv.config({ path: envPath ?? resolve(dirname(path), '.env') });
+  // MCP stdio reserves stdout for protocol frames. dotenv's startup banner
+  // would corrupt the initialize response when cc.ts loads this config.
+  dotenv.config({ path: envPath ?? resolve(dirname(path), '.env'), quiet: true });
 
   let raw: string;
   try {

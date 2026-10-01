@@ -22,6 +22,7 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 - **`/stop` is scoped to its conversation.** In Telegram, stopping one topic no longer interrupts another topic for the same contact. A waiting turn can also be cancelled. Journaling turns share an agent-wide lane, and turns in one conversation never overlap after early delivery.
 
 ### Fixed
+- **AgentBus MCP handshake.** Silence dotenv's startup banner so the MCP server writes only protocol frames to stdout. Headless tool subprocesses now receive their routed agent ID instead of defaulting to `claude`.
 - **Mac chat 404 (E62).** Session and history request query parameters now reach the bus as URL queries, so chat opens after the successful connection test.
 - **Mac queued sends (E62).** Network path updates no longer repeatedly restart the socket; queued messages now show the connection failure and a Reconnect action instead of remaining at Sending.
 - **Mac first-run setup and Quit (E62).** Saving settings now opens Main and starts the connection; Settings provides Quit and the app menu has ⌘Q.
