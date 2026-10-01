@@ -16,9 +16,9 @@ The app's Settings accepts a bus URL, app token, and optional bus token. **Test 
 
 ## Client behavior
 
-- The socket sends protocol v1 `hello` with the last applied durable sequence. On a dropped connection it retries with 1–30 second exponential backoff. Wake and a satisfied network path trigger an immediate reconnect.
+- The socket sends protocol v1 `hello` with the last applied durable sequence. On a dropped connection it retries with 1–30 second exponential backoff. Wake and a network path changing from unavailable to available trigger an immediate reconnect. A path update while already online does not restart the socket.
 - Session and message events are stored in SwiftData, with the cursor updated in the same save as each event. A repeated event is ignored. `welcome.reset` reloads the session list and recent history, replacing the local cache at the server's latest sequence. Older history is fetched by cursor on request.
-- Outgoing sends are stored with a stable `client_msg_id` before transmission. After a disconnect they are resent under that same ID until acknowledged. A rejection remains visible with its reason and a Retry action.
+- Outgoing sends are stored with a stable `client_msg_id` before transmission. After a disconnect they are resent under that same ID until acknowledged. While offline, the transcript labels them **Waiting for connection** and displays the connection error with a Reconnect button. A rejection remains visible with its reason and a Retry action.
 - Main, active conversations, and Earlier sessions appear in the sidebar. Earlier sessions without a resumable Claude transcript have a disabled composer. The transcript shows Markdown, channel labels, timestamps, attachments, expired files, and pending sends. Return sends; Shift-Return inserts a newline. Files can be selected, dropped, or pasted, and are checked against the server's size limit before upload.
 - Agent messages outside the viewed session or while the app is inactive notify through UserNotifications. Replayed messages group by session. The app Dock badge totals unread counts; Settings can hide preview text. Open at login uses `SMAppService.mainApp` where the app package supports registration.
 

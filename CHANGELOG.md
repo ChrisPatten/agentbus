@@ -22,6 +22,7 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 - **`/stop` is scoped to its conversation.** In Telegram, stopping one topic no longer interrupts another topic for the same contact. A waiting turn can also be cancelled. Journaling turns share an agent-wide lane, and turns in one conversation never overlap after early delivery.
 
 ### Fixed
+- **Mac queued sends (E62).** Network path updates no longer repeatedly restart the socket; queued messages now show the connection failure and a Reconnect action instead of remaining at Sending.
 - **Mac first-run setup and Quit (E62).** Saving settings now opens Main and starts the connection; Settings provides Quit and the app menu has ⌘Q.
 - **Mac composer Return handling (E62).** Use the SwiftUI key handler signature accepted by Xcode's Swift 6 toolchain, keeping Shift-Return for a newline.
 

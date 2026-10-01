@@ -187,6 +187,14 @@ struct TranscriptView: View {
                     Button("Stop") { Task { try? await connection?.send("/stop", target: target) } }
                 }
             }.padding()
+            if let connection, connection.state != .connected {
+                HStack {
+                    Text(connection.error.map { "Connection: \($0)" } ?? "Connecting to bus…")
+                        .foregroundStyle(connection.error == nil ? Color.secondary : Color.red)
+                    Spacer()
+                    Button("Reconnect") { connection.reconnect() }
+                }.font(.caption).padding(.horizontal).padding(.bottom, 8)
+            }
             Divider()
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
@@ -197,7 +205,8 @@ struct TranscriptView: View {
                     ForEach(pending, id: \.id) { item in
                         HStack {
                             Text(item.body).foregroundStyle(.secondary)
-                            Text(item.failure == nil ? "Sending…" : "Failed: \(item.failure!)").font(.caption)
+                            Text(item.failure.map { "Failed: \($0)" } ?? (connection?.state == .connected ? "Sending…" : "Waiting for connection…"))
+                                .font(.caption)
                             if item.failure != nil { Button("Retry") { Task { try? await connection?.retry(item.id) } } }
                         }.frame(maxWidth: .infinity, alignment: .trailing)
                     }

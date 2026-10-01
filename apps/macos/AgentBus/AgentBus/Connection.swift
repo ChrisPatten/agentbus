@@ -188,6 +188,7 @@ enum SecretStore {
     private let socket: SocketTransport
     private var runTask: Task<Void, Never>?
     private var pathMonitor: NWPathMonitor?
+    private var pathSatisfied: Bool?
     private var wakeObserver: NSObjectProtocol?
     private var generation = 0
     private var maxUploadBytes = 26_214_400
@@ -205,7 +206,13 @@ enum SecretStore {
         }
         let monitor = NWPathMonitor()
         monitor.pathUpdateHandler = { [weak self] path in
-            if path.status == .satisfied { Task { @MainActor in self?.reconnect() } }
+            let satisfied = path.status == .satisfied
+            Task { @MainActor in
+                guard let self else { return }
+                let restored = self.pathSatisfied == false && satisfied
+                self.pathSatisfied = satisfied
+                if restored { self.reconnect() }
+            }
         }
         monitor.start(queue: DispatchQueue(label: "AgentBus.NetworkPath"))
         pathMonitor = monitor
@@ -228,7 +235,7 @@ enum SecretStore {
                 maxUploadBytes = health?.limits.maxUploadBytes ?? maxUploadBytes
                 try await socket.connect(settings.request("/api/v1/app/ws", websocket: true))
                 try await socket.send(ProtocolCodec.encode(.hello(store.cursor)))
-                state = .connecting; error = nil; delay = 1
+                state = .connecting; delay = 1
                 while !Task.isCancelled && current == generation {
                     let frame = try ProtocolCodec.frame(try await socket.receive())
                     try await handle(frame, replay: true)
@@ -301,6 +308,7 @@ enum SecretStore {
                 try await loadSessions()
             }
             state = .connected
+            error = nil
             for row in store.pending where row.failure == nil { try await sendPending(row) }
             for session in store.sessions where session.readSeq > 0 {
                 try await socket.send(ProtocolCodec.encode(ClientFrame(type: "mark_read", sessionID: session.id, seq: session.readSeq, requestID: UUID().uuidString)))
