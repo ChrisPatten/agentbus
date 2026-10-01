@@ -44,7 +44,7 @@ import { resolveModel } from './model-override-loader.js';
 import { hashBlock, shouldSendBlock, markBlockSent, clearLedger, detectCompaction } from './context-ledger.js';
 import { HeadlessLimiter, type TurnClass } from './headless-limiter.js';
 
-const configPath = process.env['AGENTBUS_CONFIG'] ?? resolve(process.cwd(), 'config.yaml');
+const configPath = resolve(process.env['AGENTBUS_CONFIG'] ?? 'config.yaml');
 const config = loadConfig(configPath);
 
 // ── DB helpers ────────────────────────────────────────────────────────────────
@@ -469,7 +469,17 @@ class HeadlessInstance {
       const child = spawn(this.cfg.claude_bin, args, {
         stdio: ['ignore', 'pipe', 'pipe'],
         cwd: this.workingDir,
-        env: { ...process.env, CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' },
+        // Claude may pass its own process environment through to MCP children
+        // ahead of the per-server env block. Keep these absolute and scoped to
+        // this headless instance so cc.ts does not look for config.yaml in the
+        // agent's working directory or fall back to the wrong agent.
+        env: {
+          ...process.env,
+          CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
+          AGENTBUS_CONFIG: configPath,
+          AGENTBUS_AGENT_ID: this.cfg.agent_id,
+          AGENTBUS_TOOLS_ONLY: 'true',
+        },
       });
       this.activeChildren.set(trackingId, child);
 

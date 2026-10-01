@@ -447,7 +447,13 @@ describe('conversation serialization after early delivery (E58)', () => {
       return child as unknown as import('node:child_process').ChildProcess;
     });
 
+    // make dev supplies a relative AGENTBUS_CONFIG; Claude runs from the
+    // agent's working directory, so its MCP child needs the absolute path.
+    const previousConfigPath = process.env['AGENTBUS_CONFIG'];
+    process.env['AGENTBUS_CONFIG'] = 'config.yaml';
     const { startHeadless } = await import('./cc-headless.js');
+    if (previousConfigPath === undefined) delete process.env['AGENTBUS_CONFIG'];
+    else process.env['AGENTBUS_CONFIG'] = previousConfigPath;
     startHeadless(realDb as unknown as Database.Database);
 
     // Give both polls, turn 1's delivery, and turn 2's spawn+delivery+close
@@ -459,6 +465,10 @@ describe('conversation serialization after early delivery (E58)', () => {
     const turn2Spawned = events.find((e) => e.label === 'turn2 spawned');
 
     expect(spawnMock).toHaveBeenCalledTimes(2);
+    const spawnEnv = spawnMock.mock.calls[0]![2].env as NodeJS.ProcessEnv;
+    expect(spawnEnv['AGENTBUS_CONFIG']).toBe(join(process.cwd(), 'config.yaml'));
+    expect(spawnEnv['AGENTBUS_AGENT_ID']).toBe('peggy');
+    expect(spawnEnv['AGENTBUS_TOOLS_ONLY']).toBe('true');
     expect(turn1Delivered).toBeDefined();
     expect(turn1Closed).toBeDefined();
     expect(turn2Spawned).toBeDefined();

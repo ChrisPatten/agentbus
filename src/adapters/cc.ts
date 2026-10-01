@@ -29,7 +29,7 @@ const BACKOFF_INTERVAL_MS = 5000;
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-const configPath = process.env['AGENTBUS_CONFIG'] ?? resolve(process.cwd(), 'config.yaml');
+const configPath = resolve(process.env['AGENTBUS_CONFIG'] ?? 'config.yaml');
 const config = loadConfig(configPath);
 const pollIntervalMs = config.adapters['claude-code']?.poll_interval_ms ?? 1000;
 const busBaseUrl = `http://127.0.0.1:${config.bus.http_port}`;
