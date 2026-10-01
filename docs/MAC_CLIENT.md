@@ -12,7 +12,7 @@ xcodegen generate
 xcodebuild -project AgentBus.xcodeproj -scheme AgentBus -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build test
 ```
 
-The app's Settings accepts a bus URL, app token, and optional bus token. **Test Connection** calls `/api/v1/app/health` and reports the contact, routed agent, routing status, and bus version. Save writes tokens to Keychain. Configure the bus as in [APP_ADAPTER.md](APP_ADAPTER.md). The default URL is `http://127.0.0.1:3000`; for a remote URL use HTTPS so the socket uses WSS.
+The app's Settings accepts a bus URL, app token, and optional bus token. **Test Connection** calls `/api/v1/app/health` and reports the contact, routed agent, routing status, and bus version. **Save and Open Chat** writes tokens to Keychain, dismisses setup, connects, and selects Main. The Settings form also provides Quit; ⌘Q is in the app menu. Configure the bus as in [APP_ADAPTER.md](APP_ADAPTER.md). The default URL is `http://127.0.0.1:3000`; for a remote URL use HTTPS so the socket uses WSS.
 
 ## Client behavior
 

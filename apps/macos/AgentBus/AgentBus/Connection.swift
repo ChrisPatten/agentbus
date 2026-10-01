@@ -47,6 +47,7 @@ enum SecretStore {
     }
     var appToken: String
     var busToken: String
+    private(set) var connectionRevision = 0
     var hidePreviews: Bool {
         didSet { UserDefaults.standard.set(hidePreviews, forKey: "hidePreviews") }
     }
@@ -63,6 +64,7 @@ enum SecretStore {
     func saveSecrets() throws {
         try SecretStore.write(appToken, account: "app")
         try SecretStore.write(busToken, account: "bus")
+        connectionRevision += 1
     }
     var configured: Bool { !appToken.isEmpty }
     func endpoint(_ path: String, websocket: Bool = false) throws -> URL {
@@ -193,9 +195,11 @@ enum SecretStore {
     private var resetting = false
     private var replayThrough = 0
 
-    init(settings: ClientSettings, store: ChatStore, socket: SocketTransport = URLSessionSocket(), api: (any BusAPI)? = nil) {
+    init(settings: ClientSettings, store: ChatStore, socket: SocketTransport = URLSessionSocket(),
+         api: (any BusAPI)? = nil, observeSystemEvents: Bool = true) {
         self.settings = settings; self.store = store; self.socket = socket
         self.http = api ?? BusHTTP(settings: settings)
+        guard observeSystemEvents else { return }
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.reconnect() }
         }

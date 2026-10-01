@@ -71,6 +71,12 @@ import ServiceManagement
                 .frame(minWidth: 760, minHeight: 520)
         }
         .modelContainer(container)
+        .commands {
+            CommandGroup(replacing: .appTermination) {
+                Button("Quit AgentBus") { NSApp.terminate(nil) }
+                    .keyboardShortcut("q")
+            }
+        }
         Settings { SettingsView(settings: settings) }
     }
 }

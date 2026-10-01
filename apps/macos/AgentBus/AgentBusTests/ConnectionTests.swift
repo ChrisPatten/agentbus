@@ -52,7 +52,7 @@ import SwiftData
         let settings = ClientSettings()
         settings.appToken = "test-app-token"
         let socket = MockSocket()
-        let connection = BusConnection(settings: settings, store: store, socket: socket, api: MockAPI())
+        let connection = BusConnection(settings: settings, store: store, socket: socket, api: MockAPI(), observeSystemEvents: false)
         connection.start()
         try await waitFor { socket.sent.count >= 1 }
         XCTAssertEqual(try socket.frame(0)["type"] as? String, "hello")
@@ -93,7 +93,7 @@ import SwiftData
         api.sessionsPage = SessionsPage(sessions: [try JSONDecoder().decode(BusSession.self, from: Data(newJSON.utf8))], nextBefore: nil)
         let settings = ClientSettings(); settings.appToken = "test-app-token"
         let socket = MockSocket()
-        let connection = BusConnection(settings: settings, store: store, socket: socket, api: api)
+        let connection = BusConnection(settings: settings, store: store, socket: socket, api: api, observeSystemEvents: false)
         connection.start()
         try await waitFor { socket.sent.count >= 1 }
         XCTAssertEqual(try socket.frame(0)["cursor"] as? Int, 2)

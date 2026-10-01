@@ -5,6 +5,7 @@ import ServiceManagement
 import UserNotifications
 
 struct SettingsView: View {
+    @Environment(\.dismiss) private var dismiss
     @Bindable var settings: ClientSettings
     @State private var result = ""
     @State private var testing = false
@@ -26,7 +27,16 @@ struct SettingsView: View {
                 }.disabled(testing)
                 Text(result).foregroundStyle(.secondary)
             }
-            Button("Save") { do { try settings.saveSecrets(); result = "Saved" } catch { result = error.localizedDescription } }
+            HStack {
+                Button("Save and Open Chat") {
+                    do {
+                        try settings.saveSecrets()
+                        dismiss()
+                    } catch { result = error.localizedDescription }
+                }
+                .disabled(!settings.configured)
+                Button("Quit AgentBus") { NSApp.terminate(nil) }
+            }
             Button("Enable notifications") {
                 Task { _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) }
             }
@@ -102,7 +112,11 @@ struct RootView: View {
                 if settings.configured { value.start() }
             }
         }
-        .onChange(of: settings.appToken) { _, _ in connection?.reconnect() }
+        .onChange(of: settings.connectionRevision) { _, _ in
+            showSetup = false
+            if selectedID == nil { selectedID = main?.id ?? "main" }
+            connection?.reconnect()
+        }
         .onChange(of: sessions.count) { _, _ in
             if selectedID == nil, let main { selectedID = main.id }
         }
