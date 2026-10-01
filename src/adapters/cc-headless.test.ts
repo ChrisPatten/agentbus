@@ -830,6 +830,37 @@ describe('turn cost persistence (E39)', () => {
     vi.restoreAllMocks();
   });
 
+  it('allows delivery tools and falls back to text when Claude denies one', async () => {
+    setupOneMessagePoll();
+    const child = makeFakeChild();
+    spawnMock.mockImplementation(() => child as unknown as import('node:child_process').ChildProcess);
+
+    const { startHeadless } = await import('./cc-headless.js');
+    startHeadless(realDb as unknown as Database.Database);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const args = spawnMock.mock.calls[0]![1] as string[];
+    expect(args[args.indexOf('--allowedTools') + 1]).toBe('mcp__agentbus__reply,mcp__agentbus__send_message');
+
+    writeEvent(child.stdout, {
+      type: 'assistant',
+      message: { content: [{ type: 'tool_use', id: 'tool-1', name: 'mcp__agentbus__reply', input: {} }] },
+    });
+    writeEvent(child.stdout, {
+      type: 'user',
+      message: { content: [{ type: 'tool_result', tool_use_id: 'tool-1', is_error: true,
+        content: "Claude requested permissions to use mcp__agentbus__reply, but you haven't granted it yet." }] },
+    });
+    writeEvent(child.stdout, { type: 'result', result: 'I could not use the reply tool.' });
+    child.emit('close', 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const outbound = fetchMock.mock.calls.filter(([url, init]) =>
+      String(url).endsWith('/api/v1/messages') && (init as RequestInit | undefined)?.method === 'POST');
+    expect(outbound).toHaveLength(1);
+    expect(JSON.stringify(outbound[0]![1])).toContain('I could not use the reply tool.');
+  });
+
   it('persists cost/usage/turn count from a successful result event (S39.2/S39.3)', async () => {
     setupOneMessagePoll();
     const child = makeFakeChild();

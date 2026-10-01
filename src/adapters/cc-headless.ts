@@ -435,7 +435,9 @@ class HeadlessInstance {
       '-p', prompt,
       '--output-format', 'stream-json',
       '--verbose', // required by the CLI when --print is combined with --output-format=stream-json
-      '--allowedTools', 'all',
+      // "all" is treated as a tool name, not a wildcard. Delivery must be
+      // explicitly allowed because this is a noninteractive Claude process.
+      '--allowedTools', 'mcp__agentbus__reply,mcp__agentbus__send_message',
       '--mcp-config', mcpConfigPath,
       '--system-prompt-file', systemPromptPath,
     ];
@@ -486,6 +488,8 @@ class HeadlessInstance {
       let claudeSessionId: string | null = null;
       let resultText: string | null = null;
       let deliveredViaTool = false;
+      const pendingDeliveryIds = new Set<string>();
+      let completedDelivery = false;
       let errorOutput = '';
       let spawnError: string | null = null;
       let totalCostUsd: number | null = null;
@@ -507,7 +511,7 @@ class HeadlessInstance {
             result?: string;
             is_error?: boolean;
             subtype?: string;
-            message?: { content?: Array<{ type?: string; name?: string; input?: unknown }> };
+            message?: { content?: Array<{ type?: string; id?: string; name?: string; input?: unknown; tool_use_id?: string; is_error?: boolean; content?: unknown }> };
             /** E39 — only present on the terminal `result` event. */
             total_cost_usd?: number;
             usage?: { input_tokens?: number; output_tokens?: number };
@@ -530,6 +534,24 @@ class HeadlessInstance {
           const wasDelivered = deliveredViaTool;
           const { reportable, delivered } = selectReportableCalls(extractToolCalls(event), deliveredViaTool);
           deliveredViaTool = delivered;
+          if (event.type === 'assistant') {
+            for (const block of event.message?.content ?? []) {
+              if (block.type === 'tool_use' && block.id && block.name && DELIVERY_TOOL_NAMES.has(block.name)) {
+                pendingDeliveryIds.add(block.id);
+              }
+            }
+          }
+          if (event.type === 'user') {
+            for (const block of event.message?.content ?? []) {
+              if (block.type !== 'tool_result' || !block.tool_use_id || !pendingDeliveryIds.delete(block.tool_use_id)) continue;
+              if (block.is_error) {
+                console.error(`[${this.label}] delivery tool failed: ${String(block.content).slice(0, ERROR_DETAIL_MAX_LENGTH)}`);
+                if (!completedDelivery && pendingDeliveryIds.size === 0) deliveredViaTool = false;
+              } else if (!block.is_error) {
+                completedDelivery = true;
+              }
+            }
+          }
           for (const call of reportable) {
             onToolCall?.({ name: call.name, input: call.input });
           }

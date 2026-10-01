@@ -8,7 +8,8 @@ bus-core
         ├── polls GET /api/v1/messages/pending?agent=<agent_id>
         ├── serializes work per contact
         ├── spawns: claude -p <prompt> --output-format stream-json --verbose
-        │           --allowedTools all --mcp-config <tmp> --system-prompt-file <tmp>
+        │           --allowedTools mcp__agentbus__reply,mcp__agentbus__send_message
+        │           --mcp-config <tmp> --system-prompt-file <tmp>
         │           [--model <model>] [--resume <claude_session_id>]
         │     └── MCP subprocess: src/adapters/cc.ts with AGENTBUS_TOOLS_ONLY=true
         └── watches the stream for reply/send_message tool calls; falls back to stdout
@@ -33,7 +34,7 @@ Nothing in AgentBus bounds a long-lived transcript; Claude Code's auto-compactio
 ## `claude -p` invocation
 
 - `--output-format stream-json --verbose`: the CLI requires `--verbose` with stream-json in print mode. It does not change the event stream.
-- `--allowedTools all`.
+- `--allowedTools mcp__agentbus__reply,mcp__agentbus__send_message`: permit delivery in noninteractive turns. Claude treats `all` as a literal tool name, so it does not grant these tools. Other tools continue under the working directory's normal permission settings.
 - `--mcp-config <tmp>`: a temporary file that launches `src/adapters/cc.ts` in tools-only mode with the same `AGENTBUS_CONFIG`.
 - `--system-prompt-file <tmp>`: replaces the default coding-agent prompt. `CLAUDE.md` auto-loading is unaffected.
 - `--model <model>`: only when a model resolves. See [Runtime model overrides](#runtime-model-overrides).

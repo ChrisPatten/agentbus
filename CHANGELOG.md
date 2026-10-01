@@ -22,6 +22,7 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 - **`/stop` is scoped to its conversation.** In Telegram, stopping one topic no longer interrupts another topic for the same contact. A waiting turn can also be cancelled. Journaling turns share an agent-wide lane, and turns in one conversation never overlap after early delivery.
 
 ### Fixed
+- **Headless reply permissions.** Explicitly allow the AgentBus `reply` and `send_message` tools in noninteractive Claude turns. If a delivery call fails, fall back to the turn's text result instead of silently dropping it.
 - **Headless AgentBus MCP startup.** Resolve `AGENTBUS_CONFIG` before Claude changes to the agent's working directory and pass the absolute path and routed agent identity to its MCP subprocess.
 - **AgentBus MCP handshake.** Silence dotenv's startup banner so the MCP server writes only protocol frames to stdout. Headless tool subprocesses now receive their routed agent ID instead of defaulting to `claude`.
 - **Mac chat 404 (E62).** Session and history request query parameters now reach the bus as URL queries, so chat opens after the successful connection test.
