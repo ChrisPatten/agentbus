@@ -37,6 +37,17 @@ import SwiftData
 }
 
 @MainActor final class ConnectionTests: XCTestCase {
+    func testEndpointKeepsQueryOutOfPath() throws {
+        let settings = ClientSettings()
+        settings.baseURL = "http://127.0.0.1:3000"
+        let sessions = try settings.endpoint("/api/v1/app/sessions?state=all&limit=100")
+        XCTAssertEqual(sessions.path, "/api/v1/app/sessions")
+        XCTAssertEqual(sessions.query, "state=all&limit=100")
+        let history = try settings.endpoint("/api/v1/app/sessions/abc/messages?limit=50&before=row%2F1")
+        XCTAssertEqual(history.path, "/api/v1/app/sessions/abc/messages")
+        XCTAssertEqual(history.query, "limit=50&before=row%2F1")
+    }
+
     private func waitFor(_ predicate: @escaping @MainActor () -> Bool) async throws {
         for _ in 0..<200 {
             if predicate() { return }

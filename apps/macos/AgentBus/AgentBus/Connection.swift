@@ -70,11 +70,12 @@ enum SecretStore {
     func endpoint(_ path: String, websocket: Bool = false) throws -> URL {
         guard var components = URLComponents(string: baseURL.trimmingCharacters(in: .whitespacesAndNewlines)),
               let scheme = components.scheme?.lowercased(), ["http", "https"].contains(scheme),
-              components.host != nil else { throw ClientError.invalidURL }
+              components.host != nil, let requested = URLComponents(string: path) else { throw ClientError.invalidURL }
         if websocket { components.scheme = scheme == "https" ? "wss" : "ws" }
         let prefix = components.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        components.path = (prefix.isEmpty ? "" : "/" + prefix) + path
-        components.query = nil; components.fragment = nil
+        components.path = (prefix.isEmpty ? "" : "/" + prefix) + requested.path
+        components.percentEncodedQuery = requested.percentEncodedQuery
+        components.fragment = nil
         guard let url = components.url else { throw ClientError.invalidURL }
         return url
     }
