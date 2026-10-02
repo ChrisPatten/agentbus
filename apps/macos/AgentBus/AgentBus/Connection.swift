@@ -48,6 +48,10 @@ enum SecretStore {
     var appToken: String
     var busToken: String
     private(set) var connectionRevision = 0
+    @ObservationIgnored private var savedAppToken: String
+    @ObservationIgnored private var savedBusToken: String
+    /// Called after new tokens reach Keychain, so the app can reconnect.
+    @ObservationIgnored var onSave: (() -> Void)?
     var hidePreviews: Bool {
         didSet { UserDefaults.standard.set(hidePreviews, forKey: "hidePreviews") }
     }
@@ -56,17 +60,23 @@ enum SecretStore {
     }
     init() {
         baseURL = UserDefaults.standard.string(forKey: "busURL") ?? "http://127.0.0.1:3000"
-        appToken = SecretStore.read("app")
-        busToken = SecretStore.read("bus")
+        let app = SecretStore.read("app"), bus = SecretStore.read("bus")
+        appToken = app; busToken = bus
+        savedAppToken = app; savedBusToken = bus
         hidePreviews = UserDefaults.standard.bool(forKey: "hidePreviews")
         openAtLogin = UserDefaults.standard.bool(forKey: "openAtLogin")
     }
     func saveSecrets() throws {
         try SecretStore.write(appToken, account: "app")
         try SecretStore.write(busToken, account: "bus")
+        savedAppToken = appToken; savedBusToken = busToken
         connectionRevision += 1
+        onSave?()
     }
     var configured: Bool { !appToken.isEmpty }
+    var hasUnsavedSecrets: Bool { appToken != savedAppToken || busToken != savedBusToken }
+    /// False until an app token is in Keychain: the first-run state that opens Settings.
+    var hasSavedToken: Bool { !savedAppToken.isEmpty }
     func endpoint(_ path: String, websocket: Bool = false) throws -> URL {
         guard var components = URLComponents(string: baseURL.trimmingCharacters(in: .whitespacesAndNewlines)),
               let scheme = components.scheme?.lowercased(), ["http", "https"].contains(scheme),
@@ -172,16 +182,45 @@ enum SecretStore {
     func close() { task?.cancel(with: .goingAway, reason: nil); task = nil }
 }
 
+/// The ephemeral turn state of one session. Never stored; replaced by the reply.
+struct LiveActivity: Equatable {
+    var state: String
+    var lines: [String] = []
+    var startedAt: Date?
+}
+
+/// A request for the main window to select a session (ack of a new topic, a notification click).
+struct SelectionRequest: Equatable {
+    let sessionID: String
+    let nonce = UUID()
+}
+
 @MainActor @Observable final class BusConnection {
     enum State: String { case offline, connecting, connected }
     private(set) var state: State = .offline
     private(set) var error: String?
     private(set) var health: BusHealth?
-    private(set) var activity: [String: String] = [:]
-    private(set) var toolTrail: [String: [String]] = [:]
-    var selectedSessionID: String?
-    var onAgentMessage: ((BusMessage, Bool) -> Void)?
-    var onOpenSession: ((String) -> Void)?
+    private(set) var capacity: BusCapacity?
+    private(set) var live: [String: LiveActivity] = [:]
+    private(set) var nextRetry: Date?
+    private(set) var isResetting = false
+    private(set) var commands: [SlashCommand] = []
+    private(set) var selectionRequest: SelectionRequest?
+    private(set) var maxUploadBytes = 26_214_400
+    /// Unsent composer text per session, kept while the app runs.
+    var drafts: [String: String] = [:]
+    /// Local files chosen on this Mac, by uploaded file ID, for Quick Look. Persisted across launches.
+    @ObservationIgnored private var localFiles: [String: String] =
+        UserDefaults.standard.dictionary(forKey: "localFiles") as? [String: String] ?? [:]
+    /// Copies created by resuming an Earlier session, mapped to the original session ID.
+    @ObservationIgnored private var resumedFrom: [String: String] =
+        UserDefaults.standard.dictionary(forKey: "resumedFrom") as? [String: String] ?? [:]
+    @ObservationIgnored var onAgentMessage: ((BusMessage, Bool) -> Void)?
+    /// Called whenever cached unread counts may have changed (session events, read markers, reloads).
+    @ObservationIgnored var onUnreadChange: (() -> Void)?
+    @ObservationIgnored private var viewing: [UUID: String] = [:]
+    @ObservationIgnored private var sessionByConversation: [String: String] = [:]
+    @ObservationIgnored private var finishedTrails: [String: (lines: [String], seconds: Double)] = [:]
 
     let settings: ClientSettings
     let http: any BusAPI
@@ -192,9 +231,7 @@ enum SecretStore {
     private var pathSatisfied: Bool?
     private var wakeObserver: NSObjectProtocol?
     private var generation = 0
-    private var maxUploadBytes = 26_214_400
     private var resetBuffer: [ServerFrame] = []
-    private var resetting = false
     private var replayThrough = 0
 
     init(settings: ClientSettings, store: ChatStore, socket: SocketTransport = URLSessionSocket(),
@@ -225,15 +262,16 @@ enum SecretStore {
         runTask?.cancel(); socket.close()
         runTask = Task { [weak self] in await self?.run(current) }
     }
-    func stop() { generation += 1; runTask?.cancel(); runTask = nil; socket.close(); pathMonitor?.cancel(); state = .offline }
+    func stop() { generation += 1; runTask?.cancel(); runTask = nil; socket.close(); pathMonitor?.cancel(); state = .offline; nextRetry = nil }
 
     private func run(_ current: Int) async {
         var delay: UInt64 = 1
         while !Task.isCancelled && current == generation {
             do {
-                state = .connecting
+                state = .connecting; nextRetry = nil
                 health = try await http.health()
                 maxUploadBytes = health?.limits.maxUploadBytes ?? maxUploadBytes
+                capacity = health?.capacity ?? capacity
                 try await socket.connect(settings.request("/api/v1/app/ws", websocket: true))
                 try await socket.send(ProtocolCodec.encode(.hello(store.cursor)))
                 state = .connecting; delay = 1
@@ -246,6 +284,8 @@ enum SecretStore {
             }
             guard !Task.isCancelled && current == generation else { break }
             socket.close(); state = .offline
+            live.removeAll()
+            nextRetry = Date().addingTimeInterval(TimeInterval(delay))
             try? await Task.sleep(for: .seconds(delay))
             delay = min(delay * 2, 30)
         }
@@ -253,15 +293,23 @@ enum SecretStore {
     private func sendPending(_ row: PendingSend) async throws {
         try await socket.send(ProtocolCodec.encode(.send(row.id, target: row.target, body: row.body, attachments: row.attachmentIDs)))
     }
-    func send(_ body: String, target: BusTarget, attachments: [String] = []) async throws {
+    func send(_ body: String, target: BusTarget, attachments: [String] = [], files: [UploadedFile] = []) async throws {
         guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty else { return }
-        let row = PendingSend(target: target, body: body, attachments: attachments)
+        let row = PendingSend(target: target, body: body, attachments: attachments, files: files)
         try store.addPending(row)
         if state == .connected { try await sendPending(row) }
     }
+    /// A rejection is final for its `client_msg_id` (the bus replays the same ack), so a
+    /// rejected send is retried as a new intent. Unacknowledged sends keep their ID.
     func retry(_ id: String) async throws {
-        try store.retry(id)
-        if state == .connected, let row = store.pending.first(where: { $0.id == id }) { try await sendPending(row) }
+        guard let row = store.pending.first(where: { $0.id == id }) else { return }
+        guard row.failure != nil else {
+            if state == .connected { try await sendPending(row) }
+            return
+        }
+        let target = row.target, body = row.body, ids = row.attachmentIDs, files = row.files
+        try store.discard(id)
+        try await send(body, target: target, attachments: ids, files: files)
     }
     func createSession(title: String) async throws {
         let frame = ClientFrame(type: "create_session", title: title, requestID: UUID().uuidString)
@@ -275,11 +323,76 @@ enum SecretStore {
         let seq = store.messages(id).filter { $0.direction == "outbound" }.map(\.seq).max() ?? 0
         guard seq > 0 else { return }
         try store.setRead(id, seq: seq)
+        onUnreadChange?()
         if state == .connected {
             try await socket.send(ProtocolCodec.encode(ClientFrame(type: "mark_read", sessionID: id, seq: seq, requestID: UUID().uuidString)))
         }
     }
-    func upload(_ url: URL) async throws -> UploadedFile { try await http.upload(url, maxBytes: maxUploadBytes) }
+    func upload(_ url: URL) async throws -> UploadedFile {
+        let file = try await http.upload(url, maxBytes: maxUploadBytes)
+        localFiles[file.id] = url.path
+        if localFiles.count > 500 { localFiles.remove(at: localFiles.startIndex) }
+        UserDefaults.standard.set(localFiles, forKey: "localFiles")
+        return file
+    }
+    /// The file on this Mac behind an uploaded attachment, if it is still there.
+    func localFile(_ id: String?) -> URL? {
+        guard let id, let path = localFiles[id], FileManager.default.fileExists(atPath: path) else { return nil }
+        return URL(fileURLWithPath: path)
+    }
+    /// The Earlier session a resumed copy was forked from on this Mac.
+    func origin(of id: String) -> String? { resumedFrom[id] }
+    func requestSelection(_ id: String) { selectionRequest = SelectionRequest(sessionID: id) }
+    /// Records which session a window shows, so alerts and read markers skip it.
+    func setViewing(_ window: UUID, session: String?) {
+        viewing[window] = session
+    }
+    func isViewing(_ id: String) -> Bool { viewing.values.contains(id) }
+    /// The effective turn state: the live frame if any, else the session list's value.
+    func activityState(_ id: String) -> String {
+        live[id]?.state ?? store.session(id)?.activity ?? "idle"
+    }
+    func refreshHealth() async {
+        guard settings.configured, let value = try? await http.health() else { return }
+        health = value
+        maxUploadBytes = value.limits.maxUploadBytes
+        if let snapshot = value.capacity { capacity = snapshot }
+    }
+    func loadCommands() async {
+        guard commands.isEmpty, let data = try? await http.commands(),
+              let list = try? JSONDecoder().decode(CommandList.self, from: data) else { return }
+        commands = list.commands.sorted { $0.name < $1.name }
+    }
+    private func applyActivity(_ data: ServerFrame.DataPayload) {
+        if let snapshot = data.capacity, snapshot.limit > 0 { capacity = snapshot }
+        if let session = data.sessionID, let conversation = data.conversationID { sessionByConversation[conversation] = session }
+        guard let state = data.state,
+              let id = data.sessionID ?? data.conversationID.flatMap({ sessionByConversation[$0] }) else { return }
+        // Session events carry a snapshot of activity too; keep the cache in step so it never outlives the turn.
+        try? store.setActivity(id, state)
+        let previous = live[id]
+        let lines = data.toolLines ?? []
+        // The bus clears the trail when a message is delivered mid-turn; that message's event may still be on its way.
+        if let previous, !previous.lines.isEmpty, lines.isEmpty {
+            finishedTrails[id] = (previous.lines, previous.startedAt.map { Date().timeIntervalSince($0) } ?? 0)
+        }
+        if state == "idle" { live[id] = nil; return }
+        var next = previous ?? LiveActivity(state: state)
+        if state == "running" && next.startedAt == nil { next.startedAt = Date() }
+        next.state = state
+        next.lines = lines
+        live[id] = next
+    }
+    /// Moves the trail so far onto the delivered message. The turn itself ends only on an idle frame,
+    /// because a headless turn can deliver several messages.
+    private func finishTurn(_ message: BusMessage) {
+        let id = message.sessionID
+        let current = live[id].flatMap { $0.lines.isEmpty ? nil : ($0.lines, $0.startedAt.map { Date().timeIntervalSince($0) } ?? 0) }
+        let trail = current ?? finishedTrails[id]
+        finishedTrails[id] = nil
+        live[id]?.lines = []
+        if let trail { try? store.attachTrail(message.messageID, lines: trail.0, seconds: trail.1) }
+    }
     func loadSessions() async throws {
         var before: String? = nil
         repeat {
@@ -300,9 +413,10 @@ enum SecretStore {
             guard frame.version == 1 else { throw ClientError.server(0, "Unsupported protocol version") }
             replayThrough = frame.latestSeq ?? 0
             if frame.reset == true {
-                resetting = true
+                isResetting = true
+                defer { isResetting = false }
                 try await reload(cursor: frame.latestSeq ?? 0)
-                resetting = false
+                isResetting = false
                 for buffered in resetBuffer.sorted(by: { ($0.seq ?? 0) < ($1.seq ?? 0) }) { try await handle(buffered, replay: true) }
                 resetBuffer.removeAll()
             } else if store.sessions.isEmpty {
@@ -310,30 +424,37 @@ enum SecretStore {
             }
             state = .connected
             error = nil
+            onUnreadChange?()
             for row in store.pending where row.failure == nil { try await sendPending(row) }
             for session in store.sessions where session.readSeq > 0 {
                 try await socket.send(ProtocolCodec.encode(ClientFrame(type: "mark_read", sessionID: session.id, seq: session.readSeq, requestID: UUID().uuidString)))
             }
         case "event":
-            if resetting { resetBuffer.append(frame); return }
+            if isResetting { resetBuffer.append(frame); return }
             if frame.event == "activity" {
-                if let id = frame.data?.sessionID, let value = frame.data?.state {
-                    activity[id] = value
-                    if let tool = frame.data?.tool { toolTrail[id, default: []].append(tool) }
-                }
+                if let data = frame.data { applyActivity(data) }
                 return
             }
             let inserted = try store.apply(frame)
+            if frame.data?.session != nil { onUnreadChange?() }
             if inserted, let message = frame.data?.message, message.direction == "outbound" {
-                activity[message.sessionID] = "idle"
+                finishTurn(message)
                 onAgentMessage?(message, (frame.seq ?? 0) <= replayThrough)
             }
         case "ack":
             if let id = frame.clientMsgID {
-                _ = try store.acknowledge(id, status: frame.status ?? "rejected", reason: frame.reason)
-                if let session = frame.sessionID { selectedSessionID = session; onOpenSession?(session) }
+                let target = try store.acknowledge(id, status: frame.status ?? "rejected", reason: frame.reason)
+                // Follow a new topic, or the copy a resumed Earlier session forks into.
+                if frame.status != "rejected", let session = frame.sessionID, let target,
+                   target.kind == "new" || (target.kind == "session" && target.sessionID != session) {
+                    if target.kind == "session", let original = target.sessionID {
+                        resumedFrom[session] = original
+                        UserDefaults.standard.set(resumedFrom, forKey: "resumedFrom")
+                    }
+                    requestSelection(session)
+                }
             } else if frame.status == "created", let session = frame.sessionID {
-                selectedSessionID = session; onOpenSession?(session)
+                requestSelection(session)
             }
         case "error": error = frame.code ?? "Protocol error"
         default: break
@@ -349,5 +470,18 @@ enum SecretStore {
         var history: [String: [BusMessage]] = [:]
         for session in all { history[session.id] = try await http.messages(session.id, before: nil).messages }
         try store.replace(sessions: all, history: history, cursor: cursor)
+        onUnreadChange?()
     }
 }
+
+#if DEBUG
+extension BusConnection {
+    /// Sets connection state directly, for SwiftUI previews.
+    func preview(state: State, health: BusHealth?, live: [String: LiveActivity], nextRetry: Date? = nil,
+                 commands: [SlashCommand] = []) {
+        self.state = state; self.health = health; self.capacity = health?.capacity
+        self.live = live; self.nextRetry = nextRetry; self.commands = commands
+        if let limit = health?.limits.maxUploadBytes { maxUploadBytes = limit }
+    }
+}
+#endif

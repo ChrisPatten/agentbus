@@ -22,4 +22,23 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(try ProtocolCodec.frame(Data(message.utf8)).data?.message?.body, "Hi")
         XCTAssertEqual(try ProtocolCodec.frame(Data(session.utf8)).data?.session?.title, "Main")
     }
+    func testActivityDecodesToolLinesAndCapacity() throws {
+        let json = #"{"type":"event","event":"activity","data":{"agent_id":"agent:work","conversation_id":"c1","session_id":"s1","state":"running","turn_class":"user","running_user":4,"running_system":0,"waiting":1,"limit":5,"reserved_system_slots":1,"tool_lines":["📖 Read `a.yml`"]}}"#
+        let data = try XCTUnwrap(ProtocolCodec.frame(Data(json.utf8)).data)
+        XCTAssertEqual(data.toolLines, ["📖 Read `a.yml`"])
+        XCTAssertEqual(data.capacity?.busy, 4)
+        XCTAssertEqual(data.capacity?.userSlots, 4)
+        XCTAssertNil(data.message)
+    }
+    func testNewTargetOmitsEmptyTitle() throws {
+        let encoded = try ProtocolCodec.encode(.send("2f93a416-08a2-4df4-a821-48759a4c15a1", target: .new("  "), body: "Hi", attachments: []))
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        XCTAssertEqual(object["target"] as? [String: String], ["kind": "new"])
+    }
+    func testBusDateParsesBusFormats() {
+        XCTAssertNotNil(BusDate.parse("2026-09-30T12:00:00.123Z"))
+        XCTAssertNotNil(BusDate.parse("2026-09-30T12:00:00Z"))
+        XCTAssertNotNil(BusDate.parse("2026-09-29"))
+        XCTAssertNil(BusDate.parse("nonsense"))
+    }
 }

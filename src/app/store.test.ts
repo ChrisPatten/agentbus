@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { runMigrations } from '../db/schema.js';
 import { ensureOutboundAppSession } from './outbound.js';
-import { eventBounds, history, listSessions, readEvents, recordSessionEvent, visibleSession } from './store.js';
+import { createAppSession, eventBounds, history, listSessions, readEvents, recordSessionEvent, sessionInfo, visibleSession } from './store.js';
 import { upsertThread } from '../pipeline/thread-store.js';
 
 const when = '2026-09-30T12:00:00.000Z';
@@ -30,6 +30,22 @@ function fixture() {
   };
   return { db, addSession, addMessage };
 }
+
+describe('app topic titles', () => {
+  it('names an untitled topic from its first message', () => {
+    const f = fixture();
+    try {
+      const { sessionId } = createAppSession(f.db, 'alice', 'agent:work');
+      const title = () => sessionInfo(f.db, visibleSession(f.db, 'alice', 'agent:work', sessionId)!, 'alice')['title'];
+      expect(title()).toBe('New Conversation');
+      const conversation = (f.db.prepare('SELECT conversation_id FROM sessions WHERE id = ?').get(sessionId) as { conversation_id: string }).conversation_id;
+      f.addMessage('alice', sessionId, conversation, 'first', 'inbound', 'Plan the Salesforce change');
+      expect(title()).toBe('Plan the Salesforce change');
+      const named = createAppSession(f.db, 'alice', 'agent:work', 'Travel');
+      expect(sessionInfo(f.db, visibleSession(f.db, 'alice', 'agent:work', named.sessionId)!, 'alice')['title']).toBe('Travel');
+    } finally { f.db.close(); }
+  });
+});
 
 describe('app store visibility and projection', () => {
   it('lists only the authenticated contact and routed agent, excluding scheduler-only sessions', () => {

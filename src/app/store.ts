@@ -48,7 +48,7 @@ export function sessionInfo(db: Database.Database, row: SessionRow, contactId: s
     : getThread<{ title?: string; name?: string }>(db, row.channel, row.topic)?.metadata.title
       ?? getThread<{ title?: string; name?: string }>(db, row.channel, row.topic)?.metadata.name
       ?? (db.prepare(`SELECT substr(body,1,60) AS body FROM transcripts WHERE session_id = ? AND direction = 'inbound' ORDER BY created_at LIMIT 1`).get(row.id) as {body:string}|undefined)?.body
-      ?? row.channel;
+      ?? (row.channel === 'app' ? 'New Conversation' : row.channel);
   const marker = (db.prepare('SELECT seq FROM app_read_markers WHERE contact_id = ? AND session_id = ?').get(contactId, row.id) as {seq:number}|undefined)?.seq ?? 0;
   const unread = (db.prepare(`SELECT COUNT(*) AS n FROM app_events e JOIN transcripts t ON t.id = e.transcript_id
     WHERE e.contact_id = ? AND e.session_id = ? AND e.kind = 'message' AND t.direction = 'outbound' AND e.seq > ?`).get(contactId, row.id, marker) as {n:number}).n;
@@ -119,7 +119,9 @@ export function createAppSession(db: Database.Database, contactId: string, agent
   return db.transaction(() => {
     const key = randomUUID();
     const topic = topicForThreadKey(key);
-    upsertThread(db, { channel: 'app', topic, threadKey: key, metadata: { title: title?.trim() || 'New Conversation' } });
+    // Untitled topics take their title from the first message (see sessionInfo).
+    const named = title?.trim();
+    upsertThread(db, { channel: 'app', topic, threadKey: key, metadata: named ? { title: named } : {} });
     const session = ensureOutboundAppSession(db, contactId, agentId, topic);
     return { sessionId: session.sessionId, topic };
   })();

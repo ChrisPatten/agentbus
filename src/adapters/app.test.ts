@@ -60,3 +60,59 @@ describe('AppAdapter durable offline send', () => {
     } finally { db.close(); }
   });
 });
+
+describe('AppAdapter unread projection', () => {
+  it('follows each delivered message with a session event, once per message', async () => {
+    const db = makeDb();
+    try {
+      const app = new AppAdapter(db, () => 'agent:work');
+      const outgoing = message('out-unread');
+      await app.send(outgoing);
+      await app.send(outgoing);
+      const events = db.prepare(`SELECT kind FROM app_events WHERE contact_id = 'me' ORDER BY seq`).all() as { kind: string }[];
+      // Session creation, the message, then the session update that carries the new unread count.
+      expect(events.map((e) => e.kind)).toEqual(['session', 'message', 'session']);
+    } finally { db.close(); }
+  });
+});
+
+describe('AppAdapter activity lifecycle', () => {
+  const capacity = { running_user: 1, running_system: 0, waiting: 0, limit: 5, reserved_system_slots: 1 };
+
+  function setup() {
+    const db = makeDb();
+    const app = new AppAdapter(db, () => 'agent:work', () => [{ agent_id: 'agent:work', ...capacity }]);
+    const events: Array<{ state: string; tool_lines?: string[]; typing?: boolean }> = [];
+    app.setActivityListener((event) => events.push(event));
+    return { db, app, events };
+  }
+
+  it('keeps a running headless turn running after a mid-turn message', async () => {
+    const { db, app, events } = setup();
+    try {
+      await app.send(message('seed'));
+      const conversationId = (db.prepare(`SELECT conversation_id FROM sessions WHERE channel = 'app'`).get() as { conversation_id: string }).conversation_id;
+      app.publishActivity({ agent_id: 'agent:work', conversation_id: conversationId, state: 'running', turn_class: 'user', ...capacity });
+      app.reportToolCall('contact:me', 'Read a.yml');
+      await app.send(message('progress'));
+      const last = events.at(-1)!;
+      expect(last.state).toBe('running');
+      expect(last.tool_lines).toBeUndefined();
+      expect(last.typing).toBe(true);
+
+      app.publishActivity({ agent_id: 'agent:work', conversation_id: conversationId, state: 'idle', turn_class: 'user', ...capacity });
+      expect(events.at(-1)!.state).toBe('idle');
+    } finally { db.close(); }
+  });
+
+  it('ends the turn on delivery when no headless turn is running', async () => {
+    const { db, app, events } = setup();
+    try {
+      await app.send(message('seed'));
+      app.reportToolCall('contact:me', 'Read a.yml');
+      expect(events.at(-1)).toMatchObject({ state: 'running', tool_lines: ['Read a.yml'] });
+      await app.send(message('reply'));
+      expect(events.at(-1)!.state).toBe('idle');
+    } finally { db.close(); }
+  });
+});

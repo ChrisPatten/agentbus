@@ -21,6 +21,8 @@ export class AppAdapter implements AdapterInstance {
   private lastActivity?: string;
   private activityListener: (event: AppActivityEvent) => void = () => {};
   private readonly toolLines = new Map<string, string[]>();
+  /** Turns the headless agent reports as running, by `${agent}:${conversation}`. */
+  private readonly runningTurns = new Map<string, HeadlessActivityEvent>();
 
   constructor(
     private readonly db: Database.Database,
@@ -79,6 +81,7 @@ export class AppAdapter implements AdapterInstance {
   setActivityListener(listener: (event: AppActivityEvent) => void): void { this.activityListener = listener; }
   publishActivity(event: HeadlessActivityEvent): void {
     const key = `${event.agent_id}:${event.conversation_id}`;
+    if (event.state === 'running') this.runningTurns.set(key, event); else this.runningTurns.delete(key);
     if (event.state === 'idle') this.toolLines.delete(key);
     const lines = this.toolLines.get(key);
     this.activityListener(lines?.length ? { ...event, tool_lines: [...lines] } : event);
@@ -87,10 +90,14 @@ export class AppAdapter implements AdapterInstance {
     const conversationId = boundConversationId ?? computeConversationId(contactId, 'app', topic);
     const key = `${agentId}:${conversationId}`;
     if (!this.toolLines.has(key)) return;
+    // The delivered message takes the tool trail so far. A headless turn can send
+    // several messages, so only its own idle event ends the turn.
     this.toolLines.delete(key);
     const capacity = this.capacity(agentId);
-    this.activityListener({ agent_id: agentId, conversation_id: conversationId,
-      state: 'idle', turn_class: 'user', ...capacity });
+    const running = this.runningTurns.get(key);
+    this.activityListener(running
+      ? { ...running, ...capacity, state: 'running', typing: true }
+      : { agent_id: agentId, conversation_id: conversationId, state: 'idle', turn_class: 'user', ...capacity });
   }
   private capacity(agentId: string): Omit<HeadlessActivityEvent, 'agent_id' | 'conversation_id' | 'session_id' | 'state' | 'turn_class'> {
     const snapshot = this.capacitySnapshots().find((item) => item.agent_id === agentId);

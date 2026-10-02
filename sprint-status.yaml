@@ -959,13 +959,13 @@ epics:
       S61.4: in-progress  # Docs and tests pass; live offline cron-to-app check remains
   E62:
     status: in-progress
-    notes: XcodeGen 2.46 generated the macOS 26.5 project; Xcode 26.6 build and all 5 XCTest cases pass. First-run Save/Open Chat and Quit fix is built, awaiting operator retest. Live F1-F6, 10k-message memory and week-long acceptance pending; client must decode existing app typing/tool fields and E63 covers foreign activity plus /clear successor.
+    notes: UI rebuilt to the approved design (planning-artifacts/mac-client/design/DESIGN.md) on 2026-10-01; Xcode 26.6 build and 14 XCTest cases pass. Activity tool_lines and slot counts are now decoded. Not yet viewed on screen or run against a live bus. Live F1-F6, 10k-message memory and week-long acceptance pending; E63 covers foreign activity plus /clear successor.
     stories:
       S62.1: in-progress  # Project builds; first-run Save/Open Chat and Quit awaiting live retest
       S62.2: complete  # Protocol/reconnect mock socket XCTest passes; live flow in S62.8
       S62.3: in-progress  # SwiftData reset XCTest passes; 10k fixture pending
-      S62.4: in-progress  # Sidebar/transcript source done; Xcode and live review pending
-      S62.5: in-progress  # Composer/files done; decode existing app typing/tool fields, then E63 foreign activity
+      S62.4: in-progress  # Design UI built (sidebar, toolbar, transcript, inspector, sheet); on-screen and live review pending
+      S62.5: in-progress  # Design composer, tokens, slash popover, live tool trail built; popover key handling unverified; E63 foreign activity
       S62.6: in-progress  # Notifications/read/badge source done; live check pending
       S62.7: in-progress  # SMAppService toggle done; packaged app check pending
       S62.8: pending  # Clean build and F1-F6 verification

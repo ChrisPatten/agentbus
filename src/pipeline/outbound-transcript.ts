@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import type { MessagePayload } from '../types/envelope.js';
+import { recordSessionEvent } from '../app/store.js';
 
 /**
  * S31.1 — Shared outbound-transcript-insert helper.
@@ -37,7 +38,7 @@ export function logOutboundTranscript(
   // A delivery may be retried after a crash, and the app command path calls
   // adapter.send() before its own audit log. One logical outbound message must
   // produce one transcript row and one app replay event in either case.
-  db.prepare(
+  const inserted = db.prepare(
     `INSERT INTO transcripts (id, message_id, conversation_id, session_id, created_at, channel, contact_id, direction, body, metadata)
      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?)
      WHERE NOT EXISTS (
@@ -58,6 +59,10 @@ export function logOutboundTranscript(
     messageId,
     sessionId,
   );
+  // Outbound rows don't touch sessions.last_activity, so nothing else tells app
+  // clients the session's unread count rose. The session event follows the
+  // message event, so its projection includes the new message.
+  if (inserted.changes > 0) recordSessionEvent(db, contactId, sessionId);
 }
 
 /**

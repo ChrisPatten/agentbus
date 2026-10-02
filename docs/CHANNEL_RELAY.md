@@ -96,7 +96,7 @@ Chris — same conversation, same session.
 ## Dedup after relay
 
 The relayed message gets its **own** dedup entry (Stage 30 keys on
-`sender + body + time-bucket`) — independent of the original. Since the
+`sender + channel + topic + body + time-bucket`) — independent of the original. Since the
 rendered body usually differs from the raw source body (the template adds
 text), this is naturally a different dedup key than the source message would
 have used directly. A retried/duplicate delivery of the *same source memo*

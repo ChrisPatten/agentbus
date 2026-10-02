@@ -16,6 +16,8 @@ import SwiftData
     var readSeq: Int
     var oldestCursor: String?
     var historyComplete: Bool
+    var messageCount: Int = 0
+    var claudeSessionID: String? = nil
 
     init(_ value: BusSession) {
         id = value.sessionID; channel = value.channel; topic = value.topic
@@ -24,6 +26,7 @@ import SwiftData
         resumable = value.resumable; isMain = value.isMain
         activity = value.activity ?? "idle"; readSeq = 0
         oldestCursor = nil; historyComplete = false
+        messageCount = value.messageCount ?? 0; claudeSessionID = value.claudeSessionID
     }
     func update(_ value: BusSession) {
         channel = value.channel; topic = value.topic; title = value.title
@@ -31,6 +34,8 @@ import SwiftData
         endedAt = value.endedAt; unreadCount = value.unreadCount
         resumable = value.resumable; isMain = value.isMain
         activity = value.activity ?? activity
+        messageCount = value.messageCount ?? messageCount
+        claudeSessionID = value.claudeSessionID ?? claudeSessionID
     }
 }
 
@@ -47,6 +52,9 @@ import SwiftData
     var attachmentJSON: Data
     var sendState: String
     var clientMsgID: String?
+    /// The live tool trail that preceded this reply. Local only: the bus does not store trails.
+    var toolTrailJSON: Data? = nil
+    var toolSeconds: Double = 0
 
     init(_ value: BusMessage) {
         id = value.messageID; sessionID = value.sessionID; seq = value.seq
@@ -57,6 +65,7 @@ import SwiftData
         sendState = "sent"; clientMsgID = nil
     }
     var attachments: [BusAttachment] { (try? JSONDecoder().decode([BusAttachment].self, from: attachmentJSON)) ?? [] }
+    var toolTrail: [String] { toolTrailJSON.flatMap { try? JSONDecoder().decode([String].self, from: $0) } ?? [] }
 }
 
 @Model final class CachedState {
@@ -74,9 +83,12 @@ import SwiftData
     var attachmentJSON: Data
     var createdAt: Date
     var failure: String?
-    init(id: String = UUID().uuidString, target: BusTarget, body: String, attachments: [String]) {
+    /// Names and sizes of the uploads, so the pending bubble can show attachment cards.
+    var filesJSON: Data? = nil
+    init(id: String = UUID().uuidString, target: BusTarget, body: String, attachments: [String], files: [UploadedFile] = []) {
         self.id = id; self.body = body
         attachmentJSON = (try? JSONEncoder().encode(attachments)) ?? Data()
+        filesJSON = files.isEmpty ? nil : try? JSONEncoder().encode(files)
         createdAt = .now; failure = nil
         switch target {
         case .main: targetKind = "main"; targetID = nil; title = nil
@@ -92,7 +104,11 @@ import SwiftData
         }
     }
     var attachmentIDs: [String] { (try? JSONDecoder().decode([String].self, from: attachmentJSON)) ?? [] }
+    var files: [UploadedFile] { filesJSON.flatMap { try? JSONDecoder().decode([UploadedFile].self, from: $0) } ?? [] }
 }
+
+/// What a pending send was aimed at, captured before its row is deleted on ack.
+struct AckedTarget: Equatable { let kind: String; let sessionID: String? }
 
 @MainActor final class ChatStore {
     let context: ModelContext
@@ -142,11 +158,26 @@ import SwiftData
         try context.save()
     }
     func addPending(_ pending: PendingSend) throws { context.insert(pending); try context.save() }
-    func acknowledge(_ id: String, status: String, reason: String?) throws -> PendingSend? {
+    func acknowledge(_ id: String, status: String, reason: String?) throws -> AckedTarget? {
         guard let row = pending.first(where: { $0.id == id }) else { return nil }
+        let target = AckedTarget(kind: row.targetKind, sessionID: row.targetID)
         if status == "rejected" { row.failure = reason ?? "Rejected" }
         else { context.delete(row) }
-        try context.save(); return row
+        try context.save(); return target
+    }
+    func setActivity(_ id: String, _ state: String) throws {
+        guard let row = session(id), row.activity != state else { return }
+        row.activity = state; try context.save()
+    }
+    func discard(_ id: String) throws {
+        guard let row = pending.first(where: { $0.id == id }) else { return }
+        context.delete(row); try context.save()
+    }
+    func attachTrail(_ messageID: String, lines: [String], seconds: Double) throws {
+        let descriptor = FetchDescriptor<CachedMessage>(predicate: #Predicate { $0.id == messageID })
+        guard !lines.isEmpty, let row = try context.fetch(descriptor).first else { return }
+        row.toolTrailJSON = try JSONEncoder().encode(lines); row.toolSeconds = seconds
+        try context.save()
     }
     func retry(_ id: String) throws {
         guard let row = pending.first(where: { $0.id == id }) else { return }

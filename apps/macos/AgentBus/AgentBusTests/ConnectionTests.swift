@@ -91,6 +91,124 @@ import SwiftData
         connection.stop()
     }
 
+    func testLiveToolTrailMovesIntoReply() async throws {
+        let container = try ModelContainer(for: CachedSession.self, CachedMessage.self, CachedState.self, PendingSend.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+        let store = ChatStore(container.mainContext)
+        let settings = ClientSettings(); settings.appToken = "test-app-token"
+        let socket = MockSocket()
+        let connection = BusConnection(settings: settings, store: store, socket: socket, api: MockAPI(), observeSystemEvents: false)
+        connection.start()
+        try await waitFor { socket.sent.count >= 1 }
+        socket.push(#"{"type":"welcome","version":1,"reset":false,"latest_seq":0}"#)
+        try await waitFor { connection.state == .connected }
+
+        socket.push(#"{"type":"event","event":"activity","data":{"agent_id":"agent:work","conversation_id":"c1","session_id":"s1","state":"running","turn_class":"user","running_user":1,"running_system":0,"waiting":0,"limit":5,"reserved_system_slots":1,"tool_lines":["Read a","Bash b"]}}"#)
+        try await waitFor { connection.live["s1"]?.lines.count == 2 }
+        XCTAssertEqual(connection.activityState("s1"), "running")
+        XCTAssertEqual(connection.capacity?.runningUser, 1)
+        // The idle frame has no session_id and can precede the reply's durable event.
+        socket.push(#"{"type":"event","event":"activity","data":{"agent_id":"agent:work","conversation_id":"c1","state":"idle","turn_class":"user","running_user":0,"running_system":0,"waiting":0,"limit":5,"reserved_system_slots":1}}"#)
+        try await waitFor { connection.live["s1"] == nil }
+        socket.push(#"{"type":"event","seq":1,"event":"message","data":{"message_id":"m1","session_id":"s1","seq":1,"cursor":"row-1","direction":"outbound","arrival_channel":"app","body":"Done","created_at":"2026-09-30T12:00:00Z","scheduled":false,"attachments":[]}}"#)
+        try await waitFor { store.messages("s1").first?.toolTrail == ["Read a", "Bash b"] }
+        connection.stop()
+    }
+
+    func testNewTopicAckRequestsSelection() async throws {
+        let container = try ModelContainer(for: CachedSession.self, CachedMessage.self, CachedState.self, PendingSend.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+        let store = ChatStore(container.mainContext)
+        let settings = ClientSettings(); settings.appToken = "test-app-token"
+        let socket = MockSocket()
+        let connection = BusConnection(settings: settings, store: store, socket: socket, api: MockAPI(), observeSystemEvents: false)
+        connection.start()
+        try await waitFor { socket.sent.count >= 1 }
+        socket.push(#"{"type":"welcome","version":1,"reset":false,"latest_seq":0}"#)
+        try await waitFor { connection.state == .connected }
+
+        try await connection.send("Same session", target: .session("s1"))
+        try await waitFor { socket.sent.count >= 2 }
+        let sameID = try XCTUnwrap(socket.frame(1)["client_msg_id"] as? String)
+        socket.push(#"{"type":"ack","client_msg_id":"\#(sameID)","message_id":"m1","session_id":"s1","status":"queued"}"#)
+        try await waitFor { store.pending.isEmpty }
+        XCTAssertNil(connection.selectionRequest)
+
+        try await connection.send("Plan", target: .new("Planning"))
+        try await waitFor { socket.sent.count >= 3 }
+        let newID = try XCTUnwrap(socket.frame(2)["client_msg_id"] as? String)
+        socket.push(#"{"type":"ack","client_msg_id":"\#(newID)","message_id":"m2","session_id":"s2","status":"queued"}"#)
+        try await waitFor { connection.selectionRequest?.sessionID == "s2" }
+        connection.stop()
+    }
+
+    /// Keeps each test's in-memory container alive; a context outliving its container crashes.
+    private var containers: [ModelContainer] = []
+
+    private func connected() async throws -> (ChatStore, MockSocket, BusConnection) {
+        let container = try ModelContainer(for: CachedSession.self, CachedMessage.self, CachedState.self, PendingSend.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+        containers.append(container)
+        let store = ChatStore(container.mainContext)
+        let settings = ClientSettings(); settings.appToken = "test-app-token"
+        let socket = MockSocket()
+        let connection = BusConnection(settings: settings, store: store, socket: socket, api: MockAPI(), observeSystemEvents: false)
+        connection.start()
+        try await waitFor { socket.sent.count >= 1 }
+        socket.push(#"{"type":"welcome","version":1,"reset":false,"latest_seq":0}"#)
+        try await waitFor { connection.state == .connected }
+        return (store, socket, connection)
+    }
+
+    func testRejectedSendRetriesAsNewIntent() async throws {
+        let (store, socket, connection) = try await connected()
+        try await connection.send("Same text", target: .session("s1"))
+        try await waitFor { socket.sent.count >= 2 }
+        let first = try XCTUnwrap(socket.frame(1)["client_msg_id"] as? String)
+        socket.push(#"{"type":"ack","client_msg_id":"\#(first)","status":"rejected","reason":"Aborted at stage \"dedup\""}"#)
+        try await waitFor { store.pending.first?.failure != nil }
+        try await connection.retry(first)
+        try await waitFor { socket.sent.count >= 3 }
+        let second = try XCTUnwrap(socket.frame(2)["client_msg_id"] as? String)
+        XCTAssertNotEqual(first, second)
+        XCTAssertEqual(try socket.frame(2)["body"] as? String, "Same text")
+        XCTAssertEqual(store.pending.map(\.id), [second])
+        connection.stop()
+    }
+
+    func testTurnStaysRunningAcrossMidTurnMessages() async throws {
+        let (store, socket, connection) = try await connected()
+        try store.upsert(JSONDecoder().decode(BusSession.self, from: Data(#"{"session_id":"s1","channel":"app","topic":"general","title":"Main","started_at":"2026-09-30","last_activity":"2026-09-30","ended_at":null,"unread_count":0,"resumable":true,"is_main":true,"activity":"running"}"#.utf8)))
+        let running = #"{"type":"event","event":"activity","data":{"agent_id":"agent:work","conversation_id":"c1","session_id":"s1","state":"running","turn_class":"user","running_user":1,"running_system":0,"waiting":0,"limit":5,"reserved_system_slots":1"#
+        socket.push(running + #","tool_lines":["Read a"]}}"#)
+        try await waitFor { connection.live["s1"]?.lines == ["Read a"] }
+        // The bus clears the trail as it delivers a progress message, before that message's event arrives.
+        socket.push(running + #","typing":true}}"#)
+        try await waitFor { connection.live["s1"]?.lines.isEmpty == true }
+        socket.push(#"{"type":"event","seq":1,"event":"message","data":{"message_id":"m1","session_id":"s1","seq":1,"cursor":"row-1","direction":"outbound","arrival_channel":"app","body":"Progress","created_at":"2026-09-30T12:00:00Z","scheduled":false,"attachments":[]}}"#)
+        try await waitFor { store.messages("s1").first?.toolTrail == ["Read a"] }
+        XCTAssertEqual(connection.live["s1"]?.state, "running")
+        socket.push(#"{"type":"event","event":"activity","data":{"agent_id":"agent:work","conversation_id":"c1","state":"idle","turn_class":"user","running_user":0,"running_system":0,"waiting":0,"limit":5,"reserved_system_slots":1}}"#)
+        try await waitFor { connection.live["s1"] == nil }
+        // A stale "running" from an earlier session event must not outlive the turn.
+        XCTAssertEqual(store.session("s1")?.activity, "idle")
+        XCTAssertEqual(connection.activityState("s1"), "idle")
+        connection.stop()
+    }
+
+    func testSessionEventAfterReplyUpdatesUnread() async throws {
+        let (store, socket, connection) = try await connected()
+        var changes = 0
+        connection.onUnreadChange = { changes += 1 }
+        let session = #"{"session_id":"s1","channel":"app","topic":"general","title":"Main","started_at":"2026-09-30","last_activity":"2026-09-30","ended_at":null,"unread_count":UNREAD,"resumable":true,"is_main":true,"activity":"idle"}"#
+        socket.push(#"{"type":"event","seq":1,"event":"session","data":"# + session.replacingOccurrences(of: "UNREAD", with: "0") + "}")
+        socket.push(#"{"type":"event","seq":2,"event":"message","data":{"message_id":"m1","session_id":"s1","seq":2,"cursor":"row-1","direction":"outbound","arrival_channel":"app","body":"Hi","created_at":"2026-09-30T12:00:00Z","scheduled":false,"attachments":[]}}"#)
+        socket.push(#"{"type":"event","seq":3,"event":"session","data":"# + session.replacingOccurrences(of: "UNREAD", with: "1") + "}")
+        try await waitFor { store.session("s1")?.unreadCount == 1 }
+        XCTAssertGreaterThanOrEqual(changes, 2)
+        connection.stop()
+    }
+
     func testWelcomeResetReplacesCachedSessionsAndCursor() async throws {
         let container = try ModelContainer(for: CachedSession.self, CachedMessage.self, CachedState.self, PendingSend.self,
             configurations: ModelConfiguration(isStoredInMemoryOnly: true))

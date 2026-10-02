@@ -6,12 +6,41 @@ struct BusHealth: Decodable {
     let agent: String?
     let routed: Bool
     let version: String
+    let concurrency: [BusCapacity]?
     let limits: Limits
 
     struct Limits: Decodable { let maxUploadBytes: Int
         enum CodingKeys: String, CodingKey { case maxUploadBytes = "max_upload_bytes" }
     }
+    /// The capacity snapshot for the routed agent, or the only one reported.
+    var capacity: BusCapacity? {
+        concurrency?.first { $0.agentID == agent } ?? concurrency?.first
+    }
 }
+
+/// Headless agent slot usage, from `/health` and every `activity` frame.
+struct BusCapacity: Decodable, Equatable {
+    let agentID: String?
+    let runningUser: Int
+    let runningSystem: Int
+    let waiting: Int
+    let limit: Int
+    let reservedSystemSlots: Int
+    var busy: Int { runningUser + runningSystem }
+    var userSlots: Int { max(limit - reservedSystemSlots, 0) }
+    enum CodingKeys: String, CodingKey {
+        case agentID = "agent_id", runningUser = "running_user", runningSystem = "running_system"
+        case waiting, limit, reservedSystemSlots = "reserved_system_slots"
+    }
+}
+
+struct SlashCommand: Decodable, Hashable {
+    let name: String
+    let description: String
+    /// The manifest name with exactly one leading slash.
+    var invocation: String { "/" + name.drop { $0 == "/" } }
+}
+struct CommandList: Decodable { let commands: [SlashCommand] }
 
 struct BusSession: Codable, Identifiable {
     let sessionID: String
@@ -25,6 +54,8 @@ struct BusSession: Codable, Identifiable {
     let resumable: Bool
     let isMain: Bool
     let activity: String?
+    var messageCount: Int? = nil
+    var claudeSessionID: String? = nil
     var id: String { sessionID }
 
     enum CodingKeys: String, CodingKey {
@@ -32,6 +63,7 @@ struct BusSession: Codable, Identifiable {
         case startedAt = "started_at", lastActivity = "last_activity"
         case endedAt = "ended_at", unreadCount = "unread_count"
         case resumable, isMain = "is_main", activity
+        case messageCount = "message_count", claudeSessionID = "claude_session_id"
     }
 }
 
@@ -73,7 +105,7 @@ struct SessionsPage: Decodable { let sessions: [BusSession]; let nextBefore: Str
 struct MessagesPage: Decodable { let messages: [BusMessage]; let nextBefore: String?
     enum CodingKeys: String, CodingKey { case messages, nextBefore = "next_before" }
 }
-struct UploadedFile: Decodable { let id: String; let originalFilename: String; let size: Int
+struct UploadedFile: Codable, Hashable { let id: String; let originalFilename: String; let size: Int
     enum CodingKeys: String, CodingKey { case id, originalFilename = "original_filename", size }
 }
 
@@ -83,7 +115,11 @@ enum BusTarget: Encodable {
         var c = encoder.container(keyedBy: CodingKeys.self)
         switch self {
         case .main: try c.encode("main", forKey: .kind)
-        case .new(let title): try c.encode("new", forKey: .kind); try c.encode(title, forKey: .title)
+        case .new(let title):
+            // An omitted title lets the bus name the topic "New Conversation".
+            try c.encode("new", forKey: .kind)
+            let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { try c.encode(trimmed, forKey: .title) }
         case .session(let id): try c.encode("session", forKey: .kind); try c.encode(id, forKey: .sessionID)
         }
     }
@@ -138,18 +174,25 @@ struct ServerFrame: Decodable {
         let sessionID: String?
         let conversationID: String?
         let state: String?
-        let tool: String?
+        let turnClass: String?
+        let typing: Bool?
+        let toolLines: [String]?
+        let capacity: BusCapacity?
         let message: BusMessage?
         let session: BusSession?
         enum CodingKeys: String, CodingKey {
-            case sessionID = "session_id", conversationID = "conversation_id", state, tool
+            case sessionID = "session_id", conversationID = "conversation_id", state
+            case turnClass = "turn_class", typing, toolLines = "tool_lines"
         }
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             sessionID = try c.decodeIfPresent(String.self, forKey: .sessionID)
             conversationID = try c.decodeIfPresent(String.self, forKey: .conversationID)
             state = try c.decodeIfPresent(String.self, forKey: .state)
-            tool = try c.decodeIfPresent(String.self, forKey: .tool)
+            turnClass = try c.decodeIfPresent(String.self, forKey: .turnClass)
+            typing = try? c.decodeIfPresent(Bool.self, forKey: .typing)
+            toolLines = try? c.decodeIfPresent([String].self, forKey: .toolLines)
+            capacity = try? BusCapacity(from: decoder)
             message = try? BusMessage(from: decoder)
             session = try? BusSession(from: decoder)
         }
