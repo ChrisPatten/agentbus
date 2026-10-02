@@ -133,3 +133,6 @@ Flagged by Chris, 2026-09-28. When a user message in a Telegram group topic spaw
 
 ### Calendar proposals (iMIP invites with RSVP)
 Spec `peggy-claude-code/data/calendar-invites-spec.md`, requested 2026-09-28. **Promoted to E55 (spike, ledger, outbound), E56 (inbound RSVP + expiry scheduler), E57 (updates, Telegram buttons, /calendar, fallback).** Peggy-side skill/CLAUDE.md/email-scan/morning-brief work (spec §7) is tracked in the peggy repo, not an AgentBus epic.
+
+### Agent memory repo management (git-versioned memory, rollback of partial journal writes)
+Flagged by Chris, 2026-10-02, during the pluggable-journaling design (`planning-artifacts/journaling/decisions.md`). Have the bus version an agent's memory directory with git: snapshot before each journal run, commit after with run id and trigger reason. Gives an audit trail of what the agent learned and when, rollback for wrong or poisoned memories, and lets a journaler fallback start clean after a `failed-after-start` run by reverting its partial writes. Deliberately kept out of the journaling epic: the bus managing agents' repos is its own feature (ownership of the repo, interaction with agents that already commit their own memory, conflicts with live-agent edits).
