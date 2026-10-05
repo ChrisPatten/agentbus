@@ -916,4 +916,52 @@ epics:
       S53.4: complete  # Per-launch resolution, pool_leases.model (023), startup warning
       S53.5: complete  # Relaunch between turns on mismatch; concurrency guard
       S53.6: complete  # /pool + GET /api/v1/pool show model; docs
-last_updated: 2026-09-25  # E53 (pool model selection) implemented on feat/e53-pool-model-selection, not yet merged. Prior note preserved: E52 (pool pane watchdog): S52.1 and S52.2 implemented on feat/e52-pool-watchdog, not yet merged; S52.3 waits on real captured stalls. Prior note preserved: E51 (approval requests) merged to dev and live, awaiting a real end-to-end check. Prior note preserved: E49 (context-block ledger) + E50 (agent-managed knowledge store, Phase 1) implemented end-to-end on claude/agent-knowledge-database-xiqn29, not yet merged, not yet pushed. Both from a design spike (_bmad-output/planning-artifacts/design-spike-agent-knowledge-store.md) worked out conversationally with the operator. Prior note preserved: 2026-09-17  # E48 (interactive Claude Code session pool over tmux) implemented end-to-end and marked complete — all 10 stories, on feat/e48-cc-session-pool, not yet merged to dev/main. current_epic stays E42/E44 (Siri Bridge) since that's the operator's ongoing focus; E48 was a self-contained side branch, now finished. Prior note preserved: Backfilled E36, E38, E39, E40 (complete, merged to dev 2026-08-31/09-01) and E37, E41 (pending, epic files only). Added the Siri Bridge package E42–E47 (renumbered from E36–E41 on arrival to avoid the collision): E42 complete, E44 in-progress (S44.5 on-device is the operator's), E43/E45/E46/E47 pending. E23's S23.5 still pending operator sign-off.
+  E64:
+    status: pending
+    notes: Runtime capability taxonomy (agent-side capabilities, static vs live). Prerequisite for E65-E68. Design in planning-artifacts/journaling/decisions.md.
+    stories:
+      S64.1: pending  # Capability model and per-runtime declarations
+      S64.2: pending  # Runtime resolution and live checks
+      S64.3: pending  # Requirement validation, surfacing, docs
+  E65:
+    status: pending
+    notes: Owner contacts and bus advisories (owner-only, spoof-proof system block, direct channel for critical). Depends on E64.
+    stories:
+      S65.1: pending  # Owner contacts config
+      S65.2: pending  # Advisory store and lifecycle
+      S65.3: pending  # Delivery paths and advisory_ack
+      S65.4: pending  # Visibility and docs
+  E66:
+    status: pending
+    notes: Pluggable journaling core (triggers + journaler chain; system-message, cc-headless, script journalers); retires the Anthropic-API summarizer. Depends on E64, E65.
+    stories:
+      S66.1: pending  # Per-agent journaling config
+      S66.2: pending  # Journal state, eligibility, journal_runs
+      S66.3: pending  # Bus-side triggers and evaluation engine
+      S66.4: pending  # Harness event endpoint and generic hook
+      S66.5: pending  # Journaler interface and chain runner
+      S66.6: pending  # cc-headless journaler
+      S66.7: pending  # Script journaler and reference claude-p script
+      S66.8: pending  # System Message journaler
+      S66.9: pending  # cc-pool integration
+      S66.10: pending  # Observability (/journal, runs API, health)
+      S66.11: pending  # Retire summarizer, docs, verification
+  E67:
+    status: pending
+    notes: Native Claude Code auto memory layout, generated recent.md, UserPromptSubmit freshness hook, Baxter migration (operator approval). Depends on E64; parallel to E66.
+    stories:
+      S67.1: pending  # Per-agent memory layout config
+      S67.2: pending  # recent.md generator
+      S67.3: pending  # Switch Claude Code runtimes to native loading (spike first)
+      S67.4: pending  # UserPromptSubmit freshness hook
+      S67.5: pending  # Setup guide, status checks, Baxter migration
+  E68:
+    status: pending
+    notes: Agent learning - consolidation, feedback events, approval-gated self-edit proposals, protected paths. Depends on E66, E67.
+    stories:
+      S68.1: pending  # Consolidation job
+      S68.2: pending  # Feedback events and /feedback
+      S68.3: pending  # Self-edit proposals
+      S68.4: pending  # Protected paths enforcement
+      S68.5: pending  # Docs and verification
+last_updated: 2026-10-02  # Planned E64-E68 (runtime capability taxonomy, advisories, pluggable journaling, native memory layout, agent learning) from the journaling design discussion. Prior note preserved: E53 (pool model selection) implemented on feat/e53-pool-model-selection, not yet merged. Prior note preserved: E52 (pool pane watchdog): S52.1 and S52.2 implemented on feat/e52-pool-watchdog, not yet merged; S52.3 waits on real captured stalls. Prior note preserved: E51 (approval requests) merged to dev and live, awaiting a real end-to-end check. Prior note preserved: E49 (context-block ledger) + E50 (agent-managed knowledge store, Phase 1) implemented end-to-end on claude/agent-knowledge-database-xiqn29, not yet merged, not yet pushed. Both from a design spike (_bmad-output/planning-artifacts/design-spike-agent-knowledge-store.md) worked out conversationally with the operator. Prior note preserved: 2026-09-17  # E48 (interactive Claude Code session pool over tmux) implemented end-to-end and marked complete — all 10 stories, on feat/e48-cc-session-pool, not yet merged to dev/main. current_epic stays E42/E44 (Siri Bridge) since that's the operator's ongoing focus; E48 was a self-contained side branch, now finished. Prior note preserved: Backfilled E36, E38, E39, E40 (complete, merged to dev 2026-08-31/09-01) and E37, E41 (pending, epic files only). Added the Siri Bridge package E42–E47 (renumbered from E36–E41 on arrival to avoid the collision): E42 complete, E44 in-progress (S44.5 on-device is the operator's), E43/E45/E46/E47 pending. E23's S23.5 still pending operator sign-off.
