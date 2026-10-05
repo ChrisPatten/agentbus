@@ -12,7 +12,7 @@ import { channelMatches, type PipelineStage, type RouteTarget } from '../types.j
  * If no match: defaults to { adapterId: 'claude-code', recipientId: envelope.recipient }.
  * Sets ctx.routes and ctx.conversationId.
  */
-export function createRouteResolve(config: AppConfig, _db: Database.Database): PipelineStage {
+export function createRouteResolve(config: AppConfig, db: Database.Database): PipelineStage {
   const routes = config.pipeline.routes;
 
   // Warn at construction time if a non-last catch-all rule shadows subsequent rules.
@@ -28,6 +28,31 @@ export function createRouteResolve(config: AppConfig, _db: Database.Database): P
 
   return async (ctx) => {
     const e = ctx.envelope;
+
+    const boundId = e.channel === 'app' ? e.metadata?.['bound_session_id'] : undefined;
+    if (typeof boundId === 'string') {
+      const contactId = e.sender.replace(/^contact:/, '');
+      const bound = db.prepare(`SELECT s.id, s.conversation_id, s.agent_id, s.ended_at, cr.topic, cr.channel
+        FROM sessions s JOIN conversation_registry cr ON cr.id = s.conversation_id
+        WHERE s.id = ? AND s.contact_id = ? AND cr.contact_id = ?`)
+        .get(boundId, contactId, contactId) as {id:string;conversation_id:string;agent_id:string|null;ended_at:string|null;topic:string;channel:string}|undefined;
+      if (!bound || bound.ended_at || !bound.agent_id || bound.topic !== e.topic) return null;
+      ctx.conversationId = bound.conversation_id;
+      ctx.sessionId = bound.id;
+      e.metadata['session_channel'] = typeof e.metadata['resumed_from_channel'] === 'string'
+        ? e.metadata['resumed_from_channel'] : bound.channel;
+      e.metadata['session_topic'] = bound.topic;
+      e.metadata['conversation_id'] = bound.conversation_id;
+      // The owner's configured transport is looked up by recipient. Route
+      // matching on arrival channel would incorrectly choose the app default.
+      const target = routes.find(rule => rule.target.recipientId === bound.agent_id &&
+        (!rule.match.sender || rule.match.sender === e.sender) &&
+        (!rule.match.channel || channelMatches(rule.match.channel, 'app')) &&
+        (!rule.match.topic || rule.match.topic === 'general'))?.target;
+      if (!target) return null;
+      ctx.routes = [{ adapterId: target.adapterId, recipientId: bound.agent_id }];
+      return ctx;
+    }
 
     // Compute conversation_id: sha256(sorted([contact_id, channel, topic]).join(':'))
     const contactId = e.sender.startsWith('contact:') ? e.sender.slice('contact:'.length) : e.sender;

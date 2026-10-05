@@ -42,6 +42,8 @@ If an adapter is paused it shows `[PAUSED]` next to its name. The `dead_letter` 
 
 The `Pool:` section is one line per configured `cc-pool` instance — `<leased pane count>/<total pane count> leased`, plus a `, N parked` clause when that pool's parked-message queue is non-empty. It is omitted entirely, header included, on any deployment with no `cc-pool` instances configured — `/status`'s output there is unchanged from before this section existed. See [`/pool`](#pool-pool-agent-id) for the per-pane breakdown.
 
+The `Headless:` section shows each `cc-headless` agent's running user and system turns, waiting turns, total process limit, and reserved system slots.
+
 ### `/help [command]`
 
 Without arguments, lists all available commands with one-line descriptions. With a command name, shows the full usage string.
@@ -88,7 +90,7 @@ Lists recent sessions (default: 10, max: 50). Optionally filter by channel name 
 
 ### `/clear`
 
-The `/clear` equivalent for headless (`cc-headless`) agents: start a fresh context window. It closes your current active session **on the channel you send it from**, so your next message spawns a brand-new `claude -p` with no `--resume`. The close is immediate — there is no window where a follow-up re-attaches to the old session.
+The `/clear` equivalent for headless (`cc-headless`) agents: start a fresh context window. It closes the current selected session, so your next message in that conversation spawns a brand-new `claude -p` with no `--resume`. The close is immediate — there is no window where a follow-up re-attaches to the old session. From the Mac app, `/clear` targets the selected foreign or app session.
 
 The previous session is **not discarded**: after closing it, the bus fires a silent background journaling turn (resuming the old `claude_session_id`) so the agent reviews the conversation one last time and updates its memory files before the context is left behind. Nothing is delivered to the user from that turn. Because journaling resumes the underlying claude session by id and writes to the agent's memory *files*, it works correctly even though the DB session row is already closed.
 
@@ -99,7 +101,7 @@ The previous session is **not discarded**: after closing it, the bus fires a sil
 
 Scope and edge cases:
 
-- **Channel-scoped.** `/clear` only closes the active session for your contact on the originating channel. A Telegram `/clear` leaves a `system:peggy` (scheduler) session untouched, and vice versa.
+- **Conversation-scoped.** `/clear` only closes the active session in the selected conversation. A Telegram `/clear` leaves a `system:peggy` (scheduler) session untouched, and vice versa. An app command bound to a Telegram session closes that Telegram session.
 - **Nothing to clear.** If you have no active session with a live `claude_session_id` on that channel, it replies `No active session to clear` and does nothing.
 - **Headless not running.** On an MCP-only deployment the session is still closed, but there is no background memory pass (the reply says so).
 
@@ -107,7 +109,9 @@ This command is most useful for headless agents (see [CC_HEADLESS_ADAPTER.md](./
 
 ### `/stop`
 
-Cancels the sender's in-flight `claude -p` turn for a headless (`cc-headless`) agent — useful when a turn is stuck, taking far longer than expected, or you simply want to interrupt it. Resolves the owning headless instance the same way `/clear` does (by the active session's `agent_id`, falling back to the sole registered instance for sessions that predate `agent_id` tracking), then kills that instance's in-flight child process for the sender with `SIGKILL`.
+Cancels the `claude -p` turn in the conversation where `/stop` was sent, including a Telegram topic. It can remove a waiting turn or kill its running child with `SIGKILL`. Other topics and threads for the same contact continue. The owning instance comes from that conversation's active session, with a sole-instance fallback for older sessions.
+
+From the Mac app, `/stop` uses the selected session's conversation ID, including when the session originated on Telegram or another channel. `/cost` likewise uses that session's owner.
 
 **Hard stop, not a graceful interrupt.** `SIGTERM` is deliberately not used: `claude`'s own interrupt handling treats a catchable signal as "wrap up," which in practice caused it to silently re-prompt itself with a bare "Continue from where you left off" instead of actually stopping — the opposite of what `/stop` is for. `SIGKILL` cannot be caught, so the whole turn dies outright. The user decides what happens next, not the agent.
 
@@ -125,7 +129,7 @@ If nothing is running for the sender, or the headless adapter isn't running at a
 
 **No result is delivered for a stopped turn.** Once killed, the turn does not fall back to the configured `error_reply` — the cancellation confirmation (finalized draft, or the fallback message above) is the only feedback. On Telegram, the persistent typing indicator is also stopped immediately as part of cancelling — it does not keep blinking for its usual 2-minute safety timeout after the turn has already been killed.
 
-**Reaches journaling turns too.** A silent background journaling turn (fired on session close, or by `/clear`) runs through the same per-contact queue as normal turns, so a stuck journaling turn blocks new messages exactly like a stuck normal turn would. `/stop` can cancel either kind — it doesn't matter which one is currently occupying the contact's turn slot.
+**Reaches journaling turns too.** A silent journal for the conversation shares its queue. `/stop` can cancel it while waiting or running. Journaling also uses one lane per agent so two journals cannot overlap.
 
 ### `/cost`
 

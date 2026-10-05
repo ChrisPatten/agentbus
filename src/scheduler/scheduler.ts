@@ -141,16 +141,14 @@ export class Scheduler {
     try {
       due = this.db
         .prepare(
-          // Use strftime ISO format so the comparison is lexicographically
-          // correct against fire_at values stored as 'YYYY-MM-DDTHH:MM:SS.sssZ'.
-          // datetime('now') returns 'YYYY-MM-DD HH:MM:SS' (space separator);
-          // 'T' (0x54) > ' ' (0x20) so same-day past items would be skipped.
+          // Compare full ISO timestamps using the same clock as staleness and
+          // next-fire calculations. This also preserves millisecond precision.
           `SELECT * FROM scheduled_items
            WHERE status = 'active'
-             AND fire_at <= strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+             AND fire_at <= ?
            ORDER BY fire_at ASC LIMIT ${TICK_ITEM_LIMIT}`,
         )
-        .all() as ScheduledItem[];
+        .all(new Date().toISOString()) as ScheduledItem[];
     } catch (err) {
       console.error('[scheduler] Failed to query due items:', err);
       return;

@@ -997,6 +997,23 @@ describe('GET /api/v1/sessions and GET /api/v1/sessions/:id', () => {
     expect(getBody.session.topic).toBe('thread:abc123');
   });
 
+  it('exposes app Main and named topic titles in list and get responses', async () => {
+    insertConversationRegistry({ id: 'app-main', contactId: 'alice', channel: 'app', topic: 'general' });
+    insertConversationRegistry({ id: 'app-thread', contactId: 'alice', channel: 'app', topic: 'thread:abcdef0123456789' });
+    const mainId = insertSession({ id: 'app-main-session', channel: 'app', conversationId: 'app-main' });
+    const topicId = insertSession({ id: 'app-topic-session', channel: 'app', conversationId: 'app-thread' });
+    db.prepare(`INSERT INTO threads(channel, topic, thread_key, metadata, updated_at)
+      VALUES ('app', 'thread:abcdef0123456789', 'key', ?, ?)`).run(JSON.stringify({ title: 'Travel' }), new Date().toISOString());
+
+    const list = await server.inject({ method: 'GET', url: '/api/v1/sessions?channel=app' });
+    const sessions = (JSON.parse(list.body) as { sessions: Array<{id:string;title:string}> }).sessions;
+    expect(sessions.find(s => s.id === mainId)?.title).toBe('Main');
+    expect(sessions.find(s => s.id === topicId)?.title).toBe('Travel');
+
+    const get = await server.inject({ method: 'GET', url: `/api/v1/sessions/${topicId}` });
+    expect((JSON.parse(get.body) as {session:{title:string}}).session.title).toBe('Travel');
+  });
+
   it('returns topic: null when conversation_registry has no matching row', async () => {
     const id = insertSession({ conversationId: 'conv-orphan' });
     const res = await server.inject({ method: 'GET', url: `/api/v1/sessions/${id}` });

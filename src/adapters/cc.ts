@@ -10,8 +10,8 @@
  * IMPORTANT: All logging uses console.error() (stderr).
  * console.log() writes to stdout, which is reserved for the MCP protocol stream.
  *
- * AGENTBUS_TOOLS_ONLY=true — skip the polling loop and serve only the headless
- * tool subset (no reply/send_message/get_adapter_status). Used by cc-headless.ts
+ * AGENTBUS_TOOLS_ONLY=true — skip the polling loop and serve the headless
+ * tool subset (including reply/send_message, excluding get_adapter_status). Used by cc-headless.ts
  * to provide MCP tools to `claude -p` subprocesses via --mcp-config.
  */
 import { resolve } from 'node:path';
@@ -29,7 +29,7 @@ const BACKOFF_INTERVAL_MS = 5000;
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-const configPath = process.env['AGENTBUS_CONFIG'] ?? resolve(process.cwd(), 'config.yaml');
+const configPath = resolve(process.env['AGENTBUS_CONFIG'] ?? 'config.yaml');
 const config = loadConfig(configPath);
 const pollIntervalMs = config.adapters['claude-code']?.poll_interval_ms ?? 1000;
 const busBaseUrl = `http://127.0.0.1:${config.bus.http_port}`;
@@ -150,9 +150,11 @@ export function formatMessagesForSampling(
       .join('\n');
     const extraLines = [attachmentLines, inlineLines].filter(Boolean).join('\n');
     const bodyWithImages = body && extraLines ? `${body}\n${extraLines}` : body || extraLines;
-    parts.push(
-      `New message from ${env.sender} via ${env.channel} (topic: ${env.topic})${ts} [id:${env.id}]:\n${bodyWithImages}`,
-    );
+    const sessionChannel = env.metadata?.['session_channel'];
+    const routeLabel = typeof sessionChannel === 'string' && sessionChannel !== env.channel
+      ? `via ${env.channel} (in your ${sessionChannel} session)`
+      : `via ${env.channel} (topic: ${env.topic})`;
+    parts.push(`New message from ${env.sender} ${routeLabel}${ts} [id:${env.id}]:\n${bodyWithImages}`);
   }
 
   return parts.join('\n\n');

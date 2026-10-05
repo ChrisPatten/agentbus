@@ -63,6 +63,7 @@ const ContactPlatformsSchema = z.object({
       token: z.string().min(16),
     })
     .optional(),
+  app: z.object({ token: z.string().min(16) }).optional(),
 });
 
 /** A named contact that can send messages to the bus. */
@@ -171,6 +172,10 @@ const CcHeadlessAdapterSchema = z.object({
    * (CLI default, or `working_dir`'s `.claude/settings.json`).
    */
   model: z.string().optional(),
+  /** Maximum simultaneous claude -p children for this instance. */
+  max_concurrent_turns: z.number().int().positive().default(5),
+  /** Capacity reserved from user turns so scheduled and journal turns can start. */
+  reserved_system_slots: z.number().int().nonnegative().default(1),
   /**
    * Working directory for the spawned `claude -p` process. Determines which
    * CLAUDE.md hierarchy is auto-loaded into context (project + parents +
@@ -261,6 +266,9 @@ const CcHeadlessAdapterSchema = z.object({
         ),
     })
     .prefault({}),
+}).refine((cfg) => cfg.reserved_system_slots < cfg.max_concurrent_turns, {
+  path: ['reserved_system_slots'],
+  message: 'reserved_system_slots must be less than max_concurrent_turns',
 });
 
 /**
@@ -473,6 +481,14 @@ export const SiriAdapterSchema = z.object({
 
 export type SiriAdapterConfig = z.infer<typeof SiriAdapterSchema>;
 
+export const AppAdapterSchema = z.object({
+  enabled: z.boolean().default(true),
+  event_retention_days: z.number().int().positive().default(30),
+  max_upload_bytes: z.number().int().positive().default(25 * 1024 * 1024),
+  ping_interval_ms: z.number().int().min(1000).default(30_000),
+});
+export type AppAdapterConfig = z.infer<typeof AppAdapterSchema>;
+
 const AdaptersConfigSchema = z.object({
   telegram: z.union([TelegramAdapterSchema, z.record(z.string(), TelegramAdapterSchema)]).optional(),
   email: z.union([EmailAdapterSchema, z.record(z.string(), EmailAdapterSchema)]).optional(),
@@ -482,6 +498,7 @@ const AdaptersConfigSchema = z.object({
   'cc-pool': z.union([CcPoolAdapterSchema, z.record(z.string(), CcPoolAdapterSchema)]).optional(),
   pebble: PebbleAdapterSchema.optional(),
   siri: SiriAdapterSchema.optional(),
+  app: AppAdapterSchema.optional(),
 });
 
 const MemoryConfigSchema = z.object({
@@ -732,7 +749,7 @@ export const AppConfigSchema = z.object({
     // Pebble and Siri bearer tokens double as sender identity — a token shared
     // by two contacts would make sender resolution ambiguous, so duplicates are
     // rejected per platform.
-    for (const platform of ['pebble', 'siri'] as const) {
+    for (const platform of ['pebble', 'siri', 'app'] as const) {
       const byToken = new Map<string, string>();
       for (const [key, contact] of Object.entries(contacts)) {
         const token = contact.platforms[platform]?.token;

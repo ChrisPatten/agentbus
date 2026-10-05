@@ -65,6 +65,25 @@ function makeCtx(envelope: Partial<MessageEnvelope> = {}, config?: AppConfig, db
 }
 
 describe('route-resolve stage', () => {
+  it('uses the app backend and bound owner even when a Telegram rule for that owner appears first', async () => {
+    const db = makeDb();
+    const config = makeConfig({ routes: [
+      { match: { channel: 'telegram' }, target: { adapterId: 'cc-pool', recipientId: 'agent:work' } },
+      { match: { channel: 'app' }, target: { adapterId: 'cc-headless', recipientId: 'agent:work' } },
+    ] });
+    const now = new Date().toISOString();
+    db.prepare(`INSERT INTO conversation_registry(id,contact_id,channel,topic,first_seen,last_seen) VALUES (?,?,?,?,?,?)`)
+      .run('foreign-conversation', 'alice', 'telegram', 'general', now, now);
+    db.prepare(`INSERT INTO sessions(id,conversation_id,channel,contact_id,started_at,last_activity,agent_id)
+      VALUES (?,?,?,?,?,?,?)`).run('foreign-session', 'foreign-conversation', 'telegram', 'alice', now, now, 'agent:work');
+    const ctx = makeCtx({ channel: 'app', sender: 'contact:alice', metadata: { bound_session_id: 'foreign-session' } }, config, db);
+    const result = await createRouteResolve(config, db)(ctx);
+    expect(result).not.toBeNull();
+    expect(result!.conversationId).toBe('foreign-conversation');
+    expect(result!.sessionId).toBe('foreign-session');
+    expect(result!.routes).toEqual([{ adapterId: 'cc-headless', recipientId: 'agent:work' }]);
+    expect(result!.envelope.metadata).toMatchObject({ session_channel: 'telegram' });
+  });
   it('sets conversationId as a sha256 hex string', async () => {
     const db = makeDb();
     const config = makeConfig();

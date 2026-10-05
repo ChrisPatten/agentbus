@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import type { MessagePayload } from '../types/envelope.js';
+import { recordSessionEvent } from '../app/store.js';
 
 /**
  * S31.1 — Shared outbound-transcript-insert helper.
@@ -34,9 +35,16 @@ export function logOutboundTranscript(
     return;
   }
 
-  db.prepare(
+  // A delivery may be retried after a crash, and the app command path calls
+  // adapter.send() before its own audit log. One logical outbound message must
+  // produce one transcript row and one app replay event in either case.
+  const inserted = db.prepare(
     `INSERT INTO transcripts (id, message_id, conversation_id, session_id, created_at, channel, contact_id, direction, body, metadata)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, json(?))`,
+     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?)
+     WHERE NOT EXISTS (
+       SELECT 1 FROM transcripts
+       WHERE message_id = ? AND session_id = ? AND direction = 'outbound'
+     )`,
   ).run(
     randomUUID(),
     messageId,
@@ -48,7 +56,13 @@ export function logOutboundTranscript(
     'outbound',
     body,
     JSON.stringify(metadata),
+    messageId,
+    sessionId,
   );
+  // Outbound rows don't touch sessions.last_activity, so nothing else tells app
+  // clients the session's unread count rose. The session event follows the
+  // message event, so its projection includes the new message.
+  if (inserted.changes > 0) recordSessionEvent(db, contactId, sessionId);
 }
 
 /**
@@ -63,12 +77,14 @@ export function resolveConversationForOutbound(
   db: Database.Database,
   contactId: string,
   channel: string,
+  topic?: string,
 ): { conversationId: string | null; sessionId: string | null } {
   const conversation = db
     .prepare(
-      `SELECT id FROM conversation_registry WHERE contact_id = ? AND channel = ? ORDER BY last_seen DESC LIMIT 1`,
+      `SELECT id FROM conversation_registry WHERE contact_id = ? AND channel = ?
+       AND (? IS NULL OR topic = ?) ORDER BY last_seen DESC LIMIT 1`,
     )
-    .get(contactId, channel) as { id: string } | undefined;
+    .get(contactId, channel, topic ?? null, topic ?? null) as { id: string } | undefined;
 
   if (!conversation) {
     return { conversationId: null, sessionId: null };

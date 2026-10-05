@@ -94,7 +94,10 @@ export class DeliveryWorker {
 
       if (result.success) {
         this.queue.ack(messageId);
-        this.logOutboundTranscript(messageId, envelope);
+        // AppAdapter persists its transcript and replay event before reporting
+        // success, so a closed client cannot lose a message between queue ACK
+        // and this worker's best-effort transcript log.
+        if (adapter.id !== 'app') this.logOutboundTranscript(messageId, envelope);
       } else if (result.retryable && (envelope.metadata['retry_count'] as number ?? 0) < MAX_RETRIES) {
         // Put back in queue for retry — reset to pending
         console.warn(`[delivery] Retryable failure for ${messageId}: ${result.error}`);
@@ -150,6 +153,7 @@ export class DeliveryWorker {
         this.db,
         contactId,
         envelope.channel,
+        envelope.channel === 'app' ? envelope.topic || 'general' : undefined,
       );
       logOutboundTranscript(this.db, {
         messageId,

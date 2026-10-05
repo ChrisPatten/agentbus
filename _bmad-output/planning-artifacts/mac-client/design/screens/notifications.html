@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mac · Notifications and Dock badge</title>
+<!-- AgentBus Mac client mockup, 760x440. Visual reference only: see ../DESIGN.md. Hex colors stand in for system colors. -->
+<style>
+body{margin:0}
+a{color:#0063D1}a:hover{color:#004A9E}
+@keyframes spin{to{transform:rotate(360deg)}}
+.spin{animation:spin 0.9s linear infinite}
+button:focus-visible,a:focus-visible,input:focus-visible{outline:3px solid rgba(0,99,209,0.5);outline-offset:1px}
+</style>
+<style>html{background:#D9D9DE}body{padding:40px;display:flex;justify-content:center}</style>
+</head>
+<body>
+<div style="width: 760px; height: 440px; box-sizing: border-box; border-radius: 16px; overflow: hidden; background: #5D6B78; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', system-ui, sans-serif; position: relative">
+<div style="position: absolute; top: 16px; right: 16px; display: flex; flex-direction: column; gap: 18px">
+<div style="position: relative; width: 360px">
+
+<div style="position: relative; display: flex; gap: 10px; padding: 12px; border-radius: 18px; background: rgba(246,246,248,0.86); backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px); box-shadow: 0 10px 30px rgba(0,0,0,0.18), 0 0 0 0.5px rgba(0,0,0,0.10); color: #1D1D1F; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', system-ui, sans-serif">
+<div aria-hidden="true" style="width: 36px; height: 36px; border-radius: 9px; background: #1D1D1F; color: #FFFFFF; display: flex; align-items: center; justify-content: center; flex-shrink: 0"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v7a2.5 2.5 0 0 1-2.5 2.5H10l-4.5 4v-4h0A1.5 1.5 0 0 1 4 14.5z"></path></svg></div>
+<div style="flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px">
+<div style="display: flex; justify-content: space-between; gap: 8px"><span style="font-size: 13px; font-weight: 600">Main</span><span style="font-size: 11px; color: #6E6E73">7:02 AM</span></div>
+<span style="font-size: 13px; line-height: 1.35">Morning. The overnight dbt run finished with 2 test failures, both in stg_orders.</span>
+</div>
+</div>
+</div>
+<div style="position: relative; width: 360px">
+<div aria-hidden="true" style="position: absolute; left: 10px; right: 10px; bottom: -6px; height: 20px; border-radius: 0 0 16px 16px; background: rgba(255,255,255,0.55); box-shadow: 0 0 0 0.5px rgba(0,0,0,0.10)"></div>
+<div style="position: relative; display: flex; gap: 10px; padding: 12px; border-radius: 18px; background: rgba(246,246,248,0.86); backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px); box-shadow: 0 10px 30px rgba(0,0,0,0.18), 0 0 0 0.5px rgba(0,0,0,0.10); color: #1D1D1F; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', system-ui, sans-serif">
+<div aria-hidden="true" style="width: 36px; height: 36px; border-radius: 9px; background: #1D1D1F; color: #FFFFFF; display: flex; align-items: center; justify-content: center; flex-shrink: 0"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v7a2.5 2.5 0 0 1-2.5 2.5H10l-4.5 4v-4h0A1.5 1.5 0 0 1 4 14.5z"></path></svg></div>
+<div style="flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px">
+<div style="display: flex; justify-content: space-between; gap: 8px"><span style="font-size: 13px; font-weight: 600">Standup notes</span><span style="font-size: 11px; color: #6E6E73">9:12 AM</span></div>
+<span style="font-size: 13px; line-height: 1.35">3 new messages while you were away</span>
+</div>
+</div>
+</div>
+<div style="position: relative; width: 360px">
+
+<div style="position: relative; display: flex; gap: 10px; padding: 12px; border-radius: 18px; background: rgba(246,246,248,0.86); backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px); box-shadow: 0 10px 30px rgba(0,0,0,0.18), 0 0 0 0.5px rgba(0,0,0,0.10); color: #1D1D1F; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', system-ui, sans-serif">
+<div aria-hidden="true" style="width: 36px; height: 36px; border-radius: 9px; background: #1D1D1F; color: #FFFFFF; display: flex; align-items: center; justify-content: center; flex-shrink: 0"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v7a2.5 2.5 0 0 1-2.5 2.5H10l-4.5 4v-4h0A1.5 1.5 0 0 1 4 14.5z"></path></svg></div>
+<div style="flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px">
+<div style="display: flex; justify-content: space-between; gap: 8px"><span style="font-size: 13px; font-weight: 600">Snowflake cost spike</span><span style="font-size: 11px; color: #6E6E73">9:15 AM</span></div>
+<span style="font-size: 13px; line-height: 1.35">New message</span>
+</div>
+</div>
+</div>
+</div>
+<div style="position: absolute; left: 32px; bottom: 24px; display: flex; flex-direction: column; align-items: flex-start; gap: 10px">
+<div style="position: relative; width: 64px; height: 64px; border-radius: 15px; background: #1D1D1F; color: #FFFFFF; display: flex; align-items: center; justify-content: center; box-shadow: 0 6px 16px rgba(0,0,0,0.25)"><svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v7a2.5 2.5 0 0 1-2.5 2.5H10l-4.5 4v-4h0A1.5 1.5 0 0 1 4 14.5z"></path></svg>
+<span style="position: absolute; top: -6px; right: -8px; min-width: 22px; height: 22px; padding: 0 6px; box-sizing: border-box; border-radius: 11px; background: #E5001A; color: #FFFFFF; font-size: 12.5px; font-weight: 600; display: flex; align-items: center; justify-content: center">4</span></div>
+<span style="font-size: 11px; color: #FFFFFF">Dock badge = total unread</span>
+</div>
+</div>
+</body>
+</html>

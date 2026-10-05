@@ -6,12 +6,14 @@ import type { PipelineStage } from '../types.js';
  * Stage 30 — Dedup
  *
  * Prevents duplicate messages from reaching downstream stages. A message is a
- * duplicate if an identical (sender, body) pair was seen within the current
- * time bucket (⌊now / windowMs⌋). Returns null (abort) on a duplicate.
+ * duplicate if an identical (sender, channel, topic, body) tuple was seen within
+ * the current time bucket (⌊now / windowMs⌋). Returns null (abort) on a duplicate.
+ * Channel and topic are part of the key so the same text sent to two
+ * conversations (app topics, Telegram topics) is not mistaken for a retry.
  *
  * Key computation
  * ───────────────
- * dedupKey = sha256(sender + body + bucket)
+ * dedupKey = sha256(sender + channel + topic + body + bucket)
  * where bucket = Math.floor(Date.now() / windowMs). Using a time bucket
  * rather than a wall-clock range means two buckets exist at a time during
  * normal operation (at most ±1 bucket boundary), but a single message is
@@ -37,7 +39,7 @@ import type { PipelineStage } from '../types.js';
  *
  * Memory: expired entries are swept synchronously at the start of each
  * invocation. At steady state the Map holds at most one bucket's worth of
- * unique (sender, body) pairs.
+ * unique (sender, channel, topic, body) tuples.
  *
  * @param db       better-sqlite3 Database instance (synchronous API)
  * @param windowMs Dedup window in milliseconds (default: 30 000 = 30 s)
@@ -55,7 +57,7 @@ export function createDedup(db: Database.Database, windowMs = 30000): PipelineSt
         ? `${e.payload.emoji}:${e.payload.target_message_id}`
         : e.payload.body;
     const bucket = Math.floor(Date.now() / windowMs);
-    const raw = `${e.sender}${contentKey}${bucket}`;
+    const raw = `${e.sender}\u0000${e.channel}\u0000${e.topic ?? ''}\u0000${contentKey}${bucket}`;
     const dedupKey = createHash('sha256').update(raw).digest('hex');
 
     const now = Date.now();

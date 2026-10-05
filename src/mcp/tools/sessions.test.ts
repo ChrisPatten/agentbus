@@ -166,6 +166,26 @@ describe('list_sessions tool', () => {
     await client.close();
   });
 
+  it('preserves app topic titles for destination discovery', async () => {
+    const app = { ...mockSession, channel: 'app', topic: 'thread:0123456789abcdef', title: 'Travel' };
+    fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ ok: true, sessions: [app] }) });
+    const client = await makeClient();
+    const listed = await client.callTool({ name: 'list_sessions', arguments: { channel: 'app' } });
+    const payload = JSON.parse(((listed.content as Array<{text:string}>)[0]!).text) as {
+      sessions: Array<{topic:string;title:string}>;
+    };
+    expect(payload.sessions[0]).toMatchObject({ topic: app.topic, title: 'Travel' });
+    await client.close();
+
+    fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ ok: true, session: app }) });
+    const secondClient = await makeClient();
+    const fetched = await secondClient.callTool({ name: 'get_session', arguments: { session_id: app.id } });
+    expect(JSON.parse(((fetched.content as Array<{text:string}>)[0]!).text)).toMatchObject({
+      topic: app.topic, title: 'Travel',
+    });
+    await secondClient.close();
+  });
+
   it('passes channel filter in query string', async () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,

@@ -64,6 +64,14 @@ function makeCtx(envelope: Partial<MessageEnvelope> = {}, config?: AppConfig): P
 }
 
 describe('topic-classify stage', () => {
+  it('preserves an authorized app binding to a foreign ordinary topic', async () => {
+    const config = makeConfig({ topic_rules: [{ topic: 'code', keywords: ['bug'] }] });
+    const ctx = makeCtx({ channel: 'app', topic: 'foreign-topic', payload: { type: 'text', body: 'bug' },
+      metadata: { bound_session_id: 'session-id' } }, config);
+    const result = await createTopicClassify(config)(ctx);
+    expect(result!.envelope.topic).toBe('foreign-topic');
+    expect(result!.topics).toEqual(['foreign-topic']);
+  });
   it('defaults to general when no rules and topic is general', async () => {
     const stage = createTopicClassify(makeConfig());
     const ctx = makeCtx({ topic: 'general' });

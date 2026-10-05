@@ -23,8 +23,7 @@
  * pane mechanics go through the injected `PaneLauncher` seam.
  */
 import { randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type Database from 'better-sqlite3';
 import { getCcPoolInstances, type AppConfig, type CcPoolInstanceConfig } from '../config/schema.js';
@@ -34,6 +33,7 @@ import { createTmuxController, realTmuxExec, type TmuxController } from './tmux.
 import { PaneWatchdog } from './watchdog.js';
 import { resolveWatchdogConfig } from './watchdog-config.js';
 import { IncidentStore } from './watchdog-store.js';
+import { claudeTranscriptExists } from '../adapters/claude-transcript.js';
 import {
   derivePaneAgentId,
   derivePaneWindowName,
@@ -69,10 +69,7 @@ export type PoolResolvedModel = ResolvedModel;
  * actually calls — wires the real, override-aware resolver instead.
  */
 function defaultTranscriptExists(sessionId: string, cwd: string): boolean {
-  // Claude names the project dir after the cwd with every non-alphanumeric
-  // character replaced by '-'.
-  const slug = cwd.replace(/[^a-zA-Z0-9]/g, '-');
-  return existsSync(join(homedir(), '.claude', 'projects', slug, `${sessionId}.jsonl`));
+  return claudeTranscriptExists(sessionId, cwd);
 }
 
 function defaultResolveModel(cfgModel: string | undefined): (scheduleModel: string | null) => PoolResolvedModel {

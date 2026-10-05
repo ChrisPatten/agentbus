@@ -23,6 +23,10 @@ All three can run against the same `working_dir`/`CLAUDE.md` and register the sa
 
 All logging goes to stderr. stdout is the MCP protocol stream.
 
+Config loading also silences dotenv's startup banner. If an MCP client reports
+`CONNECTION_CLOSED` during initialize, run the configured command with stdout
+and stderr captured separately: stdout must contain only MCP JSON frames.
+
 ## Environment variables
 
 | Variable | Default | Purpose |

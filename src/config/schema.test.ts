@@ -131,6 +131,19 @@ describe('getCcHeadlessInstances', () => {
     expect(instances[0]!.name).toBeNull();
     expect(instances[0]!.agent_id).toBe('peggy');
     expect(instances[0]!.system_prompt).toBe('You are Peggy.');
+    expect(instances[0]!.max_concurrent_turns).toBe(5);
+    expect(instances[0]!.reserved_system_slots).toBe(1);
+  });
+
+  it('rejects reserved capacity at or above the total limit', () => {
+    expect(() => AppConfigSchema.parse({
+      bus: { db_path: ':memory:' },
+      adapters: { 'cc-headless': {
+        agent_id: 'peggy', system_prompt: 'You are Peggy.',
+        max_concurrent_turns: 2, reserved_system_slots: 2,
+      } },
+      memory: {},
+    })).toThrow(/reserved_system_slots/);
   });
 
   it('named-record form returns one entry per key with correct names', () => {

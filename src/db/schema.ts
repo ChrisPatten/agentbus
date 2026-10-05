@@ -129,6 +129,11 @@ function loadMigrations(): Migration[] {
       description: 'Pool leases model column (E53 S53.4)',
       sql: readFileSync(join(migrationsDir, '023_pool_leases_model.sql'), 'utf-8'),
     },
+    {
+      version: 24,
+      description: 'Durable app events and read state (E59)',
+      sql: readFileSync(join(migrationsDir, '024_app_events.sql'), 'utf-8'),
+    },
   ];
 }
 

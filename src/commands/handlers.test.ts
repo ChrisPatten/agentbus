@@ -10,6 +10,7 @@ import type { MessageEnvelope } from '../types/envelope.js';
 import { createSafeDatabase } from '../db/safe-database.js';
 import { MessageQueue } from '../core/queue.js';
 import { PoolManager } from '../pool/pool-manager.js';
+import { computeConversationId } from '../pipeline/conversation-id.js';
 
 function makeDb() {
   const db = new Database(':memory:');
@@ -689,7 +690,7 @@ describe('command handlers', () => {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         opts.id,
-        `conv-${opts.id}`,
+        computeConversationId('chris', opts.channel ?? 'telegram', 'general'),
         opts.channel ?? 'telegram',
         'chris',
         now,
@@ -719,7 +720,31 @@ describe('command handlers', () => {
         claudeSessionId: 'claude-abc',
         contactId: 'chris',
         channel: 'telegram',
+        conversationId: computeConversationId('chris', 'telegram', 'general'),
       });
+    });
+
+    it('clears the bound Telegram session when the command arrives through app', async () => {
+      const db = makeDb();
+      insertSession(db, { id: 'bound-clear', agentId: 'agent:peggy' });
+      const conversationId = computeConversationId('chris', 'telegram', 'general');
+      const journal = vi.fn();
+      const deps = { ...makeDeps({ db }), headlessControl: { journalResumeId: new Map([['agent:peggy', journal]]) } };
+      const clear = createBuiltinCommands(deps as never).find(c => c.name === 'clear')!;
+      const envelope = { ...makeEnvelope(), channel: 'app', metadata: { bound_session_id: 'bound-clear', conversation_id: conversationId } };
+      await clear.handler([], makeCtx(db, { channel: 'app', adapterId: 'app', envelope }));
+      expect(db.prepare('SELECT ended_at FROM sessions WHERE id = ?').get('bound-clear')).toMatchObject({ ended_at: expect.any(String) });
+      expect(journal).toHaveBeenCalledWith(expect.objectContaining({ channel: 'telegram', conversationId }));
+    });
+
+    it('ignores a forged conversation_id without an authorized binding', async () => {
+      const db = makeDb();
+      insertSession(db, { id: 'foreign-clear', agentId: 'agent:peggy' });
+      const conversationId = computeConversationId('chris', 'telegram', 'general');
+      const clear = createBuiltinCommands(makeDeps({ db }) as never).find(c => c.name === 'clear')!;
+      const envelope = { ...makeEnvelope(), channel: 'app', metadata: { conversation_id: conversationId } };
+      await clear.handler([], makeCtx(db, { channel: 'app', adapterId: 'app', envelope }));
+      expect(db.prepare('SELECT ended_at FROM sessions WHERE id = ?').get('foreign-clear')).toMatchObject({ ended_at: null });
     });
 
     it('reports nothing to clear when there is no active session', async () => {
@@ -789,6 +814,7 @@ describe('command handlers', () => {
         claudeSessionId: 'claude-poke',
         contactId: 'chris',
         channel: 'telegram',
+        conversationId: computeConversationId('chris', 'telegram', 'general'),
       });
       expect(peggyJournal).not.toHaveBeenCalled();
     });
@@ -843,7 +869,7 @@ describe('command handlers', () => {
       db.prepare(
         `INSERT INTO sessions (id, conversation_id, channel, contact_id, started_at, last_activity, ended_at, claude_session_id, agent_id)
          VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
-      ).run(opts.id, `conv-${opts.id}`, opts.channel ?? 'telegram', 'chris', now, now, opts.agentId ?? null);
+      ).run(opts.id, computeConversationId('chris', opts.channel ?? 'telegram', 'general'), opts.channel ?? 'telegram', 'chris', now, now, opts.agentId ?? null);
     }
 
     function makeTelegramAdapterWithFinalize(finalizeReturns = true) {
@@ -877,8 +903,33 @@ describe('command handlers', () => {
       // The finalized draft ("Stopped by user") is the user's only feedback —
       // a separate command-response message would be duplicative.
       expect(result.body).toBeUndefined();
-      expect(stopTurn).toHaveBeenCalledWith('contact:chris');
+      expect(stopTurn).toHaveBeenCalledWith(computeConversationId('chris', 'telegram', 'general'));
       expect(telegramAdapter.finalizeDraft).toHaveBeenCalledWith('contact:chris', 'Stopped by user', 'telegram', 'general');
+    });
+
+    it('stops only the bound conversation from an app command', async () => {
+      const db = makeDb();
+      insertSession(db, { id: 'bound-stop', agentId: 'agent:peggy' });
+      const conversationId = computeConversationId('chris', 'telegram', 'general');
+      const stopTurn = vi.fn().mockReturnValue(true);
+      const deps = { ...makeDeps({ db }), headlessControl: { journalResumeId: new Map(), stopTurn: new Map([['agent:peggy', stopTurn]]) } };
+      const stop = createBuiltinCommands(deps as never).find(c => c.name === 'stop')!;
+      const envelope = { ...makeEnvelope(), channel: 'app', metadata: { bound_session_id: 'bound-stop', conversation_id: conversationId } };
+      await stop.handler([], makeCtx(db, { channel: 'app', adapterId: 'app', envelope }));
+      expect(stopTurn).toHaveBeenCalledOnce();
+      expect(stopTurn).toHaveBeenCalledWith(conversationId);
+    });
+
+    it('ignores a forged conversation_id without a bound session', async () => {
+      const db = makeDb();
+      insertSession(db, { id: 'foreign-stop', agentId: 'agent:peggy' });
+      const stopTurn = vi.fn().mockReturnValue(true);
+      const deps = { ...makeDeps({ db }), headlessControl: { journalResumeId: new Map(), stopTurn: new Map([['agent:peggy', stopTurn]]) } };
+      const stop = createBuiltinCommands(deps as never).find(c => c.name === 'stop')!;
+      const envelope = { ...makeEnvelope(), channel: 'app', metadata: { conversation_id: computeConversationId('chris', 'telegram', 'general') } };
+      await stop.handler([], makeCtx(db, { channel: 'app', adapterId: 'app', envelope }));
+      expect(stopTurn).toHaveBeenCalledWith(computeConversationId('chris', 'app', 'general'));
+      expect(stopTurn).not.toHaveBeenCalledWith(computeConversationId('chris', 'telegram', 'general'));
     });
 
     it('falls back to a confirmation message when there was no draft to finalize', async () => {
@@ -951,7 +1002,7 @@ describe('command handlers', () => {
 
       await stop.handler([], makeCtx(db));
 
-      expect(pokeclaudeStop).toHaveBeenCalledWith('contact:chris');
+      expect(pokeclaudeStop).toHaveBeenCalledWith(computeConversationId('chris', 'telegram', 'general'));
       expect(peggyStop).not.toHaveBeenCalled();
     });
 
@@ -968,7 +1019,7 @@ describe('command handlers', () => {
 
       const result = await stop.handler([], makeCtx(db));
 
-      expect(soloStop).toHaveBeenCalledWith('contact:chris');
+      expect(soloStop).toHaveBeenCalledWith(computeConversationId('chris', 'telegram', 'general'));
       expect(result.body).toContain('Stopped');
     });
 
@@ -1011,7 +1062,7 @@ describe('command handlers', () => {
       const result = await stop.handler([], makeCtx(db, { channel: 'email:peggy', adapterId: 'email:peggy' }));
 
       expect(result.body).toContain('Stopped');
-      expect(stopTurn).toHaveBeenCalledWith('contact:chris');
+      expect(stopTurn).toHaveBeenCalledWith(computeConversationId('chris', 'email:peggy', 'general'));
     });
   });
 });

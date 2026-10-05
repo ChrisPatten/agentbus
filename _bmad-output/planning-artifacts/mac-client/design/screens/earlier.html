@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mac · Earlier session, offline</title>
+<!-- AgentBus Mac client mockup, 1280x800. Visual reference only: see ../DESIGN.md. Hex colors stand in for system colors. -->
+<style>
+body{margin:0}
+a{color:#0063D1}a:hover{color:#004A9E}
+@keyframes spin{to{transform:rotate(360deg)}}
+.spin{animation:spin 0.9s linear infinite}
+button:focus-visible,a:focus-visible,input:focus-visible{outline:3px solid rgba(0,99,209,0.5);outline-offset:1px}
+</style>
+<style>html{background:#D9D9DE}body{padding:40px;display:flex;justify-content:center}</style>
+</head>
+<body>
+<div style="width: 1280px; height: 800px; position: relative; box-sizing: border-box; border-radius: 16px; overflow: hidden; background: #FFFFFF; color: #1D1D1F; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', system-ui, sans-serif; font-size: 13px; -webkit-font-smoothing: antialiased; display: grid; grid-template-columns: 268px minmax(0, 1fr)"><div style="padding: 8px 0 8px 8px; display: flex; min-height: 0">
+<aside style="flex-grow: 1; display: flex; flex-direction: column; border-radius: 14px; background: rgba(242,242,245,0.92); box-shadow: 0 0 0 0.5px rgba(0,0,0,0.08); min-height: 0; overflow: hidden">
+<div style="height: 44px; display: flex; align-items: center; justify-content: space-between; padding: 0 8px 0 14px; flex-shrink: 0"><div aria-hidden="true" style="display: flex; gap: 8px"><span style="width: 12px; height: 12px; border-radius: 50%; background: #FF5F57"></span><span style="width: 12px; height: 12px; border-radius: 50%; background: #FEBC2E"></span><span style="width: 12px; height: 12px; border-radius: 50%; background: #28C840"></span></div><button type="button" aria-label="Hide sidebar" style="width: 34px; height: 30px; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 15px; background: transparent; color: #6E6E73; cursor: default"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="3"></rect><path d="M9 5v14"></path></svg></button></div>
+<nav aria-label="Sessions" style="flex-grow: 1; overflow: auto; padding: 0 8px; display: flex; flex-direction: column; gap: 1px">
+<div style="display: flex; align-items: center; gap: 4px; padding: 12px 8px 4px; font-size: 11px; font-weight: 600; color: #6E6E73">Main</div>
+<a href="main.html" style="display: flex; align-items: center; gap: 9px; padding: 6px 8px; border-radius: 8px; background: transparent; color: #1D1D1F; text-decoration: none">
+<span style="display: inline-flex; color: #0066D6; flex-shrink: 0"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v7a2.5 2.5 0 0 1-2.5 2.5H10l-4.5 4v-4h0A1.5 1.5 0 0 1 4 14.5z"></path></svg></span>
+<span style="flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px"><span style="font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Main</span><span style="font-size: 11px; color: #6E6E73; white-space: nowrap">Now</span></span>
+<span style="display: inline-flex; align-items: center; flex-shrink: 0"><span style="min-width: 18px; height: 16px; padding: 0 5px; box-sizing: border-box; border-radius: 8px; background: rgba(0,0,0,0.07); font-size: 11px; font-weight: 600; color: #6E6E73; display: inline-flex; align-items: center; justify-content: center">1</span></span>
+</a>
+<div style="display: flex; align-items: center; gap: 4px; padding: 12px 8px 4px; font-size: 11px; font-weight: 600; color: #6E6E73">Conversations</div>
+<a href="#" style="display: flex; align-items: center; gap: 9px; padding: 6px 8px; border-radius: 8px; background: transparent; color: #1D1D1F; text-decoration: none">
+<span style="display: inline-flex; color: #0066D6; flex-shrink: 0"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v7a2.5 2.5 0 0 1-2.5 2.5H10l-4.5 4v-4h0A1.5 1.5 0 0 1 4 14.5z"></path></svg></span>
+<span style="flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px"><span style="font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Pipeline migration plan</span><span style="font-size: 11px; color: #6E6E73; white-space: nowrap">2 min ago</span></span>
+<span style="display: inline-flex; align-items: center; flex-shrink: 0"><span class="spin" aria-label="Working" style="width: 12px; height: 12px; border-radius: 50%; border: 2px solid rgba(0,0,0,0.07); border-top-color: #B35500; box-sizing: border-box; display: inline-block; flex-shrink: 0"></span></span>
+</a>
+<a href="#" style="display: flex; align-items: center; gap: 9px; padding: 6px 8px; border-radius: 8px; background: transparent; color: #1D1D1F; text-decoration: none">
+<span style="display: inline-flex; color: #0066D6; flex-shrink: 0"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v7a2.5 2.5 0 0 1-2.5 2.5H10l-4.5 4v-4h0A1.5 1.5 0 0 1 4 14.5z"></path></svg></span>
+<span style="flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px"><span style="font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Snowflake cost spike</span><span style="font-size: 11px; color: #6E6E73; white-space: nowrap">Queued · 5 min ago</span></span>
+<span style="display: inline-flex; align-items: center; flex-shrink: 0"><span title="Queued" style="display: inline-flex; color: #6E6E73"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8"></circle><path d="M12 7.5V12l3 2"></path></svg></span></span>
+</a>
+<a href="#" style="display: flex; align-items: center; gap: 9px; padding: 6px 8px; border-radius: 8px; background: transparent; color: #1D1D1F; text-decoration: none">
+<span style="display: inline-flex; color: #0066D6; flex-shrink: 0"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 4L3 11l6 2.5L19 7l-8 8 6 5z"></path></svg></span>
+<span style="flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px"><span style="font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Standup notes</span><span style="font-size: 11px; color: #6E6E73; white-space: nowrap">Telegram · 9 min ago</span></span>
+<span style="display: inline-flex; align-items: center; flex-shrink: 0"><span class="spin" aria-label="Working" style="width: 12px; height: 12px; border-radius: 50%; border: 2px solid rgba(0,0,0,0.07); border-top-color: #B35500; box-sizing: border-box; display: inline-block; flex-shrink: 0"></span></span>
+</a>
+<a href="#" style="display: flex; align-items: center; gap: 9px; padding: 6px 8px; border-radius: 8px; background: transparent; color: #1D1D1F; text-decoration: none">
+<span style="display: inline-flex; color: #0066D6; flex-shrink: 0"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5.5" width="18" height="13" rx="2"></rect><path d="M3.5 7l8.5 6 8.5-6"></path></svg></span>
+<span style="flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px"><span style="font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Re: Vendor renewal terms</span><span style="font-size: 11px; color: #6E6E73; white-space: nowrap">Email · 1 hr ago</span></span>
+<span style="display: inline-flex; align-items: center; flex-shrink: 0"><span style="min-width: 18px; height: 16px; padding: 0 5px; box-sizing: border-box; border-radius: 8px; background: rgba(0,0,0,0.07); font-size: 11px; font-weight: 600; color: #6E6E73; display: inline-flex; align-items: center; justify-content: center">2</span></span>
+</a>
+<a href="#" style="display: flex; align-items: center; gap: 9px; padding: 6px 8px; border-radius: 8px; background: transparent; color: #1D1D1F; text-decoration: none">
+<span style="display: inline-flex; color: #0066D6; flex-shrink: 0"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12h1M7.5 9v6M11 6v12M14.5 8.5v7M18 10.5v3M20.5 12h-.5"></path></svg></span>
+<span style="flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px"><span style="font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">What's on tomorrow?</span><span style="font-size: 11px; color: #6E6E73; white-space: nowrap">Siri · 3 hr ago</span></span>
+<span style="display: inline-flex; align-items: center; flex-shrink: 0"></span>
+</a>
+<div style="display: flex; align-items: center; gap: 4px; padding: 12px 8px 4px; font-size: 11px; font-weight: 600; color: #6E6E73">Earlier<span style="display: inline-flex; color: #6E6E73"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 9.5L12 15l5.5-5.5"></path></svg></span></div>
+<a href="#" style="display: flex; align-items: center; gap: 9px; padding: 6px 8px; border-radius: 8px; background: #0063D1; color: #FFFFFF; text-decoration: none">
+<span style="display: inline-flex; color: #FFFFFF; flex-shrink: 0"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v7a2.5 2.5 0 0 1-2.5 2.5H10l-4.5 4v-4h0A1.5 1.5 0 0 1 4 14.5z"></path></svg></span>
+<span style="flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px"><span style="font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Main</span><span style="font-size: 11px; color: rgba(255,255,255,0.82); white-space: nowrap">Sep 21 · read only</span></span>
+<span style="display: inline-flex; align-items: center; flex-shrink: 0"><span style="display: inline-flex; color: #FFFFFF"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5.5" y="11" width="13" height="9" rx="2"></rect><path d="M8.5 11V8a3.5 3.5 0 0 1 7 0v3"></path></svg></span></span>
+</a>
+<a href="#" style="display: flex; align-items: center; gap: 9px; padding: 6px 8px; border-radius: 8px; background: transparent; color: #1D1D1F; text-decoration: none">
+<span style="display: inline-flex; color: #0066D6; flex-shrink: 0"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v7a2.5 2.5 0 0 1-2.5 2.5H10l-4.5 4v-4h0A1.5 1.5 0 0 1 4 14.5z"></path></svg></span>
+<span style="flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px"><span style="font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Q3 dbt upgrade</span><span style="font-size: 11px; color: #6E6E73; white-space: nowrap">Sep 14</span></span>
+<span style="display: inline-flex; align-items: center; flex-shrink: 0"></span>
+</a>
+<a href="#" style="display: flex; align-items: center; gap: 9px; padding: 6px 8px; border-radius: 8px; background: transparent; color: #1D1D1F; text-decoration: none">
+<span style="display: inline-flex; color: #0066D6; flex-shrink: 0"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 4L3 11l6 2.5L19 7l-8 8 6 5z"></path></svg></span>
+<span style="flex-grow: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px"><span style="font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Weekend plans</span><span style="font-size: 11px; color: #6E6E73; white-space: nowrap">Sep 12</span></span>
+<span style="display: inline-flex; align-items: center; flex-shrink: 0"></span>
+</a>
+</nav>
+<div style="display: flex; align-items: center; gap: 7px; padding: 10px 16px 12px; font-size: 11px; color: #6E6E73; border-top: 0.5px solid rgba(0,0,0,0.09)"><span style="width: 7px; height: 7px; border-radius: 50%; background: #C9001C"></span>Offline · reconnecting</div>
+</aside>
+</div><main style="display: flex; flex-direction: column; min-width: 0; min-height: 0"><div style="height: 52px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 14px 0 20px; flex-shrink: 0">
+<div style="display: flex; flex-direction: column; min-width: 0"><h1 style="margin: 0; font-size: 15px; font-weight: 600; color: #1D1D1F">Main</h1><span style="font-size: 11px; color: #6E6E73">Sep 21 · 38 messages · read only</span></div>
+<div style="display: flex; align-items: center; gap: 10px"><span style="display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border-radius: 13px; background: rgba(201,0,28,0.08); color: #C9001C; font-size: 12px; font-weight: 500"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 9.5a10 10 0 0 1 14 0M8 12.5a6 6 0 0 1 8 0M11 15.5a1.5 1.5 0 0 1 2 0M4 4l16 16"></path></svg>Offline · retrying in 8s</span><div style="display: flex; align-items: center; padding: 2px; border-radius: 18px; background: rgba(255,255,255,0.78); box-shadow: 0 8px 28px rgba(0,0,0,0.10), 0 0 0 0.5px rgba(0,0,0,0.12)"><button type="button" aria-label="Show inspector" style="width: 34px; height: 30px; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 15px; background: transparent; color: #1D1D1F; cursor: default"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="3"></rect><path d="M15 5v14"></path></svg></button><button type="button" aria-label="More" style="width: 34px; height: 30px; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 15px; background: transparent; color: #1D1D1F; cursor: default"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="12" r="1.2"></circle><circle cx="12" cy="12" r="1.2"></circle><circle cx="18" cy="12" r="1.2"></circle></svg></button></div></div>
+</div><section aria-label="Transcript" style="flex-grow: 1; overflow: auto; padding: 16px 28px 12px"><div style="max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px"><div style="align-self: center; font-size: 11px; font-weight: 600; color: #6E6E73">Sunday, Sep 21 4:12 PM</div>
+<div style="display: flex; flex-direction: column; align-items: flex-end; gap: 5px">
+<div style="max-width: 70%; padding: 8px 13px; border-radius: 18px; background: #0063D1; color: #FFFFFF; font-size: 14px; line-height: 1.45">Summarize the Fivetran connector changes we need for the Q4 sources.</div>
+
+<div style="display: flex; gap: 8px; font-size: 11px; color: #6E6E73"><span>4:12 PM</span></div>
+</div>
+<div style="display: flex; flex-direction: column; gap: 6px; max-width: 680px">
+<div style="font-size: 11px; color: #6E6E73">4:13 PM</div>
+<details style="font-size: 12px; color: #6E6E73"><summary style="list-style: none; display: inline-flex; align-items: center; gap: 4px; cursor: default"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 6.5L15 12l-5.5 5.5"></path></svg>Used 2 tools · 15s</summary></details>
+<div style="font-size: 14px; line-height: 1.55; color: #1D1D1F"><p style="margin: 0">Three connectors need changes before Q4: the Salesforce sync needs the new <code style="font-family: ui-monospace, 'SF Mono', Menlo, monospace; font-size: 12.5px; padding: 1px 5px; border-radius: 5px; background: rgba(0,0,0,0.045)">Opportunity_Split</code> object, NetSuite should move to the incremental API, and the Zendesk connector can be retired once the support data lands in the lake.</p></div>
+</div>
+<div style="display: flex; flex-direction: column; align-items: flex-end; gap: 5px">
+<div style="max-width: 70%; padding: 8px 13px; border-radius: 18px; background: #0063D1; color: #FFFFFF; font-size: 14px; line-height: 1.45">Thanks. Attaching the vendor sheet for later.</div>
+<div style="display: flex; align-items: center; gap: 10px; padding: 8px 12px 8px 10px; border-radius: 12px; background: rgba(0,0,0,0.045); box-shadow: 0 0 0 0.5px rgba(0,0,0,0.09)">
+<span style="display: inline-flex; color: #6E6E73"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3.5H7.5a1.5 1.5 0 0 0-1.5 1.5v14a1.5 1.5 0 0 0 1.5 1.5h9a1.5 1.5 0 0 0 1.5-1.5V7.5z"></path><path d="M14 3.5v4h4"></path></svg></span>
+<span style="display: flex; flex-direction: column"><span style="font-size: 12.5px; font-weight: 500; color: #1D1D1F">connector_inventory.xlsx</span><span style="font-size: 11px; color: #6E6E73">88 KB · <span style="font-style: italic">Expired</span></span></span>
+</div>
+<div style="display: flex; gap: 8px; font-size: 11px; color: #6E6E73"><span>4:20 PM</span></div>
+</div>
+<div style="align-self: center; font-size: 11px; color: #6E6E73">Cleared with /clear · Sep 21, 4:31 PM</div></div></section><div style="padding: 10px 20px 18px; flex-shrink: 0">
+<div style="max-width: 760px; margin: 0 auto; display: flex; align-items: center; gap: 12px; padding: 10px 10px 10px 16px; border-radius: 22px; background: rgba(0,0,0,0.045); box-shadow: 0 0 0 0.5px rgba(0,0,0,0.09)">
+<span style="display: inline-flex; color: #6E6E73"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5.5" y="11" width="13" height="9" rx="2"></rect><path d="M8.5 11V8a3.5 3.5 0 0 1 7 0v3"></path></svg></span>
+<span style="flex-grow: 1; font-size: 12.5px; color: #6E6E73">This session can't be resumed. Its Claude transcript is no longer on disk.</span>
+<a href="sheet.html" style="height: 28px; display: inline-flex; align-items: center; padding: 0 12px; border-radius: 14px; background: #FFFFFF; box-shadow: 0 0 0 0.5px rgba(0,0,0,0.10), 0 1px 2px rgba(0,0,0,0.06); color: #1D1D1F; text-decoration: none; font-size: 12.5px; font-weight: 500">New Conversation</a>
+</div>
+</div></main></div>
+</body>
+</html>

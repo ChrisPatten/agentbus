@@ -81,6 +81,10 @@ describe('sendChannelNotification', () => {
 // ── formatMessagesForSampling ─────────────────────────────────────────────────
 
 describe('formatMessagesForSampling', () => {
+  it('names both arrival and original session channels for a bound app message', () => {
+    const env = makeEnvelope({ channel: 'app', topic: 'general', metadata: { session_channel: 'telegram:peggy' } });
+    expect(formatMessagesForSampling([env])).toContain('via app (in your telegram:peggy session)');
+  });
   it('formats a single message with full date+time', () => {
     const result = formatMessagesForSampling([makeEnvelope()]);
     expect(result).toMatch(

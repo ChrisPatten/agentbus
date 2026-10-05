@@ -126,6 +126,19 @@ describe('dedup stage', () => {
     expect(r1!.dedupKey).not.toBe(r2!.dedupKey);
   });
 
+  it('same body in another topic or channel is not a duplicate', async () => {
+    const db = makeDb();
+    const stage = createDedup(db);
+    const first = await stage(makeCtx({ channel: 'app', topic: 'thread:a', payload: { type: 'text', body: 'count to ten' } }, db));
+    const otherTopic = await stage(makeCtx({ channel: 'app', topic: 'thread:b', payload: { type: 'text', body: 'count to ten' } }, db));
+    const otherChannel = await stage(makeCtx({ channel: 'telegram', topic: 'thread:a', payload: { type: 'text', body: 'count to ten' } }, db));
+    const repeat = await stage(makeCtx({ channel: 'app', topic: 'thread:a', payload: { type: 'text', body: 'count to ten' } }, db));
+    expect(first).not.toBeNull();
+    expect(otherTopic).not.toBeNull();
+    expect(otherChannel).not.toBeNull();
+    expect(repeat).toBeNull();
+  });
+
   it('different sender produces different key', async () => {
     const db = makeDb();
     const stage = createDedup(db);

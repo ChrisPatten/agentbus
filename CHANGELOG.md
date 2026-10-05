@@ -10,6 +10,32 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+### Added
+- **Native AgentBus macOS client (E62, in progress).** SwiftUI/XcodeGen source adds Keychain setup, resilient app protocol, SwiftData cache, conversations, files, notifications, and Dock unread state. Xcode and live work-laptop acceptance remain pending.
+- **Cross-channel app continuation (E60).** App messages can continue a listed Telegram, email, or Siri session with replies returned to the app. Resumable Earlier sessions fork into a new app topic while preserving the original history and active session.
+- **Proactive app delivery (E61).** Scheduled work can notify Main or an existing named app topic while the client is offline. Agent session tools expose app titles, and missed cron and one-off work follows documented wake behavior.
+- **Mac app adapter and client API (E59).** Authenticated local WebSocket and HTTP routes provide durable message/session replay, app topics, read state, uploads, health, and command discovery. Offline app delivery persists before queue acknowledgement.
+- **Parallel `cc-headless` conversations (E58).** One agent can run turns in separate conversations concurrently. Each instance defaults to five live children, with one slot reserved from user turns for scheduled and journaling work. `/status` and health report running and waiting counts; activity subscriptions expose queued, running, and idle states.
+
+### Changed
+- **Mac client UI matches the approved design (E62).** Sidebar rows with channel symbols and working/queued/unread/read-only state, slot-usage footer, toolbar Stop/inspector/More with an offline retry pill, block Markdown with copyable code, send-state and arrival labels, live tool trails that collapse into the reply, a floating glass composer with attachment tokens and slash-command popover, inspector with agent slots, tabbed Settings, per-session windows, and Session menu shortcuts. ⌘N creates an empty conversation directly; there is no title sheet. Activity frames' `tool_lines` and slot counts are now decoded.
+- **Mac client compatibility (E62).** The native app now targets macOS 26.5 with Xcode 26.6, matching the work laptop.
+- **`/stop` is scoped to its conversation.** In Telegram, stopping one topic no longer interrupts another topic for the same contact. A waiting turn can also be cancelled. Journaling turns share an agent-wide lane, and turns in one conversation never overlap after early delivery.
+
+### Fixed
+- **App unread counts didn't rise for agent replies.** The bus now sends a `session` event after each outbound message, so the Mac sidebar and Dock badge update while the app is in the background.
+- **Same text in two conversations was rejected as a duplicate.** The dedup stage now keys on channel and topic as well as sender, body, and time bucket. Identical text sent to two app topics (or two Telegram topics) within 30 seconds is no longer dropped with `Aborted at stage "dedup"`.
+- **App activity ended a headless turn at its first message.** A turn that delivers progress messages now stays `running`, with a fresh tool-line list, until the headless agent reports `idle`.
+- **Untitled app topics.** A topic created without a title is named from its first message instead of staying “New Conversation”.
+- **Mac client feedback fixes (E62).** The transcript follows new content and keeps the last message clear of the composer. The working spinner and hidden unread badges no longer stick after a turn. A rejected send's Retry now resends under a new ID and shows the reason. ⌘V attaches copied files and converts rich text to Markdown. Copy buttons confirm with "Copied". Attachments sent from this Mac open in Quick Look. A resumed session shows its original history. The slash popover aligns with the composer. The attach and send buttons have tooltips. The window no longer loops on layout when the inspector opens in a small window.
+- **Headless reply permissions.** Explicitly allow the AgentBus `reply` and `send_message` tools in noninteractive Claude turns. If a delivery call fails, fall back to the turn's text result instead of silently dropping it.
+- **Headless AgentBus MCP startup.** Resolve `AGENTBUS_CONFIG` before Claude changes to the agent's working directory and pass the absolute path and routed agent identity to its MCP subprocess.
+- **AgentBus MCP handshake.** Silence dotenv's startup banner so the MCP server writes only protocol frames to stdout. Headless tool subprocesses now receive their routed agent ID instead of defaulting to `claude`.
+- **Mac chat 404 (E62).** Session and history request query parameters now reach the bus as URL queries, so chat opens after the successful connection test.
+- **Mac queued sends (E62).** Network path updates no longer repeatedly restart the socket; queued messages now show the connection failure and a Reconnect action instead of remaining at Sending.
+- **Mac first-run setup and Quit (E62).** Saving settings now opens Main and starts the connection; Settings provides Quit and the app menu has ⌘Q.
+- **Mac composer Return handling (E62).** Use the SwiftUI key handler signature accepted by Xcode's Swift 6 toolchain, keeping Shift-Return for a newline.
+
 ## [0.14.0] - 2026-09-29
 
 ### Added
