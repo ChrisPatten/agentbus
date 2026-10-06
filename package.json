@@ -33,7 +33,6 @@
     "vitest": "^4.1.4"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.88.0",
     "@fastify/multipart": "^10.1.0",
     "@fastify/websocket": "^11.3.1",
     "@modelcontextprotocol/sdk": "^1.29.0",

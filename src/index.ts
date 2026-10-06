@@ -54,7 +54,6 @@ import { createPoolCommand } from './commands/pool.js';
 import { createPaneCommand } from './commands/pane.js';
 import { createRcCommand } from './commands/rc.js';
 import { createJournalCommand } from './commands/journal.js';
-import { Summarizer } from './memory/summarizer.js';
 import { SessionTracker } from './memory/session-tracker.js';
 import { Scheduler } from './scheduler/scheduler.js';
 import { AttachmentSweeper } from './media/attachment-sweeper.js';
@@ -340,14 +339,12 @@ deliverJournalInstruction = createJournalInstructionDelivery({
   queue, registry, owners: ownerDirectory, pipeline, config, db, commandRegistry, pauseSet,
 });
 
-// ── Memory system ─────────────────────────────────────────────────────────────
-// Summarizer calls the Claude API to extract memories from completed sessions.
-// SessionTracker runs a background loop to close idle sessions and trigger
-// summarization. Both degrade gracefully when ANTHROPIC_API_KEY is not set.
+// ── Session tracker ───────────────────────────────────────────────────────────
+// Closes idle legacy (MCP-adapter) sessions and reports every close to the
+// journaling engine. (E66 retired the Anthropic-API summarizer.)
 
-const summarizer = new Summarizer({ db, config });
 const sessionTracker = new SessionTracker({
-  db, config, summarizer,
+  db, config,
   onSessionClosed: (session) => { journalEngine.trigger({ reason: 'close', sessionId: session.id }); },
 });
 

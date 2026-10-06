@@ -31,7 +31,8 @@ async function stubBus(): Promise<{ url: string; seen: Array<{ token: string | u
   return { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, seen };
 }
 
-describe.skipIf(!hasJq)('agentbus_journal_hook.sh', () => {
+// Spawning is slow when the whole suite runs in parallel.
+describe.skipIf(!hasJq)('agentbus_journal_hook.sh', { timeout: 30_000 }, () => {
   it('posts pre-compact with a snapshot and sends AGENTBUS_BUS_TOKEN as X-Bus-Token', async () => {
     const { url, seen } = await stubBus();
     const dir = mkdtempSync(join(tmpdir(), 'journal-hook-'));
@@ -55,7 +56,7 @@ describe.skipIf(!hasJq)('agentbus_journal_hook.sh', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  }, 15_000);
+  });
 
   it('exits 0 without a session id', () => {
     const r = spawnSync('/bin/bash', [HOOK], { input: '{}', env: { PATH: process.env['PATH'] } });

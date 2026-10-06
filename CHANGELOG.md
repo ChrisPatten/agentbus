@@ -58,6 +58,12 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 - **Mac first-run setup and Quit (E62).** Saving settings now opens Main and starts the connection; Settings provides Quit and the app menu has ⌘Q.
 - **Mac composer Return handling (E62).** Use the SwiftUI key handler signature accepted by Xcode's Swift 6 toolchain, keeping Shift-Return for a newline.
 
+### Removed
+- **Anthropic-API summarizer (E66).** `src/memory/summarizer.ts` and the `@anthropic-ai/sdk` dependency are gone; journaling (with the `claude-p-journal.sh` reference script) replaces "an LLM over the bus transcript". The bus no longer needs `ANTHROPIC_API_KEY`. Sessions the tracker closes now get status `closed`.
+- **Writes to the legacy memory store (E66).** The `memories` and `session_summaries` tables stay (nothing is dropped) and are read-only: memory injection (stage 85), `recall_memory` and `GET /api/v1/memories/recall` keep reading existing rows, but `log_memory` now returns an error and `POST /api/v1/memories` returns `410`. **Breaking for MCP-adapter deployments that wrote memories through `log_memory`.**
+- **Config keys `memory.claude_api_model`, `memory.summary_max_tokens` and `memory.structured_extraction` (E66).** Still accepted, with a deprecation warning, and ignored, so existing configs keep starting.
+- **`HeadlessHandle.journalResumeId` / `runJournalingTurn` and `PoolManager.journalingRunner` (E66).** Dead pre-E66 journaling hooks; nothing called them.
+
 ## [0.14.0] - 2026-09-29
 
 ### Added

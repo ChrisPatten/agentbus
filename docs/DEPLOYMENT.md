@@ -30,7 +30,6 @@ bus-core runs as one pm2-managed process. Platform adapters (Telegram, email, th
    ```
    TELEGRAM_BOT_TOKEN=...
    ICLOUD_APP_PW=...          # only if you enable the email adapter
-   ANTHROPIC_API_KEY=...      # only if memory.structured_extraction is true
    ```
 
    `config.yaml` references them as `${VAR_NAME}`. A minimal headless deployment:
@@ -234,9 +233,9 @@ Symptom: `journal_cursor_at` / `last_journaled_at` on sessions stays stale while
 
 See [JOURNALING.md](JOURNALING.md).
 
-### Summarizer not running
+### `memory.claude_api_model … are deprecated and ignored`
 
-Only relevant when `memory.structured_extraction: true`. Check for `[summarizer]` errors in the logs. The usual cause is a missing or invalid `ANTHROPIC_API_KEY`.
+E66 retired the Anthropic-API summarizer. `memory.claude_api_model`, `memory.summary_max_tokens` and `memory.structured_extraction` still load, with this warning, and do nothing. Remove them from `config.yaml`; `ANTHROPIC_API_KEY` is no longer needed by the bus. Journaling replaces the summarizer ([JOURNALING.md](JOURNALING.md)).
 
 ### Claude Code MCP adapter not connecting
 

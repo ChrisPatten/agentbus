@@ -117,7 +117,7 @@ describe('recall_memory tool', () => {
   });
 });
 
-describe('log_memory tool', () => {
+describe('log_memory tool (read-only since E66)', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
@@ -129,83 +129,15 @@ describe('log_memory tool', () => {
     vi.restoreAllMocks();
   });
 
-  it('returns success with new memory ID', async () => {
-    fetchMock.mockResolvedValueOnce({
-      ok: true,
-      status: 201,
-      json: async () => ({ ok: true, id: 'new-mem-id', superseded: null }),
-    });
-
+  it('returns an error, records nothing and points at the memory files', async () => {
     const client = await makeClient();
     const result = await client.callTool({
       name: 'log_memory',
       arguments: { contact_id: 'contact:alice', content: 'Prefers tea' },
     });
-
-    expect(result.isError).toBeFalsy();
-    const data = parseResult(result) as { ok: boolean; id: string; superseded: null };
-    expect(data.ok).toBe(true);
-    expect(data.id).toBe('new-mem-id');
-    expect(data.superseded).toBeNull();
-    await client.close();
-  });
-
-  it('returns superseded ID when an old memory was replaced', async () => {
-    fetchMock.mockResolvedValueOnce({
-      ok: true,
-      status: 201,
-      json: async () => ({ ok: true, id: 'new-id', superseded: 'old-id' }),
-    });
-
-    const client = await makeClient();
-    const result = await client.callTool({
-      name: 'log_memory',
-      arguments: {
-        contact_id: 'contact:alice',
-        content: 'Updated preference',
-        category: 'preference',
-        confidence: 0.95,
-      },
-    });
-
-    const data = parseResult(result) as { superseded: string };
-    expect(data.superseded).toBe('old-id');
-    await client.close();
-  });
-
-  it('returns available: false when memory system is not initialized', async () => {
-    fetchMock.mockResolvedValueOnce({
-      ok: false,
-      status: 503,
-      json: async () => ({ ok: false, error: 'Memory system not yet initialized' }),
-    });
-
-    const client = await makeClient();
-    const result = await client.callTool({
-      name: 'log_memory',
-      arguments: { contact_id: 'contact:alice', content: 'Test fact' },
-    });
-
-    expect(result.isError).toBeFalsy();
-    const data = parseResult(result) as { available: boolean };
-    expect(data.available).toBe(false);
-    await client.close();
-  });
-
-  it('returns tool error when bus returns non-ok (non-503)', async () => {
-    fetchMock.mockResolvedValueOnce({
-      ok: false,
-      status: 400,
-      json: async () => ({ error: 'Validation error' }),
-    });
-
-    const client = await makeClient();
-    const result = await client.callTool({
-      name: 'log_memory',
-      arguments: { contact_id: 'contact:alice', content: 'Test' },
-    });
-
     expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toContain('memory files');
+    expect(fetchMock).not.toHaveBeenCalled();
     await client.close();
   });
 });

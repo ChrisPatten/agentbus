@@ -42,6 +42,15 @@ function substituteEnvVars(obj: unknown): unknown {
   return obj;
 }
 
+/** Retired summarizer keys (E66) present in the raw `memory` block. */
+export const RETIRED_MEMORY_KEYS = ['claude_api_model', 'summary_max_tokens', 'structured_extraction'] as const;
+
+export function retiredMemoryKeys(raw: unknown): string[] {
+  const memory = (raw as { memory?: unknown } | null)?.memory;
+  if (!memory || typeof memory !== 'object') return [];
+  return RETIRED_MEMORY_KEYS.filter((k) => k in (memory as Record<string, unknown>));
+}
+
 /**
  * Load, validate, and return the application configuration.
  *
@@ -95,6 +104,16 @@ export function loadConfig(path: string, envPath?: string): AppConfig {
     console.warn(
       `[config] ${legacy.join(', ')} is deprecated; move it to agents.<agent-id>.journaling (see docs/JOURNALING.md).` +
         (shadowed ? ' Agents that have agents.<id>.journaling ignore their cc-headless block.' : ''),
+    );
+  }
+
+  // E66 — summarizer settings are accepted but ignored.
+  const retired = retiredMemoryKeys(substituted);
+  if (retired.length > 0) {
+    console.warn(
+      `[config] ${retired.map((k) => `memory.${k}`).join(', ')} ${retired.length === 1 ? 'is' : 'are'} deprecated and ignored: ` +
+        'the Anthropic-API summarizer was retired (journaling replaces it, see docs/JOURNALING.md). Remove ' +
+        `${retired.length === 1 ? 'it' : 'them'} from config.yaml.`,
     );
   }
 

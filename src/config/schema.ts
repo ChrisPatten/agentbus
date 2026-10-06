@@ -509,9 +509,13 @@ const MemoryConfigSchema = z.object({
   summarizer_interval_ms: z.number().int().positive().default(60000),
   session_idle_threshold_ms: z.number().int().positive().default(1800000),
   context_window_hours: z.number().positive().default(48),
-  claude_api_model: z.string().default('claude-sonnet-4-6'),
-  /** Max tokens for the summarization API response (default: 8192) */
-  summary_max_tokens: z.number().int().positive().default(8192),
+  /**
+   * @deprecated E66 — the Anthropic-API summarizer was retired. Accepted and
+   * ignored (the loader logs a deprecation warning) so old configs still start.
+   */
+  claude_api_model: z.string().optional(),
+  /** @deprecated E66 — see `claude_api_model`. Accepted and ignored. */
+  summary_max_tokens: z.number().int().positive().optional(),
   /**
    * Shell command(s) to run when a session is closed due to inactivity.
    * Executed via /bin/sh -c, so shell syntax is supported.
@@ -565,13 +569,11 @@ const MemoryConfigSchema = z.object({
    */
   memory_inject_exclude: z.array(z.string()).default([]),
   /**
-   * E20 — when false (default), the summarizer's structured-extraction content
-   * path is disabled: the bus writes neither the `memories` nor the
-   * `session_summaries` table, and the agent's own files are the single source
-   * of truth. Set true to restore legacy behavior for MCP-adapter deployments
-   * that still rely on the structured store.
+   * @deprecated E66 — the summarizer that wrote the `memories` and
+   * `session_summaries` tables was retired; the tables are read-only. Accepted
+   * and ignored (the loader logs a deprecation warning).
    */
-  structured_extraction: z.boolean().default(false),
+  structured_extraction: z.boolean().optional(),
 });
 
 /**

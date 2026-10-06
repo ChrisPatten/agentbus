@@ -66,7 +66,8 @@ function job(env: Record<string, string>, overrides: Partial<JournalJob> = {}): 
 
 const journaler = (busUrl?: string) => new ScriptJournaler({ ...(busUrl ? { busUrl } : {}), basePath: process.env['PATH'], home: dir, log: () => {} });
 
-describe.skipIf(!hasJq)('scripts/journalers/claude-p-journal.sh (S66.7)', () => {
+// Spawning is slow when the whole suite runs in parallel.
+describe.skipIf(!hasJq)('scripts/journalers/claude-p-journal.sh (S66.7)', { timeout: 60_000 }, () => {
   it('pipes a fenced transcript to claude -p in the working dir with the model, and reports done with notes and cost', async () => {
     const result = await journaler().run(job({ CLAUDE_BIN: fakeClaude('Recorded the briefing reply.') }));
     expect(result).toMatchObject({ outcome: 'done', notes: 'Recorded the briefing reply.', costUsd: 0.05 });
@@ -102,5 +103,5 @@ describe.skipIf(!hasJq)('scripts/journalers/claude-p-journal.sh (S66.7)', () => 
     expect(seen[0]!.url).toContain('/api/v1/journal/runs?agent=agent%3Apeggy&conversation=conv-1');
     expect(seen[0]!.token).toBe('s3cret');
     expect(readFileSync(join(dir, 'prompt.txt'), 'utf-8')).toContain('Chris prefers 24-hour time.');
-  }, 15_000);
+  });
 });

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AppConfigSchema } from '../../config/schema.js';
@@ -45,7 +45,8 @@ function job(script: Record<string, unknown>, overrides: Partial<JournalJob> = {
 
 const journaler = () => new ScriptJournaler({ busUrl: 'http://127.0.0.1:3000', basePath: process.env['PATH'], home: dir, log: () => {} });
 
-describe('ScriptJournaler (S66.7)', () => {
+// Spawning is slow when the whole suite runs in parallel.
+describe('ScriptJournaler (S66.7)', { timeout: 30_000 }, () => {
   it('feeds the version 1 payload on stdin, runs in the working dir and gives only the minimal environment', async () => {
     const cmd = writeScript('dump.sh', `cat > "${dir}/payload.json"; pwd > "${dir}/cwd.txt"; env | sort > "${dir}/env.txt"; echo '{"files_changed":["memory/daily/x.md"],"notes":"ok","cost_usd":0.01}'`);
     process.env['AGENTBUS_TEST_SECRET'] = 'leak';
@@ -80,21 +81,31 @@ describe('ScriptJournaler (S66.7)', () => {
     expect(await j.run(job({ command: writeScript('d.sh', 'echo broken >&2; exit 1') }))).toMatchObject({ outcome: 'failed-after-start', error: 'exit 1: broken' });
   });
 
-  it('times out with failed-after-start and kills the process group', async () => {
-    const cmd = writeScript('slow.sh', `sleep 30 & echo $! > "${dir}/bg.pid"; wait`);
-    const result = await journaler().run(job({ command: cmd, timeout_ms: 300 }));
+  it('times out with failed-after-start', async () => {
+    const result = await journaler().run(job({ command: writeScript('slow.sh', 'sleep 30'), timeout_ms: 300 }));
     expect(result).toMatchObject({ outcome: 'failed-after-start', error: expect.stringContaining('timed out') });
-    const bg = Number(readFileSync(join(dir, 'bg.pid'), 'utf-8').trim());
-    await new Promise((r) => setTimeout(r, 300));
-    expect(() => process.kill(bg, 0)).toThrow();
-  }, 15_000);
+  });
+
+  it('kills the process group when stopped, background children included', async () => {
+    const cmd = writeScript('slow.sh', `sleep 30 & echo $! > "${dir}/bg.pid"; wait`);
+    const controller = new AbortController();
+    const pidFile = join(dir, 'bg.pid');
+    const poll = setInterval(() => { if (existsSync(pidFile) && readFileSync(pidFile, 'utf-8').trim()) controller.abort(); }, 20);
+    const result = await journaler().run(job({ command: cmd, timeout_ms: 25_000 }), { signal: controller.signal });
+    clearInterval(poll);
+    expect(result.outcome).toBe('failed-after-start');
+    const bg = Number(readFileSync(pidFile, 'utf-8').trim());
+    const alive = () => { try { process.kill(bg, 0); return true; } catch { return false; } };
+    for (let i = 0; i < 50 && alive(); i++) await new Promise((r) => setTimeout(r, 100));
+    expect(alive()).toBe(false);
+  });
 
   it('stops when the chain runner aborts', async () => {
     const controller = new AbortController();
     setTimeout(() => controller.abort(), 100);
     const result = await journaler().run(job({ command: writeScript('slow.sh', 'sleep 30') }), { signal: controller.signal });
     expect(result).toMatchObject({ outcome: 'failed-after-start', error: expect.stringContaining('aborted') });
-  }, 15_000);
+  });
 
   it('resolves a relative command against the working dir and checks it is executable', () => {
     writeScript('rel.sh', 'exit 0');

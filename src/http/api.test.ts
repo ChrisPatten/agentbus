@@ -1312,110 +1312,39 @@ describe('POST /api/v1/messages/:id/react', () => {
 
 // ── Memory API (E8) ───────────────────────────────────────────────────────────
 
-describe('POST /api/v1/memories', () => {
+describe('POST /api/v1/memories (read-only since E66)', () => {
+  it('returns 410: the legacy memory store no longer takes writes', async () => {
+    const { server } = await makeServer();
+    try {
+      const res = await server.inject({
+        method: 'POST',
+        url: '/api/v1/memories',
+        payload: { contact_id: 'alice', content: 'Alice prefers morning meetings', category: 'preference' },
+      });
+      expect(res.statusCode).toBe(410);
+      expect(JSON.parse(res.body)).toMatchObject({ ok: false, error: expect.stringContaining('read-only') });
+    } finally {
+      await server.close();
+    }
+  });
+});
+
+/** Insert a legacy memory row directly (the store is read-only over HTTP). */
+function seedMemory(db: Database.Database, m: { id?: string; contact: string; content: string; category: string; supersededBy?: string }): string {
+  const id = m.id ?? randomUUID();
+  db.prepare(`INSERT INTO memories (id, session_id, contact_id, category, content, confidence, source, created_at, expires_at, superseded_by)
+    VALUES (?, NULL, ?, ?, ?, 0.9, 'manual', ?, NULL, ?)`).run(id, m.contact, m.category, m.content, new Date().toISOString(), m.supersededBy ?? null);
+  return id;
+}
+
+describe('GET /api/v1/memories/recall', () => {
   let server: FastifyInstance;
   let db: Database.Database;
 
   beforeEach(async () => {
     ({ server, db } = await makeServer());
-  });
-
-  afterEach(async () => {
-    await server.close();
-  });
-
-  it('creates a memory and returns 201', async () => {
-    const res = await server.inject({
-      method: 'POST',
-      url: '/api/v1/memories',
-      payload: { contact_id: 'alice', content: 'Alice prefers morning meetings', category: 'preference' },
-    });
-    expect(res.statusCode).toBe(201);
-    const body = JSON.parse(res.body) as { ok: boolean; id: string; superseded: string | null };
-    expect(body.ok).toBe(true);
-    expect(typeof body.id).toBe('string');
-    expect(body.superseded).toBeNull();
-  });
-
-  it('supersedes the previous active memory for same contact+category', async () => {
-    const r1 = await server.inject({
-      method: 'POST',
-      url: '/api/v1/memories',
-      payload: { contact_id: 'alice', content: 'Alice likes tea', category: 'preference' },
-    });
-    const { id: firstId } = JSON.parse(r1.body) as { id: string };
-
-    const r2 = await server.inject({
-      method: 'POST',
-      url: '/api/v1/memories',
-      payload: { contact_id: 'alice', content: 'Alice now likes coffee', category: 'preference' },
-    });
-    expect(r2.statusCode).toBe(201);
-    const body2 = JSON.parse(r2.body) as { id: string; superseded: string };
-    expect(body2.superseded).toBe(firstId);
-
-    const first = db.prepare('SELECT superseded_by FROM memories WHERE id = ?').get(firstId) as { superseded_by: string };
-    expect(first.superseded_by).toBe(body2.id);
-  });
-
-  it('does not supersede memories of a different category', async () => {
-    await server.inject({
-      method: 'POST',
-      url: '/api/v1/memories',
-      payload: { contact_id: 'alice', content: 'Alice is a developer', category: 'fact' },
-    });
-    const res = await server.inject({
-      method: 'POST',
-      url: '/api/v1/memories',
-      payload: { contact_id: 'alice', content: 'Alice prefers mornings', category: 'preference' },
-    });
-    expect(JSON.parse(res.body).superseded).toBeNull();
-  });
-
-  it('rejects an invalid category with 400', async () => {
-    const res = await server.inject({
-      method: 'POST',
-      url: '/api/v1/memories',
-      payload: { contact_id: 'alice', content: 'foo', category: 'admin' },
-    });
-    expect(res.statusCode).toBe(400);
-  });
-
-  it('rejects missing contact_id with 400', async () => {
-    const res = await server.inject({
-      method: 'POST',
-      url: '/api/v1/memories',
-      payload: { content: 'foo', category: 'general' },
-    });
-    expect(res.statusCode).toBe(400);
-  });
-
-  it('rejects missing content with 400', async () => {
-    const res = await server.inject({
-      method: 'POST',
-      url: '/api/v1/memories',
-      payload: { contact_id: 'alice', category: 'general' },
-    });
-    expect(res.statusCode).toBe(400);
-  });
-});
-
-describe('GET /api/v1/memories/recall', () => {
-  let server: FastifyInstance;
-
-  beforeEach(async () => {
-    ({ server } = await makeServer());
-    // Seed memories
-    await server.inject({
-      method: 'POST',
-      url: '/api/v1/memories',
-      payload: { contact_id: 'alice', content: 'Alice enjoys hiking on weekends', category: 'preference' },
-    });
-    await server.inject({
-      method: 'POST',
-      url: '/api/v1/memories',
-      payload: { contact_id: 'bob', content: 'Bob is a software engineer', category: 'work' },
-    });
+    seedMemory(db, { contact: 'alice', content: 'Alice enjoys hiking on weekends', category: 'preference' });
+    seedMemory(db, { contact: 'bob', content: 'Bob is a software engineer', category: 'work' });
   });
 
   afterEach(async () => {
@@ -1449,18 +1378,8 @@ describe('GET /api/v1/memories/recall', () => {
   });
 
   it('does not return superseded memories', async () => {
-    // Create a memory then supersede it
-    const r1 = await server.inject({
-      method: 'POST',
-      url: '/api/v1/memories',
-      payload: { contact_id: 'carol', content: 'Carol drives a sedan', category: 'fact' },
-    });
-    const { id: oldId } = JSON.parse(r1.body) as { id: string };
-    await server.inject({
-      method: 'POST',
-      url: '/api/v1/memories',
-      payload: { contact_id: 'carol', content: 'Carol now drives an EV', category: 'fact' },
-    });
+    const newId = seedMemory(db, { contact: 'carol', content: 'Carol now drives an EV', category: 'fact' });
+    const oldId = seedMemory(db, { contact: 'carol', content: 'Carol drives a sedan', category: 'fact', supersededBy: newId });
 
     const res = await server.inject({ method: 'GET', url: '/api/v1/memories/recall?q=sedan' });
     const body = JSON.parse(res.body) as { memories: { id: string }[] };

@@ -1685,68 +1685,13 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     }
   );
 
-  // POST /api/v1/memories — manually log a memory
-  const MEMORY_CATEGORIES = [
-    'preference', 'fact', 'plan', 'relationship', 'work', 'health', 'general',
-  ] as const;
-  const MemoryInsertSchema = z.object({
-    contact_id: z.string().min(1),
-    content: z.string().min(1),
-    category: z.enum(MEMORY_CATEGORIES).default('general'),
-    confidence: z.number().min(0).max(1).default(0.9),
-    source: z.string().default('manual'),
-    expires_at: z.string().optional(),
-    channel: z.string().optional(),
-  });
-
-  server.post<{ Body: unknown }>('/api/v1/memories', async (req, reply) => {
-    const parsed = MemoryInsertSchema.safeParse(req.body);
-    if (!parsed.success) {
-      return reply.status(400).send({ ok: false, error: parsed.error.message });
-    }
-
-    // Graceful degradation
-    const tableExists = db
-      .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='memories'`)
-      .get();
-    if (!tableExists) {
-      return reply.status(503).send({ ok: false, error: 'Memory system not yet initialized' });
-    }
-
-    const { contact_id, content, category, confidence, source, expires_at, channel } = parsed.data;
-    const now = new Date().toISOString();
-    const newId = randomUUID();
-
-    // Supersede + insert atomically to prevent two concurrent requests from both
-    // believing they are the sole active memory for a given (contact_id, category, channel).
-    let supersededId: string | undefined;
-    db.transaction(() => {
-      const existing = db
-        .prepare(
-          `SELECT id FROM memories
-           WHERE contact_id = ? AND category = ? AND superseded_by IS NULL
-             AND (expires_at IS NULL OR expires_at > ?)
-             AND (channel = ? OR channel IS NULL)
-           ORDER BY created_at DESC LIMIT 1`,
-        )
-        .get(contact_id, category, now, channel ?? null) as { id: string } | undefined;
-
-      if (existing) {
-        db.prepare(`UPDATE memories SET superseded_by = ? WHERE id = ?`).run(newId, existing.id);
-        supersededId = existing.id;
-      }
-
-      db.prepare(
-        `INSERT INTO memories
-           (id, session_id, contact_id, category, content, confidence, source, created_at, expires_at, superseded_by, channel)
-         VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
-      ).run(newId, contact_id, category, content, confidence, source, now, expires_at ?? null, channel ?? null);
-    })();
-
-    return reply.status(201).send({
-      ok: true,
-      id: newId,
-      superseded: supersededId ?? null,
+  // POST /api/v1/memories — formerly logged a memory (log_memory).
+  // E66 — the legacy structured memory store is read-only: the summarizer
+  // that filled it is gone and agents keep memory in their own files.
+  server.post<{ Body: unknown }>('/api/v1/memories', async (_req, reply) => {
+    return reply.status(410).send({
+      ok: false,
+      error: 'The legacy memory store is read-only. Write durable facts to your memory files (MEMORY.md, daily journal) instead.',
     });
   });
 

@@ -3,7 +3,6 @@ import Database from 'better-sqlite3';
 import { runMigrations } from '../db/schema.js';
 import { SessionTracker } from './session-tracker.js';
 import type { AppConfig } from '../config/schema.js';
-import type { Summarizer } from './summarizer.js';
 
 function makeDb() {
   const db = new Database(':memory:');
@@ -21,8 +20,6 @@ const stubConfig: AppConfig = {
     summarizer_interval_ms: 60000,
     session_idle_threshold_ms: 900000, // 15 min
     context_window_hours: 48,
-    claude_api_model: 'claude-sonnet-4-6',
-    summary_max_tokens: 8192,
     session_close_min_messages: 0,
   },
   pipeline: {
@@ -36,12 +33,12 @@ const stubConfig: AppConfig = {
   },
 } as unknown as AppConfig;
 
-function makeMockSummarizer(): Summarizer {
-  return {
-    summarize: vi.fn().mockResolvedValue(true),
-    retrySummarize: vi.fn().mockResolvedValue(true),
-  } as unknown as Summarizer;
+/** Spy on the on_session_close hook runner (private) without running a shell. */
+function spyHook() {
+  return vi.spyOn(SessionTracker.prototype as unknown as { runOnSessionCloseHook: (s: { id: string }) => void }, 'runOnSessionCloseHook')
+    .mockImplementation(() => {});
 }
+const hookedIds = (spy: ReturnType<typeof spyHook>) => spy.mock.calls.map((c) => c[0].id);
 
 function insertSession(
   db: Database.Database,
@@ -83,14 +80,16 @@ function insertSession(
 
 describe('SessionTracker.tick()', () => {
   let db: Database.Database;
-  let summarizer: Summarizer;
   let tracker: SessionTracker;
+  let hook: ReturnType<typeof spyHook>;
 
   beforeEach(() => {
     db = makeDb();
-    summarizer = makeMockSummarizer();
-    tracker = new SessionTracker({ db, config: stubConfig, summarizer });
+    hook = spyHook();
+    tracker = new SessionTracker({ db, config: stubConfig });
   });
+
+  afterEach(() => { vi.restoreAllMocks(); });
 
   it('closes idle sessions past the threshold', () => {
     // Session idle for 20 minutes (threshold is 15)
@@ -103,17 +102,13 @@ describe('SessionTracker.tick()', () => {
       status: string;
     };
     expect(session.ended_at).not.toBeNull();
-    expect(session.status).toBe('summarize_pending');
+    expect(session.status).toBe('closed');
   });
 
-  it('calls summarizer for idle sessions', async () => {
+  it('runs the on_session_close hook for idle sessions', () => {
     const sessionId = insertSession(db, { lastActivityOffset: 20 * 60 * 1000 });
-
     tracker.tick();
-    // Allow fire-and-forget to resolve
-    await new Promise((r) => setTimeout(r, 10));
-
-    expect(summarizer.summarize).toHaveBeenCalledWith(sessionId);
+    expect(hookedIds(hook)).toEqual([sessionId]);
   });
 
   it('does NOT close idle headless sessions (claude_session_id set) — they are long-lived', () => {
@@ -131,7 +126,7 @@ describe('SessionTracker.tick()', () => {
     };
     expect(session.ended_at).toBeNull();
     expect(session.status).toBe('active');
-    expect(summarizer.summarize).not.toHaveBeenCalledWith(sessionId);
+    expect(hookedIds(hook)).not.toContain(sessionId);
   });
 
   it('does NOT close sessions within the idle threshold', () => {
@@ -166,12 +161,12 @@ describe('SessionTracker.tick()', () => {
     expect(session.status).toBe('summarized');
   });
 
-  it('closes idle sessions below the global min-message threshold but skips hook+summarize', () => {
+  it('closes idle sessions below the global min-message threshold but skips the hook', () => {
     const config = {
       ...stubConfig,
       memory: { ...stubConfig.memory, session_close_min_messages: 2 },
     } as unknown as AppConfig;
-    const t = new SessionTracker({ db, config, summarizer });
+    const t = new SessionTracker({ db, config });
 
     // 0-message session, idle past threshold — closed but not summarized
     const below = insertSession(db, { lastActivityOffset: 20 * 60 * 1000, messageCount: 0 });
@@ -188,17 +183,15 @@ describe('SessionTracker.tick()', () => {
       ended_at: string | null;
       status: string;
     };
-    // Both are closed — but only the one meeting the threshold triggers summarization
+    // Both are closed — but only the one meeting the threshold runs the hook
     expect(b.ended_at).not.toBeNull();
-    expect(b.status).toBe('summarize_pending');
+    expect(b.status).toBe('closed');
     expect(m.ended_at).not.toBeNull();
-    expect(m.status).toBe('summarize_pending');
-    // Summarizer called only for the session meeting the threshold
-    expect(vi.mocked(summarizer.summarize)).toHaveBeenCalledWith(meets);
-    expect(vi.mocked(summarizer.summarize)).not.toHaveBeenCalledWith(below);
+    expect(m.status).toBe('closed');
+    expect(hookedIds(hook)).toEqual([meets]);
   });
 
-  it('applies per-channel min-message threshold: closes all idle, summarizes only those that qualify', () => {
+  it('applies per-channel min-message threshold: closes all idle, runs the hook only for those that qualify', () => {
     const config = {
       ...stubConfig,
       memory: {
@@ -206,7 +199,7 @@ describe('SessionTracker.tick()', () => {
         session_close_min_messages: { telegram: 3, 'claude-code': 0 },
       },
     } as unknown as AppConfig;
-    const t = new SessionTracker({ db, config, summarizer });
+    const t = new SessionTracker({ db, config });
 
     // telegram with 1 message — below channel threshold of 3, closed but not summarized
     const tgBelow = insertSession(db, {
@@ -231,8 +224,7 @@ describe('SessionTracker.tick()', () => {
     };
     expect(tg.ended_at).not.toBeNull();
     expect(cc.ended_at).not.toBeNull();
-    expect(vi.mocked(summarizer.summarize)).toHaveBeenCalledWith(ccMeets);
-    expect(vi.mocked(summarizer.summarize)).not.toHaveBeenCalledWith(tgBelow);
+    expect(hookedIds(hook)).toEqual([ccMeets]);
   });
 
   it('defaults to 0 (no guard) when session_close_min_messages is unset', () => {
@@ -247,34 +239,18 @@ describe('SessionTracker.tick()', () => {
     expect(session.ended_at).not.toBeNull();
   });
 
-  it('retries failed sessions below max attempts', async () => {
-    const endedAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-    const sessionId = insertSession(db, {
-      status: 'summarize_failed',
-      summaryAttempts: 1,
-      endedAt,
-      lastActivityOffset: 60 * 60 * 1000,
-    });
-
+  it('marks mid-flight closed sessions closed and runs the hook once', () => {
+    const sessionId = insertSession(db, { endedAt: new Date().toISOString() });
     tracker.tick();
-    await new Promise((r) => setTimeout(r, 10));
-
-    // Status should be reset to pending before summarize is called
-    expect(summarizer.summarize).toHaveBeenCalledWith(sessionId);
+    tracker.tick();
+    expect((db.prepare('SELECT status FROM sessions WHERE id = ?').get(sessionId) as { status: string }).status).toBe('closed');
+    expect(hookedIds(hook)).toEqual([sessionId]);
   });
 
-  it('does NOT retry sessions that hit max attempts (3)', () => {
-    const endedAt = new Date().toISOString();
-    insertSession(db, {
-      status: 'summarize_failed',
-      summaryAttempts: 3,
-      endedAt,
-      lastActivityOffset: 60 * 60 * 1000,
-    });
-
+  it('leaves legacy summarize_failed sessions alone (no summarizer since E66)', () => {
+    const sessionId = insertSession(db, { status: 'summarize_failed', summaryAttempts: 1, endedAt: new Date(Date.now() - 3_600_000).toISOString(), lastActivityOffset: 3_600_000 });
     tracker.tick();
-
-    expect(summarizer.summarize).not.toHaveBeenCalled();
+    expect((db.prepare('SELECT status FROM sessions WHERE id = ?').get(sessionId) as { status: string }).status).toBe('summarize_failed');
   });
 
   it('hard-deletes memories expired more than 30 days ago', () => {
@@ -313,7 +289,7 @@ describe('SessionTracker close notifications (E66)', () => {
   it('reports idle-closed and mid-flight-closed sessions to onSessionClosed', () => {
     const db = makeDb();
     const closed: string[] = [];
-    const tracker = new SessionTracker({ db, config: stubConfig, summarizer: makeMockSummarizer(), onSessionClosed: (s) => closed.push(s.id) });
+    const tracker = new SessionTracker({ db, config: stubConfig, onSessionClosed: (s) => closed.push(s.id) });
     const idle = insertSession(db, { id: 'idle', conversationId: 'c-idle', lastActivityOffset: 2 * 900_000 });
     const midFlight = insertSession(db, { id: 'mid', conversationId: 'c-mid', endedAt: new Date().toISOString() });
     insertSession(db, { id: 'headless', conversationId: 'c-h', lastActivityOffset: 2 * 900_000, claudeSessionId: 'claude-1' });
@@ -325,19 +301,19 @@ describe('SessionTracker close notifications (E66)', () => {
 
   it('a throwing onSessionClosed does not break the tick', () => {
     const db = makeDb();
-    const summarizer = makeMockSummarizer();
-    const tracker = new SessionTracker({ db, config: stubConfig, summarizer, onSessionClosed: () => { throw new Error('boom'); } });
+    const hook = spyHook();
+    const tracker = new SessionTracker({ db, config: stubConfig, onSessionClosed: () => { throw new Error('boom'); } });
     insertSession(db, { id: 'idle', lastActivityOffset: 2 * 900_000 });
     expect(() => tracker.tick()).not.toThrow();
-    expect(summarizer.summarize).toHaveBeenCalledWith('idle');
+    expect(hookedIds(hook)).toEqual(['idle']);
+    vi.restoreAllMocks();
   });
 });
 
 describe('SessionTracker start/stop', () => {
   it('starts and stops without errors', () => {
     const db = makeDb();
-    const summarizer = makeMockSummarizer();
-    const tracker = new SessionTracker({ db, config: stubConfig, summarizer });
+    const tracker = new SessionTracker({ db, config: stubConfig });
     tracker.start();
     tracker.stop();
     // No interval leak — just verifying it doesn't throw

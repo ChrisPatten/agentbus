@@ -1,9 +1,10 @@
 /**
  * S7.3 / E8 — Memory Tools: recall_memory, log_memory, search_transcripts
  *
- * recall_memory and log_memory call the bus HTTP API (GET /api/v1/memories/recall
- * and POST /api/v1/memories respectively). Both degrade gracefully when the
- * memory system is not yet initialized (pre-E8 or missing API key).
+ * The legacy structured store is read-only since E66 (the summarizer that
+ * filled it was retired). recall_memory reads it through GET
+ * /api/v1/memories/recall and degrades gracefully when the table is missing;
+ * log_memory stays registered but always returns an error.
  *
  * search_transcripts is fully functional via FTS5 on transcripts.
  */
@@ -48,15 +49,6 @@ interface MemoryResult {
   expires_at: string | null;
 }
 
-interface MemoryInsertResponse {
-  ok: boolean;
-  available?: boolean;
-  reason?: string;
-  id?: string;
-  superseded?: string | null;
-  error?: string;
-}
-
 export function registerMemoryTools(server: McpServer, busBaseUrl: string): void {
   // ── recall_memory ─────────────────────────────────────────────────────────
 
@@ -65,7 +57,7 @@ export function registerMemoryTools(server: McpServer, busBaseUrl: string): void
     {
       description:
         'Search the memory store for facts about contacts and past conversations. Returns active memories matching the query, ordered by confidence. ' +
-        'LEGACY: in the file-memory model (E20) the structured store is dormant — read your own MEMORY.md and daily journal files instead. Retained for MCP-adapter deployments with memory.structured_extraction enabled.',
+        'LEGACY, read-only: the structured store is no longer written (E66). Read your own MEMORY.md and daily journal files instead; this only returns older entries.',
       inputSchema: {
         query: z.string().min(1).describe('Full-text search query'),
         contact_id: z.string().optional().describe('Filter memories for a specific contact'),
@@ -115,73 +107,24 @@ export function registerMemoryTools(server: McpServer, busBaseUrl: string): void
   );
 
   // ── log_memory ────────────────────────────────────────────────────────────
+  //
+  // E66 — the legacy store is read-only. The tool stays registered so an
+  // agent prompt that mentions it gets a clear answer instead of "unknown tool".
 
   server.registerTool(
     'log_memory',
     {
       description:
-        'Explicitly record a fact about a contact to the memory store. Supersedes an existing memory for the same contact and category. ' +
-        'LEGACY: in the file-memory model (E20) the structured store is dormant — write durable facts to your own MEMORY.md / daily journal files instead. Retained for MCP-adapter deployments with memory.structured_extraction enabled.',
+        'DEPRECATED: the legacy memory store is read-only. Write durable facts to your own memory files (MEMORY.md, ' +
+        'daily journal, topic files) instead. Calling this returns an error and records nothing.',
       inputSchema: {
-        contact_id: z.string().min(1).describe('Contact this memory is about'),
-        content: z.string().min(1).describe('The fact or memory to record'),
-        category: z
-          .string()
-          .optional()
-          .default('general')
-          .describe(
-            'Memory category: preference, fact, plan, relationship, work, health, general (default: general)',
-          ),
-        confidence: z
-          .number()
-          .min(0)
-          .max(1)
-          .optional()
-          .default(0.9)
-          .describe('Confidence score 0.0–1.0 (default: 0.9)'),
-        source: z
-          .string()
-          .optional()
-          .default('manual')
-          .describe('Source of the memory (default: manual)'),
-        expires_at: z
-          .string()
-          .optional()
-          .describe('Optional ISO 8601 expiry timestamp after which this memory is excluded from recall'),
+        contact_id: z.string().optional().describe('Ignored'),
+        content: z.string().optional().describe('Ignored'),
       },
     },
-    async ({ contact_id, content, category, confidence, source, expires_at }) => {
-      try {
-        const res = await fetch(`${busBaseUrl}/api/v1/memories`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ contact_id, content, category, confidence, source, expires_at }),
-        });
-
-        if (res.status === 503) {
-          return toolSuccess({
-            available: false,
-            reason: 'Memory system not yet initialized',
-          });
-        }
-
-        if (!res.ok) {
-          const err = (await res.json().catch(() => ({ error: `HTTP ${res.status}` }))) as {
-            error?: string;
-          };
-          return toolError(`Failed to log memory: ${err.error ?? `HTTP ${res.status}`}`);
-        }
-
-        const data = (await res.json()) as MemoryInsertResponse;
-        return toolSuccess({
-          ok: true,
-          id: data.id,
-          superseded: data.superseded ?? null,
-        });
-      } catch (err) {
-        return toolError(`Failed to log memory: ${String(err)}`);
-      }
-    },
+    async () => toolError(
+      'log_memory is no longer available: the legacy memory store is read-only. Write the fact to your memory files instead.',
+    ),
   );
 
   // ── search_transcripts ────────────────────────────────────────────────────

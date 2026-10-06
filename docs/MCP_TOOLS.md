@@ -20,7 +20,7 @@ Errors come back as `{ "content": [{ "type": "text", "text": "Error: ..." }], "i
 | `fetch_attachment` | Resolve an attachment ID to a file path | Always |
 | `schedule_message`, `list_schedules`, `cancel_schedule`, `update_schedule` | Scheduled messages | Always |
 | `set_model_override`, `get_model_override`, `list_model_overrides`, `delete_model_override` | Runtime model overrides (agent or global) | Always |
-| `recall_memory`, `log_memory` | Legacy structured memory store | Always; dormant unless `memory.structured_extraction` |
+| `recall_memory`, `log_memory` | Legacy structured memory store (read-only; `log_memory` always errors) | Always |
 | `write_knowledge`, `get_knowledge`, `forget_knowledge`, `search_knowledge` | Agent-managed structured knowledge store (Phase 1) | Always |
 | `advisory_ack` | Acknowledge a bus advisory after relaying it to the owner | Always |
 | `journal_complete` | Finish a System Message journal run | Polling adapter and cc-pool panes (not cc-headless) |
@@ -178,7 +178,7 @@ Output: `{ "ok": true, "deleted_count": n, "message" }`.
 
 ## Legacy memory store
 
-Dormant unless `memory.structured_extraction` is true. The file-based memory model replaces it. See [MEMORY.md](MEMORY.md).
+Read-only since E66: the summarizer that filled it was retired, and the file-based memory model replaces it. See [MEMORY.md](MEMORY.md).
 
 ### `recall_memory`
 
@@ -187,8 +187,7 @@ Output: `{ "memories": [...], "count": n }`.
 
 ### `log_memory`
 
-Input: `{ "contact_id": "chris", "content": "...", "category"?: "general", "confidence"?: 0.9, "source"?: "manual", "expires_at"? }`
-Output: `{ "ok": true, "id", "superseded": "<old id>" | null }`.
+Deprecated (E66). Still registered so prompts that mention it get a clear answer, but it records nothing and returns `isError` telling the agent to write the fact to its memory files. Arguments are ignored.
 
 ## Knowledge store
 

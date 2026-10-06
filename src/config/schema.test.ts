@@ -686,9 +686,10 @@ describe('AppConfigSchema — cc-headless memory + journaling (E20)', () => {
     expect(h.memory.journal_lookback_days).toBe(0);
   });
 
-  it('defaults memory.structured_extraction to false', () => {
-    const parsed = AppConfigSchema.parse(base);
-    expect(parsed.memory.structured_extraction).toBe(false);
+  it('accepts the retired summarizer keys without defaults (E66)', () => {
+    expect(AppConfigSchema.parse(base).memory.structured_extraction).toBeUndefined();
+    const parsed = AppConfigSchema.parse({ ...base, memory: { ...base.memory, structured_extraction: true, claude_api_model: 'x', summary_max_tokens: 10 } });
+    expect(parsed.memory).toMatchObject({ structured_extraction: true, claude_api_model: 'x', summary_max_tokens: 10 });
   });
 });
 

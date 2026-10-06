@@ -414,7 +414,7 @@ Returns `{ "ok": true, "attachment": { "id", "local_path", "mime_type", "origina
 
 ## Memories (legacy)
 
-The structured memory store is dormant unless `memory.structured_extraction` is true. See [MEMORY.md](MEMORY.md).
+The structured memory store is read-only since E66 (the summarizer was retired). See [MEMORY.md](MEMORY.md).
 
 ### `GET /api/v1/memories/recall`
 
@@ -428,7 +428,7 @@ Returns active memories (not superseded, not expired) ordered by confidence, the
 
 ### `POST /api/v1/memories`
 
-Body `{ "contact_id", "content", "category"?, "confidence"?, "source"?, "expires_at"?, "channel"? }`. Supersedes the existing active memory for the same contact, category, and channel. Returns `201 { "ok": true, "id", "superseded": "<old-id>" | null }`.
+Retired (E66): returns `410 { ok: false, error }` and writes nothing. It used to insert a memory (the `log_memory` tool).
 
 ## Knowledge
 

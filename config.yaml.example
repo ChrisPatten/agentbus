@@ -173,11 +173,11 @@ topics:
   - personal
 
 memory:
-  structured_extraction: false       # legacy summarizer and memories store; see docs/MEMORY.md
-  summarizer_interval_ms: 60000
-  session_idle_threshold_ms: 1800000
+  summarizer_interval_ms: 60000      # session-tracker and journaling-engine tick
+  session_idle_threshold_ms: 1800000 # idle gap that closes a polling-adapter session
   context_window_hours: 48
-  claude_api_model: claude-sonnet-4-6
+  # claude_api_model, summary_max_tokens and structured_extraction are retired (E66):
+  # still accepted with a deprecation warning, and ignored. See docs/MEMORY.md.
 
 # Per-agent settings keyed by recipient id — docs/ATTACHMENTS.md, docs/ADVISORIES.md, docs/JOURNALING.md
 agents:
@@ -193,9 +193,13 @@ agents:
     #   threshold_ms: { default: 1800000, telegram: 300000 }
     #   ceiling_ms: 14400000
     #   min_human_messages: 2        # final triggers (/clear, close, shutdown) journal any human content
-    #   timeout_ms: 300000
-    #   script:                      # the always-available last resort (journaler ships in E66 part B)
+    #   timeout_ms: 300000           # per run; system-message holds the conversation at most this long
+    #   model: claude-sonnet-4-6     # default: the runtime instance's model
+    #   system-message: { timeout_ms: 300000 }   # the live agent journals; finishes with journal_complete
+    #   cc-headless: { model: claude-haiku-4-5 } # claude -p --resume (forked on cc-pool)
+    #   script:                      # the always-available last resort: your executable, JSON on stdin
     #     command: /path/to/agentbus/scripts/journalers/claude-p-journal.sh
+    #     env: { CLAUDE_BIN: /opt/homebrew/bin/claude }  # minimal env: PATH, HOME, AGENTBUS_* plus this
 
 pipeline:
   dedup_window_ms: 30000
