@@ -284,7 +284,7 @@ export class Scheduler {
   /**
    * Upsert all schedules from config.yaml into the DB.
    *
-   * ON CONFLICT: update payload/label/cron_expr but NOT fire_at for existing
+   * ON CONFLICT: update payload/label/cron_expr/max_fires but NOT fire_at for existing
    * active items — overwriting fire_at would cause an immediate re-fire.
    *
    * Important: once a config schedule is manually cancelled (via /schedule cancel
@@ -337,10 +337,11 @@ export class Scheduler {
         .prepare(
           `INSERT INTO scheduled_items
              (id, type, cron_expr, timezone, fire_at, channel, sender, payload_body,
-              topic, priority, label, model, created_at, created_by, fire_count, status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'config', 0, 'active')
+              topic, priority, label, model, max_fires, created_at, created_by, fire_count, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'config', 0, 'active')
            ON CONFLICT(id) DO UPDATE SET
              cron_expr    = excluded.cron_expr,
+             max_fires    = excluded.max_fires,
              timezone     = excluded.timezone,
              payload_body = excluded.payload_body,
              topic        = excluded.topic,
@@ -362,6 +363,7 @@ export class Scheduler {
           entry.priority,
           entry.label ?? null,
           entry.model ?? null,
+          entry.max_fires ?? null,
           now,
         );
     }

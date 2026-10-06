@@ -50,6 +50,7 @@ schedules:
 | `topic` | see above | Put the job in a specific topic instead |
 | `priority` | `normal` | `normal`, `high` or `urgent` |
 | `model` | | The model for this job, for example `haiku` for a cheap daily check. See [Choosing models](/features/models). |
+| `max_fires` | | Stop a recurring schedule after this many runs, for example `52` for a year of weekly runs |
 
 Give each schedule either `cron` or `fire_at`.
 
@@ -60,11 +61,11 @@ Give each schedule either `cron` or `fire_at`.
 The bus reads `schedules` each time it starts:
 
 - **New entries** are added.
-- **Changed entries** pick up the new prompt, cron, time zone, label, topic, priority and model. A new cron time takes effect after the next run under the old one.
+- **Changed entries** pick up the new prompt, cron, time zone, label, topic, priority, model and `max_fires`. A new cron time takes effect after the next run under the old one.
 - **Removed entries** are cancelled.
 - **A config schedule you cancel stays cancelled**, even if it's still in the file. To bring it back, give it a new `id`.
 
-`max_fires` (stop after a number of runs) is accepted in `config.yaml` but not applied yet. To limit a recurring schedule, create it by asking your agent or through the API.
+A schedule that reaches its `max_fires` is marked completed and stops running.
 
 ## Asking your agent
 

@@ -38,7 +38,7 @@ schedules:
     label: Onboarding reminder
 ```
 
-Config schedules are upserted by `id` on every startup — safe to restart with. Removing an entry from config.yaml cancels the schedule on the next startup.
+Config schedules are upserted by `id` on every startup — safe to restart with. An existing row picks up changes to `prompt`, `cron`, `timezone`, `label`, `topic`, `priority`, `model` and `max_fires` (removing `max_fires` makes it unlimited again). Removing an entry from config.yaml cancels the schedule on the next startup.
 
 > **Cancelling a config schedule manually** (via `/schedule cancel` or `DELETE /api/v1/schedules/:id`) marks it cancelled permanently. Subsequent restarts will **not** revive it, even if the entry is still present in config.yaml. To reset it, change its `id` in config.yaml so a fresh row is inserted, then remove the old id.
 

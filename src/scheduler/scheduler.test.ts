@@ -433,6 +433,31 @@ describe('Scheduler.loadConfig()', () => {
     expect(row!['payload_body']).toBe('Hello from config');
   });
 
+  it('persists max_fires from config, and updates it on a later load', () => {
+    const entry = {
+      id: 'cfg-max',
+      cron: '0 8 * * *',
+      timezone: 'UTC',
+      channel: 'telegram',
+      sender: 'contact:chris',
+      prompt: 'Limited',
+      topic: 'general',
+      priority: 'normal' as const,
+      max_fires: 3,
+    };
+    new Scheduler(makeDeps(db, noop, { ...baseConfig, schedules: [entry] } as unknown as AppConfig)).loadConfig();
+    expect(getItem(db, 'cfg-max')!['max_fires']).toBe(3);
+
+    new Scheduler(
+      makeDeps(db, noop, { ...baseConfig, schedules: [{ ...entry, max_fires: 7 }] } as unknown as AppConfig),
+    ).loadConfig();
+    expect(getItem(db, 'cfg-max')!['max_fires']).toBe(7);
+
+    const { max_fires: _omit, ...unlimited } = entry;
+    new Scheduler(makeDeps(db, noop, { ...baseConfig, schedules: [unlimited] } as unknown as AppConfig)).loadConfig();
+    expect(getItem(db, 'cfg-max')!['max_fires']).toBeNull();
+  });
+
   it('upserts a cron schedule from config', () => {
     const config = {
       ...baseConfig,
