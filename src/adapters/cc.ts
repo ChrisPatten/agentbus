@@ -32,7 +32,10 @@ const BACKOFF_INTERVAL_MS = 5000;
 
 const configPath = resolve(process.env['AGENTBUS_CONFIG'] ?? 'config.yaml');
 const config = loadConfig(configPath);
-const pollIntervalMs = config.adapters['claude-code']?.poll_interval_ms ?? 1000;
+const pollIntervalMs = resolvePollIntervalMs(
+  process.env['AGENTBUS_POLL_INTERVAL_MS'],
+  config.adapters['claude-code']?.poll_interval_ms,
+);
 const busBaseUrl = `http://127.0.0.1:${config.bus.http_port}`;
 
 // When bus.auth_token is set (in this config, or passed down as
@@ -40,6 +43,17 @@ const busBaseUrl = `http://127.0.0.1:${config.bus.http_port}`;
 // polling loop and every MCP tool — must carry X-Bus-Token. Patch the global
 // fetch once, scoped to busBaseUrl, so no call site can forget it.
 installBusTokenFetch(busBaseUrl, resolveBusToken(config));
+
+/**
+ * Poll interval for this process: `AGENTBUS_POLL_INTERVAL_MS` (set by cc-pool
+ * from the pool's `poll_interval_ms`) wins, then the `claude-code` adapter's
+ * `poll_interval_ms`, then 1000ms. A non-positive or non-numeric env value is ignored.
+ */
+export function resolvePollIntervalMs(envValue: string | undefined, configValue: number | undefined): number {
+  const fromEnv = envValue !== undefined ? Number(envValue) : NaN;
+  if (Number.isInteger(fromEnv) && fromEnv > 0) return fromEnv;
+  return configValue ?? 1000;
+}
 
 // ── Shared mutable state ──────────────────────────────────────────────────────
 

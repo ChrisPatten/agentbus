@@ -50,7 +50,7 @@ Every field of `adapters.cc-pool`:
 | `model` | string | unset | The pool's fallback `--model` — the last step of the resolution order in [Model selection](#model-selection) below, used only when no schedule model or override applies. Set it: when unset (and nothing else resolves a model either), the CLI falls back to the `model` in `~/.claude/settings.json`, which `/model` in any interactive session rewrites. bus-core logs a startup warning for a pool with no `model` configured. |
 | `working_dir` | string | bus-core cwd | Working directory shared by every pane in the pool. Determines the auto-loaded `CLAUDE.md` hierarchy. |
 | `launch_args` | list of strings | `[]` | Extra CLI args appended verbatim to every launch/resume invocation. |
-| `poll_interval_ms` | number | `1000` | Poll interval passed through to each pane's `cc.ts` process. |
+| `poll_interval_ms` | number | `1000` | Poll interval for each pane's `cc.ts` process, passed in the per-pane MCP config as `AGENTBUS_POLL_INTERVAL_MS` (which `cc.ts` prefers over `adapters.claude-code.poll_interval_ms`). Takes effect when a pane's `claude` next starts. |
 | `system_prompt` | string | unset | Appended via `--append-system-prompt-file` — it adds to the CLI's default prompt rather than replacing it, unlike `cc-headless`'s required `system_prompt`. Supports the same `{{var}}` templates and `@path` expansion as `cc-headless`. |
 | `lease.idle_evict_ms` | number (ms) | `1800000` (30 min) | Idle time after which a leased pane becomes evictable by a new conversation. |
 | `lease.hard_idle_ms` | number (ms) | `21600000` (6 h) | Time since a lease started after which it's proactively released, regardless of activity. |

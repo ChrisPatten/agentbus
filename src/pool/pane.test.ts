@@ -612,6 +612,23 @@ describe('PaneLifecycle.release', () => {
   });
 });
 
+// ── poll_interval_ms ─────────────────────────────────────────────────────────
+
+describe('PaneLifecycle — poll_interval_ms', () => {
+  it("passes the pool's poll_interval_ms to the pane's MCP config", async () => {
+    const tmux = makeTmux({ paneAlive: vi.fn(async () => false), capturePane: makeNoAckCapture() });
+    const pl = new PaneLifecycle({
+      tmux, busBaseUrl: 'http://127.0.0.1:3000', cfg: makeCfg({ poll_interval_ms: 250 }), scratchDir, fetchFn: makeReadyFetch(),
+    });
+
+    const launchPromise = pl.launch(makeLaunchParams());
+    await vi.advanceTimersByTimeAsync(600);
+    await launchPromise;
+
+    expect(mockWritePaneMcpConfig).toHaveBeenCalledWith(expect.objectContaining({ pollIntervalMs: 250 }));
+  });
+});
+
 // ── bus.auth_token ───────────────────────────────────────────────────────────
 
 describe('PaneLifecycle — bus.auth_token', () => {

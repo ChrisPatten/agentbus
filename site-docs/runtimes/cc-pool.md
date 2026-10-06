@@ -69,6 +69,7 @@ Routes reach the pool with `adapterId: cc-pool` and `recipientId: agent:<agent_i
 | `model` | Claude Code's default | The model for new sessions. See [Choosing models](/features/models). The bus warns at startup if this isn't set. |
 | `system_prompt` | none | Extra instructions **appended** to Claude Code's own prompt. Panes rely on the folder's `CLAUDE.md` first. |
 | `launch_args` | `[]` | Extra command-line options for every `claude` launch. |
+| `poll_interval_ms` | `1000` | How often each pane checks for new messages, in milliseconds. Applies to panes started after you change it. |
 | `pane_env` | `{}` | Extra environment variables for every pane, for example `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: "50"`. |
 | `lease.idle_evict_ms` | `1800000` (30 min) | How long a conversation must be idle before another conversation can take its pane. |
 | `lease.hard_idle_ms` | `21600000` (6 h) | How long a conversation can be idle before its pane is released anyway. |

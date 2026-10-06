@@ -35,7 +35,7 @@ and stderr captured separately: stdout must contain only MCP JSON frames.
 | `AGENTBUS_AGENT_ID` | `claude` | Recipient to poll for (`agent:<id>`). Polling mode only |
 | `AGENTBUS_TOOLS_ONLY` | unset | `true` selects tools-only mode |
 
-The only config field this process reads is `adapters.claude-code.poll_interval_ms` (default `1000`). The schema also accepts `sampling_max_tokens` and `plugin`, but nothing reads them.
+The only config field this process reads is `adapters.claude-code.poll_interval_ms` (default `1000`). An `AGENTBUS_POLL_INTERVAL_MS` environment variable overrides it; cc-pool sets that from the pool's own `poll_interval_ms`. The schema also accepts `sampling_max_tokens` and `plugin`, but nothing reads them.
 
 ## Polling mode
 

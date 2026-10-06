@@ -3,6 +3,7 @@ import {
   formatMessagesForSampling,
   processAckedMessages,
   sendChannelNotification,
+  resolvePollIntervalMs,
 } from './cc.js';
 import type { MessageEnvelope } from '../types/envelope.js';
 
@@ -433,5 +434,19 @@ describe('formatMessagesForSampling', () => {
     expect(second).not.toContain('(topic: general)');
     expect(third).toContain('(topic: thread:bbb222)');
     expect(third).not.toContain('(topic: thread:aaa111)');
+  });
+});
+
+describe('resolvePollIntervalMs', () => {
+  it('prefers AGENTBUS_POLL_INTERVAL_MS (set by cc-pool) over the claude-code setting', () => {
+    expect(resolvePollIntervalMs('250', 1000)).toBe(250);
+  });
+  it('falls back to the claude-code setting, then 1000ms', () => {
+    expect(resolvePollIntervalMs(undefined, 3000)).toBe(3000);
+    expect(resolvePollIntervalMs(undefined, undefined)).toBe(1000);
+  });
+  it('ignores an invalid env value', () => {
+    expect(resolvePollIntervalMs('abc', 2000)).toBe(2000);
+    expect(resolvePollIntervalMs('0', 2000)).toBe(2000);
   });
 });

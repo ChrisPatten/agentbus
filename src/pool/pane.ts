@@ -250,6 +250,7 @@ export class PaneLifecycle {
         agentbusConfigPath: this.agentbusConfigPath,
         workingDir: params.ensureWindow.cwd,
         outDir: this.scratchDir,
+        pollIntervalMs: this.cfg.poll_interval_ms,
       });
 
       if (this.cfg.system_prompt) {
