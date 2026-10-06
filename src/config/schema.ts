@@ -157,6 +157,22 @@ const ClaudeCodeAdapterSchema = z.object({
   plugin: z.string().optional(),
 });
 
+/** Default journaling instruction (E20; shared by every journaler since E66). */
+export const DEFAULT_JOURNALING_PROMPT =
+  'Our conversation has paused. Review it and update your memory files ' +
+  "(today's daily journal, MEMORY.md, and any relevant topic files) with " +
+  'anything durable worth remembering. Do NOT message the user — this is ' +
+  'an internal journaling turn, not a reply.';
+
+/**
+ * Per-channel idle gap (ms): a number for every channel, or a record of
+ * channel → ms with a required `default` key.
+ */
+const JournalingThresholdSchema = z.union([
+  z.number().int().positive(),
+  z.object({ default: z.number().int().positive() }).catchall(z.number().int().positive()),
+]);
+
 /**
  * Headless Claude Code adapter — spawns `claude -p` per message batch instead
  * of running a persistent MCP session. Compatible with in-process bus-core.
@@ -240,12 +256,7 @@ const CcHeadlessAdapterSchema = z.object({
        * nothing new worth journaling, so this only needs to catch a real
        * pause in the conversation, not every reply.
        */
-      threshold_ms: z
-        .union([
-          z.number().int().positive(),
-          z.object({ default: z.number().int().positive() }).catchall(z.number().int().positive()),
-        ])
-        .default({ default: 1_800_000 }),
+      threshold_ms: JournalingThresholdSchema.default({ default: 1_800_000 }),
       /**
        * E30 — hard ceiling (ms) since the last sweep (or session start, if
        * never journaled), applied globally across channels regardless of
@@ -256,14 +267,7 @@ const CcHeadlessAdapterSchema = z.object({
        */
       ceiling_ms: z.number().int().positive().optional(),
       /** Prompt sent on the silent journaling turn. */
-      prompt: z
-        .string()
-        .default(
-          'Our conversation has paused. Review it and update your memory files ' +
-            "(today's daily journal, MEMORY.md, and any relevant topic files) with " +
-            'anything durable worth remembering. Do NOT message the user — this is ' +
-            'an internal journaling turn, not a reply.',
-        ),
+      prompt: z.string().default(DEFAULT_JOURNALING_PROMPT),
     })
     .prefault({}),
 }).refine((cfg) => cfg.reserved_system_slots < cfg.max_concurrent_turns, {
@@ -599,6 +603,80 @@ const AgentOwnerSchema = z.object({
   }),
 });
 
+/** Journalers that can carry out a journal run (E66). See docs/JOURNALING.md. */
+export const JOURNALER_IDS = ['system-message', 'cc-headless', 'script'] as const;
+export type JournalerId = (typeof JOURNALER_IDS)[number];
+
+/**
+ * Per-agent journaling (E66 S66.1): when the bus journals this agent's
+ * conversations (triggers) and who does it (the journaler chain). Replaces
+ * the `adapters.cc-headless.journaling` block, which still works as a
+ * deprecated alias for agents without this block.
+ */
+const AgentJournalingSchema = z.object({
+  enabled: z.boolean().default(true),
+  /**
+   * Journalers to try, in order. The bus moves to the next one when a
+   * journaler can't run or fails. Entries the agent's runtime can never
+   * support are skipped. Default: every journaler, in the order below, with
+   * `script` only when `script.command` is set.
+   */
+  chain: z.array(z.enum(JOURNALER_IDS)).min(1).optional(),
+  /** Pause trigger: idle gap before a conversation is evaluated. Default 30 min. */
+  threshold_ms: JournalingThresholdSchema.default({ default: 1_800_000 }),
+  /** Ceiling trigger: max time since the last journal (or session start). Unset → no ceiling. */
+  ceiling_ms: z.number().int().positive().optional(),
+  /** New human messages needed before a non-final trigger journals. */
+  min_human_messages: z.number().int().positive().default(2),
+  /** Per-run timeout for journalers that wait on the agent. */
+  timeout_ms: z.number().int().positive().default(300_000),
+  /** Model for journal runs. Default: the agent's runtime model. */
+  model: z.string().min(1).optional(),
+  /** Journaling instruction. Default: the built-in prompt. */
+  prompt: z.string().min(1).optional(),
+  'system-message': z
+    .object({
+      timeout_ms: z.number().int().positive().optional(),
+      model: z.string().min(1).optional(),
+      prompt: z.string().min(1).optional(),
+    })
+    .optional(),
+  'cc-headless': z
+    .object({
+      model: z.string().min(1).optional(),
+      prompt: z.string().min(1).optional(),
+    })
+    .optional(),
+  script: z
+    .object({
+      /** Executable run directly (no shell). Absolute, or resolved against the agent's working_dir. */
+      command: z.string().min(1),
+      args: z.array(z.string()).default([]),
+      timeout_ms: z.number().int().positive().optional(),
+      env: z.record(z.string(), z.string()).default({}),
+      model: z.string().min(1).optional(),
+    })
+    .optional(),
+}).superRefine((j, ctx) => {
+  const chain = j.chain ?? [];
+  const seen = new Set<string>();
+  chain.forEach((id, i) => {
+    if (seen.has(id)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `Duplicate journaler "${id}" in chain`, path: ['chain', i] });
+    }
+    seen.add(id);
+  });
+  if (chain.includes('script') && !j.script) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'chain includes "script" but journaling.script.command is not set',
+      path: ['script'],
+    });
+  }
+});
+
+export type AgentJournalingConfig = z.infer<typeof AgentJournalingSchema>;
+
 /**
  * Per-agent configuration, keyed by recipient id (e.g. "agent:claude").
  * Additional agent-scoped settings live here under the same key: E65 adds
@@ -607,6 +685,7 @@ const AgentOwnerSchema = z.object({
 const AgentConfigSchema = z.object({
   media: AgentMediaSchema.optional(),
   owners: z.array(AgentOwnerSchema).optional(),
+  journaling: AgentJournalingSchema.optional(),
 });
 
 /**

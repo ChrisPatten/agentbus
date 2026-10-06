@@ -27,6 +27,7 @@ import {
 import { claudeTranscriptExists } from '../adapters/claude-transcript.js';
 import { getLastPollAt } from '../http/agent-liveness.js';
 import type { PoolLeaseRow } from '../pool/types.js';
+import { journalingRequirements } from '../journaling/config.js';
 import {
   runtimeCapabilities,
   missingCapabilities,
@@ -319,10 +320,12 @@ export function validateRuntimeRequirements(
 }
 
 /**
- * Requirements that config-driven features place on agent runtimes.
- * Empty today: the first consumers (E65 advisories, E66 journaling chains)
- * add their entries here so `loadConfig()` rejects impossible configs.
+ * Requirements that config-driven features place on agent runtimes, so
+ * `loadConfig()` rejects impossible configs.
+ *   - E66 journaling: a chain with no journaler the agent's runtime can
+ *     support (see `journalingRequirements`).
+ * E65 advisories register nothing: they degrade to direct delivery.
  */
-export function collectRuntimeRequirements(_config: AppConfig): RuntimeRequirement[] {
-  return [];
+export function collectRuntimeRequirements(config: AppConfig): RuntimeRequirement[] {
+  return [...journalingRequirements(config, new RuntimeResolver(config))];
 }

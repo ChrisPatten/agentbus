@@ -65,6 +65,8 @@ import { AdvisoryStore } from './advisories/store.js';
 import { AdvisoryService } from './advisories/service.js';
 import { createBusAdvisoryTransport } from './advisories/transport.js';
 import { createAdvisoryInject } from './pipeline/stages/advisory-inject.js';
+import { resolveJournalingSettings } from './journaling/config.js';
+import { reviewChains } from './journaling/advisories.js';
 
 const configPath = process.env['AGENTBUS_CONFIG'] ?? resolve(process.cwd(), 'config.yaml');
 
@@ -115,6 +117,12 @@ for (const agentId of ownerDirectory.agentsWithOwners()) {
     console.warn(`[agentbus] agents.${agentId}.owners: ${agentId} has no runtime; its advisories go directly to owners`);
   }
 }
+
+// E66 — per-agent journaling settings (agents.<id>.journaling, or the
+// deprecated cc-headless block). A chain that can run out of options raises
+// an advisory to the agent's owners.
+const journalingSettings = resolveJournalingSettings(config);
+reviewChains(journalingSettings.values(), runtimeResolver, advisories);
 
 const { registry: commandRegistry, pauseSet, headlessControl } = createCommandSystem({
   adapterRegistry: registry,

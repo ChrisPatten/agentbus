@@ -5,6 +5,7 @@ import { load as parseYaml } from 'js-yaml';
 import dotenv from 'dotenv';
 import { AppConfigSchema, type AppConfig } from './schema.js';
 import { RuntimeResolver, collectRuntimeRequirements, validateRuntimeRequirements } from '../core/runtime-resolver.js';
+import { legacyJournalingBlocks, resolveJournalingSettings } from '../journaling/config.js';
 
 /**
  * Walk an unknown object tree and replace all `${VAR_NAME}` tokens in string
@@ -83,6 +84,18 @@ export function loadConfig(path: string, envPath?: string): AppConfig {
   const requirements = collectRuntimeRequirements(result.data);
   if (requirements.length > 0) {
     validateRuntimeRequirements(new RuntimeResolver(result.data), requirements);
+  }
+
+  // E66 — the cc-headless `journaling` block is a deprecated alias for
+  // `agents.<id>.journaling`. Logged to stderr (stdout is MCP's in cc.ts).
+  const legacy = legacyJournalingBlocks(substituted);
+  if (legacy.length > 0) {
+    const settings = resolveJournalingSettings(result.data);
+    const shadowed = [...settings.values()].filter((s) => s.source === 'agents').length > 0;
+    console.warn(
+      `[config] ${legacy.join(', ')} is deprecated; move it to agents.<agent-id>.journaling (see docs/JOURNALING.md).` +
+        (shadowed ? ' Agents that have agents.<id>.journaling ignore their cc-headless block.' : ''),
+    );
   }
 
   // Ensure the db directory exists so better-sqlite3 can create the file
