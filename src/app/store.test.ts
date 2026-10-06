@@ -144,3 +144,31 @@ describe('app store visibility and projection', () => {
     } finally { f.db.close(); }
   });
 });
+
+describe('bus-originated turns are hidden (E65/E66)', () => {
+  it('keeps system-only inbound rows out of history, replay, titles and session visibility', () => {
+    const f = fixture();
+    try {
+      // A Telegram session that only ever had a bus advisory turn is not shown.
+      const tg = f.addSession('alice', 'agent:work', 'telegram', 'general', 'tg');
+      f.addMessage('alice', 'tg', tg, 'adv', 'inbound', '[AgentBus advisory turn a1]', { system_only: true, bus_advisory: true });
+      expect(visibleSession(f.db, 'alice', 'agent:work', 'tg')).toBeNull();
+
+      const { sessionId } = createAppSession(f.db, 'alice', 'agent:work');
+      const conversation = (f.db.prepare('SELECT conversation_id FROM sessions WHERE id = ?').get(sessionId) as { conversation_id: string }).conversation_id;
+      f.addMessage('alice', sessionId, conversation, 'journal', 'inbound', '[AgentBus journal run r1]', { system_only: true, journal_run_id: 'r1' });
+      f.addMessage('alice', sessionId, conversation, 'hello', 'inbound', 'Hello there');
+      f.addMessage('alice', sessionId, conversation, 'reply', 'outbound', 'Hi!');
+
+      const rows = history(f.db, 'alice', 'agent:work', sessionId, 50)!;
+      expect(rows.map((r) => r['message_id'])).toEqual(['hello', 'reply']);
+      const title = sessionInfo(f.db, visibleSession(f.db, 'alice', 'agent:work', sessionId)!, 'alice')['title'];
+      expect(title).toBe('Hello there');
+      const { latest } = eventBounds(f.db, 'alice');
+      const messages = readEvents(f.db, 'alice', 'agent:work', 0, latest).filter((e) => e.event === 'message');
+      expect(messages.map((e) => e.data['message_id'])).toEqual(['hello', 'reply']);
+      // Still in the DB for debugging.
+      expect(f.db.prepare(`SELECT COUNT(*) AS n FROM transcripts WHERE json_extract(metadata,'$.system_only') = 1`).get()).toEqual({ n: 2 });
+    } finally { f.db.close(); }
+  });
+});

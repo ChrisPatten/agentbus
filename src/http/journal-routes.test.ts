@@ -124,3 +124,16 @@ describe('journal instruction delivery', () => {
     expect(msg!.envelope.metadata).not.toHaveProperty('system_only');
   });
 });
+
+describe('session transcript hides bus-originated turns', () => {
+  it('leaves system-only rows out of GET /api/v1/sessions/:id/transcript', async () => {
+    db.prepare(`INSERT INTO sessions (id, conversation_id, channel, contact_id, started_at, last_activity) VALUES ('s1','conv-1','telegram','chris','x','x')`).run();
+    const add = (id: string, meta: Record<string, unknown>, at: string) => db.prepare(`INSERT INTO transcripts
+      (id, message_id, conversation_id, session_id, created_at, channel, contact_id, direction, body, metadata)
+      VALUES (?, ?, 'conv-1', 's1', ?, 'telegram', 'chris', 'inbound', ?, ?)`).run(id, id, at, id, JSON.stringify(meta));
+    add('visible', {}, '2026-10-06T10:00:00.000Z');
+    add('journal-turn', { system_only: true, journal_run_id: 'r' }, '2026-10-06T10:01:00.000Z');
+    const res = await server.inject({ method: 'GET', url: '/api/v1/sessions/s1/transcript' });
+    expect(res.json().transcript.map((m: { message_id: string }) => m.message_id)).toEqual(["visible"]);
+  });
+});

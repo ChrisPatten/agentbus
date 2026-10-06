@@ -8,6 +8,14 @@ import { sessionCanResume } from './resume.js';
 
 export interface AppEvent { seq: number; event: 'message' | 'session'; data: Record<string, unknown> }
 
+/**
+ * SQL condition (transcripts aliased `t`): not a bus-originated system-only
+ * turn (E65 critical advisory turns, E66 journal instructions). Those rows
+ * stay in the DB, flagged `metadata.system_only`, for debugging, but are
+ * never shown to people.
+ */
+export const VISIBLE_TRANSCRIPT = `COALESCE(json_extract(t.metadata, '$.system_only'), 0) = 0`;
+
 export function routedAgent(config: AppConfig, contactId: string): string | null {
   for (const rule of config.pipeline.routes) {
     if (rule.match.sender && rule.match.sender !== `contact:${contactId}`) continue;
@@ -32,7 +40,8 @@ export function visibleSession(db: Database.Database, contactId: string, agentId
         s.channel = 'app' OR EXISTS (SELECT 1 FROM transcripts t
           WHERE t.session_id = s.id AND t.direction = 'inbound'
             AND t.contact_id = ?
-            AND COALESCE(json_extract(t.metadata, '$.scheduled'), 0) = 0)
+            AND COALESCE(json_extract(t.metadata, '$.scheduled'), 0) = 0
+            AND ${VISIBLE_TRANSCRIPT})
       )`).get(id, contactId, agentId, contactId) as SessionRow | undefined;
   return row ?? null;
 }
@@ -47,7 +56,8 @@ export function sessionInfo(db: Database.Database, row: SessionRow, contactId: s
   const title = row.channel === 'app' && row.topic === 'general' ? 'Main'
     : getThread<{ title?: string; name?: string }>(db, row.channel, row.topic)?.metadata.title
       ?? getThread<{ title?: string; name?: string }>(db, row.channel, row.topic)?.metadata.name
-      ?? (db.prepare(`SELECT substr(body,1,60) AS body FROM transcripts WHERE session_id = ? AND direction = 'inbound' ORDER BY created_at LIMIT 1`).get(row.id) as {body:string}|undefined)?.body
+      ?? (db.prepare(`SELECT substr(t.body,1,60) AS body FROM transcripts t WHERE t.session_id = ? AND t.direction = 'inbound'
+        AND ${VISIBLE_TRANSCRIPT} ORDER BY t.created_at LIMIT 1`).get(row.id) as {body:string}|undefined)?.body
       ?? (row.channel === 'app' ? 'New Conversation' : row.channel);
   const marker = (db.prepare('SELECT seq FROM app_read_markers WHERE contact_id = ? AND session_id = ?').get(contactId, row.id) as {seq:number}|undefined)?.seq ?? 0;
   const unread = (db.prepare(`SELECT COUNT(*) AS n FROM app_events e JOIN transcripts t ON t.id = e.transcript_id
@@ -82,7 +92,7 @@ export function readEvents(db: Database.Database, contactId: string, agentId: st
     if (row.kind === 'session') {
       events.push({ seq: row.seq, event: 'session', data: sessionInfo(db, session, contactId, config) });
     } else {
-      const message = db.prepare(`SELECT * FROM transcripts WHERE id = ? AND session_id = ?`)
+      const message = db.prepare(`SELECT * FROM transcripts t WHERE t.id = ? AND t.session_id = ? AND ${VISIBLE_TRANSCRIPT}`)
         .get(row.transcript_id, row.session_id) as Record<string, unknown> | undefined;
       if (message) events.push({ seq: row.seq, event: 'message', data: messageInfo(db, message, row.seq) });
     }
@@ -108,7 +118,7 @@ export function history(db: Database.Database, contactId: string, agentId: strin
     .get(before, sessionId) as {created_at:string;id:string}|undefined : undefined;
   const rows = db.prepare(`SELECT t.*, e.seq FROM transcripts t LEFT JOIN app_events e
     ON e.contact_id = ? AND e.kind = 'message' AND e.transcript_id = t.id
-    WHERE t.session_id = ? AND (? IS NULL OR t.created_at < ? OR (t.created_at = ? AND t.id < ?))
+    WHERE t.session_id = ? AND ${VISIBLE_TRANSCRIPT} AND (? IS NULL OR t.created_at < ? OR (t.created_at = ? AND t.id < ?))
     ORDER BY t.created_at DESC, t.id DESC LIMIT ?`)
     .all(contactId, sessionId, before ?? null,
       cursor?.created_at ?? before ?? null, cursor?.created_at ?? before ?? null, cursor?.id ?? '', limit) as Record<string, unknown>[];

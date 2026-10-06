@@ -66,7 +66,7 @@ import { createSafeDatabase } from '../db/safe-database.js';
 import { logOutboundTranscript } from '../pipeline/outbound-transcript.js';
 import { validateAppDestination } from '../app/outbound.js';
 import { boundAppReply } from '../app/binding.js';
-import { routedAgent } from '../app/store.js';
+import { routedAgent, VISIBLE_TRANSCRIPT } from '../app/store.js';
 import { logWebhookRequest } from './webhook-log.js';
 import { registerSiriRoutes } from './siri-routes.js';
 import type { SiriAdapter } from '../adapters/siri.js';
@@ -1070,7 +1070,7 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
         replyToConversationId = transcript.conversation_id;
         const latestInbound = db
           .prepare(
-            `SELECT message_id FROM transcripts WHERE conversation_id = ? AND direction = 'inbound' ORDER BY created_at DESC LIMIT 1`,
+            `SELECT t.message_id FROM transcripts t WHERE t.conversation_id = ? AND t.direction = 'inbound' AND ${VISIBLE_TRANSCRIPT} ORDER BY t.created_at DESC LIMIT 1`,
           )
           .get(transcript.conversation_id) as { message_id: string } | undefined;
         const isLatestInbound = latestInbound?.message_id === data.reply_to;
@@ -1287,7 +1287,7 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       SELECT t.message_id, t.session_id, t.channel, t.contact_id, t.direction, t.body, t.created_at
       FROM transcripts t
       JOIN transcripts_fts fts ON fts.rowid = t.rowid
-      WHERE fts.body MATCH ?
+      WHERE fts.body MATCH ? AND ${VISIBLE_TRANSCRIPT}
     `;
     const params: unknown[] = [q];
 
@@ -1461,8 +1461,8 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
 
     let sql = `
       SELECT message_id, session_id, channel, contact_id, direction, body, created_at
-      FROM transcripts
-      WHERE session_id = ?
+      FROM transcripts t
+      WHERE session_id = ? AND ${VISIBLE_TRANSCRIPT}
     `;
     const params: unknown[] = [id];
 

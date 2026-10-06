@@ -384,6 +384,8 @@ Every transcript row for the session, oldest first: `{ message_id, session_id, c
 
 Returns `{ "ok": true, "transcript": [...], "count": n }`, or `404` for an unknown session.
 
+Bus-originated system-only turns (advisory turns, journal instructions) are left out here and in `GET /api/v1/transcripts/search`; they stay in the database.
+
 ### `GET /api/v1/transcripts/search`
 
 FTS5 search over transcript bodies.
