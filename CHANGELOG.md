@@ -11,6 +11,7 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 ## [Unreleased]
 
 ### Added
+- **Owner contacts (E65).** Each agent can list its owners under `agents.<id>.owners` (`channel` and `contact_id`). Owners receive bus advisories about the agent. The bus refuses to start if an owner isn't a configured contact. See `docs/ADVISORIES.md`.
 - **Runtime capability taxonomy (E64).** The bus now knows what each agent runtime (`cc-headless`, `cc-pool`, `claude-code`, other polled harnesses) supports: system turns, schedules, session resume and fork, exclusive sessions, a live agent, native memory, context injection and hook events. `/status` gains a `Runtimes:` section and `/api/v1/health` a `runtimes` object. Live checks cover a pane still leased to its conversation, a Claude transcript still on disk, and a harness still polling. Features can declare required capabilities and get a startup error for impossible configurations. See `docs/RUNTIME_CAPABILITIES.md`.
 - **Native AgentBus macOS client (E62, in progress).** SwiftUI/XcodeGen source adds Keychain setup, resilient app protocol, SwiftData cache, conversations, files, notifications, and Dock unread state. Xcode and live work-laptop acceptance remain pending.
 - **Cross-channel app continuation (E60).** App messages can continue a listed Telegram, email, or Siri session with replies returned to the app. Resumable Earlier sessions fork into a new app topic while preserving the original history and active session.

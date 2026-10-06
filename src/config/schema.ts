@@ -586,11 +586,27 @@ const AgentMediaSchema = z.object({
 });
 
 /**
+ * An owner contact (E65): a person who receives bus advisories about this
+ * agent, on one channel. `contact_id` is a bare key of `contacts`; `channel`
+ * is the exact channel their conversation arrives on (e.g. "telegram",
+ * "telegram:peggy", "app"). Owners are used for advisories (and E68
+ * proposals) only — they are not a trust tier.
+ */
+const AgentOwnerSchema = z.object({
+  channel: z.string().min(1),
+  contact_id: z.string().min(1).refine((id) => !id.startsWith('contact:'), {
+    message: 'contact_id must be a bare contact key (drop the "contact:" prefix)',
+  }),
+});
+
+/**
  * Per-agent configuration, keyed by recipient id (e.g. "agent:claude").
- * Additional agent-scoped settings can be added here over time.
+ * Additional agent-scoped settings live here under the same key: E65 adds
+ * `owners`; E66 adds `journaling`, E67 `memory`.
  */
 const AgentConfigSchema = z.object({
   media: AgentMediaSchema.optional(),
+  owners: z.array(AgentOwnerSchema).optional(),
 });
 
 /**
@@ -795,6 +811,29 @@ export const AppConfigSchema = z.object({
     routes: [],
     relays: [],
   }),
+}).superRefine((cfg, ctx) => {
+  // E65 — owner contacts must name a configured contact, once per channel.
+  for (const [agentKey, agent] of Object.entries(cfg.agents)) {
+    const seen = new Set<string>();
+    (agent.owners ?? []).forEach((owner, i) => {
+      if (!cfg.contacts[owner.contact_id]) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Owner contact "${owner.contact_id}" is not defined under contacts`,
+          path: ['agents', agentKey, 'owners', i, 'contact_id'],
+        });
+      }
+      const key = `${owner.contact_id}\u0000${owner.channel}`;
+      if (seen.has(key)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Duplicate owner ${owner.contact_id} on ${owner.channel}`,
+          path: ['agents', agentKey, 'owners', i],
+        });
+      }
+      seen.add(key);
+    });
+  }
 });
 
 /** Fully-typed application configuration */

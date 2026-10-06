@@ -990,10 +990,10 @@ epics:
       S64.2: complete  # Runtime resolution and live checks (src/core/runtime-resolver.ts; resume + session tracker use it)
       S64.3: complete  # Requirement validation in loadConfig, /status + health, docs/RUNTIME_CAPABILITIES.md
   E65:
-    status: pending
+    status: in-progress
     notes: Owner contacts and bus advisories (owner-only, spoof-proof system block, direct channel for critical). Depends on E64.
     stories:
-      S65.1: pending  # Owner contacts config
+      S65.1: complete  # Owner contacts config (agents.<id>.owners, src/core/owners.ts)
       S65.2: pending  # Advisory store and lifecycle
       S65.3: pending  # Delivery paths and advisory_ack
       S65.4: pending  # Visibility and docs

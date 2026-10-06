@@ -179,12 +179,15 @@ memory:
   context_window_hours: 48
   claude_api_model: claude-sonnet-4-6
 
-# Per-agent settings keyed by recipient id — docs/ATTACHMENTS.md
+# Per-agent settings keyed by recipient id — docs/ATTACHMENTS.md, docs/ADVISORIES.md
 agents:
   "agent:claude":
     media:
       download_path: /tmp/agentbus/claude   # inbound images and files; created at startup
       ttl_seconds: 3600
+    owners:                          # who receives bus advisories about this agent
+      - channel: telegram            # exact channel of the owner's conversation
+        contact_id: alice            # a key under contacts
 
 pipeline:
   dedup_window_ms: 30000
