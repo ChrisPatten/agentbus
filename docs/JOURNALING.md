@@ -148,11 +148,21 @@ The job (`JournalJob`, `src/journaling/types.ts`) carries ids (run, agent, pane,
 
 | Journaler | Status |
 |---|---|
-| `cc-headless` | **Provisional** (`journalers/cc-headless-provisional.ts`): runs the existing headless journaling turn (`HeadlessHandle.journalSession`, `claude -p <prompt> --resume <id>`) for `cc-headless` sessions only; `unavailable` when the instance isn't running, the session has no Claude session yet, or its transcript is gone. Ignores the journaler `model`. S66.6 replaces it. |
+| `cc-headless` | See [cc-headless journaler](#cc-headless-journaler). |
 | `system-message` | *(part B, S66.8)* |
 | `script` | *(part B, S66.7)* |
 
-Until part B registers them, only `cc-headless` sessions can be journaled. A chain on any other runtime reports `unavailable` for every entry and exhausts. Leave `agents.<id>.journaling` unset for those agents until then.
+### cc-headless journaler
+
+Resumes the session's Claude transcript and journals there, with the whole conversation in context (`fidelity: full-session`). Code: `journalers/cc-headless.ts`.
+
+- **`canJournal`**: the session runs on `cc-headless` or `cc-pool`, has a `claude_session_id`, and its transcript is still on disk under the runtime's working directory (Claude Code's `cleanupPeriodDays` deletes old ones). For `cc-headless`, the instance must be running.
+- **cc-headless sessions** go through the instance (`HeadlessHandle.journalSession`): same system prompt, MCP config and memory context as a normal turn, serialized with live turns on the same Claude session. Delivery tools are disallowed. See [CC_HEADLESS_ADAPTER.md](CC_HEADLESS_ADAPTER.md#journaling-on-pause-or-ceiling).
+- **cc-pool sessions** run `claude -p <prompt> --resume <claude_session_id> --fork-session --output-format json --permission-mode acceptEdits --strict-mcp-config` in the pool's `working_dir`, with the pool's `claude_bin` and `pane_env`. `--fork-session` leaves the pane's own transcript untouched (the pane may still be live), and with no MCP servers the turn can't message anyone.
+- **Model**: `cc-headless.model`, else `journaling.model`, else the runtime instance's `model`, passed as `--model`.
+- **Timeout**: `timeout_ms`. A turn that outlives it, or one the chain runner gives up on (3× the timeout), has its process group killed: SIGTERM, then SIGKILL after 5 s. The attempt is `failed-after-start`.
+- **Prompt**: the journaler prompt, then what is new since the last journal (message count, window, cursor) and the paths of any transcript snapshots, and a request to reply with one line, or `NOTHING_TO_RECORD` when nothing was worth keeping (`nothing-to-do`).
+- **Cost and tokens** come from the CLI result event (`total_cost_usd`; input tokens include cache reads and writes).
 
 ## Chain runner and outcomes
 

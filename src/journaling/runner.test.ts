@@ -8,7 +8,6 @@ import { resolveJournalingSettings } from './config.js';
 import { JournalerRegistry } from './registry.js';
 import { runChain } from './runner.js';
 import { JournalStore } from './store.js';
-import { ProvisionalHeadlessJournaler } from './journalers/cc-headless-provisional.js';
 import type { Journaler, JournalJob, JournalOutcome, JournalerId } from './types.js';
 
 let db: Database.Database;
@@ -146,31 +145,20 @@ describe('runChain (E66 S66.5)', () => {
   });
 });
 
-describe('ProvisionalHeadlessJournaler (E66 part A)', () => {
-  const live = (ok: boolean) => ({ checkLive: () => ({ ok, capability: 'sessionResume' as const, check: 'transcript' as const, reason: ok ? 'on disk' : 'transcript missing' }) });
-
-  it('is unavailable off cc-headless, without a handle, a Claude session, or the transcript', () => {
-    const j = new ProvisionalHeadlessJournaler(live(true));
-    expect(j.canJournal(job()).ok).toBe(false); // cc-pool
-    const headlessJob = job({ runtime: 'cc-headless', agentId: 'agent:baxter' });
-    expect(j.canJournal(headlessJob)).toMatchObject({ ok: false, reason: expect.stringContaining('not running') });
-    j.addHandle('agent:baxter', { journalSession: vi.fn() });
-    expect(j.canJournal({ ...headlessJob, claudeSessionId: null })).toMatchObject({ ok: false });
-    expect(j.canJournal(headlessJob)).toEqual({ ok: true });
-    const missing = new ProvisionalHeadlessJournaler(live(false));
-    missing.addHandle('agent:baxter', { journalSession: vi.fn() });
-    expect(missing.canJournal(headlessJob)).toEqual({ ok: false, reason: 'transcript missing' });
-  });
-
-  it('maps the turn result to done / failed-after-start', async () => {
-    const j = new ProvisionalHeadlessJournaler(live(true));
-    const journalSession = vi.fn()
-      .mockResolvedValueOnce({ error: null, costUsd: 0.02, inputTokens: 10, outputTokens: 5 })
-      .mockResolvedValueOnce({ error: 'exit 1', costUsd: null, inputTokens: null, outputTokens: null });
-    j.addHandle('agent:baxter', { journalSession });
-    const headlessJob = job({ runtime: 'cc-headless', agentId: 'agent:baxter' });
-    expect(await j.run(headlessJob)).toMatchObject({ outcome: 'done', fidelity: 'full-session', costUsd: 0.02 });
-    expect(journalSession).toHaveBeenCalledWith({ conversationId: 'conv-1', claudeSessionId: 'claude-1', contactId: 'chris', channel: 'telegram', prompt: settings.journalers['cc-headless'].prompt });
-    expect(await j.run(headlessJob)).toMatchObject({ outcome: 'failed-after-start', error: 'exit 1' });
+describe('settle timeout (S66.6)', () => {
+  it('aborts the attempt signal so the journaler can kill its work, and moves on', async () => {
+    let seen: AbortSignal | undefined;
+    const stuck = journaler('system-message', 'done', {
+      run: vi.fn((_job: JournalJob, runCtx?: { signal: AbortSignal }) => {
+        seen = runCtx?.signal;
+        return new Promise<never>(() => {});
+      }),
+    });
+    registry.register(stuck);
+    registry.register(journaler('script', 'done'));
+    const summary = await runChain(job({ timeoutMs: 5 }), ctx(['system-message', 'script']), deps());
+    expect(seen?.aborted).toBe(true);
+    expect(summary.attempts.map((a) => a.outcome)).toEqual(['failed-after-start', 'done']);
+    expect(summary.attempts[0]!.error).toContain('did not settle');
   });
 });

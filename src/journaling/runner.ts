@@ -32,7 +32,8 @@ import {
 
 /**
  * Safety net for a journaler that never settles: after this multiple of the
- * job timeout the attempt is recorded as `failed-after-start` and the
+ * job timeout the attempt's abort signal fires (the journaler kills its
+ * process group), the attempt is recorded as `failed-after-start` and the
  * agent's lane is released. Journalers enforce their own timeouts first.
  */
 export const SETTLE_TIMEOUT_FACTOR = 3;
@@ -74,10 +75,27 @@ export interface ChainRunContext {
   backlogSince: string | null;
 }
 
-function withSettleTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+/**
+ * Run `start(signal)`, rejecting after `ms`. On timeout the signal aborts
+ * first, so the journaler can kill what it started (its `claude -p` or
+ * script process group) instead of leaving it running after the lane moves on.
+ */
+function withSettleTimeout<T>(start: (signal: AbortSignal) => Promise<T>, ms: number): Promise<T> {
+  const controller = new AbortController();
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`journaler did not settle within ${ms} ms`)), ms);
+    const timer = setTimeout(() => {
+      controller.abort(new Error('settle timeout'));
+      reject(new Error(`journaler did not settle within ${ms} ms; its work was stopped`));
+    }, ms);
     timer.unref?.();
+    let promise: Promise<T>;
+    try {
+      promise = start(controller.signal);
+    } catch (err) {
+      clearTimeout(timer);
+      reject(err);
+      return;
+    }
     promise.then(
       (v) => { clearTimeout(timer); resolve(v); },
       (e: unknown) => { clearTimeout(timer); reject(e); },
@@ -122,7 +140,7 @@ export async function runChain(job: JournalJob, ctx: ChainRunContext, deps: Chai
         error = available.reason ?? 'unavailable';
       } else {
         try {
-          result = await withSettleTimeout(journaler.run(job), Math.max(1, job.timeoutMs) * SETTLE_TIMEOUT_FACTOR);
+          result = await withSettleTimeout((signal) => journaler.run(job, { signal }), Math.max(1, job.timeoutMs) * SETTLE_TIMEOUT_FACTOR);
           outcome = result.outcome;
           error = result.error ?? null;
         } catch (err) {

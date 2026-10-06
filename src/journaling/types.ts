@@ -146,6 +146,16 @@ export interface JournalRunResult {
 }
 
 /**
+ * Per-attempt context from the chain runner. `signal` aborts when the
+ * runner's settle timeout (a multiple of the job timeout) fires: a
+ * journaler must then stop its work (kill its process group, release its
+ * holds) and settle promptly.
+ */
+export interface JournalRunContext {
+  signal: AbortSignal;
+}
+
+/**
  * A journaler: one way to carry out a journal run. Register instances with
  * `JournalerRegistry`. `requires` is checked statically (config load and
  * before each attempt); `canJournal` covers live state (pane still leased,
@@ -157,5 +167,5 @@ export interface Journaler {
   readonly supportsKinds: readonly JobKind[];
   canJournal(job: JournalJob): JournalAvailability | Promise<JournalAvailability>;
   /** Must not throw for expected failures; a throw is recorded as `failed-after-start`. */
-  run(job: JournalJob): Promise<JournalRunResult>;
+  run(job: JournalJob, ctx?: JournalRunContext): Promise<JournalRunResult>;
 }

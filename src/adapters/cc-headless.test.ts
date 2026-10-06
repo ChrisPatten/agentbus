@@ -523,8 +523,8 @@ describe('conversation serialization after early delivery (E58)', () => {
     });
     const { startHeadless } = await import('./cc-headless.js');
     const handle = startHeadless(realDb as unknown as Database.Database).get('agent:peggy')!;
-    handle.journalResumeId({ claudeSessionId: 'old-a', contactId: 'alice', channel: 'telegram', conversationId: 'conv-a' });
-    handle.journalResumeId({ claudeSessionId: 'old-b', contactId: 'alice', channel: 'telegram', conversationId: 'conv-b' });
+    void handle.journalSession({ claudeSessionId: 'old-a', contactId: 'alice', channel: 'telegram', conversationId: 'conv-a' });
+    void handle.journalSession({ claudeSessionId: 'old-b', contactId: 'alice', channel: 'telegram', conversationId: 'conv-b' });
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(children).toHaveLength(1);
     expect(handle.snapshot()).toMatchObject({ running_system: 1, waiting: 1 });
@@ -536,6 +536,45 @@ describe('conversation serialization after early delivery (E58)', () => {
     children[1]!.emit('close', 0);
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(handle.snapshot()).toMatchObject({ running_system: 0, waiting: 0 });
+  });
+
+  it('runs a journaling turn with the journaler model, no delivery tools, in its own process group (E66 S66.6)', async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(pendingResponse([])));
+    const children: ReturnType<typeof makeFakeChild>[] = [];
+    spawnMock.mockImplementation(() => {
+      const child = makeFakeChild();
+      children.push(child);
+      return child as unknown as import('node:child_process').ChildProcess;
+    });
+    const { startHeadless } = await import('./cc-headless.js');
+    const handle = startHeadless(realDb as unknown as Database.Database).get('agent:peggy')!;
+    const pending = handle.journalSession({
+      claudeSessionId: 'old-a', contactId: 'alice', channel: 'telegram', conversationId: 'conv-a', model: 'claude-haiku-4-5', prompt: 'Journal.',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const [, args, options] = spawnMock.mock.calls[0]!;
+    expect(args).toEqual(expect.arrayContaining(['--model', 'claude-haiku-4-5', '--resume', 'old-a', '--disallowedTools']));
+    expect(args).not.toContain('--allowedTools');
+    expect(options).toMatchObject({ detached: true });
+    writeEvent(children[0]!.stdout, { type: 'result', session_id: 'old-a', result: 'Recorded.', total_cost_usd: 0.03, usage: { input_tokens: 9, output_tokens: 4 } });
+    children[0]!.emit('close', 0);
+    await expect(pending).resolves.toMatchObject({ error: null, costUsd: 0.03, inputTokens: 9, outputTokens: 4, resultText: 'Recorded.' });
+  });
+
+  it('kills a journaling turn that outlives its timeout (E66 S66.6)', async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(pendingResponse([])));
+    const children: ReturnType<typeof makeFakeChild>[] = [];
+    spawnMock.mockImplementation(() => {
+      const child = makeFakeChild();
+      child.kill.mockImplementation(() => { setImmediate(() => child.emit('close', null)); return true; });
+      children.push(child);
+      return child as unknown as import('node:child_process').ChildProcess;
+    });
+    const { startHeadless } = await import('./cc-headless.js');
+    const handle = startHeadless(realDb as unknown as Database.Database).get('agent:peggy')!;
+    const result = await handle.journalSession({ claudeSessionId: 'old-a', contactId: 'alice', channel: 'telegram', conversationId: 'conv-a', timeoutMs: 30 });
+    expect(children[0]!.kill).toHaveBeenCalledWith('SIGTERM');
+    expect(result).toMatchObject({ timedOut: true, error: expect.stringContaining('timed out') });
   });
 
   it('serializes an Earlier fork against journaling on the same Claude transcript without holding capacity', async () => {
@@ -560,7 +599,7 @@ describe('conversation serialization after early delivery (E58)', () => {
     });
     const { startHeadless } = await import('./cc-headless.js');
     const handle = startHeadless(realDb as unknown as Database.Database).get('agent:peggy')!;
-    handle.journalResumeId({ claudeSessionId: 'shared-claude-id', contactId: 'alice', channel: 'telegram', conversationId: 'old-conversation' });
+    void handle.journalSession({ claudeSessionId: 'shared-claude-id', contactId: 'alice', channel: 'telegram', conversationId: 'old-conversation' });
     await new Promise(resolve => setTimeout(resolve, 45));
     expect(children).toHaveLength(1);
     expect(handle.snapshot()).toMatchObject({ running_system: 1, running_user: 0, waiting: 1 });

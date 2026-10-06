@@ -69,7 +69,7 @@ import { resolveJournalingSettings } from './journaling/config.js';
 import { reviewChains } from './journaling/advisories.js';
 import { JournalEngine } from './journaling/engine.js';
 import { JournalerRegistry } from './journaling/registry.js';
-import { ProvisionalHeadlessJournaler } from './journaling/journalers/cc-headless-provisional.js';
+import { CcHeadlessJournaler } from './journaling/journalers/cc-headless.js';
 import { HarnessEvents, createHookHealthTicker } from './journaling/events.js';
 
 const configPath = process.env['AGENTBUS_CONFIG'] ?? resolve(process.cwd(), 'config.yaml');
@@ -133,7 +133,7 @@ reviewChains(journalingSettings.values(), runtimeResolver, advisories);
 // events feed it; it walks each agent's journaler chain. Journalers are
 // registered once their runtimes start (below).
 const journalers = new JournalerRegistry();
-const headlessJournaler = new ProvisionalHeadlessJournaler(runtimeResolver);
+const headlessJournaler = new CcHeadlessJournaler({ resolver: runtimeResolver });
 journalers.register(headlessJournaler);
 const journalEngine = new JournalEngine({
   db, config, resolver: runtimeResolver, registry: journalers, advisories, owners: ownerDirectory, settings: journalingSettings,
@@ -348,8 +348,8 @@ deliveryWorker.start();
 // (E20). Each instance registers its own runner, keyed by agent_id, so a
 // multi-agent deployment (E23) journals each session with its owning agent.
 for (const [agentId, headless] of startHeadless(db)) {
-  // E66 — the (provisional) cc-headless journaler runs this instance's
-  // journaling turns.
+  // E66 — the cc-headless journaler runs this instance's journaling turns
+  // through its handle (serialized with live turns on the same session).
   headlessJournaler.addHandle(agentId, headless);
   // Let /stop reach the owning instance's in-flight turn.
   headlessControl.stopTurn.set(agentId, headless.stopTurn);
