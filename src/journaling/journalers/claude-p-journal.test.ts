@@ -89,6 +89,17 @@ describe.skipIf(!hasJq)('scripts/journalers/claude-p-journal.sh (S66.7)', { time
     expect((await journaler().run(job({ CLAUDE_BIN: '/nonexistent/claude' }))).outcome).toBe('unavailable');
   });
 
+  it('runs consolidation jobs with the payload prompt and no conversation (E68)', async () => {
+    const result = await journaler().run(job({ CLAUDE_BIN: fakeClaude('Merged duplicates.') }, {
+      kind: 'consolidate', trigger: 'scheduled', messages: [], humanMessageCount: 0, sessionId: '', conversationId: '',
+      prompt: 'Consolidate. Archive: memory/archive',
+    }));
+    expect(result).toMatchObject({ outcome: 'done', notes: 'Merged duplicates.' });
+    const prompt = readFileSync(join(dir, 'prompt.txt'), 'utf-8');
+    expect(prompt).toContain('Consolidate. Archive: memory/archive');
+    expect(prompt).not.toContain('BEGIN CONVERSATION');
+  });
+
   it('fetches earlier run notes with X-Bus-Token when AGENTBUS_BUS_TOKEN is set', async () => {
     const seen: Array<{ url: string; token: string | undefined }> = [];
     server = createServer((req, res) => {

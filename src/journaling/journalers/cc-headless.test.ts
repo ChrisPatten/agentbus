@@ -3,7 +3,7 @@ import { AppConfigSchema } from '../../config/schema.js';
 import { resolveJournalingSettings } from '../config.js';
 import type { RunProcessOptions, RunProcessResult } from '../process.js';
 import type { JournalJob } from '../types.js';
-import { CcHeadlessJournaler, NOTHING_TO_RECORD, parseClaudeJsonResult } from './cc-headless.js';
+import { CcHeadlessJournaler, NOTHING_TO_RECORD, parseClaudeJsonResult, protectedPathDenyRules } from './cc-headless.js';
 
 const settings = resolveJournalingSettings(AppConfigSchema.parse({
   bus: { db_path: ':memory:' }, adapters: {}, memory: {},
@@ -147,6 +147,65 @@ describe('CcHeadlessJournaler on cc-pool (direct claude -p)', () => {
     expect(await j.run(job())).toMatchObject({ outcome: 'failed-after-start', error: 'Session not found' });
     expect(await j.run(job())).toMatchObject({ outcome: 'failed-after-start', error: 'boom' });
     expect((await j.run(job())).outcome).toBe('nothing-to-do');
+  });
+});
+
+describe('CcHeadlessJournaler consolidation (E68 S68.1)', () => {
+  const consolidation = {
+    lastPassAt: null, sessionRunsSince: 2, indexPath: null, dailyDir: null, archiveDir: null,
+    archiveBefore: '2026-09-06', maxMemoryLines: 200, maxMemoryBytes: 25_600,
+  };
+  const cjob = (over: Partial<JournalJob> = {}) => job({
+    kind: 'consolidate', trigger: 'scheduled', sessionId: '', conversationId: '', claudeSessionId: null, snapshots: [],
+    prompt: 'Consolidate your memory.', consolidation, ...over,
+  });
+
+  it('runs a fresh turn through the cc-headless handle, with deny rules for protected paths', async () => {
+    const consolidate = vi.fn().mockResolvedValue({ error: null, costUsd: 0.1, inputTokens: 5, outputTokens: 5, resultText: 'Merged two feedback memories.' });
+    const j = new CcHeadlessJournaler({ resolver: resolver() });
+    const headless = cjob({ runtime: 'cc-headless', agentId: 'agent:baxter', sessionAgentId: 'agent:baxter', protectedPaths: ['/agents/baxter/CLAUDE.md', '/agents/baxter/skills/'] });
+    expect(j.canJournal(headless)).toMatchObject({ ok: false });
+    j.addHandle('agent:baxter', { journalSession: vi.fn(), consolidate });
+    expect(j.canJournal(headless)).toEqual({ ok: true });
+    expect(await j.run(headless)).toMatchObject({ outcome: 'done', notes: 'Merged two feedback memories.' });
+    const req = consolidate.mock.calls[0]![0];
+    expect(req.prompt).toContain('Consolidate your memory.');
+    expect(req.prompt).toContain(NOTHING_TO_RECORD);
+    expect(req.denyTools).toEqual([
+      'Edit(//agents/baxter/CLAUDE.md)', 'Write(//agents/baxter/CLAUDE.md)',
+      'Edit(//agents/baxter/skills/**)', 'Write(//agents/baxter/skills/**)',
+    ]);
+  });
+
+  it('runs a fresh claude -p (no --resume) on cc-pool with the agentbus tools and delivery tools denied', async () => {
+    const runProcess = vi.fn(async (_o: RunProcessOptions) => proc({ stdout: resultJson() }));
+    const toolsMcpConfig = vi.fn(() => ({ mcpServers: { agentbus: { command: 'npx' } } }));
+    const j = new CcHeadlessJournaler({ resolver: resolver(), runProcess, env: () => ({}), toolsMcpConfig });
+    expect(j.canJournal(cjob())).toEqual({ ok: true });
+    expect(j.canJournal(cjob({ runtime: 'claude-code' }))).toMatchObject({ ok: false });
+    expect((await j.run(cjob({ protectedPaths: ['/agents/peggy/.claude/'] }))).outcome).toBe('done');
+    const args = runProcess.mock.calls[0]![0].args;
+    expect(args).not.toContain('--resume');
+    expect(args).not.toContain('--fork-session');
+    expect(toolsMcpConfig).toHaveBeenCalledWith('peggy');
+    expect(JSON.parse(args[args.indexOf('--mcp-config') + 1]!)).toEqual({ mcpServers: { agentbus: { command: 'npx' } } });
+    const deny = args[args.indexOf('--disallowedTools') + 1]!;
+    expect(deny).toContain('mcp__agentbus__send_message');
+    expect(deny).toContain('Edit(//agents/peggy/.claude/**)');
+  });
+
+  it('session forks get deny rules but keep no MCP servers', async () => {
+    const runProcess = vi.fn(async (_o: RunProcessOptions) => proc({ stdout: resultJson() }));
+    const j = new CcHeadlessJournaler({ resolver: resolver(), runProcess, env: () => ({}), toolsMcpConfig: () => ({ x: 1 }) });
+    await j.run(job({ protectedPaths: ['/agents/peggy/CLAUDE.md'] }));
+    const args = runProcess.mock.calls[0]![0].args;
+    expect(args[args.indexOf('--mcp-config') + 1]).toBe('{"mcpServers":{}}');
+    expect(args[args.indexOf('--disallowedTools') + 1]).toBe('Edit(//agents/peggy/CLAUDE.md),Write(//agents/peggy/CLAUDE.md)');
+  });
+
+  it('protectedPathDenyRules handles relative paths and none', () => {
+    expect(protectedPathDenyRules(undefined)).toEqual([]);
+    expect(protectedPathDenyRules(['skills/'])).toEqual(['Edit(skills/**)', 'Write(skills/**)']);
   });
 });
 

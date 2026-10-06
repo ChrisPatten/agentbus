@@ -369,6 +369,31 @@ export class JournalStore {
       .all(...params) as JournalRunRow[];
   }
 
+  /**
+   * E68 — when the agent's last successful consolidation started (an
+   * attempt that ended `done` or `nothing-to-do`), or null.
+   */
+  lastConsolidation(agentId: string): string | null {
+    const row = this.db
+      .prepare(
+        `SELECT MAX(started_at) AS at FROM journal_runs
+         WHERE agent_id = ? AND kind = 'consolidate' AND outcome IN ('done', 'nothing-to-do')`,
+      )
+      .get(agentId) as { at: string | null };
+    return row.at ?? null;
+  }
+
+  /** E68 — session journal runs that ended `done` for the agent after `since` (all of them when null). */
+  sessionRunsSince(agentId: string, since: string | null): number {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(DISTINCT run_id) AS n FROM journal_runs
+         WHERE agent_id = ? AND kind = 'session' AND outcome = 'done' AND (? IS NULL OR started_at > ?)`,
+      )
+      .get(agentId, since, since) as { n: number };
+    return row.n;
+  }
+
   /** Delete runs older than the retention window. Returns rows deleted. */
   sweepRuns(retentionDays: number = JOURNAL_RUN_RETENTION_DAYS): number {
     const cutoff = new Date(this.now().getTime() - retentionDays * 86_400_000).toISOString();

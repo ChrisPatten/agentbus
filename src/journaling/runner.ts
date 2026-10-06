@@ -15,10 +15,18 @@
  *   - exhausted: the cursor stays; count the attempt for this window and
  *     the agent's streak; raise `journaling:chain-exhausted` (warning, or
  *     critical after 3 consecutive exhaustions or 24 h of backlog).
+ * Consolidation jobs (E68) skip the cursor bookkeeping: success resolves
+ * `journaling:consolidation-exhausted`, exhaustion raises it (warning).
  * Partial writes from a failed attempt are not rolled back (out of scope).
  */
 import { missingCapabilities, type RuntimeCapabilities } from '../core/runtime-capabilities.js';
-import { raiseChainExhausted, resolveChainExhausted, type JournalAdvisories } from './advisories.js';
+import {
+  raiseChainExhausted,
+  raiseConsolidationExhausted,
+  resolveChainExhausted,
+  resolveConsolidationExhausted,
+  type JournalAdvisories,
+} from './advisories.js';
 import { JOURNALER_REQUIREMENTS } from './config.js';
 import type { JournalerRegistry } from './registry.js';
 import type { JournalStore } from './store.js';
@@ -156,8 +164,8 @@ export async function runChain(job: JournalJob, ctx: ChainRunContext, deps: Chai
     deps.store.insertRun({
       runId: job.runId,
       agentId: job.agentId,
-      sessionId: job.sessionId,
-      conversationId: job.conversationId,
+      sessionId: job.sessionId || null,
+      conversationId: job.conversationId || null,
       kind: job.kind,
       trigger: job.trigger,
       journaler: id,
@@ -185,7 +193,19 @@ export async function runChain(job: JournalJob, ctx: ChainRunContext, deps: Chai
   }
 
   let summary: ChainRunSummary;
-  if (winner) {
+  if (job.kind === 'consolidate') {
+    // E68: consolidation has no session cursor or window; its health is its own advisory.
+    if (winner) {
+      resolveConsolidationExhausted(deps.advisories, job.agentId);
+      summary = { runId: job.runId, outcome: winner.outcome as 'done' | 'nothing-to-do', journaler: winner.journaler, attempts, cursorAdvanced: false, advisory: null };
+    } else {
+      raiseConsolidationExhausted(deps.advisories, {
+        agentId: job.agentId,
+        attempts: attempts.map((a) => ({ journaler: a.journaler, outcome: a.outcome, error: a.error })),
+      });
+      summary = { runId: job.runId, outcome: 'exhausted', journaler: null, attempts, cursorAdvanced: false, advisory: 'warning' };
+    }
+  } else if (winner) {
     const success = winner.outcome as 'done' | 'nothing-to-do';
     deps.store.advanceCursor(job.sessionId, job.window.advanceTo);
     deps.store.recordSuccess(job.sessionId, success);
@@ -217,6 +237,7 @@ export async function runChain(job: JournalJob, ctx: ChainRunContext, deps: Chai
   // One structured line per run (S66.10 reads the same fields from journal_runs).
   log(`[journaling] ${JSON.stringify({
     run_id: job.runId,
+    kind: job.kind,
     agent: job.agentId,
     session: job.sessionId,
     conversation: job.conversationId,

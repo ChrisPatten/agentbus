@@ -7,6 +7,9 @@
 # agent's memory files. Use it as the last entry of a journaling chain, or as
 # a starting point for your own script.
 #
+# E68: consolidation jobs (`kind: "consolidate"`) run the payload's
+# consolidation prompt the same way, with no conversation.
+#
 #   agents:
 #     "agent:baxter":
 #       journaling:
@@ -53,7 +56,7 @@ MEMORY_DIR="$(jq -r '.memory_dir // empty' <<<"$PAYLOAD")"
 KIND="$(jq -r '.kind' <<<"$PAYLOAD")"
 [[ -n "$WORKING_DIR" && -d "$WORKING_DIR" ]] || { echo "no working directory in payload" >&2; exit 75; }
 [[ -n "$MEMORY_DIR" ]] || { echo "no memory directory in payload" >&2; exit 75; }
-[[ "$KIND" == "session" ]] || { echo "job kind $KIND is not supported by this script" >&2; exit 75; }
+[[ "$KIND" == "session" || "$KIND" == "consolidate" ]] || { echo "job kind $KIND is not supported by this script" >&2; exit 75; }
 
 # Optional: notes from this conversation's recent journal runs, for continuity.
 # The bus token goes to curl on stdin (-K -), so it never shows in `ps`.
@@ -68,7 +71,7 @@ bus_get() {
   fi
 }
 PREVIOUS=""
-if [[ -n "${AGENTBUS_URL:-}" ]] && command -v curl >/dev/null 2>&1; then
+if [[ "$KIND" == "session" && -n "${AGENTBUS_URL:-}" ]] && command -v curl >/dev/null 2>&1; then
   AGENT="$(jq -r '.agent_id' <<<"$PAYLOAD")"
   CONV="$(jq -r '.conversation_id' <<<"$PAYLOAD")"
   RUNS="$(bus_get "$AGENTBUS_URL/api/v1/journal/runs?agent=$(jq -rn --arg v "$AGENT" '$v|@uri')&conversation=$(jq -rn --arg v "$CONV" '$v|@uri')&limit=5" 2>/dev/null)"
@@ -87,6 +90,13 @@ TRANSCRIPT="$(jq -r --argjson max "$MAX_BODY" '
 ' <<<"$PAYLOAD")"
 SNAPSHOTS="$(jq -r '.snapshots[]? | "- \(.path) (\(.event))"' <<<"$PAYLOAD")"
 
+if [[ "$KIND" == "consolidate" ]]; then
+  # The bus wrote the whole consolidation instruction (paths, budgets, dates).
+  PROMPT="$INSTRUCTION
+
+When you are done, reply with one short line saying what you changed. If
+nothing needed changing, reply with exactly $NOTHING."
+else
 PROMPT="$INSTRUCTION
 
 Your memory directory is $MEMORY_DIR. Update the memory files there (today's
@@ -109,6 +119,7 @@ $TRANSCRIPT
 
 When you are done, reply with one short line saying what you recorded. If
 nothing was worth keeping, reply with exactly $NOTHING."
+fi
 
 ARGS=(-p --output-format json --permission-mode acceptEdits --mcp-config '{"mcpServers":{}}' --strict-mcp-config)
 # Point Claude Code auto memory at the agent's memory dir (E67), so the run

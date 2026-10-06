@@ -37,10 +37,14 @@ export type JobKind = 'session' | 'consolidate';
  *   release, shutdown,      They bypass min_human_messages.
  *   pre-compact, session-end
  *   manual                  /journal now: bypasses the pause threshold and
- *                           min_human_messages, respects the cursor
+ *                           min_human_messages, respects the cursor;
+ *                           /journal consolidate
+ *   scheduled               consolidation's own cron (E68)
  */
 export const JOURNAL_TRIGGERS = [
   'pause', 'ceiling', 'close', 'clear', 'evict', 'release', 'shutdown', 'pre-compact', 'session-end', 'manual',
+  // E68 — consolidation's cron (manual consolidation uses `manual`).
+  'scheduled',
 ] as const;
 export type JournalTrigger = (typeof JOURNAL_TRIGGERS)[number];
 
@@ -78,6 +82,25 @@ export interface JournalSnapshot {
   event: string;
   path: string;
   created_at: string;
+}
+
+/**
+ * E68 S68.1 — what a consolidation job works on: the agent's memory files
+ * and the journal runs since the last pass. Set on `consolidate` jobs only.
+ */
+export interface ConsolidationContext {
+  /** When the last successful consolidation started (null: never). */
+  lastPassAt: string | null;
+  /** Session journal runs that ended `done` since the last pass. */
+  sessionRunsSince: number;
+  indexPath: string | null;
+  dailyDir: string | null;
+  archiveDir: string | null;
+  /** Local date `YYYY-MM-DD`: dailies older than this may be archived once promoted (30 days). */
+  archiveBefore: string;
+  /** MEMORY.md budget: native auto memory loads the first 200 lines / 25 KB. */
+  maxMemoryLines: number;
+  maxMemoryBytes: number;
 }
 
 /**
@@ -134,6 +157,14 @@ export interface JournalJob {
   timeoutMs: number;
   /** The agent's effective journaling settings; per-journaler settings live under `settings.journalers`. */
   settings: JournalingSettings;
+  /** E68 — set on `consolidate` jobs. Session fields (session/conversation/channel/contact) are empty strings there. */
+  consolidation?: ConsolidationContext;
+  /**
+   * E68 S68.4 — the agent's protected paths, absolute; directories end in
+   * `/`. Journalers that start `claude` deny edits to them; the chain runner
+   * hashes them before and after the run.
+   */
+  protectedPaths?: string[];
 }
 
 /** Result of `Journaler.canJournal`: cheap, side-effect free. */

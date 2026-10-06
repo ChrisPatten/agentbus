@@ -13,7 +13,7 @@ Slash commands let you operate AgentBus from any connected channel without SSH a
 | `/sessions [channel] [--limit N]` | List recent sessions | `/sessions telegram --limit 5` |
 | `/clear` | Start a fresh session; journal the previous one in the background | `/clear` |
 | `/stop` | Cancel the current in-flight turn | `/stop` |
-| `/journal [runs [n] \| now]` | Journaling status, recent journal runs, or journal this conversation now | `/journal runs 10` |
+| `/journal [runs [n] \| now \| consolidate]` | Journaling status, recent journal runs, journal this conversation now, or consolidate memory now | `/journal runs 10` |
 | `/cost` | Show day/week/month API cost for this agent | `/cost` |
 | `/pool [pool-agent-id]` | Show cc-pool pane leases and parked-queue depth | `/pool peggy` |
 | `/pane [n\|all]` | Send a PNG snapshot of the cc-pool tmux pane(s) | `/pane 2` |
@@ -112,13 +112,14 @@ Scope and edge cases:
 
 See [CC_HEADLESS_ADAPTER.md](./CC_HEADLESS_ADAPTER.md) and [CC_POOL_ADAPTER.md](./CC_POOL_ADAPTER.md#session-tracker-interaction).
 
-### `/journal [runs [n] | now]`
+### `/journal [runs [n] | now | consolidate]`
 
 Journaling status and control for the conversation you send it from (E66, [JOURNALING.md](JOURNALING.md#observability)).
 
 - **`/journal`**: for this conversation, when it was last journaled, how many messages from people are waiting (and whether that is below `min_human_messages`), a pending final trigger, and a run in progress. For its agent: the chain (and entries the runtime can't run), last success, failed runs in a row, the last failure, the backlog, hook health and open journaling advisories. Then the agent's memory setup (E67): how memory loads, whether its `CLAUDE.md` imports `recent.md`, and warnings such as a missing import or an `autoMemoryDirectory` set where Claude Code ignores it ([AGENT_MEMORY.md](AGENT_MEMORY.md#setup-checks)).
 - **`/journal runs [n]`**: the agent's last `n` journal attempts (default 5, at most 20): when, trigger, journaler (and which one it fell back from), outcome, what it could see (`bus-transcript`, `snapshot`, `full-session`), cost, and the error or note.
 - **`/journal now`**: journal this conversation now (trigger `manual`). Bypasses the pause threshold, `min_human_messages` and the attempt cap, but respects the cursor: with nothing new since the last run, it says so. The reply comes when the run finishes within about 1.5 s, otherwise it says the run started.
+- **`/journal consolidate`** (E68): run the agent's consolidation pass now, even when nothing new was journaled ([AGENT_LEARNING.md](AGENT_LEARNING.md#consolidation)). Same 1.5 s wait. `/journal` shows the last and next pass; `/journal runs` lists passes as `consolidate(manual)` or `consolidate(scheduled)`.
 
 ```
 /journal now

@@ -22,9 +22,15 @@
  *
  * The agent may end its reply with `NOTHING_TO_RECORD` to report that the
  * window held nothing worth keeping (`nothing-to-do`).
+ *
+ * E68 S68.1 — consolidation jobs run a fresh `claude -p` (no `--resume`)
+ * in the agent's working dir: through the instance handle on cc-headless
+ * (system prompt, MCP tools), directly on cc-pool (with the agentbus tools
+ * server when `toolsMcpConfig` is wired, so `propose_change` works).
+ * E68 S68.4 — every turn denies edits to the job's protected paths.
  */
 import { DISABLE_AUTO_MEMORY_ENV, autoMemorySettings } from '../../memory/native.js';
-import type { JournalSessionRequest, JournalSessionResult } from '../../adapters/cc-headless.js';
+import type { ConsolidationTurnRequest, JournalSessionRequest, JournalSessionResult } from '../../adapters/cc-headless.js';
 import type { RuntimeResolver } from '../../core/runtime-resolver.js';
 import { INHERITED_CLAUDE_SESSION_VARS } from '../../pool/pane.js';
 import { runProcess as defaultRunProcess, tail, type RunProcessOptions, type RunProcessResult } from '../process.js';
@@ -33,6 +39,8 @@ import type { Journaler, JournalAvailability, JournalJob, JournalRunContext, Jou
 
 export interface HeadlessJournalHandle {
   journalSession(opts: JournalSessionRequest): Promise<JournalSessionResult>;
+  /** E68 — absent on handles that predate consolidation (tests). */
+  consolidate?(opts: ConsolidationTurnRequest): Promise<JournalSessionResult>;
 }
 
 /** Marker the agent ends its reply with when there was nothing to record. */
@@ -44,12 +52,35 @@ const PROMPT_SUFFIX =
 
 const ERROR_TAIL = 400;
 
+/** Delivery tools a fresh consolidation run with the agentbus tools may never call. */
+const JOURNAL_DELIVERY_TOOLS = 'mcp__agentbus__reply,mcp__agentbus__send_message,mcp__agentbus__send_email';
+
 export interface CcHeadlessJournalerDeps {
   resolver: Pick<RuntimeResolver, 'checkLive' | 'resolve'>;
   /** Injectable for tests. */
   runProcess?: (opts: RunProcessOptions) => Promise<RunProcessResult>;
   /** Base environment for direct (cc-pool) runs. Default: the bus's own environment. */
   env?: () => Record<string, string | undefined>;
+  /**
+   * E68 — MCP config (agentbus tools only) for fresh cc-pool consolidation
+   * runs, keyed by the bare agent id. Without it they run with no MCP servers.
+   */
+  toolsMcpConfig?: (bareAgentId: string) => unknown;
+}
+
+/**
+ * E68 S68.4 — `--disallowedTools` rules that deny edits to protected paths.
+ * Absolute paths use Claude Code's `//` prefix; directories (ending in `/`)
+ * get a `**` glob. Both `Edit` and `Write` are listed.
+ */
+export function protectedPathDenyRules(paths: readonly string[] | undefined): string[] {
+  const rules: string[] = [];
+  for (const p of paths ?? []) {
+    const glob = p.endsWith('/') ? `${p}**` : p;
+    const spec = glob.startsWith('/') ? `/${glob}` : glob;
+    rules.push(`Edit(${spec})`, `Write(${spec})`);
+  }
+  return rules;
 }
 
 /** Parse the `--output-format json` result object (the last JSON object on stdout). */
@@ -93,7 +124,7 @@ const saidNothing = (text: string | null | undefined) => !!text && text.trim().e
 export class CcHeadlessJournaler implements Journaler {
   readonly id = 'cc-headless' as const;
   readonly requires = ['sessionResume'] as const;
-  readonly supportsKinds = ['session'] as const;
+  readonly supportsKinds = ['session', 'consolidate'] as const;
 
   /** Keyed by prefixed agent id, as `startHeadless()` returns them. */
   private readonly handles = new Map<string, HeadlessJournalHandle>();
@@ -108,6 +139,7 @@ export class CcHeadlessJournaler implements Journaler {
   }
 
   canJournal(job: JournalJob): JournalAvailability {
+    if (job.kind === 'consolidate') return this.canConsolidate(job);
     if (job.runtime !== 'cc-headless' && job.runtime !== 'cc-pool') {
       return { ok: false, reason: `${job.runtime} sessions have no resumable Claude transcript` };
     }
@@ -120,11 +152,21 @@ export class CcHeadlessJournaler implements Journaler {
     return live.ok ? { ok: true } : { ok: false, reason: live.reason };
   }
 
+  private canConsolidate(job: JournalJob): JournalAvailability {
+    if (job.runtime === 'cc-headless') {
+      return this.handles.get(job.agentId)?.consolidate ? { ok: true } : { ok: false, reason: `cc-headless instance ${job.agentId} is not running` };
+    }
+    if (job.runtime === 'cc-pool') return job.workingDir ? { ok: true } : { ok: false, reason: 'pool has no working directory' };
+    return { ok: false, reason: `${job.runtime} agents can't run a fresh claude -p` };
+  }
+
   private prompt(job: JournalJob): string {
+    if (job.kind === 'consolidate') return `${job.prompt.trim()}\n\n${PROMPT_SUFFIX}`;
     return `${promptWithJobContext(job.settings.journalers['cc-headless'].prompt, job)}\n\n${PROMPT_SUFFIX}`;
   }
 
   async run(job: JournalJob, ctx?: JournalRunContext): Promise<JournalRunResult> {
+    if (job.kind === 'consolidate') return job.runtime === 'cc-headless' ? this.consolidateViaHandle(job, ctx) : this.runDirect(job, ctx);
     if (!job.claudeSessionId) return { outcome: 'unavailable', error: 'no Claude session to resume' };
     return job.runtime === 'cc-headless' ? this.runViaHandle(job, ctx) : this.runDirect(job, ctx);
   }
@@ -140,8 +182,26 @@ export class CcHeadlessJournaler implements Journaler {
       prompt: this.prompt(job),
       model: job.settings.journalers['cc-headless'].model,
       timeoutMs: job.timeoutMs,
+      denyTools: protectedPathDenyRules(job.protectedPaths),
       ...(ctx?.signal ? { signal: ctx.signal } : {}),
     });
+    return this.handleResult(result);
+  }
+
+  private async consolidateViaHandle(job: JournalJob, ctx?: JournalRunContext): Promise<JournalRunResult> {
+    const handle = this.handles.get(job.agentId);
+    if (!handle?.consolidate) return { outcome: 'unavailable', error: `cc-headless instance ${job.agentId} is not running` };
+    const result = await handle.consolidate({
+      prompt: this.prompt(job),
+      model: job.settings.journalers['cc-headless'].model,
+      timeoutMs: job.timeoutMs,
+      denyTools: protectedPathDenyRules(job.protectedPaths),
+      ...(ctx?.signal ? { signal: ctx.signal } : {}),
+    });
+    return this.handleResult(result);
+  }
+
+  private handleResult(result: JournalSessionResult): JournalRunResult {
     const cost = { costUsd: result.costUsd, inputTokens: result.inputTokens, outputTokens: result.outputTokens };
     if (result.error) {
       const beforeStart = !result.timedOut && result.error.startsWith('spawn failed');
@@ -159,14 +219,19 @@ export class CcHeadlessJournaler implements Journaler {
     const runtime = this.deps.resolver.resolve(job.sessionAgentId);
     if (!runtime || runtime.kind !== 'cc-pool') return { outcome: 'unavailable', error: `no cc-pool runtime for ${job.sessionAgentId}` };
     const model = job.settings.journalers['cc-headless'].model;
+    const consolidate = job.kind === 'consolidate';
+    const bareAgent = job.agentId.startsWith('agent:') ? job.agentId.slice('agent:'.length) : job.agentId;
+    const mcpConfig = consolidate && this.deps.toolsMcpConfig ? JSON.stringify(this.deps.toolsMcpConfig(bareAgent)) : '{"mcpServers":{}}';
+    const deny = [...(consolidate ? [JOURNAL_DELIVERY_TOOLS] : []), ...protectedPathDenyRules(job.protectedPaths)];
     const args = [
       '-p', this.prompt(job),
-      '--resume', job.claudeSessionId!,
-      '--fork-session',
+      // Session jobs fork the pane's transcript; consolidation starts fresh.
+      ...(consolidate ? [] : ['--resume', job.claudeSessionId!, '--fork-session']),
       '--output-format', 'json',
       '--permission-mode', 'acceptEdits',
-      '--mcp-config', '{"mcpServers":{}}',
+      '--mcp-config', mcpConfig,
       '--strict-mcp-config',
+      ...(deny.length > 0 ? ['--disallowedTools', deny.join(',')] : []),
       ...(model ? ['--model', model] : []),
       // E67 — the fork sees the pool's memory the way its panes do.
       ...(job.nativeMemory && job.memoryDir ? ['--settings', autoMemorySettings(job.memoryDir)] : []),

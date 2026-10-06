@@ -24,7 +24,7 @@ const config = AppConfigSchema.parse({
 
 function journaler(outcome: JournalOutcome = 'done'): Journaler {
   return {
-    id: 'cc-headless', requires: [], supportsKinds: ['session'], canJournal: () => ({ ok: true }),
+    id: 'cc-headless', requires: [], supportsKinds: ['session', 'consolidate'], canJournal: () => ({ ok: true }),
     run: vi.fn(async () => ({ outcome, fidelity: 'full-session' as const, costUsd: 0.03, notes: 'Recorded the trip.' })),
   };
 }
@@ -87,6 +87,14 @@ describe('/journal (E66 S66.10)', () => {
     const body = (await cmd.handler(['runs', '3'], ctx())).body!;
     expect(body).toContain('Last 1 journal attempt(s):');
     expect(body).toContain('manual cc-headless: done, saw full-session $0.03 — Recorded the trip.');
+  });
+
+  it('/journal consolidate runs a manual pass and /journal shows consolidation status (E68)', async () => {
+    const { cmd } = setup();
+    expect((await cmd.handler(['consolidate'], ctx())).body).toBe('Consolidated with cc-headless.');
+    const runs = (await cmd.handler(['runs'], ctx())).body!;
+    expect(runs).toContain('consolidate(manual) cc-headless: done');
+    expect((await cmd.handler([], ctx())).body).toContain('consolidation: last 0s ago');
   });
 
   it('prints usage for an unknown subcommand', async () => {

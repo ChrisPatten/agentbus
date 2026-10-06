@@ -15,6 +15,7 @@
  */
 import { z } from 'zod';
 import { isAbsolute } from 'node:path';
+import { Cron } from 'croner';
 import { parseFireAt } from '../scheduler/time.js';
 
 /** Platform identifiers and credentials for a known contact. */
@@ -164,6 +165,9 @@ export const DEFAULT_JOURNALING_PROMPT =
   "(today's daily journal, MEMORY.md, and any relevant topic files) with " +
   'anything durable worth remembering. Do NOT message the user — this is ' +
   'an internal journaling turn, not a reply.';
+
+/** E68 — default consolidation schedule: nightly at 03:00 (bus local time unless `timezone` is set). */
+export const DEFAULT_CONSOLIDATION_CRON = '0 3 * * *';
 
 /**
  * Per-channel idle gap (ms): a number for every channel, or a record of
@@ -642,6 +646,27 @@ const AgentJournalingSchema = z.object({
       model: z.string().min(1).optional(),
     })
     .optional(),
+  /**
+   * E68 S68.1 — consolidation: a periodic agent-level pass that turns the
+   * daily journals into lasting memory. Runs on its own cron (not the
+   * scheduler), through the same journaler chain, and is skipped when no
+   * session journal completed since the last pass. See docs/AGENT_LEARNING.md.
+   */
+  consolidation: z
+    .object({
+      enabled: z.boolean().default(true),
+      /** Cron expression (5 or 6 fields). Default nightly at 03:00. */
+      cron: z.string().min(1).default(DEFAULT_CONSOLIDATION_CRON),
+      /** IANA time zone for `cron`. Default: the bus host's local time zone. */
+      timezone: z.string().min(1).optional(),
+      /** Consolidation instruction. Default: the built-in prompt. */
+      prompt: z.string().min(1).optional(),
+      /** Line budget for MEMORY.md. Capped at the native 200-line load limit. */
+      max_memory_lines: z.number().int().positive().max(200).default(200),
+      /** Per-run timeout. Default: the journaling timeout_ms. */
+      timeout_ms: z.number().int().positive().optional(),
+    })
+    .optional(),
 }).superRefine((j, ctx) => {
   const chain = j.chain ?? [];
   const seen = new Set<string>();
@@ -657,6 +682,17 @@ const AgentJournalingSchema = z.object({
       message: 'chain includes "script" but journaling.script.command is not set',
       path: ['script'],
     });
+  }
+  if (j.consolidation) {
+    try {
+      new Cron(j.consolidation.cron, { paused: true, ...(j.consolidation.timezone ? { timezone: j.consolidation.timezone } : {}) }).stop();
+    } catch (err) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `invalid consolidation cron/timezone: ${err instanceof Error ? err.message : String(err)}`,
+        path: ['consolidation', 'cron'],
+      });
+    }
   }
 });
 

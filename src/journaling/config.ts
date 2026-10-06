@@ -17,6 +17,7 @@
  * bus raises an advisory.
  */
 import {
+  DEFAULT_CONSOLIDATION_CRON,
   DEFAULT_JOURNALING_PROMPT,
   JOURNALER_IDS,
   getCcHeadlessInstances,
@@ -26,6 +27,7 @@ import {
 } from '../config/schema.js';
 import { missingCapabilities, type RequiredCapability } from '../core/runtime-capabilities.js';
 import type { AgentRuntime, RuntimeRequirement } from '../core/runtime-resolver.js';
+import { DEFAULT_CONSOLIDATION_PROMPT } from './prompt.js';
 
 export { JOURNALER_IDS, type JournalerId };
 
@@ -51,6 +53,22 @@ export interface ScriptJournalerSettings {
   model: string | null;
 }
 
+/** E68 S68.1 — the agent's consolidation pass. */
+export interface ConsolidationSettings {
+  enabled: boolean;
+  cron: string;
+  /** IANA zone for `cron`; null = the bus host's local zone. */
+  timezone: string | null;
+  prompt: string;
+  /** Line budget for MEMORY.md (≤ the native 200-line load limit). */
+  maxMemoryLines: number;
+  timeoutMs: number;
+}
+
+/** Native auto memory loads the first 200 lines / 25 KB of MEMORY.md. */
+export const NATIVE_MEMORY_MAX_LINES = 200;
+export const NATIVE_MEMORY_MAX_BYTES = 25 * 1024;
+
 export interface JournalingSettings {
   /** Prefixed logical agent id (a pool's id, never a pane id). */
   agentId: string;
@@ -71,6 +89,8 @@ export interface JournalingSettings {
     'cc-headless': { model: string | null; prompt: string };
     script: ScriptJournalerSettings | null;
   };
+  /** E68 — consolidation. Disabled for the deprecated cc-headless alias. */
+  consolidation: ConsolidationSettings;
 }
 
 const AGENT_PREFIX = 'agent:';
@@ -135,6 +155,14 @@ export function resolveJournalingSettings(config: AppConfig): Map<string, Journa
         },
         script,
       },
+      consolidation: {
+        enabled: (j.enabled ?? true) && (j.consolidation?.enabled ?? true),
+        cron: j.consolidation?.cron ?? DEFAULT_CONSOLIDATION_CRON,
+        timezone: j.consolidation?.timezone ?? null,
+        prompt: j.consolidation?.prompt ?? DEFAULT_CONSOLIDATION_PROMPT,
+        maxMemoryLines: Math.min(j.consolidation?.max_memory_lines ?? NATIVE_MEMORY_MAX_LINES, NATIVE_MEMORY_MAX_LINES),
+        timeoutMs: j.consolidation?.timeout_ms ?? timeoutMs,
+      },
     });
   }
 
@@ -160,6 +188,15 @@ export function resolveJournalingSettings(config: AppConfig): Map<string, Journa
         'system-message': { timeoutMs: DEFAULT_JOURNAL_TIMEOUT_MS, model, prompt },
         'cc-headless': { model, prompt },
         script: null,
+      },
+      // The alias predates consolidation; configure agents.<id>.journaling to get it.
+      consolidation: {
+        enabled: false,
+        cron: DEFAULT_CONSOLIDATION_CRON,
+        timezone: null,
+        prompt: DEFAULT_CONSOLIDATION_PROMPT,
+        maxMemoryLines: NATIVE_MEMORY_MAX_LINES,
+        timeoutMs: DEFAULT_JOURNAL_TIMEOUT_MS,
       },
     });
   }

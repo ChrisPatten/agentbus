@@ -68,6 +68,21 @@ export interface ScriptPayloadV1 {
   prompt: string;
   model: string | null;
   timeout_ms: number;
+  /**
+   * E68 — present on `kind: "consolidate"` payloads only (session fields are
+   * empty strings and `messages` is empty there). `prompt` is the full
+   * consolidation instruction with these values written out.
+   */
+  consolidation?: {
+    last_pass_at: string | null;
+    session_runs_since: number;
+    index_path: string | null;
+    daily_dir: string | null;
+    archive_dir: string | null;
+    archive_before: string;
+    max_memory_lines: number;
+    max_memory_bytes: number;
+  };
 }
 
 export function buildScriptPayload(job: JournalJob): ScriptPayloadV1 {
@@ -108,6 +123,20 @@ export function buildScriptPayload(job: JournalJob): ScriptPayloadV1 {
     prompt: job.prompt,
     model: script?.model ?? job.model,
     timeout_ms: script?.timeoutMs ?? job.timeoutMs,
+    ...(job.consolidation
+      ? {
+          consolidation: {
+            last_pass_at: job.consolidation.lastPassAt,
+            session_runs_since: job.consolidation.sessionRunsSince,
+            index_path: job.consolidation.indexPath,
+            daily_dir: job.consolidation.dailyDir,
+            archive_dir: job.consolidation.archiveDir,
+            archive_before: job.consolidation.archiveBefore,
+            max_memory_lines: job.consolidation.maxMemoryLines,
+            max_memory_bytes: job.consolidation.maxMemoryBytes,
+          },
+        }
+      : {}),
   };
 }
 

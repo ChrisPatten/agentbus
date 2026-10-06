@@ -6,6 +6,7 @@
  *   /journal now        journal this conversation now (trigger `manual`):
  *                       bypasses the pause threshold and min_human_messages,
  *                       respects the cursor
+ *   /journal consolidate  run the agent's consolidation pass now (E68)
  */
 import type Database from 'better-sqlite3';
 import type { CommandDefinition, SlashCommandContext } from './registry.js';
@@ -18,6 +19,8 @@ import type { MemorySetupStatus } from '../memory/setup-check.js';
 export interface JournalCommandDeps extends JournalStatusDeps {
   /** How long `/journal now` waits for a quick answer before replying "started". Default 1500 ms. */
   nowWaitMs?: number;
+  /** E68 — the consolidation timer, for the next pass in `/journal`. */
+  consolidation?: { nextRunAt(agentId: string): Date | null };
 }
 
 /** "3m ago", "2h ago", "4d ago". */
@@ -73,6 +76,15 @@ function statusBody(deps: JournalCommandDeps, conversationId: string): string {
   if (agent.lastFailure) lines.push(`  last failure (${ago(agent.lastFailureAt, now)}): ${agent.lastFailure}`);
   if (agent.backlogSince) lines.push(`  backlog: ${agent.backlogSessions} conversation(s), oldest ${ago(agent.backlogSince, now)}`);
   if (agent.hooks.length > 0) lines.push(`  hooks: ${agent.hooks.map((h) => `${h.event} ${h.status}`).join(', ')}`);
+  const settings = deps.engine.settingsFor(agent.agentId);
+  if (settings?.consolidation.enabled) {
+    const last = deps.engine.store.lastConsolidation(agent.agentId);
+    const next = deps.consolidation?.nextRunAt(agent.agentId) ?? null;
+    lines.push(`  consolidation: last ${ago(last, now)}${next ? `, next ${next.toISOString().slice(0, 16).replace('T', ' ')} UTC` : ''}` +
+      (deps.engine.isConsolidating(agent.agentId) ? ' (running)' : ''));
+  } else if (settings) {
+    lines.push('  consolidation: off');
+  }
   for (const a of agent.advisories) lines.push(`  [${a.severity}] ${a.title} (${a.state})`);
   const memory = deps.memorySetup?.(agent.agentId);
   if (memory) lines.push('', ...memoryLines(memory));
@@ -93,11 +105,12 @@ export function memoryLines(m: MemorySetupStatus): string[] {
 }
 
 function runLine(r: JournalRunRow, now: Date): string {
+  const trigger = r.kind === 'consolidate' ? `consolidate(${r.trigger})` : r.trigger;
   const from = r.fallback_from ? ` after ${r.fallback_from}` : '';
   const fidelity = r.fidelity ? `, saw ${r.fidelity}` : '';
   const err = r.error && r.outcome !== 'done' && r.outcome !== 'nothing-to-do' ? `: ${r.error.slice(0, 120)}` : '';
   const notes = r.notes && r.outcome === 'done' ? ` — ${r.notes.slice(0, 80)}` : '';
-  return `${ago(r.started_at, now)} ${r.trigger} ${r.journaler}${from}: ${r.outcome}${fidelity}${usd(r.cost_usd)}${err}${notes}`;
+  return `${ago(r.started_at, now)} ${trigger} ${r.journaler}${from}: ${r.outcome}${fidelity}${usd(r.cost_usd)}${err}${notes}`;
 }
 
 function runsBody(deps: JournalCommandDeps, conversationId: string, n: number): string {
@@ -136,11 +149,40 @@ async function nowBody(deps: JournalCommandDeps, conversationId: string): Promis
   return 'Journaling this conversation now. /journal runs shows the result.';
 }
 
+function describeConsolidation(r: EvaluationResult): string {
+  switch (r.status) {
+    case 'journaled': return `Consolidated with ${r.summary?.journaler ?? 'a journaler'}.`;
+    case 'nothing-to-do': return 'Consolidation finished: nothing to change.';
+    case 'nothing': return 'Nothing new to consolidate since the last pass.';
+    case 'exhausted': return 'Consolidation failed: no journaler could run it. /journal runs shows why.';
+    case 'not-configured': return 'Journaling is not set up for this conversation\'s agent.';
+    case 'disabled': return 'Consolidation is turned off for this agent.';
+    default: return `Consolidation ended: ${r.status}${r.error ? ` (${r.error})` : ''}.`;
+  }
+}
+
+async function consolidateBody(deps: JournalCommandDeps, conversationId: string): Promise<string> {
+  const agentId = agentFor(deps, conversationId);
+  if (!agentId) return 'Journaling is not set up for this conversation\'s agent.';
+  const handle = deps.engine.consolidate(agentId, 'manual');
+  if (handle.status === 'not-configured') return 'Journaling is not set up for this conversation\'s agent.';
+  if (handle.status === 'disabled') return 'Consolidation is turned off for this agent.';
+  const waitMs = deps.nowWaitMs ?? 1500;
+  const quick = await Promise.race([
+    handle.done,
+    new Promise<null>((resolve) => { const t = setTimeout(() => resolve(null), waitMs); t.unref?.(); }),
+  ]);
+  if (quick) return describeConsolidation(quick);
+  return handle.status === 'merged'
+    ? 'Consolidation is already queued or running. /journal runs shows the result.'
+    : 'Consolidating memory now. /journal runs shows the result.';
+}
+
 export function createJournalCommand(deps: JournalCommandDeps & { db: Database.Database }): CommandDefinition {
   return {
     name: 'journal',
-    description: 'Journaling status, recent runs, or journal this conversation now',
-    usage: '/journal [runs [n] | now]',
+    description: 'Journaling status, recent runs, journal now, or consolidate memory',
+    usage: '/journal [runs [n] | now | consolidate]',
     scope: 'bus',
     handler: async (args, ctx) => {
       const conversationId = commandConversationId(ctx, deps.db, contactOf(ctx));
@@ -151,7 +193,11 @@ export function createJournalCommand(deps: JournalCommandDeps & { db: Database.D
         return { body: runsBody(deps, conversationId, n) };
       }
       if (sub === 'now') return { body: await nowBody(deps, conversationId) };
-      return { body: 'Usage:\n  /journal           journaling status\n  /journal runs [n]  recent journal runs\n  /journal now       journal this conversation now' };
+      if (sub === 'consolidate') return { body: await consolidateBody(deps, conversationId) };
+      return {
+        body: 'Usage:\n  /journal              journaling status\n  /journal runs [n]     recent journal runs\n' +
+          '  /journal now          journal this conversation now\n  /journal consolidate  consolidate memory now',
+      };
     },
   };
 }

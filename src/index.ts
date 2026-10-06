@@ -41,7 +41,7 @@ import { EmailAdapter } from './adapters/email.js';
 import { SiriAdapter } from './adapters/siri.js';
 import { AppAdapter } from './adapters/app.js';
 import { routedAgent } from './app/store.js';
-import { startHeadless, stopHeadless, getHeadlessSnapshots } from './adapters/cc-headless.js';
+import { startHeadless, stopHeadless, getHeadlessSnapshots, buildMcpConfig } from './adapters/cc-headless.js';
 import { createPoolManagers } from './pool/pool-manager.js';
 import { RuntimeResolver } from './core/runtime-resolver.js';
 import { createPoolRouteResolve } from './pipeline/stages/pool-route-resolve.js';
@@ -76,6 +76,7 @@ import { createJournalInstructionDelivery } from './journaling/delivery.js';
 import { createJournalHoldNotice } from './pipeline/stages/journal-hold.js';
 import { HarnessEvents, createHookHealthTicker } from './journaling/events.js';
 import { RecentMemory } from './memory/recent-service.js';
+import { ConsolidationScheduler } from './journaling/consolidation.js';
 import { RecentFreshness } from './memory/recent-freshness.js';
 import { checkMemorySetup } from './memory/setup-check.js';
 
@@ -140,7 +141,7 @@ reviewChains(journalingSettings.values(), runtimeResolver, advisories);
 // events feed it; it walks each agent's journaler chain. Journalers are
 // registered once their runtimes start (below).
 const journalers = new JournalerRegistry();
-const headlessJournaler = new CcHeadlessJournaler({ resolver: runtimeResolver });
+const headlessJournaler = new CcHeadlessJournaler({ resolver: runtimeResolver, toolsMcpConfig: buildMcpConfig });
 journalers.register(headlessJournaler);
 journalers.register(new ScriptJournaler({ busUrl: busBaseUrl }));
 // E66 S66.8 — System Message journaler: the live agent journals in its own
@@ -167,6 +168,9 @@ const journalEngine = new JournalEngine({
   onJournaled: (result) => { if (result.agentId) recentMemory.regenerate(result.agentId, 'journaled'); },
 });
 journalEngine.addTicker(() => recentMemory.tick());
+// E68 S68.1 — nightly (per-agent cron) consolidation, on the engine tick.
+const consolidationScheduler = new ConsolidationScheduler({ engine: journalEngine });
+journalEngine.addTicker(() => { consolidationScheduler.tick(); });
 // E67 S67.5 — memory setup checks: /journal shows them; startup logs them.
 const memorySetup = (agentId: string) => checkMemorySetup(recentMemory.layoutFor(agentId), runtimeResolver.resolve(recentMemory.layoutFor(agentId).agentId));
 // Harness hook events (POST /api/v1/journal/events) and hook health.
@@ -219,7 +223,9 @@ commandRegistry.register(createCostCommand({ db, headlessControl }));
 commandRegistry.register(createPoolCommand({ poolManagers }));
 commandRegistry.register(createPaneCommand({ poolManagers }));
 commandRegistry.register(createRcCommand({ poolManagers }));
-commandRegistry.register(createJournalCommand({ db, engine: journalEngine, resolver: runtimeResolver, advisories, gate: journalGate, memorySetup }));
+commandRegistry.register(createJournalCommand({
+  db, engine: journalEngine, resolver: runtimeResolver, advisories, gate: journalGate, memorySetup, consolidation: consolidationScheduler,
+}));
 
 const pipeline = new PipelineEngine();
 pipeline.use({ slot: 10, name: 'normalize',        stage: normalize });

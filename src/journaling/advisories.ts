@@ -10,6 +10,9 @@
  *                                            unjournaled eligible content (S66.5)
  *   journaling:hook-stopped:<evt>  warning   a hook that used to report <evt> has gone
  *                                            quiet for an active session (S66.4)
+ *   journaling:consolidation-exhausted
+ *                                  warning   a consolidation pass tried every journaler
+ *                                            and none succeeded (E68 S68.1)
  */
 import type { AdvisoryService } from '../advisories/service.js';
 import type { AgentRuntime } from '../core/runtime-resolver.js';
@@ -17,6 +20,7 @@ import { CHAIN_RISK_CONDITION, chainExhaustionRisk, type JournalingSettings } fr
 
 export { CHAIN_RISK_CONDITION };
 export const CHAIN_EXHAUSTED_CONDITION = 'journaling:chain-exhausted';
+export const CONSOLIDATION_EXHAUSTED_CONDITION = 'journaling:consolidation-exhausted';
 export const hookStoppedCondition = (event: string) => `journaling:hook-stopped:${event}`;
 
 /** Consecutive exhausted runs before the exhaustion advisory turns critical. */
@@ -99,4 +103,29 @@ export function raiseChainExhausted(
 
 export function resolveChainExhausted(advisories: JournalAdvisories | undefined, agentId: string): void {
   advisories?.resolve(agentId, CHAIN_EXHAUSTED_CONDITION);
+}
+
+/** E68 — every journaler failed a consolidation pass. */
+export function raiseConsolidationExhausted(
+  advisories: JournalAdvisories | undefined,
+  input: { agentId: string; attempts: Array<{ journaler: string; outcome: string; error?: string | null }> },
+): void {
+  const tried = input.attempts.length > 0
+    ? input.attempts.map((a) => `${a.journaler}: ${a.outcome}${a.error ? ` (${a.error})` : ''}`).join('; ')
+    : 'no journaler that supports consolidation was runnable';
+  advisories?.raise({
+    agentId: input.agentId,
+    conditionKey: CONSOLIDATION_EXHAUSTED_CONDITION,
+    severity: 'warning',
+    title: 'Memory consolidation failed',
+    body: `The consolidation pass could not run with any journaler (${tried}). Journals are still recorded; they are just not being consolidated.`,
+    remediation:
+      'Check the bus log for "[journaling]" lines, then run /journal consolidate. A script journaler that handles ' +
+      '`kind: "consolidate"` payloads, or cc-headless on cc-headless/cc-pool agents, can always run.',
+    source: 'journaling',
+  });
+}
+
+export function resolveConsolidationExhausted(advisories: JournalAdvisories | undefined, agentId: string): void {
+  advisories?.resolve(agentId, CONSOLIDATION_EXHAUSTED_CONDITION);
 }

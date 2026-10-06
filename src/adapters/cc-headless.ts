@@ -154,8 +154,12 @@ function cleanTmp(...paths: string[]): void {
   }
 }
 
-/** Build the stdio MCP config for this headless agent's tool subprocess. */
-function buildMcpConfig(agentId: string): unknown {
+/**
+ * Build the stdio MCP config for this headless agent's tool subprocess.
+ * E68: also used for fresh consolidation runs on cc-pool agents, so the
+ * pass can call `propose_change`.
+ */
+export function buildMcpConfig(agentId: string): unknown {
   return {
     mcpServers: {
       agentbus: {
@@ -205,6 +209,11 @@ export interface JournalTurnOptions {
   model?: string | null;
   timeoutMs?: number;
   signal?: AbortSignal;
+  /**
+   * E68 S68.4 — extra `--disallowedTools` rules for the turn, e.g.
+   * `Edit(//abs/agent/CLAUDE.md)`: edits to the agent's protected paths.
+   */
+  denyTools?: readonly string[];
 }
 
 /** Delivery tools a journaling turn may never call (a journal run never messages anyone). */
@@ -279,6 +288,13 @@ export interface HeadlessHandle {
    */
   journalSession(opts: JournalSessionRequest): Promise<JournalSessionResult>;
   /**
+   * E68 S68.1 — run one silent consolidation turn: a fresh `claude -p`
+   * (no `--resume`) in the agent's working dir, with the agent's system
+   * prompt and MCP tools, delivery tools disallowed. Serialized with the
+   * instance's other journaling turns.
+   */
+  consolidate(opts: ConsolidationTurnRequest): Promise<JournalSessionResult>;
+  /**
    * Kill the in-flight `claude -p` turn for `contactId`, if one is running
    * (used by `/stop`). Returns true if a turn was found and killed, false if
    * none was running.
@@ -295,6 +311,10 @@ export interface JournalSessionRequest extends JournalTurnOptions {
   channel: string;
   /** Defaults to the instance's `journaling.prompt`. */
   prompt?: string;
+}
+
+export interface ConsolidationTurnRequest extends JournalTurnOptions {
+  prompt: string;
 }
 
 export interface JournalSessionResult {
@@ -397,6 +417,8 @@ class HeadlessInstance {
 
   private emitActivity(conversationId: string, sessionId: string | undefined,
     state: HeadlessActivityEvent['state'], turnClass: TurnClass): void {
+    // E68: consolidation turns belong to no conversation; nothing to show.
+    if (conversationId.startsWith('consolidate:')) return;
     const event: HeadlessActivityEvent = {
       ...this.snapshot(), conversation_id: conversationId, session_id: sessionId,
       state, turn_class: turnClass,
@@ -504,7 +526,7 @@ class HeadlessInstance {
       // explicitly allowed because this is a noninteractive Claude process.
       // E66: a journaling turn never delivers, so it gets the opposite.
       ...(journal
-        ? ['--disallowedTools', JOURNAL_DISALLOWED_TOOLS]
+        ? ['--disallowedTools', [JOURNAL_DISALLOWED_TOOLS, ...(journal.denyTools ?? [])].join(',')]
         : ['--allowedTools', 'mcp__agentbus__reply,mcp__agentbus__send_message']),
       '--mcp-config', mcpConfigPath,
       '--system-prompt-file', systemPromptPath,
@@ -1050,7 +1072,7 @@ class HeadlessInstance {
             channel: opts.channel,
             prompt: opts.prompt ?? this.cfg.journaling.prompt,
             resumeId: opts.claudeSessionId,
-            journal: { model: opts.model ?? null, timeoutMs: opts.timeoutMs, signal: opts.signal },
+            journal: { model: opts.model ?? null, timeoutMs: opts.timeoutMs, signal: opts.signal, denyTools: opts.denyTools },
           });
           resolvePromise({
             error: result.error, costUsd: result.totalCostUsd, inputTokens: result.inputTokens, outputTokens: result.outputTokens,
@@ -1061,6 +1083,45 @@ class HeadlessInstance {
           fail(err);
         }
       }, opts.claudeSessionId).catch(fail);
+    });
+  }
+
+  /**
+   * E68 S68.1 — one silent consolidation turn (see `HeadlessHandle.consolidate`).
+   * Keyed on its own queue (`consolidate:<agent>`), in the system turn class
+   * and the instance-wide journal lane.
+   */
+  consolidate(db: Database.Database, opts: ConsolidationTurnRequest): Promise<JournalSessionResult> {
+    const key = `consolidate:${this.agentId}`;
+    return new Promise((resolvePromise) => {
+      const fail = (err: unknown) => resolvePromise({
+        error: err instanceof Error ? err.message : String(err), costUsd: null, inputTokens: null, outputTokens: null,
+      });
+      void this.enqueue(key, undefined, 'system', true, async () => {
+        if (opts.signal?.aborted) {
+          resolvePromise({ error: 'consolidation turn aborted before it started', costUsd: null, inputTokens: null, outputTokens: null, timedOut: true });
+          return;
+        }
+        try {
+          const result = await this.runClaudeTurn({
+            db,
+            session: null,
+            contactId: 'system:bus',
+            conversationId: key,
+            channel: 'system',
+            prompt: opts.prompt,
+            resumeId: null,
+            journal: { model: opts.model ?? null, timeoutMs: opts.timeoutMs, signal: opts.signal, denyTools: opts.denyTools },
+          });
+          resolvePromise({
+            error: result.error, costUsd: result.totalCostUsd, inputTokens: result.inputTokens, outputTokens: result.outputTokens,
+            resultText: result.resultText,
+            ...(result.timedOut ? { timedOut: true } : {}),
+          });
+        } catch (err) {
+          fail(err);
+        }
+      }).catch(fail);
     });
   }
 
@@ -1134,6 +1195,7 @@ class HeadlessInstance {
     void this.poll(db);
     return {
       journalSession: (opts) => this.journalSession(db, opts),
+      consolidate: (opts) => this.consolidate(db, opts),
       stopTurn: (conversationId: string) => this.stopTurn(conversationId),
       subscribeActivity: (listener) => this.subscribeActivity(listener),
       snapshot: () => this.snapshot(),

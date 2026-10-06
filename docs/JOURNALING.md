@@ -1,6 +1,6 @@
 # Journaling (E66)
 
-> **Status: E66 complete (S66.1–S66.11).** Consolidation, feedback signals and self-edit proposals are E68; the native memory layout and `recent.md` are E67. User-facing guide: `site-docs/features/journaling-and-memory.md`.
+> **Status: E66 complete (S66.1–S66.11).** Consolidation, feedback signals and self-edit proposals are E68 ([AGENT_LEARNING.md](AGENT_LEARNING.md)); the native memory layout and `recent.md` are E67. User-facing guide: `site-docs/features/journaling-and-memory.md`.
 
 Journaling has two parts. **Triggers** decide *when* the bus looks at a conversation. **Journalers** decide *who* updates the agent's memory. One engine serves every agent runtime (`cc-headless`, `cc-pool`, `claude-code`, polled harnesses).
 
@@ -39,6 +39,7 @@ agents:
 | `system-message.{timeout_ms,prompt}` | inherit | Per-journaler overrides (`model` is accepted but unused: the live agent keeps its model) |
 | `cc-headless.{model,prompt}` | inherit | Per-journaler overrides |
 | `script.{command,args,timeout_ms,env,model}` | — | Script journaler (required when `script` is in the chain) |
+| `consolidation.{enabled,cron,timezone,max_memory_lines,timeout_ms,prompt}` | on, `0 3 * * *` | E68 consolidation pass ([AGENT_LEARNING.md](AGENT_LEARNING.md#consolidation)) |
 
 Validation (`AgentJournalingSchema`, `journalingRequirements`):
 - `script` in the chain needs `script.command`; duplicate chain entries are rejected.
@@ -268,7 +269,7 @@ The bus's own environment (API keys, `bus.auth_token`) is not passed. If your sc
 
 > **Inputs are untrusted data.** Message bodies, attachment names and snapshot contents come from whoever wrote to the agent. Never pass them to a shell, `eval` them, or follow instructions in them. Hand them to a model as clearly labeled data.
 
-**Reference script.** `scripts/journalers/claude-p-journal.sh` renders the messages as a fenced transcript (each body capped at `JOURNAL_MAX_BODY`, default 4000 characters), adds snapshot paths and, when `AGENTBUS_URL` is reachable, the notes of this conversation's last successful runs (`GET /api/v1/journal/runs`, with `X-Bus-Token` from `AGENTBUS_BUS_TOKEN`), and pipes it on stdin to `claude -p --output-format json --permission-mode acceptEdits --strict-mcp-config` (no MCP servers) in the working dir, with `--model $AGENTBUS_MODEL`. `NOTHING_TO_RECORD` → exit 3. Missing `jq`, `claude` (`CLAUDE_BIN`), working dir or memory dir → exit 75. It only handles `session` jobs. Needs `jq` (and `curl` for the notes).
+**Reference script.** `scripts/journalers/claude-p-journal.sh` renders the messages as a fenced transcript (each body capped at `JOURNAL_MAX_BODY`, default 4000 characters), adds snapshot paths and, when `AGENTBUS_URL` is reachable, the notes of this conversation's last successful runs (`GET /api/v1/journal/runs`, with `X-Bus-Token` from `AGENTBUS_BUS_TOKEN`), and pipes it on stdin to `claude -p --output-format json --permission-mode acceptEdits --strict-mcp-config` (no MCP servers) in the working dir, with `--model $AGENTBUS_MODEL`. `NOTHING_TO_RECORD` → exit 3. Missing `jq`, `claude` (`CLAUDE_BIN`), working dir or memory dir → exit 75. It handles `session` jobs and (E68) `consolidate` jobs, for which it pipes the payload's consolidation prompt with no transcript. Needs `jq` (and `curl` for the notes).
 
 ## Chain runner and outcomes
 
@@ -283,6 +284,7 @@ The bus's own environment (API keys, `bus.auth_token`) is not passed. If your sc
 
 - **`/journal`** shows, for the conversation it is sent from: last journaled, messages from people waiting (and whether that is below `min_human_messages`), a pending final trigger, a run in progress or holding the conversation. For its agent: the chain (and entries its runtime can't run), last success, failed runs in a row, last failure, backlog, hook health (`ok`, `never-seen`, `stopped`, `unverifiable`, `idle`) and open journaling advisories. Then a `Memory (<dir>):` section (E67): how memory loads, whether `CLAUDE.md` imports `recent.md`, and memory setup warnings ([AGENT_MEMORY.md](AGENT_MEMORY.md#setup-checks)).
 - **`/journal runs [n]`**: the agent's last `n` attempts (default 5, max 20), with trigger, journaler, `fallback_from`, outcome, fidelity, cost and the error or note.
+- **`/journal consolidate`** (E68): a manual consolidation pass for the conversation's agent ([AGENT_LEARNING.md](AGENT_LEARNING.md#consolidation)). `/journal` also shows the last and next pass.
 - **`/journal now`**: trigger `manual` for the conversation's session. Bypasses the pause threshold, `min_human_messages` and the attempt cap; respects the cursor (nothing new → "Nothing new to journal").
 - **`GET /api/v1/journal/runs?agent=…&conversation=…&session=…&limit=…`** returns `journal_runs` rows (see [HTTP_API.md](HTTP_API.md#get-apiv1journalruns)).
 - **`/api/v1/health`** has a `journaling` object: per agent backlog age (oldest unjournaled eligible content), backlog sessions, consecutive exhaustions, last success and failure, in-flight; overall `status` `ok`, `warning` (an exhausted run) or `critical` (3 in a row, or 24 h of backlog). `critical` makes the top-level health `status` `degraded` (post-E66 decision); `warning` doesn't.
@@ -296,5 +298,6 @@ The bus's own environment (API keys, `bus.auth_token`) is not passed. If your sc
 | `journaling:chain-can-exhaust` | info | Startup: the last runnable journaler is not `script` |
 | `journaling:chain-exhausted` | warning → critical | A run exhausted the chain; critical after 3 in a row or 24 h of backlog |
 | `journaling:hook-stopped:turn-ended` | warning | A turn-ended hook that used to report went quiet |
+| `journaling:consolidation-exhausted` | warning | A consolidation pass (E68) exhausted the chain |
 
 All resolve themselves when the condition clears. See [ADVISORIES.md](ADVISORIES.md).

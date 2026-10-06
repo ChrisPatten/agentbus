@@ -1,5 +1,6 @@
 /**
- * Journaling prompt helpers shared by the built-in journalers (E66).
+ * Journaling prompt helpers shared by the built-in journalers (E66), and
+ * the consolidation prompt (E68 S68.1).
  */
 import { join, relative } from 'node:path';
 import { RECENT_FILE } from '../memory/layout.js';
@@ -43,4 +44,50 @@ export function jobContextLines(job: JournalJob): string[] {
 /** `prompt` followed by the job context. */
 export function promptWithJobContext(prompt: string, job: JournalJob): string {
   return `${prompt.trim()}\n\n${jobContextLines(job).join('\n')}`;
+}
+
+/**
+ * E68 S68.1 — default consolidation instruction. The job context
+ * (`consolidationContextLines`) adds the paths, budgets and dates.
+ */
+export const DEFAULT_CONSOLIDATION_PROMPT = [
+  'This is your consolidation pass: an internal, silent turn. Do not message anyone.',
+  'Your daily journals record what happened. Turn them into lasting knowledge and keep your memory small:',
+  '1. Promote patterns that recur across conversations (preferences, corrections, recurring tasks, facts about people and projects) ' +
+    'into typed topic files and, for the essentials, into MEMORY.md.',
+  '2. Merge duplicate memories and resolve contradictions: the newer fact wins. Where you replace something, note in the surviving ' +
+    'memory what it replaced and when.',
+  '3. Keep MEMORY.md within its budget: a few essentials plus a one-line index of topic files. Move detail into topic files.',
+  '4. Archive, never delete: move stale topic content, and daily journals older than the archive date once their durable content ' +
+    'has been promoted, into the archive directory (keep file names; dailies go under archive/daily/). Never delete a memory file.',
+  '5. Write topic files in the native memory format: YAML frontmatter with `name`, `description` and `type` ' +
+    '(one of user, feedback, project, reference), then the content. One memory per file; MEMORY.md links each one.',
+  '6. Recurring-correction check: look for corrections that keep coming back even though a rule for them already exists ' +
+    '(in a feedback memory or in your instructions). Flag each one in its feedback memory with the dates it recurred. If the rule ' +
+    'lives in a protected file, propose strengthening it with the propose_change tool (path, the new content or a unified diff, ' +
+    'the rationale and the evidence: dates and conversations). Propose at most what matters; proposals are rate limited.',
+].join('\n');
+
+/** Lines describing a consolidation job, appended to the consolidation prompt. */
+export function consolidationContextLines(job: JournalJob): string[] {
+  const c = job.consolidation;
+  if (!c) return [];
+  const rel = (p: string | null) => (p ? (job.workingDir ? relative(job.workingDir, p) || '.' : p) : '(not configured)');
+  const lines = [
+    `Memory directory: ${rel(job.memoryDir)}`,
+    `Index: ${rel(c.indexPath)} (at most ${c.maxMemoryLines} lines and ${Math.round(c.maxMemoryBytes / 1024)} KB: native memory loads no more than that)`,
+    `Daily journals: ${rel(c.dailyDir)}`,
+    `Archive: ${rel(c.archiveDir)}`,
+    `Archive daily journals dated before ${c.archiveBefore} once their durable content is promoted.`,
+    c.lastPassAt
+      ? `Last consolidation: ${c.lastPassAt}. Session journal runs since then: ${c.sessionRunsSince}. Focus on what was journaled since.`
+      : `This is the first consolidation. Session journal runs on record: ${c.sessionRunsSince}.`,
+    `Do not edit ${rel(job.memoryDir ? join(job.memoryDir, RECENT_FILE) : null)}: AgentBus regenerates it after this pass.`,
+  ];
+  return lines;
+}
+
+/** The full consolidation instruction: `prompt` followed by the job context. */
+export function consolidationPrompt(prompt: string, job: JournalJob): string {
+  return `${prompt.trim()}\n\n${consolidationContextLines(job).join('\n')}`;
 }

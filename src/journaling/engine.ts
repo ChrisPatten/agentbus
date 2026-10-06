@@ -34,7 +34,7 @@ import type { AgentRuntime, RuntimeResolver } from '../core/runtime-resolver.js'
 import type { OwnerDirectory } from '../core/owners.js';
 import type { SessionRow } from '../memory/types.js';
 import type { JournalAdvisories } from './advisories.js';
-import { resolveJournalingSettings, thresholdForChannel, type JournalingSettings } from './config.js';
+import { NATIVE_MEMORY_MAX_BYTES, resolveJournalingSettings, thresholdForChannel, type JournalingSettings } from './config.js';
 import { assessEligibility, eligibleSince, loadWindow, PENDING_MAX_AGE_MS } from './eligibility.js';
 import type { JournalerRegistry } from './registry.js';
 import { runChain, type ChainRunSummary } from './runner.js';
@@ -42,6 +42,12 @@ import { JournalStore } from './store.js';
 import { isFinalTrigger, type JournalJob, type JournalTrigger } from './types.js';
 import { memoryLayout, memorySettingsFor, runtimeWorkingDir } from '../memory/layout.js';
 import { usesNativeMemory } from '../memory/native.js';
+import { formatLocalDate } from '../adapters/memory-context.js';
+import { consolidationPrompt } from './prompt.js';
+
+/** Dailies older than this many days may be archived by consolidation once promoted. */
+export const ARCHIVE_DAILIES_AFTER_DAYS = 30;
+const consolidationKey = (agentId: string) => `consolidate:${agentId}`;
 
 /** Exhausted runs per window before non-manual triggers stop retrying it (new content re-arms). */
 export const MAX_ATTEMPTS_PER_WINDOW = 3;
@@ -110,6 +116,8 @@ export interface JournalEngineDeps {
 }
 
 interface Slot {
+  kind: 'session' | 'consolidate';
+  /** Session id, or `consolidate:<agentId>` for consolidation. */
   sessionId: string;
   agentId: string;
   trigger: JournalTrigger;
@@ -287,21 +295,49 @@ export class JournalEngine {
     return { status: 'queued', sessionId: session.id, agentId: agent.agentId, done: this.enqueue(session.id, agent.agentId, req.reason) };
   }
 
-  private enqueue(sessionId: string, agentId: string, trigger: JournalTrigger): Promise<EvaluationResult> {
-    const slot: Slot = { sessionId, agentId, trigger, running: false, rerun: null, done: Promise.resolve({ status: 'error' }) };
+  /**
+   * E68 S68.1 — ask for a consolidation pass for an agent. Shares the
+   * agent's lane with session runs (one run per agent at a time). A
+   * `scheduled` pass is skipped (status `nothing`) when no session journal
+   * completed since the last pass; `manual` (/journal consolidate) always runs.
+   */
+  consolidate(agentId: string, reason: 'scheduled' | 'manual' = 'manual'): TriggerHandle {
+    const id = toPrefixed(agentId);
+    const settings = this.settings.get(id);
+    const runtime = this.deps.resolver.resolve(id);
+    if (!settings || !runtime) return { status: 'not-configured', agentId: id, done: resolved({ status: 'not-configured', agentId: id }) };
+    if (!settings.enabled || !settings.consolidation.enabled) {
+      return { status: 'disabled', agentId: id, done: resolved({ status: 'disabled', agentId: id }) };
+    }
+    const key = consolidationKey(id);
+    const existing = this.slots.get(key);
+    if (existing) {
+      if (!existing.running) existing.trigger = stronger(existing.trigger, reason);
+      return { status: 'merged', agentId: id, done: existing.done };
+    }
+    return { status: 'queued', agentId: id, done: this.enqueue(key, id, reason, 'consolidate') };
+  }
+
+  /** True while a consolidation pass is queued or running for the agent. */
+  isConsolidating(agentId: string): boolean {
+    return this.slots.has(consolidationKey(toPrefixed(agentId)));
+  }
+
+  private enqueue(sessionId: string, agentId: string, trigger: JournalTrigger, kind: Slot['kind'] = 'session'): Promise<EvaluationResult> {
+    const slot: Slot = { kind, sessionId, agentId, trigger, running: false, rerun: null, done: Promise.resolve({ status: 'error' }) };
     this.slots.set(sessionId, slot);
     const previous = this.lanes.get(agentId) ?? Promise.resolve();
     const done = previous.then(async () => {
       slot.running = true;
       try {
-        return await this.evaluate(slot);
+        return kind === 'consolidate' ? await this.evaluateConsolidation(slot) : await this.evaluate(slot);
       } catch (err) {
         const error = err instanceof Error ? err.message : String(err);
-        this.log(`[journaling] evaluation failed for session ${sessionId.slice(0, 8)}: ${error}`);
-        return { status: 'error' as const, sessionId, agentId, error };
+        this.log(`[journaling] evaluation failed for ${kind === 'consolidate' ? `consolidation of ${agentId}` : `session ${sessionId.slice(0, 8)}`}: ${error}`);
+        return kind === 'consolidate' ? { status: 'error' as const, agentId, error } : { status: 'error' as const, sessionId, agentId, error };
       } finally {
         this.slots.delete(sessionId);
-        if (slot.rerun && !this.stopped) this.trigger({ reason: slot.rerun, sessionId });
+        if (slot.rerun && !this.stopped && kind === 'session') this.trigger({ reason: slot.rerun, sessionId });
       }
     });
     slot.done = done;
@@ -377,6 +413,91 @@ export class JournalEngine {
       }
     }
     return result;
+  }
+
+  /** E68 S68.1 — one consolidation pass through the agent's chain. */
+  private async evaluateConsolidation(slot: Slot): Promise<EvaluationResult> {
+    const agentId = slot.agentId;
+    const settings = this.settings.get(agentId);
+    const runtime = this.deps.resolver.resolve(agentId);
+    if (!settings || !runtime) return { status: 'not-configured', agentId };
+    const lastPassAt = this.store.lastConsolidation(agentId);
+    const sessionRunsSince = this.store.sessionRunsSince(agentId, lastPassAt);
+    if (slot.trigger !== 'manual' && sessionRunsSince === 0) {
+      this.log(`[journaling] consolidation of ${agentId} skipped: no session journal since ${lastPassAt ?? 'ever'}`);
+      return { status: 'nothing', agentId };
+    }
+    const job = this.buildConsolidationJob(agentId, runtime, settings, slot.trigger, lastPassAt, sessionRunsSince);
+    const summary = await runChain(job, {
+      chain: settings.chain, capabilities: runtime.capabilities, backlogSince: null,
+    }, {
+      store: this.store, registry: this.deps.registry, advisories: this.deps.advisories, now: this.deps.now, log: this.deps.log,
+    });
+    const status: EvaluationStatus =
+      summary.outcome === 'done' ? 'journaled' : summary.outcome === 'nothing-to-do' ? 'nothing-to-do' : 'exhausted';
+    const result: EvaluationResult = { status, agentId, summary };
+    if (status === 'journaled' && this.deps.onJournaled) {
+      try {
+        this.deps.onJournaled(result);
+      } catch (err) {
+        this.log(`[journaling] onJournaled failed for ${agentId}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    return result;
+  }
+
+  private buildConsolidationJob(
+    agentId: string,
+    runtime: AgentRuntime,
+    settings: JournalingSettings,
+    trigger: JournalTrigger,
+    lastPassAt: string | null,
+    sessionRunsSince: number,
+  ): JournalJob {
+    const workingDir = runtimeWorkingDir(runtime);
+    const layout = memoryLayout(memorySettingsFor(this.deps.config, agentId), workingDir);
+    const now = this.now();
+    const archiveBefore = formatLocalDate(new Date(now.getTime() - ARCHIVE_DAILIES_AFTER_DAYS * 86_400_000));
+    const job: JournalJob = {
+      runId: this.deps.newRunId?.() ?? randomUUID(),
+      kind: 'consolidate',
+      trigger,
+      agentId,
+      sessionAgentId: agentId,
+      runtime: runtime.kind,
+      workingDir,
+      memoryDir: layout.memoryDir,
+      nativeMemory: usesNativeMemory(layout, runtime.capabilities),
+      sessionId: '',
+      conversationId: '',
+      channel: '',
+      contactId: '',
+      topic: null,
+      claudeSessionId: null,
+      harnessSessionId: null,
+      harnessTranscriptPath: null,
+      sessionOpen: false,
+      window: { cursorAt: lastPassAt, from: lastPassAt, to: now.toISOString(), advanceTo: null },
+      messages: [],
+      humanMessageCount: 0,
+      snapshots: [],
+      prompt: settings.consolidation.prompt,
+      model: settings.model,
+      timeoutMs: settings.consolidation.timeoutMs,
+      settings,
+      consolidation: {
+        lastPassAt,
+        sessionRunsSince,
+        indexPath: layout.indexPath,
+        dailyDir: layout.dailyDir,
+        archiveDir: layout.archiveDir,
+        archiveBefore,
+        maxMemoryLines: settings.consolidation.maxMemoryLines,
+        maxMemoryBytes: NATIVE_MEMORY_MAX_BYTES,
+      },
+    };
+    job.prompt = consolidationPrompt(settings.consolidation.prompt, job);
+    return job;
   }
 
   private buildJob(
