@@ -458,6 +458,27 @@ describe('Scheduler.loadConfig()', () => {
     expect(getItem(db, 'cfg-max')!['max_fires']).toBeNull();
   });
 
+  it('stores a config fire_at with a UTC offset or named zone as UTC, and corrects an unfired row', () => {
+    const entry = {
+      id: 'cfg-offset',
+      fire_at: '2099-05-01T09:00:00-05:00',
+      timezone: 'UTC',
+      channel: 'telegram',
+      sender: 'contact:chris',
+      prompt: 'Offset',
+      topic: 'general',
+      priority: 'normal' as const,
+    };
+    // Simulate a row stored by the old code, with the raw offset string.
+    insertItem(db, { id: 'cfg-offset', fire_at: entry.fire_at });
+    new Scheduler(makeDeps(db, noop, { ...baseConfig, schedules: [entry] } as unknown as AppConfig)).loadConfig();
+    expect(getItem(db, 'cfg-offset')!['fire_at']).toBe('2099-05-01T14:00:00.000Z');
+
+    const zoned = { ...entry, id: 'cfg-zoned', fire_at: '2099-07-01T09:00', timezone: 'America/New_York' };
+    new Scheduler(makeDeps(db, noop, { ...baseConfig, schedules: [zoned] } as unknown as AppConfig)).loadConfig();
+    expect(getItem(db, 'cfg-zoned')!['fire_at']).toBe('2099-07-01T13:00:00.000Z');
+  });
+
   it('upserts a cron schedule from config', () => {
     const config = {
       ...baseConfig,

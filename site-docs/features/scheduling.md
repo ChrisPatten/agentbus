@@ -41,8 +41,8 @@ schedules:
 |---|---|---|
 | `id` | required | A unique name for the schedule |
 | `cron` | | When a recurring schedule runs: minute, hour, day of month, month, day of week |
-| `fire_at` | | When a one-off schedule runs, as a date and time. Use UTC, ending in `Z`. |
-| `timezone` | `UTC` | The time zone `cron` is read in, for example `Europe/London` |
+| `fire_at` | | When a one-off schedule runs, as a date and time, for example `"2027-04-01T09:00"`. See below. |
+| `timezone` | `UTC` | The time zone `cron`, and a `fire_at` without an offset, are read in, for example `Europe/London` |
 | `channel` | required | The channel the prompt arrives on, and the reply goes to |
 | `sender` | required | Who the prompt is from, usually `contact:<you>` |
 | `prompt` | required | What to ask the agent |
@@ -54,7 +54,13 @@ schedules:
 
 Give each schedule either `cron` or `fire_at`.
 
-**Write `fire_at` in UTC, ending in `Z`.** A time with an offset, such as `-05:00`, is currently read as if it were UTC, so the schedule fires early.
+**Writing `fire_at`.** You can write it three ways:
+
+- **In your schedule's time zone**, with no offset: `"2027-04-01T09:00"` with `timezone: America/New_York` runs at 9 am New York time.
+- **With an offset**: `"2027-04-01T09:00:00-04:00"`. The offset wins over `timezone`.
+- **In UTC**, ending in `Z`: `"2027-04-01T13:00:00Z"`.
+
+If you change the `fire_at` of a one-off schedule that hasn't run yet, the new time is used next time the bus starts.
 
 ### Changing config schedules
 
