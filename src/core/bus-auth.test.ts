@@ -71,7 +71,8 @@ describe('withBusToken', () => {
 
 // The pool hook scripts are bash; exercise them with a stub `curl` on PATH
 // that records its argv and stdin, so we can see whether the token was sent.
-describe('scripts/hooks bus token', () => {
+// Spawning bash + curl stubs is slow under full-suite load; allow extra time.
+describe('scripts/hooks bus token', { timeout: 30_000 }, () => {
   const hooksDir = resolve(__dirname, '../../scripts/hooks');
 
   function runHook(script: string, input: unknown, token?: string): { args: string; stdin: string } {
