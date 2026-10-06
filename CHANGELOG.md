@@ -11,6 +11,7 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 ## [Unreleased]
 
 ### Added
+- **Documentation site.** User documentation built with VitePress from `site-docs/` and published at `/docs/` alongside the landing page: getting started, concepts, every shipped channel and runtime, features, configuration/HTTP API/MCP tool/slash command reference, and operations. `npm run docs:dev` previews it and `npm run docs:build` builds it; the Pages workflow now builds the docs and deploys them with the landing page.
 - **Native AgentBus macOS client (E62, in progress).** SwiftUI/XcodeGen source adds Keychain setup, resilient app protocol, SwiftData cache, conversations, files, notifications, and Dock unread state. Xcode and live work-laptop acceptance remain pending.
 - **Cross-channel app continuation (E60).** App messages can continue a listed Telegram, email, or Siri session with replies returned to the app. Resumable Earlier sessions fork into a new app topic while preserving the original history and active session.
 - **Proactive app delivery (E61).** Scheduled work can notify Main or an existing named app topic while the client is offline. Agent session tools expose app titles, and missed cron and one-off work follows documented wake behavior.
