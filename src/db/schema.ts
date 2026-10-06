@@ -134,6 +134,11 @@ function loadMigrations(): Migration[] {
       description: 'Durable app events and read state (E59)',
       sql: readFileSync(join(migrationsDir, '024_app_events.sql'), 'utf-8'),
     },
+    {
+      version: 25,
+      description: 'Bus advisories (E65)',
+      sql: readFileSync(join(migrationsDir, '025_advisories.sql'), 'utf-8'),
+    },
   ];
 }
 

@@ -994,7 +994,7 @@ epics:
     notes: Owner contacts and bus advisories (owner-only, spoof-proof system block, direct channel for critical). Depends on E64.
     stories:
       S65.1: complete  # Owner contacts config (agents.<id>.owners, src/core/owners.ts)
-      S65.2: pending  # Advisory store and lifecycle
+      S65.2: complete  # Advisory store and lifecycle (migration 025, src/advisories/store.ts)
       S65.3: pending  # Delivery paths and advisory_ack
       S65.4: pending  # Visibility and docs
   E66:

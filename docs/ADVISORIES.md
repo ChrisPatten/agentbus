@@ -30,3 +30,20 @@ agents:
 - Owners receive advisories (and, later, E68 self-edit proposals). They are not a trust tier: they don't change what the agent may remember or journal.
 
 Code: `src/core/owners.ts` (`OwnerDirectory`: `owners`, `isOwner`, `ownerConversations`, `logicalAgentId`).
+
+## Advisory lifecycle
+
+Advisories live in the `advisories` table (migration 025). Each one has a condition key chosen by its producer, a severity (`info`, `warning` or `critical`), a title, a body, and a required remediation hint telling the owner what to do.
+
+```
+open ──► delivered ──► acknowledged ──► resolved
+  └──────────┴──────────────┴──────────────┘ (resolve from any state)
+```
+
+- **One advisory per condition.** While a condition is active (any state except `resolved`), raising it again updates the same row: `raise_count` and `last_raised_at` move, changed text is stored, and delivery state is kept.
+- **Escalation in place.** Raising with a higher severity updates the row and moves it back to `open`, so it is delivered again at the new severity. A lower severity never de-escalates.
+- **Auto-resolve.** The producer calls `resolve(agent, conditionKey)` when the condition clears.
+- **Re-raise on recurrence.** A raise after `resolve` opens a new row, so the history of past occurrences is kept.
+- **Acknowledge.** The agent calls the `advisory_ack` MCP tool once it has relayed the advisory. An agent can only acknowledge its own advisories.
+
+Code: `src/advisories/store.ts` (`AdvisoryStore`: `raise`, `resolve`, `ack`, `markDelivered`, `recordAttempt`, `list`, `listActive`).
