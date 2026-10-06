@@ -52,7 +52,7 @@ function msg(sessionId: string, minAgo: number, opts: { dir?: 'inbound' | 'outbo
 function fakeJournaler(id: JournalerId = 'cc-headless', outcome: JournalOutcome = 'done') {
   const jobs: JournalJob[] = [];
   let release: (() => void) | null = null;
-  const j: Journaler & { jobs: JournalJob[]; hold: () => void; release: () => void } = {
+  const j: Journaler & { jobs: JournalJob[]; held: boolean; hold: () => void; release: () => void } = {
     id, requires: [], supportsKinds: ['session'], jobs,
     canJournal: () => ({ ok: true }),
     run: vi.fn(async (job: JournalJob) => {
