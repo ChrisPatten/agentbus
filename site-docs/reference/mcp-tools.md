@@ -107,9 +107,16 @@ See [Scheduling](/features/scheduling).
 
 See [Knowledge store](/features/knowledge-store).
 
+## Advisories and journaling
+
+| Tool | What it does |
+|---|---|
+| `advisory_ack` | Confirms the agent has told its owner about an advisory: `id` from the advisory block. See [Owners and advisories](/features/owners-and-advisories). |
+| `journal_complete` | Finishes a journal run: `run_id` from the journal block, plus `files_changed`, a one-line `notes`, or `nothing_new: true`. Until it's called, messages to the agent wait and its own messages are refused. Not available to `cc-headless`. See [Journaling and memory](/features/journaling-and-memory#while-the-agent-is-journaling). |
+
 ## Memory
 
-`recall_memory` and `log_memory` belong to the memory system that's being rebuilt. See [Journaling and memory](/features/journaling-and-memory).
+`recall_memory` searches the old memory store, which is no longer written to. `log_memory` is still listed but returns an error: agents keep their memory in their own files. See [Journaling and memory](/features/journaling-and-memory#the-old-memory-store).
 
 ## Runtime-specific
 

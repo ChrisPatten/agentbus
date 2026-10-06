@@ -20,11 +20,13 @@ The tables below list the routes that are useful to you. Other routes exist for 
 
 | Method and path | Returns |
 |---|---|
-| `GET /api/v1/health` | Overall `status` (`healthy` or `degraded`), the bus `version`, each channel's status and capabilities, and message counts in the queue (`pending`, `processing`, `delivered`, `dead_letter`) |
+| `GET /api/v1/health` | Overall `status` (`healthy` or `degraded`), the bus `version`, each channel's status and capabilities, message counts in the queue (`pending`, `processing`, `delivered`, `dead_letter`), and a `journaling` summary |
 | `GET /api/v1/adapters` | The channels running on the bus |
 | `GET /api/v1/pool` | Each `cc-pool` pane's state, conversation, model and last activity, plus parked messages. `?pool=agent:<id>` for one pool. |
 
 `/api/v1/health` always answers `200` while the bus is running, so it's suitable for uptime monitors. See [Health and logs](/operations/monitoring).
+
+The `journaling` summary has its own `status`: `critical` when an agent's journal runs have failed 3 times in a row or a conversation has waited a day to be journaled, `warning` after a failed run, otherwise `ok`. For each agent it gives the age of the oldest unjournaled conversation (`backlog_age_ms`), failed runs in a row, and the last success and failure. It doesn't change the overall `status`, so point a monitor at `journaling.status` if you want to be alerted.
 
 ## Sessions and transcripts
 
@@ -82,6 +84,23 @@ See [Choosing models](/features/models).
 | `POST /api/v1/approvals/<id>/resolve` | Answers a request: `{"decision": "approve"}` or `{"decision": "deny"}` |
 
 Answering through the API skips the check that only the addressed contact may answer. See [Approvals](/features/approvals).
+
+## Journaling
+
+| Method and path | Returns |
+|---|---|
+| `GET /api/v1/journal/runs` | Journal runs, newest first: which journaler ran, the trigger, the outcome, what it could see, files changed, notes and cost. Filters: `agent` (for example `agent:assistant`), `conversation`, `session`, `limit` (default 50, up to 500). Kept for 90 days. |
+
+See [Journaling and memory](/features/journaling-and-memory).
+
+## Advisories
+
+| Method and path | Returns |
+|---|---|
+| `GET /api/v1/advisories` | Advisories, most severe first. Filters: `agent`, `state` (`active`, the default, or `all`, `open`, `delivered`, `acknowledged`, `resolved`). |
+| `GET /api/v1/advisories/<id>` | One advisory |
+
+There's no route to raise an advisory; only the bus raises them. See [Owners and advisories](/features/owners-and-advisories).
 
 ## Knowledge store
 

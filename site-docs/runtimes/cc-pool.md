@@ -126,7 +126,7 @@ Claude Code hooks in `scripts/hooks/` in the AgentBus folder make a pool work be
 | `agentbus_journal_hook.sh` | `Stop`, `PreCompact` and `SessionEnd` | Tells the bus each time a turn finishes, so a long-running turn isn't mistaken for an idle conversation. Before the conversation's context is compacted or cleared, it saves a copy of the transcript for journaling. |
 | `agentbus_stop_hook.sh` | `Stop` | The older turn-finished hook. Keep it if you already have it, or use `agentbus_journal_hook.sh` instead. |
 
-The scripts talk to the bus at `http://127.0.0.1:3000`. The approval and tool-status hooks have this address at the top of the file; the journal and stop hooks read `AGENTBUS_URL` from the environment instead and need no editing. The scripts need `jq` and `curl`; the tool-status hook also needs `python3`.
+The scripts talk to the bus at `http://127.0.0.1:3000`. The approval and tool-status hooks have this address at the top of the file; the journal and stop hooks read `AGENTBUS_URL` from the environment instead and need no editing. If your bus has an `auth_token`, the journal and stop hooks send it from `AGENTBUS_BUS_TOKEN`, which the pool sets in every pane. The scripts need `jq` and `curl`; the tool-status hook also needs `python3`.
 
 Panes only pick up new hook settings when they next start.
 
@@ -138,7 +138,7 @@ Parked messages and leases are stored in the bus database and survive a restart.
 
 ## Clearing a conversation
 
-`/clear` ends the conversation's session in the bus. While the conversation still holds its pane, that pane's Claude session keeps its context. The fresh session starts the next time the conversation is given a pane. To start fresh straight away, use the Claude Code session directly (attach to it and run `/clear` there).
+`/clear` ends the conversation's session and journals it. The conversation lets go of its pane straight away, and the pane is cleared (or closed, with `on_evict: kill`) in the background, so your next message starts a fresh Claude session.
 
 `/stop` doesn't apply to pool conversations. To interrupt a pane, attach to it and press Escape.
 

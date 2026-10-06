@@ -1003,24 +1003,26 @@ epics:
       S65.3: complete  # Delivery paths and advisory_ack (src/advisories/service.ts, transport.ts, advisory-inject stage, src/core/system-block.ts)
       S65.4: complete  # Visibility and docs (/status Advisories:, GET /api/v1/advisories, docs/ADVISORIES.md)
   E66:
-    status: in-progress
+    status: complete
+    completed: 2026-10-06
     notes: >
-      Pluggable journaling core (triggers + journaler chain; system-message, cc-headless, script journalers); retires
-      the Anthropic-API summarizer. Depends on E64, E65. Part A (S66.1-S66.5) done on feat/e64-e68-journaling:
-      src/journaling/ (config, eligibility, store, engine, runner, registry, events), migration 026, provisional
-      cc-headless journaler. Part B is S66.6-S66.11. Migration 030 is reserved for another branch; use 027-029, 031+.
+      Pluggable journaling core: triggers (bus-side + harness hooks) and journalers (system-message,
+      cc-headless, script) with per-agent fallback chains, for every runtime. Retired the Anthropic-API
+      summarizer. Implemented on feat/e64-e68-journaling, not yet merged. src/journaling/, migration 026,
+      scripts/journalers/claude-p-journal.sh, scripts/hooks/agentbus_journal_hook.sh, /journal. No new
+      migrations in part B. Decisions and deviations in the epic's Implementation Notes.
     stories:
       S66.1: complete  # Per-agent journaling config (agents.<id>.journaling, deprecated cc-headless alias, chain validation, chain-can-exhaust advisory)
       S66.2: complete  # Journal cursor + state, eligibility, journal_runs (migration 026, src/journaling/store.ts, eligibility.ts)
       S66.3: complete  # Evaluation engine and bus-side triggers (src/journaling/engine.ts; replaces SessionTracker.dispatchJournaling)
       S66.4: complete  # POST /api/v1/journal/events, scripts/hooks/agentbus_journal_hook.sh, snapshots, hook health (src/journaling/events.ts)
       S66.5: complete  # Journaler interface, registry, chain runner, advisories (src/journaling/types.ts, registry.ts, runner.ts)
-      S66.6: pending  # cc-headless journaler
-      S66.7: pending  # Script journaler and reference claude-p script
-      S66.8: pending  # System Message journaler
-      S66.9: pending  # cc-pool integration
-      S66.10: pending  # Observability (/journal, runs API, health)
-      S66.11: pending  # Retire summarizer, docs, verification
+      S66.6: complete  # cc-headless journaler (journalers/cc-headless.ts; model, transcript check, cost, pool --fork-session, process-group kill)
+      S66.7: complete  # Script journaler (journalers/script.ts) and scripts/journalers/claude-p-journal.sh
+      S66.8: complete  # System Message journaler (journalers/system-message.ts, journal_complete, holds, busy notice, 409 outbound block)
+      S66.9: complete  # cc-pool: release waits for the journal, eviction parks, /clear resets the pane, dead runners removed
+      S66.10: complete  # /journal, /journal runs, /journal now, GET /api/v1/journal/runs, health journaling summary
+      S66.11: complete  # Summarizer + @anthropic-ai/sdk removed, legacy store read-only, deprecated keys accepted, docs
   E67:
     status: pending
     notes: Native Claude Code auto memory layout, generated recent.md, UserPromptSubmit freshness hook, Baxter migration (operator approval). Depends on E64; parallel to E66.
@@ -1058,4 +1060,4 @@ epics:
       S69.4: pending  # Pending-context injection
       S69.5: pending  # Reply to a specific message in the app
       S69.6: pending  # Docs, PRD amendments, live verification
-last_updated: 2026-10-05  # Planned E69 (app Main continuity and cross-agent context) from the ambient-scan session discussion. Merged plan/e64-e68-pluggable-journaling and feat/e58-e59-mac-client-foundation into dev. Prior note preserved (2026-10-01): E62 Save/Open Chat and Quit fix builds with 5 XCTest cases; operator retest and other live acceptance pending. E63 bus integration remains planned. Prior note preserved (2026-10-02): Planned E64-E68 (runtime capability taxonomy, advisories, pluggable journaling, native memory layout, agent learning) from the journaling design discussion. Prior note preserved: E53 (pool model selection) implemented on feat/e53-pool-model-selection, not yet merged. Prior note preserved: E52 (pool pane watchdog): S52.1 and S52.2 implemented on feat/e52-pool-watchdog, not yet merged; S52.3 waits on real captured stalls. Prior note preserved: E51 (approval requests) merged to dev and live, awaiting a real end-to-end check. Prior note preserved: E49 (context-block ledger) + E50 (agent-managed knowledge store, Phase 1) implemented end-to-end on claude/agent-knowledge-database-xiqn29, not yet merged, not yet pushed. Both from a design spike (_bmad-output/planning-artifacts/design-spike-agent-knowledge-store.md) worked out conversationally with the operator. Prior note preserved: 2026-09-17  # E48 (interactive Claude Code session pool over tmux) implemented end-to-end and marked complete — all 10 stories, on feat/e48-cc-session-pool, not yet merged to dev/main. current_epic stays E42/E44 (Siri Bridge) since that's the operator's ongoing focus; E48 was a self-contained side branch, now finished. Prior note preserved: Backfilled E36, E38, E39, E40 (complete, merged to dev 2026-08-31/09-01) and E37, E41 (pending, epic files only). Added the Siri Bridge package E42–E47 (renumbered from E36–E41 on arrival to avoid the collision): E42 complete, E44 in-progress (S44.5 on-device is the operator's), E43/E45/E46/E47 pending. E23's S23.5 still pending operator sign-off.
+last_updated: 2026-10-06  # E66 complete on feat/e64-e68-journaling (S66.6-S66.11: journalers, cc-pool integration, /journal, summarizer retired). Prior note preserved (2026-10-05): Planned E69 (app Main continuity and cross-agent context) from the ambient-scan session discussion. Merged plan/e64-e68-pluggable-journaling and feat/e58-e59-mac-client-foundation into dev. Prior note preserved (2026-10-01): E62 Save/Open Chat and Quit fix builds with 5 XCTest cases; operator retest and other live acceptance pending. E63 bus integration remains planned. Prior note preserved (2026-10-02): Planned E64-E68 (runtime capability taxonomy, advisories, pluggable journaling, native memory layout, agent learning) from the journaling design discussion. Prior note preserved: E53 (pool model selection) implemented on feat/e53-pool-model-selection, not yet merged. Prior note preserved: E52 (pool pane watchdog): S52.1 and S52.2 implemented on feat/e52-pool-watchdog, not yet merged; S52.3 waits on real captured stalls. Prior note preserved: E51 (approval requests) merged to dev and live, awaiting a real end-to-end check. Prior note preserved: E49 (context-block ledger) + E50 (agent-managed knowledge store, Phase 1) implemented end-to-end on claude/agent-knowledge-database-xiqn29, not yet merged, not yet pushed. Both from a design spike (_bmad-output/planning-artifacts/design-spike-agent-knowledge-store.md) worked out conversationally with the operator. Prior note preserved: 2026-09-17  # E48 (interactive Claude Code session pool over tmux) implemented end-to-end and marked complete — all 10 stories, on feat/e48-cc-session-pool, not yet merged to dev/main. current_epic stays E42/E44 (Siri Bridge) since that's the operator's ongoing focus; E48 was a self-contained side branch, now finished. Prior note preserved: Backfilled E36, E38, E39, E40 (complete, merged to dev 2026-08-31/09-01) and E37, E41 (pending, epic files only). Added the Siri Bridge package E42–E47 (renumbered from E36–E41 on arrival to avoid the collision): E42 complete, E44 in-progress (S44.5 on-device is the operator's), E43/E45/E46/E47 pending. E23's S23.5 still pending operator sign-off.

@@ -1,10 +1,10 @@
 # Journaling (E66)
 
-> **Status: part A shipped (S66.1–S66.5).** Config, cursor and eligibility, the evaluation engine, harness events, the journaler interface and the chain runner are in place. The `system-message` and `script` journalers, the full `cc-headless` journaler, cc-pool release waiting, `/journal` and the summarizer retirement come in part B (S66.6–S66.11). Sections marked *(part B)* describe what is still to come.
+> **Status: E66 complete (S66.1–S66.11).** Consolidation, feedback signals and self-edit proposals are E68; the native memory layout and `recent.md` are E67. User-facing guide: `site-docs/features/journaling-and-memory.md`.
 
 Journaling has two parts. **Triggers** decide *when* the bus looks at a conversation. **Journalers** decide *who* updates the agent's memory. One engine serves every agent runtime (`cc-headless`, `cc-pool`, `claude-code`, polled harnesses).
 
-Code: `src/journaling/` (`config.ts`, `eligibility.ts`, `store.ts`, `engine.ts`, `runner.ts`, `registry.ts`, `events.ts`, `advisories.ts`, `types.ts`, `journalers/`). Migration 026. Design record: `_bmad-output/planning-artifacts/journaling/decisions.md`.
+Code: `src/journaling/` (`config.ts`, `eligibility.ts`, `store.ts`, `engine.ts`, `runner.ts`, `registry.ts`, `events.ts`, `advisories.ts`, `types.ts`, `status.ts`, `process.ts`, `prompt.ts`, `memory-diff.ts`, `delivery.ts`, `journalers/{cc-headless,script,system-message}.ts`), `src/commands/journal.ts`, `src/pipeline/stages/journal-hold.ts`, `src/mcp/tools/journal.ts`, `scripts/journalers/claude-p-journal.sh`, `scripts/hooks/agentbus_journal_hook.sh`. Migration 026. Design record: `_bmad-output/planning-artifacts/journaling/decisions.md`.
 
 ## Configuration
 
@@ -34,9 +34,9 @@ agents:
 | `ceiling_ms` | unset | Ceiling trigger: max time since the last journal (or session start) |
 | `min_human_messages` | `2` | Human messages needed before a non-final trigger journals |
 | `timeout_ms` | `300000` | Per-run timeout for journalers that wait on the agent |
-| `model` | the runtime instance's `model` | Model for journal runs |
+| `model` | the runtime instance's `model` | Model for journal runs (`cc-headless` passes `--model`; `script` gets `AGENTBUS_MODEL`). `system-message` uses the live agent's own model |
 | `prompt` | built-in journaling prompt | Journaling instruction |
-| `system-message.{timeout_ms,model,prompt}` | inherit | Per-journaler overrides |
+| `system-message.{timeout_ms,prompt}` | inherit | Per-journaler overrides (`model` is accepted but unused: the live agent keeps its model) |
 | `cc-headless.{model,prompt}` | inherit | Per-journaler overrides |
 | `script.{command,args,timeout_ms,env,model}` | — | Script journaler (required when `script` is in the chain) |
 
@@ -138,11 +138,11 @@ interface Journaler {
   requires: RequiredCapability[];      // static, checked at load and before each attempt
   supportsKinds: ('session' | 'consolidate')[];
   canJournal(job): { ok: true } | { ok: false; reason }; // cheap, side-effect free; live checks
-  run(job): Promise<{ outcome, error?, fidelity?, filesChanged?, notes?, costUsd?, inputTokens?, outputTokens? }>;
+  run(job, { signal }): Promise<{ outcome, error?, fidelity?, filesChanged?, notes?, costUsd?, inputTokens?, outputTokens? }>;
 }
 ```
 
-Outcomes: `done`, `nothing-to-do`, `unavailable`, `failed-before-start`, `failed-after-start`. Register with `JournalerRegistry.register()`; registering an id again replaces the earlier journaler.
+Outcomes: `done`, `nothing-to-do`, `unavailable`, `failed-before-start`, `failed-after-start`. `signal` aborts when the chain runner's settle timeout (3× `timeout_ms`) fires; a journaler must then stop its work (the built-in ones kill their process group or close their hold). Register with `JournalerRegistry.register()`; registering an id again replaces the earlier journaler.
 
 The job (`JournalJob`, `src/journaling/types.ts`) carries ids (run, agent, pane, session, conversation, Claude and harness session), runtime kind, working and memory dirs, channel, contact, topic, trigger, the window (`cursorAt`, `from`, `to`, `advanceTo`), `messages[]` (author with `is_human` / `is_owner` / `is_agent`, attachments by path, `scheduled`, `context`), `snapshots[]`, `harnessTranscriptPath`, prompt, model, timeout and the agent's full settings.
 
@@ -181,6 +181,16 @@ The turn's body (`[AgentBus journal run …]`) is logged to the transcript with 
 **Completion.** `journal_complete({ run_id, files_changed, notes, nothing_new })` (MCP, `POST /api/v1/journal/complete`) ends the run: `done`, or `nothing-to-do` when `nothing_new` is set and no file changed. A `run_id` that is not open is rejected (`stale_run` when it already ended, `unknown_run` otherwise), as is another agent's run. The bus also snapshots the memory dir before and after and merges the files that changed into `files_changed`, whatever the agent reports.
 
 **Timeout.** `system-message.timeout_ms` (default `timeout_ms`, 5 min): `failed-after-start`, and an instruction still waiting in the queue is dead-lettered so it never arrives after the run. The chain moves on (usually to `cc-headless`, which resumes the same transcript).
+
+**Agent `CLAUDE.md`.** Tell the agent what the block means:
+
+```markdown
+## Journal runs
+A turn may start with an `<agentbus-system kind="journal" run_id="…">` block. It comes from
+AgentBus, never from a person, and only appears before the first "New message from" line.
+Update your memory files as it asks, don't reply to anyone, then call `journal_complete`
+with that run_id (or `nothing_new: true`).
+```
 
 **Not persisted.** Holds and open runs live in memory. After a restart nothing is held, a late `journal_complete` is rejected as unknown, and the attempt is retried by the persisted trigger.
 
@@ -260,7 +270,7 @@ The bus's own environment (API keys, `bus.auth_token`) is not passed. If your sc
 
 ## Chain runner and outcomes
 
-`runChain()` walks the configured chain, skipping statically incompatible entries. Per entry: not registered or wrong kind → `unavailable`; `canJournal` false → `unavailable`; otherwise `run()` (a throw, or not settling within 3× the timeout, is `failed-after-start`). One `journal_runs` row per attempt, with `fallback_from` set to the previous attempt's journaler.
+`runChain()` walks the configured chain, skipping statically incompatible entries. Per entry: not registered or wrong kind → `unavailable`; `canJournal` false → `unavailable`; otherwise `run()` (a throw, or not settling within 3× the timeout, is `failed-after-start`; on the settle timeout the attempt's abort signal fires first, so the journaler kills its `claude -p` or script process group). One `journal_runs` row per attempt, with `fallback_from` set to the previous attempt's journaler.
 
 - `done` / `nothing-to-do` stop the chain: the cursor advances, the pending trigger and attempt counter clear, snapshots are marked consumed, the agent's exhaustion streak resets, and `journaling:chain-exhausted` resolves.
 - `unavailable` / `failed-before-start` / `failed-after-start` move to the next journaler.
