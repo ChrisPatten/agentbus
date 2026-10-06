@@ -10,7 +10,9 @@
  *   - Exit codes: 0 done, 3 nothing-to-do, 75 unavailable, anything else
  *     (or a timeout) failed-after-start. A command that can't be started is
  *     failed-before-start.
- *   - Optional stdout JSON `{ files_changed?, notes?, cost_usd? }`. stderr is
+ *   - Optional stdout JSON `{ files_changed?, notes?, cost_usd?, proposals? }`
+ *     (E68: `proposals[]` of `{ path, new_content | diff, rationale, evidence }`
+ *     are submitted as self-edit proposals when the run succeeds). stderr is
  *     captured (truncated) to the bus log and, on failure, the run's error.
  *   - Timeout (`script.timeout_ms`, default the journaling timeout): SIGTERM,
  *     then SIGKILL, to the process group. The chain runner's abort does the same.
@@ -22,7 +24,30 @@ import { accessSync, constants as fsConstants, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, resolve as resolvePath } from 'node:path';
 import { runProcess as defaultRunProcess, tail, type RunProcessOptions, type RunProcessResult } from '../process.js';
-import type { Journaler, JournalAvailability, JournalJob, JournalRunContext, JournalRunResult } from '../types.js';
+import type { Journaler, JournalAvailability, JournalJob, JournalProposal, JournalRunContext, JournalRunResult } from '../types.js';
+
+/** Max proposals read from one script run (the bus enforces its own daily limit). */
+const MAX_SCRIPT_PROPOSALS = 5;
+
+function parseProposals(raw: unknown): JournalProposal[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out: JournalProposal[] = [];
+  for (const p of raw.slice(0, MAX_SCRIPT_PROPOSALS)) {
+    if (!p || typeof p !== 'object') continue;
+    const r = p as Record<string, unknown>;
+    if (typeof r['path'] !== 'string' || typeof r['rationale'] !== 'string') continue;
+    out.push({
+      path: r['path'],
+      rationale: r['rationale'],
+      ...(typeof r['new_content'] === 'string' ? { new_content: r['new_content'] } : {}),
+      ...(typeof r['diff'] === 'string' ? { diff: r['diff'] } : {}),
+      ...(typeof r['evidence'] === 'string' || Array.isArray(r['evidence'])
+        ? { evidence: Array.isArray(r['evidence']) ? r['evidence'].filter((e): e is string => typeof e === 'string') : (r['evidence'] as string) }
+        : {}),
+    });
+  }
+  return out;
+}
 
 /** Exit codes of the script contract. */
 export const SCRIPT_EXIT = { done: 0, nothingToDo: 3, unavailable: 75 } as const;
@@ -165,7 +190,7 @@ export function buildScriptPayload(job: JournalJob): ScriptPayloadV1 {
 }
 
 /** Parse the optional stdout JSON (the last JSON object printed). */
-export function parseScriptOutput(stdout: string): { filesChanged?: string[]; notes?: string; costUsd?: number } | null {
+export function parseScriptOutput(stdout: string): { filesChanged?: string[]; notes?: string; costUsd?: number; proposals?: JournalProposal[] } | null {
   const text = stdout.trim();
   if (!text) return null;
   for (const candidate of [text, ...text.split('\n').reverse()]) {
@@ -173,7 +198,9 @@ export function parseScriptOutput(stdout: string): { filesChanged?: string[]; no
       const v = JSON.parse(candidate) as Record<string, unknown>;
       if (!v || typeof v !== 'object' || Array.isArray(v)) continue;
       const files = Array.isArray(v['files_changed']) ? v['files_changed'].filter((f): f is string => typeof f === 'string') : undefined;
+      const proposals = parseProposals(v['proposals']);
       return {
+        ...(proposals && proposals.length > 0 ? { proposals } : {}),
         ...(files ? { filesChanged: files } : {}),
         ...(typeof v['notes'] === 'string' ? { notes: tail(v['notes'], 2000) } : {}),
         ...(typeof v['cost_usd'] === 'number' ? { costUsd: v['cost_usd'] } : {}),
@@ -285,6 +312,7 @@ export class ScriptJournaler implements Journaler {
       ...(out.filesChanged ? { filesChanged: out.filesChanged } : {}),
       ...(out.notes ? { notes: out.notes } : {}),
       ...(out.costUsd !== undefined ? { costUsd: out.costUsd } : {}),
+      ...(out.proposals ? { proposals: out.proposals } : {}),
     };
     switch (proc.code) {
       case SCRIPT_EXIT.done: return { outcome: 'done', ...extra };

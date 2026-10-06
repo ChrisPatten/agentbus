@@ -85,6 +85,7 @@ import { defaultScheduleTopic } from '../scheduler/default-topic.js';
 import { resolveApprovalTarget } from '../approvals/resolve-target.js';
 import { dispatchApproval } from '../approvals/dispatch.js';
 import { resolveApproval, type ApprovalResolveHooks } from '../approvals/resolve.js';
+import type { ProposalService, ProposalStatus } from '../learning/proposals.js';
 import { APPROVAL_TIMEOUT_MS, type ApprovalStatus } from '../approvals/types.js';
 import { parseFreshnessQuery, type RecentFreshness } from '../memory/recent-freshness.js';
 import { parseHarnessEvent, type HarnessEvents } from '../journaling/events.js';
@@ -134,6 +135,8 @@ export interface HttpServerDeps {
   memoryRecent?: Pick<RecentFreshness, 'check'>;
   /** E68 — hooks for POST /api/v1/approvals/:id/resolve (denied-approval feedback, self-edit proposals). */
   approvalHooks?: ApprovalResolveHooks;
+  /** E68 — when present, the /api/v1/proposals routes are mounted (the propose_change MCP tool). */
+  proposals?: Pick<ProposalService, 'submit' | 'list' | 'get'>;
 }
 
 const MessagePayloadSchema = z.discriminatedUnion('type', [
@@ -880,6 +883,62 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
         return reply.status(status).send({ ok: false, error: result.reason });
       }
       return { ok: true, run_id: result.runId };
+    });
+  }
+
+  // ── Self-edit proposals (E68 S68.3) ──────────────────────────────────────
+  // POST /api/v1/proposals — the propose_change MCP tool. `agent_id` is the
+  //   caller (bare, prefixed or a pool pane id). One of new_content / diff.
+  // GET  /api/v1/proposals?agent=&status=&limit= — newest first, without content.
+  // GET  /api/v1/proposals/:id — one proposal, with its content and diff.
+  const proposals = deps.proposals;
+  if (proposals) {
+    const ProposalSchema = z.object({
+      agent_id: z.string().min(1),
+      path: z.string().min(1).max(1000),
+      new_content: z.string().max(512 * 1024).optional(),
+      diff: z.string().max(512 * 1024).optional(),
+      rationale: z.string().min(1).max(10_000),
+      evidence: z.union([z.string().max(10_000), z.array(z.string().max(2_000)).max(50)]).optional(),
+      run_id: z.string().min(1).optional(),
+    });
+    const PROPOSAL_STATUS: Record<string, number> = {
+      unknown_agent: 404, no_protected_paths: 422, not_protected: 400, invalid: 400, diff_failed: 409, no_change: 400,
+      too_large: 413, rate_limited: 429, no_owners: 422, not_delivered: 422,
+    };
+    const summaryOf = (p: ReturnType<typeof proposals.list>[number]) => {
+      const { new_content: _content, ...rest } = p;
+      return rest;
+    };
+    server.post<{ Body: unknown }>('/api/v1/proposals', async (req, reply) => {
+      const parsed = ProposalSchema.safeParse(req.body);
+      if (!parsed.success) return reply.status(400).send({ ok: false, error: 'invalid', message: parsed.error.message });
+      const b = parsed.data;
+      const result = await proposals.submit({
+        agentId: b.agent_id, path: b.path, rationale: b.rationale, source: 'mcp',
+        ...(b.new_content !== undefined ? { newContent: b.new_content } : {}),
+        ...(b.diff !== undefined ? { diff: b.diff } : {}),
+        ...(b.evidence !== undefined ? { evidence: b.evidence } : {}),
+        ...(b.run_id ? { runId: b.run_id } : {}),
+      });
+      if (!result.ok) return reply.status(PROPOSAL_STATUS[result.error] ?? 400).send({ ok: false, error: result.error, message: result.message });
+      return {
+        ok: true, id: result.proposal.id, status: result.proposal.status, path: result.proposal.path,
+        notified: result.notified, expires_at: result.proposal.expires_at, ...(result.duplicate ? { duplicate: true } : {}),
+      };
+    });
+    server.get<{ Querystring: { agent?: string; status?: string; limit?: string } }>('/api/v1/proposals', async (req, reply) => {
+      const valid: ProposalStatus[] = ['pending', 'applied', 'denied', 'stale', 'expired', 'failed'];
+      const status = req.query.status as ProposalStatus | undefined;
+      if (status && !valid.includes(status)) return reply.status(400).send({ ok: false, error: `status must be one of ${valid.join(', ')}` });
+      const limit = Math.max(1, Math.min(Number.parseInt(req.query.limit ?? '50', 10) || 50, 200));
+      const list = proposals.list({ ...(req.query.agent ? { agentId: req.query.agent } : {}), ...(status ? { status } : {}), limit });
+      return { ok: true, count: list.length, proposals: list.map(summaryOf) };
+    });
+    server.get<{ Params: { id: string } }>('/api/v1/proposals/:id', async (req, reply) => {
+      const p = proposals.get(req.params.id);
+      if (!p) return reply.status(404).send({ ok: false, error: 'not_found' });
+      return { ok: true, proposal: p };
     });
   }
 

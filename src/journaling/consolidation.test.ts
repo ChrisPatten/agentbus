@@ -158,6 +158,20 @@ describe('JournalEngine.consolidate (S68.1)', () => {
     expect(engineFor(makeConfig(), [fake()]).consolidate('nobody').status).toBe('not-configured');
   });
 
+  it('submits proposals the winning journaler returned (E68 S68.3)', async () => {
+    const submit = vi.fn(async () => ({ ok: true }));
+    const j = fake();
+    j.run = vi.fn(async (job: JournalJob) => {
+      j.jobs.push(job);
+      return { outcome: 'done' as const, proposals: [{ path: 'CLAUDE.md', diff: '@@', rationale: 'recurring correction', evidence: ['x'] }] };
+    });
+    const engine = engineFor(makeConfig(), [j], { proposals: { submit } });
+    await engine.consolidate('baxter', 'manual').done;
+    expect(submit).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      agentId: 'agent:baxter', path: 'CLAUDE.md', diff: '@@', rationale: 'recurring correction', evidence: ['x'], source: 'script', runId: j.jobs[0]!.runId,
+    }));
+  });
+
   it('passes the consolidation context to scripts', async () => {
     const j = fake();
     const engine = engineFor(makeConfig(), [j]);

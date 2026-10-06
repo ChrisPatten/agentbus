@@ -164,6 +164,11 @@ function loadMigrations(): Migration[] {
       description: 'Feedback events for agent learning (E68)',
       sql: readFileSync(join(migrationsDir, '032_feedback_events.sql'), 'utf-8'),
     },
+    {
+      version: 33,
+      description: 'Self-edit proposals (E68)',
+      sql: readFileSync(join(migrationsDir, '033_self_edit_proposals.sql'), 'utf-8'),
+    },
   ];
 }
 

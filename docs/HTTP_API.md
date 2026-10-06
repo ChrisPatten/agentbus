@@ -37,6 +37,9 @@ Set `bus.host: 0.0.0.0` to accept connections from other hosts, for example a re
 | GET | `/api/v1/approvals` | List approval requests, optionally by status |
 | GET | `/api/v1/approvals/:id` | Fetch one approval request |
 | POST | `/api/v1/approvals/:id/resolve` | Answer an approval request |
+| POST | `/api/v1/proposals` | Propose a change to a protected file (the `propose_change` tool) |
+| GET | `/api/v1/proposals` | List self-edit proposals, by agent and status |
+| GET | `/api/v1/proposals/:id` | Fetch one proposal, with its content |
 | GET | `/api/v1/advisories` | List bus advisories, by agent and state |
 | GET | `/api/v1/advisories/:id` | Fetch one advisory |
 | POST | `/api/v1/advisories/:id/ack` | Acknowledge a bus advisory (the `advisory_ack` tool) |
@@ -224,7 +227,23 @@ Returns `{ ok, approval }`, or `404`.
 
 ### `POST /api/v1/approvals/:id/resolve`
 
-Body: `{ "decision": "approve" | "deny", "resolvedBy": "<who>" }`. Sends the key into the pane if the request is still answerable. Returns `{ ok, outcome, approval }` where `outcome` is `approved`, `denied`, `stale`, `expired`, or `already_resolved`. `404` for an unknown id, `400` for a bad `decision`.
+Body: `{ "decision": "approve" | "deny", "resolvedBy": "<who>" }`. Sends the key into the pane if the request is still answerable (for a `self-edit` request: applies or rejects the proposal). A denial is recorded as a `denied-approval` feedback event (E68). Returns `{ ok, outcome, approval }` where `outcome` is `approved`, `denied`, `stale`, `expired`, or `already_resolved`. `404` for an unknown id, `400` for a bad `decision`.
+
+## Proposals
+
+Self-edit proposals (E68): an agent proposes a change to a protected file and its owners approve it. See [AGENT_LEARNING.md](AGENT_LEARNING.md#self-edit-proposals).
+
+### `POST /api/v1/proposals`
+
+The `propose_change` MCP tool. Body `{ "agent_id", "path", "new_content"? | "diff"?, "rationale", "evidence"?: string | string[], "run_id"? }`; `agent_id` is the caller (bare, prefixed or a pool pane id). Returns `200 { ok: true, id, status: "pending", path, notified, expires_at }` (`duplicate: true` for an identical pending proposal, which notifies no one again). Errors are `{ ok: false, error, message }`: `400` `invalid` / `not_protected` / `no_change`, `409` `diff_failed`, `413` `too_large` (over 256 KB), `429` `rate_limited` (3 per agent per 24 h), `422` `no_owners` / `no_protected_paths` / `not_delivered`.
+
+### `GET /api/v1/proposals`
+
+`?agent=<id>`, `?status=` one of `pending`, `applied`, `denied`, `stale`, `expired`, `failed`, `?limit=` (default 50, max 200). Returns `{ ok, count, proposals }`, newest first, without `new_content`. `400` for an unknown status.
+
+### `GET /api/v1/proposals/:id`
+
+Returns `{ ok, proposal }` with `new_content`, `diff`, `base_hash`, `evidence`, `approval_ids` and the status, or `404`.
 
 ## Advisories
 

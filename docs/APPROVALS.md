@@ -54,6 +54,18 @@ A request becomes `stale`, and no key is sent, when any of these hold at answer 
 
 Repeated hook firings for the same unanswered prompt (same pane, tool, and summary) collapse into one request and one notification.
 
+## Self-edit proposals (E68)
+
+A second kind of request, raised in-process rather than through `POST /api/v1/approvals`: an agent's proposal to change one of its protected files (`adapter_id` `self-edit`, `tool_name` `propose_change`). See [AGENT_LEARNING.md](AGENT_LEARNING.md#self-edit-proposals).
+
+- **One request per owner** (`agents.<id>.owners`), each addressed to that owner in their default conversation, dispatched through the same `notifyApproval` seam (Telegram). The first answer wins; the other owners' requests are marked `stale` ("answered by …") and their buttons removed by the sweep.
+- **Message.** "📝 Proposed change", then the request's `raw_context.details`: who wants to change which file, why, the evidence and a compact unified diff (cut to fit Telegram), and the deadline with its date.
+- **Approve/Deny only**, no inline edits. **Expiry: 7 days** (not the 15-minute default).
+- **Resolution** is the `self-edit` backend (`ResolveApprovalDeps.backends`, wired to `ProposalService.decide`): approve writes the file (temp file + rename) if its hash still equals the proposal's base hash, else the request and proposal go `stale` ("changed since the proposal"); deny marks the proposal `denied`. A request that doesn't belong to the proposal (raw_context forged elsewhere) is stale.
+- `POST /api/v1/approvals` can't raise `self-edit` requests (no target resolves for it).
+
+`raw_context.details` is generic: any backend can put a plain-text body there and `renderApprovalPending` shows it under the summary.
+
 ### Denials are feedback (E68)
 
 Every request answered **Deny** (through a Telegram tap or `POST /api/v1/approvals/:id/resolve`) is recorded as a `denied-approval` feedback event for the agent (a pool pane maps to its pool), in the request's conversation. The conversation's next journal run sees it and may run below `min_human_messages` because of it. The hook is `ResolveApprovalDeps.onResolved`. See [AGENT_LEARNING.md](AGENT_LEARNING.md#feedback-events).

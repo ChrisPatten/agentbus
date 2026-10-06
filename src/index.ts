@@ -78,6 +78,8 @@ import { HarnessEvents, createHookHealthTicker } from './journaling/events.js';
 import { RecentMemory } from './memory/recent-service.js';
 import { ConsolidationScheduler } from './journaling/consolidation.js';
 import { ProtectedPathMonitor } from './learning/monitor.js';
+import { ProposalService, SELF_EDIT_ADAPTER } from './learning/proposals.js';
+import { dispatchApproval } from './approvals/dispatch.js';
 import { recordApprovalOutcome, recordDeliveryFailure, recordToolError, type FeedbackProducerDeps } from './journaling/feedback-producers.js';
 import { createFeedbackCommand } from './commands/feedback.js';
 import { RecentFreshness } from './memory/recent-freshness.js';
@@ -169,9 +171,17 @@ const recentMemory = new RecentMemory({ config, resolver: runtimeResolver });
 // E68 S68.4 — protected paths: deny rules on cc-headless journal turns, and
 // before/after hashing of protected files around every journal run.
 const protectedPaths = new ProtectedPathMonitor({ config, resolver: runtimeResolver, advisories });
+// E68 S68.3 — self-edit proposals: approval requests to owners; the bus
+// applies an approved change itself (base-hash checked).
+const proposalApprovals = new ApprovalStore(db);
+const proposalService = new ProposalService({
+  db, owners: ownerDirectory, protectedPaths, approvals: proposalApprovals,
+  dispatch: (request, channel) => dispatchApproval({ registry, store: proposalApprovals }, request, channel),
+});
 const journalEngine = new JournalEngine({
   db, config, resolver: runtimeResolver, registry: journalers, advisories, owners: ownerDirectory, settings: journalingSettings,
   protectedPaths,
+  proposals: proposalService,
   onJournaled: (result) => { if (result.agentId) recentMemory.regenerate(result.agentId, 'journaled'); },
 });
 journalEngine.addTicker(() => recentMemory.tick());
@@ -186,6 +196,7 @@ const safeFeedback = (fn: () => void) => { try { fn(); } catch (err) { console.e
 // Shared by every approval resolution path (Telegram taps, POST /api/v1/approvals/:id/resolve).
 const approvalHooks: ApprovalResolveHooks = {
   onResolved: (request, status) => safeFeedback(() => recordApprovalOutcome(feedbackProducers, request, status)),
+  backends: { [SELF_EDIT_ADAPTER]: (request, decision) => proposalService.decide(request, decision) },
 };
 // E67 S67.5 — memory setup checks: /journal shows them; startup logs them.
 const memorySetup = (agentId: string) => checkMemorySetup(recentMemory.layoutFor(agentId), runtimeResolver.resolve(recentMemory.layoutFor(agentId).agentId));
@@ -294,7 +305,7 @@ const memoryRecent = new RecentFreshness({
   },
   knownAgent: (agentId) => runtimeResolver.resolve(agentId.startsWith('agent:') ? agentId : `agent:${agentId}`) !== undefined,
 });
-const httpServer = await createHttpServer({ queue, registry, config, pipeline, db, commandRegistry, pauseSet, siri, app, poolManagers, getHeadlessSnapshots, runtimeResolver, advisories, journalEvents, journalGate, journalStatus, memoryRecent, approvalHooks });
+const httpServer = await createHttpServer({ queue, registry, config, pipeline, db, commandRegistry, pauseSet, siri, app, poolManagers, getHeadlessSnapshots, runtimeResolver, advisories, journalEvents, journalGate, journalStatus, memoryRecent, approvalHooks, proposals: proposalService });
 
 // E66 — busy notice for a held message: the channel's native queued/status
 // signal where it has one, a short text elsewhere, nothing on email.
@@ -432,6 +443,12 @@ const maintenanceTimer = setInterval(() => {
   if (recovered > 0) console.log(`[agentbus] Recovered ${recovered} stuck processing message(s)`);
   const swept = queue.sweepExpired();
   if (swept > 0) console.log(`[agentbus] Swept ${swept} expired message(s)`);
+  try {
+    const expiredProposals = proposalService.sweep();
+    if (expiredProposals > 0) console.log(`[learning] ${expiredProposals} self-edit proposal(s) expired`);
+  } catch (err) {
+    console.error(`[agentbus] Proposal sweep failed: ${String(err)}`);
+  }
   sweepApprovals({ registry, store: approvalStore }).catch((err) =>
     console.error(`[agentbus] Approval sweep failed: ${String(err)}`),
   );

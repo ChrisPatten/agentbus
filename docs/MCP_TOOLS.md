@@ -23,6 +23,7 @@ Errors come back as `{ "content": [{ "type": "text", "text": "Error: ..." }], "i
 | `write_knowledge`, `get_knowledge`, `forget_knowledge`, `search_knowledge` | Agent-managed structured knowledge store (Phase 1) | Always |
 | `advisory_ack` | Acknowledge a bus advisory after relaying it to the owner | Always |
 | `journal_complete` | Finish a System Message journal run | Polling adapter and cc-pool panes (not cc-headless) |
+| `propose_change` | Propose a change to a protected file (CLAUDE.md, skills, …) for an owner to approve | Always |
 | `get_adapter_status` | Health of the polling MCP adapter | Polling mode only |
 
 ## Messaging
@@ -216,6 +217,17 @@ Finishes a System Message journal run (E66). The run arrives in an `<agentbus-sy
 
 Input: `{ "run_id", "files_changed"?: string[], "notes"?: string, "nothing_new"?: boolean }`. The calling agent's id is sent with it.
 Output: `{ "success": true, "run_id" }`. A run that already ended (timed out) or was already completed, an unknown run id, or another agent's run returns `isError`.
+
+## Agent learning
+
+### `propose_change`
+
+Proposes a change to one of the agent's **protected files** (`CLAUDE.md`, its system prompt file, `skills/`, `.claude/`, or what `agents.<id>.protected_paths` lists), which the agent can't edit itself (E68). The bus sends each owner an Approve/Deny request with the rationale, evidence and a compact diff; on approval it writes the file itself, if the file hasn't changed since the proposal. See [AGENT_LEARNING.md](AGENT_LEARNING.md#self-edit-proposals).
+
+Input: `{ "path", "new_content"? | "diff"?, "rationale", "evidence"?: string[], "run_id"? }`. Exactly one of `new_content` (the whole new file) and `diff` (a unified diff against the current file). `path` is relative to the agent's working dir. The calling agent's id is sent with it.
+Output: `{ "success": true, "proposal_id", "status": "pending", "notified_owners", "expires_at" }` (plus a `note` for an identical proposal already waiting). `isError` with the reason for a path that isn't protected (memory files: edit them directly), a diff that doesn't apply, no change, more than 3 proposals in 24 h, an agent without owners, or no owner reachable on a channel with interactive approvals (Telegram).
+
+Not available to cc-pool session journal forks (they run with no MCP servers); everywhere else, including cc-headless journaling and consolidation turns, it is.
 
 ## Polling adapter only
 

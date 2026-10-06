@@ -179,6 +179,15 @@ export interface JournalJob {
 /** Result of `Journaler.canJournal`: cheap, side-effect free. */
 export type JournalAvailability = { ok: true } | { ok: false; reason: string };
 
+/** E68 S68.3 — a self-edit proposal a journaler returned (script `proposals[]`). */
+export interface JournalProposal {
+  path: string;
+  new_content?: string;
+  diff?: string;
+  rationale: string;
+  evidence?: string[] | string;
+}
+
 /** Result of `Journaler.run`. */
 export interface JournalRunResult {
   outcome: JournalOutcome;
@@ -189,6 +198,8 @@ export interface JournalRunResult {
   costUsd?: number | null;
   inputTokens?: number | null;
   outputTokens?: number | null;
+  /** E68 — proposals to submit when this attempt ends the chain successfully. */
+  proposals?: JournalProposal[];
 }
 
 /**

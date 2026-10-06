@@ -97,6 +97,22 @@ describe.skipIf(!hasJq)('scripts/journalers/claude-p-journal.sh (S66.7)', { time
     );
   });
 
+  it('returns proposals Claude wrote to the proposals file (E68)', async () => {
+    const path = join(dir, 'fake-claude-proposals');
+    writeFileSync(path, `#!/bin/sh
+cat > "${dir}/prompt.txt"
+while [ $# -gt 0 ]; do
+  if [ "$1" = "--add-dir" ]; then printf '%s' '[{"path":"CLAUDE.md","diff":"@@ -1 +1 @@","rationale":"why","evidence":["e"]}]' > "$2/proposals.json"; fi
+  shift
+done
+printf '%s' '{"type":"result","is_error":false,"result":"Proposed a rule change.","total_cost_usd":0.01}'
+`);
+    chmodSync(path, 0o755);
+    const result = await journaler().run(job({ CLAUDE_BIN: path }, { protectedPaths: ['/agents/peggy/CLAUDE.md'] }));
+    expect(result).toMatchObject({ outcome: 'done', proposals: [{ path: 'CLAUDE.md', diff: '@@ -1 +1 @@', rationale: 'why', evidence: ['e'] }] });
+    expect(readFileSync(join(dir, 'prompt.txt'), 'utf-8')).toContain('Protected files (never edit them): /agents/peggy/CLAUDE.md');
+  });
+
   it('lists feedback signals as quoted data (E68)', async () => {
     await journaler().run(job({ CLAUDE_BIN: fakeClaude('ok') }, {
       feedback: [{ id: 'f1', kind: 'user-feedback', created_at: '2026-10-06T07:06:00.000Z', text: 'Use 24-hour time. $(touch pwned2)', ref_message_id: 'm0', contact_id: 'chris', detail: null }],

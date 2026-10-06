@@ -45,6 +45,7 @@ import { usesNativeMemory } from '../memory/native.js';
 import { formatLocalDate } from '../adapters/memory-context.js';
 import { consolidationPrompt } from './prompt.js';
 import { BYPASS_KINDS, FeedbackStore, toFeedbackItem } from './feedback.js';
+import type { ProposalInput } from '../learning/proposals.js';
 
 /** Dailies older than this many days may be archived by consolidation once promoted. */
 export const ARCHIVE_DAILIES_AFTER_DAYS = 30;
@@ -111,6 +112,8 @@ export interface JournalEngineDeps {
    * (deny rules), and the guard hashes them around every run.
    */
   protectedPaths?: RunGuard<any> & { jobPaths(agentId: string): string[] };
+  /** E68 S68.3 — submits `proposals[]` a successful journaler returned (script stdout). */
+  proposals?: { submit(input: ProposalInput): Promise<unknown> };
   now?: () => Date;
   /** Default: `memory.summarizer_interval_ms` (the pre-E66 sweep cadence). */
   tickIntervalMs?: number;
@@ -427,7 +430,10 @@ export class JournalEngine {
     });
     const status: EvaluationStatus =
       summary.outcome === 'done' ? 'journaled' : summary.outcome === 'nothing-to-do' ? 'nothing-to-do' : 'exhausted';
-    if (summary.outcome !== 'exhausted') this.feedback.consume(feedback.map((f) => f.id), job.runId);
+    if (summary.outcome !== 'exhausted') {
+      this.feedback.consume(feedback.map((f) => f.id), job.runId);
+      this.submitProposals(job, summary);
+    }
     const result: EvaluationResult = { status, ...base, summary };
     if (status === 'journaled' && this.deps.onJournaled) {
       try {
@@ -460,6 +466,7 @@ export class JournalEngine {
     });
     const status: EvaluationStatus =
       summary.outcome === 'done' ? 'journaled' : summary.outcome === 'nothing-to-do' ? 'nothing-to-do' : 'exhausted';
+    if (summary.outcome !== 'exhausted') this.submitProposals(job, summary);
     const result: EvaluationResult = { status, agentId, summary };
     if (status === 'journaled' && this.deps.onJournaled) {
       try {
@@ -569,6 +576,27 @@ export class JournalEngine {
       settings,
       ...(this.deps.protectedPaths ? { protectedPaths: this.deps.protectedPaths.jobPaths(agentId) } : {}),
     };
+  }
+
+  /** Submit the proposals the winning journaler returned. Never throws. */
+  private submitProposals(job: JournalJob, summary: ChainRunSummary): void {
+    const winner = summary.attempts.find((a) => a.journaler === summary.journaler && (a.outcome === 'done' || a.outcome === 'nothing-to-do'));
+    const proposals = winner?.result?.proposals ?? [];
+    if (proposals.length === 0 || !this.deps.proposals) return;
+    for (const p of proposals) {
+      void this.deps.proposals
+        .submit({
+          agentId: job.agentId, path: p.path, rationale: p.rationale, source: 'script', runId: job.runId,
+          ...(p.new_content !== undefined ? { newContent: p.new_content } : {}),
+          ...(p.diff !== undefined ? { diff: p.diff } : {}),
+          ...(p.evidence !== undefined ? { evidence: p.evidence } : {}),
+        })
+        .then((r) => {
+          const res = r as { ok?: boolean; error?: string; message?: string };
+          if (res && res.ok === false) this.log(`[journaling] proposal from run ${job.runId.slice(0, 8)} for ${p.path} rejected: ${res.error}: ${res.message}`);
+        })
+        .catch((err: unknown) => this.log(`[journaling] proposal from run ${job.runId.slice(0, 8)} failed: ${err instanceof Error ? err.message : String(err)}`));
+    }
   }
 
   // ── Tick: pause, ceiling, pending finals, retention ───────────────────────

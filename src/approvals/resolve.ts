@@ -24,7 +24,18 @@ export interface ResolveApprovalDeps {
    * denials. Errors are logged, never thrown.
    */
   onResolved?: (request: ApprovalRequest, status: 'approved' | 'denied') => void;
+  /**
+   * E68 — in-process backends by `adapter_id` (`self-edit`: apply or reject a
+   * proposal). Same contract as the built-in branches: return `stale` rather
+   * than act when the request no longer applies.
+   */
+  backends?: Record<string, ApprovalBackend>;
 }
+
+export type ApprovalBackend = (
+  request: ApprovalRequest,
+  decision: ApprovalDecision,
+) => Promise<{ result: 'resolved'; key: string } | { result: 'stale'; reason: string }>;
 
 /** The optional parts of `ResolveApprovalDeps`, shared by every resolution path (Telegram taps, the HTTP route). */
 export type ApprovalResolveHooks = Omit<ResolveApprovalDeps, 'store' | 'poolManagers'>;
@@ -95,6 +106,8 @@ async function deliverDecision(
   row: ApprovalRequest,
   decision: ApprovalDecision,
 ): Promise<{ result: 'resolved'; key: string } | { result: 'stale'; reason: string }> {
+  const backend = deps.backends?.[row.adapter_id];
+  if (backend) return backend(row, decision);
   if (row.adapter_id === 'cc-pool') {
     const manager = findPoolManagerForAgent(deps.poolManagers, row.agent_id);
     if (!manager) return { result: 'stale', reason: `no configured pool owns agent "${row.agent_id}"` };

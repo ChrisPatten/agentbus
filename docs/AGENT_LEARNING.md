@@ -1,8 +1,8 @@
 # Agent learning (E68)
 
-> **Status: in progress (S68.1, S68.2, S68.4).** Journaling (E66) records what happened; this page covers what turns it into learning. User-facing guide: `site-docs/features/journaling-and-memory.md`.
+> **Status: in progress (S68.1–S68.4).** Journaling (E66) records what happened; this page covers what turns it into learning. User-facing guide: `site-docs/features/journaling-and-memory.md`.
 
-Code: `src/journaling/consolidation.ts`, `src/journaling/engine.ts` (`consolidate`), `src/journaling/prompt.ts` (`DEFAULT_CONSOLIDATION_PROMPT`, `feedbackLines`), `src/journaling/feedback.ts`, `src/journaling/feedback-producers.ts`, `src/commands/feedback.ts`, `src/learning/protected-paths.ts`, `src/learning/monitor.ts`. Migration 032. Design record: `_bmad-output/planning-artifacts/journaling/decisions.md` ("Consolidation").
+Code: `src/journaling/consolidation.ts`, `src/journaling/engine.ts` (`consolidate`), `src/journaling/prompt.ts` (`DEFAULT_CONSOLIDATION_PROMPT`, `feedbackLines`), `src/journaling/feedback.ts`, `src/journaling/feedback-producers.ts`, `src/commands/feedback.ts`, `src/learning/protected-paths.ts`, `src/learning/monitor.ts`, `src/learning/proposals.ts`, `src/learning/diff.ts`, `src/mcp/tools/proposals.ts`. Migrations 032 (`feedback_events`), 033 (`self_edit_proposals`). Design record: `_bmad-output/planning-artifacts/journaling/decisions.md` ("Consolidation").
 
 ## Consolidation
 
@@ -131,3 +131,33 @@ agents:
 3. **Prompts.** cc-headless and System Message prompts, and the consolidation prompt, list the protected paths and point at `propose_change`. Scripts get `protected_paths` (absolute; directories end in `/`).
 
 System Message runs (a live agent) and scripts can't be prevented from editing; for them hashing is the check.
+
+## Self-edit proposals
+
+When the agent finds a better way to work that belongs in its instructions, it proposes the change and an owner decides.
+
+### Proposing
+
+- **MCP:** `propose_change({ path, new_content | diff, rationale, evidence?, run_id? })` → `POST /api/v1/proposals` ([MCP_TOOLS.md](MCP_TOOLS.md#propose_change), [HTTP_API.md](HTTP_API.md#proposals)). Available to every agent with the agentbus tools, including cc-headless journaling and consolidation turns; not to cc-pool session journal forks (no MCP servers).
+- **Scripts:** `proposals[]` in the stdout JSON, submitted (source `script`, with the run id) when the run succeeds. The reference script lets Claude write them to a file in a private temp dir (`--add-dir`) and returns them.
+
+`ProposalService.submit` checks, in order: the agent has protected paths; `path` (relative to the working dir, or absolute) is protected (memory files are not: edit them directly); exactly one of `new_content` / `diff` and a non-empty rationale; a `diff` applies to the current file (strict context match, hunks may sit up to 50 lines off); the content changes something and is at most 256 KB; an identical pending proposal (same file and content) is returned as a duplicate instead of a new one; **at most 3 proposals per agent per 24 h** (proposals that reached no owner don't count); the agent has owners. Evidence is kept as up to 10 one-line items.
+
+### Approving
+
+The proposal (`self_edit_proposals`, migration 033) stores the base hash of the file (sha256, or `absent` for a new file), the new content, and a compact unified diff. Each owner gets an approval request ([APPROVALS.md](APPROVALS.md#self-edit-proposals-e68)) with the rationale, evidence and diff, **Approve/Deny only**, valid **7 days**. If no owner could be notified (owners need Telegram), the proposal is `failed` and the tool reports it.
+
+| Status | Meaning |
+|---|---|
+| `pending` | Waiting for an owner |
+| `applied` | Approved; the bus wrote the file (temp file + rename, directories created) and told the protected-path monitor its new hash, so the next run's check doesn't flag it |
+| `denied` | Denied; the approval path records a `denied-approval` feedback event in the owner's default conversation, so the agent learns from it at its next journal run |
+| `stale` | Approved, but the file's hash no longer matched the base (someone changed it), or the write failed: nothing written. The agent may propose again against the current file |
+| `expired` | No answer within 7 days (`ProposalService.sweep` on the 60 s maintenance tick; the approval sweep expires the requests) |
+| `failed` | No owner could be notified, or the write failed |
+
+The first owner to answer decides; the other owners' requests go `stale`.
+
+### Recurring corrections
+
+Consolidation's recurring-correction check is the main source of proposals: when the feedback counts show a correction recurring after a rule already exists, and the rule lives in a protected file, the pass proposes strengthening it.

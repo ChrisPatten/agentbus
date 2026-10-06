@@ -19,7 +19,7 @@
 #           env: { CLAUDE_BIN: /opt/homebrew/bin/claude }
 #
 # Contract (the bus side is src/journaling/journalers/script.ts):
-#   exit 0   done            stdout: {"notes": ..., "cost_usd": ...}
+#   exit 0   done            stdout: {"notes": ..., "cost_usd": ..., "proposals": [...]}
 #   exit 3   nothing to do   Claude replied NOTHING_TO_RECORD
 #   exit 75  unavailable     no working/memory dir, no claude, no jq, bad payload
 #   other    failed
@@ -136,6 +136,26 @@ ARGS+=(--settings "$(jq -nc --arg d "$MEMORY_DIR" '{autoMemoryDirectory: $d}')")
 DENY="$(jq -r '[.protected_paths[]? | (if endswith("/") then . + "**" else . end) | ("Edit(/" + . + ")", "Write(/" + . + ")")] | join(",")' <<<"$PAYLOAD")"
 [[ -n "$DENY" ]] && ARGS+=(--disallowedTools "$DENY")
 
+# E68: self-edit proposals. Claude can't edit protected files; it may write
+# proposals to a file in a private temp dir, returned as `proposals[]`.
+PROPOSALS_DIR=""
+if [[ -n "$DENY" ]]; then
+  PROPOSALS_DIR="$(mktemp -d "${TMPDIR:-/tmp}/agentbus-proposals.XXXXXX")" || PROPOSALS_DIR=""
+fi
+if [[ -n "$PROPOSALS_DIR" ]]; then
+  trap 'rm -rf "$PROPOSALS_DIR"' EXIT
+  PROPOSALS_FILE="$PROPOSALS_DIR/proposals.json"
+  ARGS+=(--add-dir "$PROPOSALS_DIR")
+  PROTECTED="$(jq -r '.protected_paths | join(", ")' <<<"$PAYLOAD")"
+  PROMPT="$PROMPT
+
+Protected files (never edit them): $PROTECTED. To propose a change to one,
+write a JSON array to $PROPOSALS_FILE with one object per proposal:
+{\"path\": \"<path>\", \"new_content\": \"<whole new file>\" (or \"diff\": \"<unified diff>\"),
+\"rationale\": \"<why, for the owner>\", \"evidence\": [\"<dates, conversations>\"]}.
+An owner approves or denies each one; at most 3 a day."
+fi
+
 cd "$WORKING_DIR" || exit 75
 OUT="$(printf '%s' "$PROMPT" | "$CLAUDE_BIN" "${ARGS[@]}")"
 CODE=$?
@@ -148,8 +168,13 @@ if [[ $CODE -ne 0 || "$IS_ERROR" == "true" ]]; then
   exit 1
 fi
 
-jq -nc --arg notes "$RESULT" --arg cost "$COST" \
-  '{notes: $notes} + (if $cost != "" then {cost_usd: ($cost | tonumber)} else {} end)'
+PROPOSALS="[]"
+if [[ -n "$PROPOSALS_DIR" && -s "$PROPOSALS_FILE" ]]; then
+  PROPOSALS="$(jq -c 'if type == "array" then . else [] end' "$PROPOSALS_FILE" 2>/dev/null || echo '[]')"
+fi
+jq -nc --arg notes "$RESULT" --arg cost "$COST" --argjson proposals "$PROPOSALS" \
+  '{notes: $notes} + (if $cost != "" then {cost_usd: ($cost | tonumber)} else {} end)
+   + (if ($proposals | length) > 0 then {proposals: $proposals} else {} end)'
 
 if [[ "$RESULT" == *"$NOTHING" ]]; then
   exit 3
