@@ -11,6 +11,7 @@ import { loadWindow } from './eligibility.js';
 import type { JournalEngine } from './engine.js';
 import type { JournalRunGate } from './journalers/system-message.js';
 import type { JournalRunRow } from './store.js';
+import type { MemorySetupStatus } from '../memory/setup-check.js';
 
 export interface ConversationJournalStatus {
   sessionId: string;
@@ -52,6 +53,8 @@ export interface JournalStatusDeps {
   advisories?: Pick<AdvisoryService, 'listActive'>;
   gate?: Pick<JournalRunGate, 'runForConversation' | 'runForAgent'>;
   now?: () => Date;
+  /** E67 — memory setup checks for `/journal` (src/memory/setup-check.ts). */
+  memorySetup?: (agentId: string) => MemorySetupStatus | null;
 }
 
 export function conversationStatus(deps: JournalStatusDeps, conversationId: string): ConversationJournalStatus | null {

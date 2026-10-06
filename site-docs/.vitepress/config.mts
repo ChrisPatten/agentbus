@@ -73,6 +73,7 @@ export default defineConfig({
           { text: 'Choosing models', link: '/features/models' },
           { text: 'Knowledge store', link: '/features/knowledge-store' },
           { text: 'Journaling and memory', link: '/features/journaling-and-memory' },
+          { text: 'How memory is organized', link: '/features/agent-memory' },
           { text: 'Owners and advisories', link: '/features/owners-and-advisories' },
         ],
       },

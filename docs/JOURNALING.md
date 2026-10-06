@@ -281,7 +281,7 @@ The bus's own environment (API keys, `bus.auth_token`) is not passed. If your sc
 
 ## Observability
 
-- **`/journal`** shows, for the conversation it is sent from: last journaled, messages from people waiting (and whether that is below `min_human_messages`), a pending final trigger, a run in progress or holding the conversation. For its agent: the chain (and entries its runtime can't run), last success, failed runs in a row, last failure, backlog, hook health (`ok`, `never-seen`, `stopped`, `unverifiable`, `idle`) and open journaling advisories.
+- **`/journal`** shows, for the conversation it is sent from: last journaled, messages from people waiting (and whether that is below `min_human_messages`), a pending final trigger, a run in progress or holding the conversation. For its agent: the chain (and entries its runtime can't run), last success, failed runs in a row, last failure, backlog, hook health (`ok`, `never-seen`, `stopped`, `unverifiable`, `idle`) and open journaling advisories. Then a `Memory (<dir>):` section (E67): how memory loads, whether `CLAUDE.md` imports `recent.md`, and memory setup warnings ([AGENT_MEMORY.md](AGENT_MEMORY.md#setup-checks)).
 - **`/journal runs [n]`**: the agent's last `n` attempts (default 5, max 20), with trigger, journaler, `fallback_from`, outcome, fidelity, cost and the error or note.
 - **`/journal now`**: trigger `manual` for the conversation's session. Bypasses the pause threshold, `min_human_messages` and the attempt cap; respects the cursor (nothing new → "Nothing new to journal").
 - **`GET /api/v1/journal/runs?agent=…&conversation=…&session=…&limit=…`** returns `journal_runs` rows (see [HTTP_API.md](HTTP_API.md#get-apiv1journalruns)).

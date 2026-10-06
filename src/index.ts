@@ -78,6 +78,7 @@ import { createJournalHoldNotice } from './pipeline/stages/journal-hold.js';
 import { HarnessEvents, createHookHealthTicker } from './journaling/events.js';
 import { RecentMemory } from './memory/recent-service.js';
 import { RecentFreshness } from './memory/recent-freshness.js';
+import { checkMemorySetup } from './memory/setup-check.js';
 
 const configPath = process.env['AGENTBUS_CONFIG'] ?? resolve(process.cwd(), 'config.yaml');
 
@@ -167,6 +168,8 @@ const journalEngine = new JournalEngine({
   onJournaled: (result) => { if (result.agentId) recentMemory.regenerate(result.agentId, 'journaled'); },
 });
 journalEngine.addTicker(() => recentMemory.tick());
+// E67 S67.5 — memory setup checks: /journal shows them; startup logs them.
+const memorySetup = (agentId: string) => checkMemorySetup(recentMemory.layoutFor(agentId), runtimeResolver.resolve(recentMemory.layoutFor(agentId).agentId));
 // Harness hook events (POST /api/v1/journal/events) and hook health.
 const journalEvents = new HarnessEvents({ db, engine: journalEngine, store: journalEngine.store, poolManagers });
 journalEngine.addTicker(createHookHealthTicker({
@@ -214,7 +217,7 @@ commandRegistry.register(createCostCommand({ db, headlessControl }));
 commandRegistry.register(createPoolCommand({ poolManagers }));
 commandRegistry.register(createPaneCommand({ poolManagers }));
 commandRegistry.register(createRcCommand({ poolManagers }));
-commandRegistry.register(createJournalCommand({ db, engine: journalEngine, resolver: runtimeResolver, advisories, gate: journalGate }));
+commandRegistry.register(createJournalCommand({ db, engine: journalEngine, resolver: runtimeResolver, advisories, gate: journalGate, memorySetup }));
 
 const pipeline = new PipelineEngine();
 pipeline.use({ slot: 10, name: 'normalize',        stage: normalize });
@@ -250,7 +253,7 @@ const app = config.adapters.app?.enabled
   ? new AppAdapter(db, (contactId) => routedAgent(config, contactId), getHeadlessSnapshots) : undefined;
 if (app) registry.register(app);
 
-const journalStatus = { db, engine: journalEngine, resolver: runtimeResolver, advisories, gate: journalGate };
+const journalStatus = { db, engine: journalEngine, resolver: runtimeResolver, advisories, gate: journalGate, memorySetup };
 // E67 — UserPromptSubmit freshness hook: recent.md for a live session, only when it changed.
 const memoryRecent = new RecentFreshness({
   db,
@@ -479,6 +482,9 @@ for (const pool of poolManagers.values()) {
 
 sessionTracker.start();
 recentMemory.regenerateAll('startup');
+for (const layout of recentMemory.layouts()) {
+  for (const warning of memorySetup(layout.agentId).warnings) console.warn(`[memory] ${layout.agentId}: ${warning}`);
+}
 journalEngine.start();
 attachmentSweeper.start();
 scheduler.loadConfig();

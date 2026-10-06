@@ -4,6 +4,8 @@ AgentBus helps your agents remember what happened. After a conversation, the bus
 
 Journaling works the same way whether your agent runs as `cc-headless`, in a `cc-pool` pane, or as a shared `claude-code` session.
 
+Where the memory files live and how your agent reads them is described in [How memory is organized](/features/agent-memory).
+
 ## How it works
 
 When a conversation pauses, the bus starts a **journal run**: a short pass where the agent reviews what's new in the conversation and updates its memory.
@@ -127,7 +129,7 @@ then call `journal_complete` with that run_id (or `nothing_new: true`).
 
 | Command | Shows or does |
 |---|---|
-| `/journal` | Journaling status for this conversation and its agent: time since the last journal, waiting messages, the configured chain, recent failures, hook health, open warnings |
+| `/journal` | Journaling status for this conversation and its agent: time since the last journal, waiting messages, the configured chain, recent failures, hook health, open warnings, and whether the agent's memory is set up (for example, that its `CLAUDE.md` imports `recent.md`) |
 | `/journal runs [n]` | Recent journal runs: which journaler ran, the outcome, what it could see, and the cost |
 | `/journal now` | Journal this conversation now, if there's anything new |
 

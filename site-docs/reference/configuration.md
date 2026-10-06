@@ -169,7 +169,7 @@ For a `cc-headless` agent without this block, the older `journaling` options und
 
 ### memory
 
-Where the agent's memory files are, and how much of its recent journals it sees. See [Journaling and memory](/features/journaling-and-memory).
+Where the agent's memory files are, and how much of its recent journals it sees. See [How memory is organized](/features/agent-memory).
 
 ```yaml
 agents:

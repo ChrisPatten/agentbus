@@ -13,6 +13,7 @@ import { commandConversationId } from './handlers.js';
 import { agentStatus, conversationStatus, type JournalStatusDeps } from '../journaling/status.js';
 import type { EvaluationResult } from '../journaling/engine.js';
 import type { JournalRunRow } from '../journaling/store.js';
+import type { MemorySetupStatus } from '../memory/setup-check.js';
 
 export interface JournalCommandDeps extends JournalStatusDeps {
   /** How long `/journal now` waits for a quick answer before replying "started". Default 1500 ms. */
@@ -73,7 +74,22 @@ function statusBody(deps: JournalCommandDeps, conversationId: string): string {
   if (agent.backlogSince) lines.push(`  backlog: ${agent.backlogSessions} conversation(s), oldest ${ago(agent.backlogSince, now)}`);
   if (agent.hooks.length > 0) lines.push(`  hooks: ${agent.hooks.map((h) => `${h.event} ${h.status}`).join(', ')}`);
   for (const a of agent.advisories) lines.push(`  [${a.severity}] ${a.title} (${a.state})`);
+  const memory = deps.memorySetup?.(agent.agentId);
+  if (memory) lines.push('', ...memoryLines(memory));
   return lines.join('\n');
+}
+
+/** E67 — the memory setup checks, for `/journal`. */
+export function memoryLines(m: MemorySetupStatus): string[] {
+  const lines = [`Memory (${m.memoryDir ?? 'no memory dir'}):`];
+  const source = m.autoMemorySource === 'bus' ? 'set by the bus'
+    : m.autoMemorySource === 'operator' ? 'from your launch_args --settings'
+    : m.autoMemorySource === 'settings-file' ? 'from .claude/settings.local.json'
+    : 'not set by the bus';
+  lines.push(`  loading: ${m.loading === 'native' ? `native (auto memory, ${source})` : m.loading === 'injected' ? 'bus injection (memory.native: false)' : 'none on this runtime'}`);
+  if (m.importsRecent !== null) lines.push(`  CLAUDE.md imports recent.md: ${m.importsRecent ? 'yes' : 'no'}`);
+  for (const w of m.warnings) lines.push(`  warning: ${w}`);
+  return lines;
 }
 
 function runLine(r: JournalRunRow, now: Date): string {

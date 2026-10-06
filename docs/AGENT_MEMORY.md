@@ -1,6 +1,49 @@
 # Agent memory layout (E67)
 
-How an agent's memory files are laid out, configured and loaded. Code: `src/memory/` (`layout.ts`). User-facing page: `site-docs/features/agent-memory.md`. Journaling, which writes these files, is in [JOURNALING.md](JOURNALING.md).
+How an agent's memory files are laid out, configured and loaded. Code: `src/memory/` (`layout.ts`, `recent.ts`, `recent-service.ts`, `native.ts`, `recent-freshness.ts`, `setup-check.ts`). User-facing page: `site-docs/features/agent-memory.md`. Journaling, which writes these files, is in [JOURNALING.md](JOURNALING.md).
+
+## Layers
+
+AgentBus adopts Claude Code's native [auto memory](https://code.claude.com/docs/en/memory#auto-memory), pointed at the agent's own memory dir, so every Claude Code runtime loads memory the same way.
+
+| Layer | Loaded | Written by |
+|---|---|---|
+| `CLAUDE.md` + imports (persona, principal, tools) | Every session, in full | Operator (or approved proposals, E68) |
+| Pinned memory (for example `memory/vocabulary.md`), imported from `CLAUDE.md` | Every session, in full; outside the 200-line cap | Journalers |
+| `memory/MEMORY.md`: a few essentials plus a one-line index of topic files | First 200 lines / 25KB (native) | Native auto memory, journalers, consolidation |
+| Typed topic files (frontmatter `metadata.type`: `user`, `feedback`, `project`, `reference`) | On demand | Same |
+| `memory/daily/YYYY-MM-DD.md` (not indexed) | Through `recent.md` | Session journalers |
+| `memory/recent.md` (generated) | Imported from `CLAUDE.md`; refreshed in live sessions by the freshness hook | The bus only |
+| `memory/archive/` | Never | Consolidation (E68) |
+
+## Agent setup
+
+1. **Memory dir.** Default `<working_dir>/memory`; change it with `agents.<id>.memory.dir`. On cc-headless and cc-pool the bus sets `autoMemoryDirectory` itself (`--settings`), so nothing else is needed. For a `claude-code` agent, set `"autoMemoryDirectory": "/abs/path/to/memory"` in the project's `.claude/settings.local.json` or in user settings. Claude Code ignores the key in a checked-in project `.claude/settings.json`.
+2. **Imports in `CLAUDE.md`.** Add `@memory/recent.md` (required for recent journals) and any pinned memory, for example `@memory/vocabulary.md`. Imports resolve relative to the importing file, at most 4 hops deep.
+3. **Topic files in the native format**, one memory per file:
+
+   ```markdown
+   ---
+   name: Prefers app channel
+   description: Deliver every message on the AgentBus app channel; Telegram is not used
+   metadata:
+     type: feedback
+   ---
+   Deliver all messages with send_message(to="contact:chris", channel="app"). (2026-10-05)
+   ```
+
+   `user` = about the person the agent works for, `feedback` = how they want the agent to work, `project` = ongoing work and its state, `reference` = facts to look up. `MEMORY.md` lists each topic file on one line (`- [Prefers app channel](feedback-app-channel.md): deliver on app`). Journaler and consolidation prompts write this format.
+4. **Steering line in `CLAUDE.md`:**
+
+   ```markdown
+   Save a memory during the conversation only when someone explicitly asks you to remember
+   something. Everything else is recorded by the journaling sweep after the conversation
+   pauses, so stay focused on the conversation.
+   ```
+
+   Agents with standing in-turn rules (for example "log commitments immediately") keep them; the line steers the rest.
+5. **Freshness hook** for cc-pool agents ([below](#freshness-hook)).
+6. **Retire** any SessionStart hook that prints `MEMORY.md` or dailies: native loading and `recent.md` replace it, and it would load them twice.
 
 ## Configuration
 
@@ -85,3 +128,13 @@ A live session (a cc-pool pane) loads `recent.md` through its `CLAUDE.md` import
 Registering `SessionStart` makes the baseline exact: the session has just loaded the file, so the first prompt doesn't repeat it, and every `/compact`, `/clear` or resume resets it. Without it, a session's first prompt is the baseline (anything that changed between launch and that prompt is missed until the next change). The hook is best-effort: it needs `jq` and `curl`, uses a 2 s timeout, prints nothing on any failure and always exits 0. It follows the common hook convention: `AGENTBUS_URL`, token from `AGENTBUS_BUS_TOKEN` (else `AGENTBUS_TOKEN`, else `AGENTBUS_TOKEN_FILE`) through curl's stdin.
 
 Injected content is never subtracted: a session that received a new `recent.md` holds both versions in its context until it compacts. The note tells the agent the new one replaces the earlier one.
+
+## Setup checks
+
+`checkMemorySetup(layout, runtime)` (`src/memory/setup-check.ts`) runs for every agent with a layout at startup (each warning logged as `[memory] <agent>: …`) and for `/journal` (a `Memory (<dir>):` section after the agent's journaling status; `memoryLines` in `src/commands/journal.ts`). It reports:
+
+- `loading`: `native`, `injected` (cc-headless with `native: false`) or `none` (a runtime without native memory or injection).
+- Who supplies `autoMemoryDirectory`: `bus` (cc-headless, cc-pool), `operator` (cc-pool whose `launch_args` pass their own `--settings`: warns that file must set it), `settings-file` / `unknown` (claude-code: `.claude/settings.local.json` sets it, or a warning to set it).
+- Settings files that set it uselessly: project `.claude/settings.json` (ignored by Claude Code), a `.claude/settings.local.json` value the bus's `--settings` overrides.
+- Whether `CLAUDE.md`, `.claude/CLAUDE.md` or `CLAUDE.local.md` in the working dir import `recent.md`, following `@` imports (outside code) up to 4 hops (`importClosure`). Native without the import warns ("add that line so the agent sees its recent journals"); injection with the import warns (loaded twice). Without a working dir it can't check and says so.
+- A memory dir that is unresolved or missing.
