@@ -274,14 +274,14 @@ List active schedules for the current channel:
 ```
 Active schedules for telegram (2):
 
-  a1b2c3d4  Morning briefing  next: 2026-04-17 12:00 UTC  (3 fired)
-  e5f6g7h8  Weekly review     next: 2026-04-18 21:00 UTC  (0 fired)
+  a1b2c3d4  Morning briefing  next: 2026-04-17 08:00 (America/New_York)  (3 fired)
+  e5f6g7h8  Weekly review     next: 2026-04-18 17:00 (America/New_York)  (0 fired)
   i9j0k1l2  Email Watch       next: 2026-04-17 12:15 UTC  (12 fired)  [haiku]
 
 Use /schedule cancel <id> to cancel a schedule.
 ```
 
-A `[model]` suffix appears only when the job has its own `model` set.
+Next-fire times are converted from the stored UTC `fire_at` into each schedule's own `timezone` (the zone its cron is evaluated in) and labelled with it; `UTC` schedules, or an unknown zone, show UTC. A `[model]` suffix appears only when the job has its own `model` set.
 
 ### `/schedule cancel <id>`
 

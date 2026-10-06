@@ -92,7 +92,7 @@ See [MCP tools](/reference/mcp-tools#scheduling).
 
 | To | Do this |
 |---|---|
-| See what's scheduled on this channel | Send `/schedule`. Next run times are shown in UTC. |
+| See what's scheduled on this channel | Send `/schedule`. Each next run time is shown in that schedule's own time zone, which is named next to it. |
 | Cancel a schedule | `/schedule cancel <id>`, using the first characters of the ID from the list |
 | Pause or resume, rename, or change a schedule's model or topic | Ask your agent, or use `PATCH /api/v1/schedules/<id>` |
 | Change a schedule's time or prompt | Cancel it and create a new one, or edit `config.yaml` for config schedules |
