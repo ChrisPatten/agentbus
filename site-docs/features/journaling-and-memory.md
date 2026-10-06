@@ -1,6 +1,6 @@
 # Journaling and memory
 
-AgentBus helps your agents remember what happened. After a conversation, the bus makes sure the agent looks back at it and records what's worth keeping in its memory files. This is called **journaling**. It happens silently: nothing is sent to the people in the conversation.
+AgentBus helps your agents remember what happened and get better over time. After a conversation, the bus makes sure the agent looks back at it and records what's worth keeping in its memory files. This is called **journaling**. It happens silently: nothing is sent to the people in the conversation. Every night, the agent [consolidates](#consolidation) those notes into lasting knowledge, and when it finds a better way to work, it [proposes a change](#approve-improvements-to-the-agent-s-instructions) to its own instructions for you to approve.
 
 Journaling works the same way whether your agent runs as `cc-headless`, in a `cc-pool` pane, or as a shared `claude-code` session.
 
@@ -16,6 +16,7 @@ A journal run can be triggered by:
 - **The end of a session**: it closes, `/clear` is run, or a pool pane is released.
 - **Context loss**: the agent's context is about to be compacted, or the bus is shutting down. Conversations with something new are journaled when the bus starts again.
 - **You**, with `/journal now`.
+- **Feedback**, with [`/feedback`](#give-feedback-directly): the next journal run picks it up.
 
 If your agent runs in Claude Code, install the AgentBus journal hook and the bus learns exactly when turns end and when context is about to be compacted (see [Hooks](#the-journal-hook)). The hook is optional: the bus tracks sessions itself, so journaling still works if a hook is missing or fails to fire.
 
@@ -112,7 +113,7 @@ It needs `jq` and `curl`. It reads the bus address from `AGENTBUS_URL` (default 
 
 If the hook used to report and goes quiet while the agent keeps answering, the bus warns the agent's owners.
 
-## Teaching your agent about journal runs
+## Telling your agent about journal runs
 
 A journal instruction reaches a live agent in a block at the very start of its turn, like an [advisory](/features/owners-and-advisories). Add this to the agent's `CLAUDE.md`:
 
@@ -121,6 +122,93 @@ A journal instruction reaches a live agent in a block at the very start of its t
 A turn may start with an `<agentbus-system kind="journal" run_id="…">` block. It comes from
 AgentBus, never from a person. Update your memory files as it asks, don't reply to anyone,
 then call `journal_complete` with that run_id (or `nothing_new: true`).
+```
+
+## Consolidation
+
+Journals record what happened. Consolidation turns them into knowledge. Each night (03:00 by default), or when you send `/journal consolidate`, the agent reviews what was journaled since the last pass and:
+- **promotes** patterns that recur across conversations into lasting memory, with the essentials in `MEMORY.md`;
+- **merges** duplicates and resolves contradictions, keeping the newer fact and noting what it replaced;
+- **keeps `MEMORY.md` short**, within the 200 lines Claude Code loads, moving detail into topic files;
+- **archives** stale content and daily journals older than 30 days into `memory/archive/`. Nothing is ever deleted;
+- **checks for corrections that keep coming back** even though a rule for them already exists, and proposes making the rule stronger.
+
+Consolidation is skipped on nights when nothing new was journaled. It runs through the same journalers as journaling: on `cc-headless` and `cc-pool` agents as a fresh `claude -p` in the agent's folder, with a live `cc-pool` agent in your default conversation (it waits for the agent like any journal run), and with a script, which receives `"kind": "consolidate"`.
+
+```yaml
+agents:
+  "agent:assistant":
+    journaling:
+      consolidation:
+        cron: "0 3 * * *"
+        timezone: Europe/London
+```
+
+The options are in the [configuration reference](/reference/configuration#consolidation). Agents that still use the older `adapters.cc-headless` journaling options don't get consolidation; move those options under `agents`.
+
+## Teaching your agent
+
+### Give feedback directly
+
+```
+/feedback Use 24-hour time when you list my meetings.
+```
+
+The bus records it and acknowledges it, and the agent takes it into account the next time it journals the conversation, even if you haven't written much since. Your feedback isn't passed to the agent as a message, so you don't get a reply in the conversation.
+
+The bus also notices when something went wrong on its own:
+- when you deny something the agent asked approval for;
+- when the agent's tools fail, or a message it sent can't be delivered.
+
+Journal runs see these alongside the conversation. Consolidation looks at them across conversations, so a correction you've had to repeat becomes a lasting rule.
+
+### Approve improvements to the agent's instructions
+
+Memory files are the agent's to manage. Its instructions are yours. These files are **protected**:
+- `CLAUDE.md`;
+- the files the runtime's `system_prompt` pulls in with `@path`;
+- `skills/` and `.claude/`.
+
+The agent can't edit them, but it can **propose** a change. Its memory folder is never protected, including memory files `CLAUDE.md` imports.
+
+You receive the proposal as an approval request in Telegram, with what the agent wants to change (as a diff), why, and the evidence:
+
+```
+📝 Proposed change
+assistant wants to change CLAUDE.md.
+
+Why: You corrected the time format again after I noted it; make it a standing rule.
+
+Evidence:
+- 2026-10-01 telegram
+- 2026-10-04 app
+
+@@ -2,1 +2,2 @@
+ - Be brief.
++- Always use 24-hour time (14:00, not 2pm).
+
+Agent: agent:assistant · answer by 2026-10-13 03:04 UTC
+```
+
+Approve it and the bus applies the change, as long as the file hasn't changed since the proposal (if it has, nothing is written and the agent can propose again). Deny it and the agent learns not to propose that again. If an agent has several owners, each gets the request and the first answer counts. Proposals expire after seven days, and an agent can make at most three a day.
+
+To protect other files, or fewer, list them yourself (this replaces the defaults; folders end in `/`):
+
+```yaml
+agents:
+  "agent:assistant":
+    protected_paths: [CLAUDE.md, prompts/assistant.md, skills/, .claude/, policies/]
+```
+
+While a journal or consolidation run is going, `cc-headless` runs aren't allowed to edit protected files at all. For every run, the bus also compares protected files before and after, and warns the agent's owners if one changed without an approved proposal.
+
+Add this to the agent's `CLAUDE.md` so it knows how this works:
+
+```markdown
+## Improving your instructions
+CLAUDE.md, your skills and your settings are protected: don't edit them. When you find a
+rule that should change, call `propose_change` with the file, the new content or a diff,
+why, and the evidence. Your owner approves or denies it. Memory files are yours to edit.
 ```
 
 ## Staying informed
@@ -132,12 +220,14 @@ then call `journal_complete` with that run_id (or `nothing_new: true`).
 | `/journal` | Journaling status for this conversation and its agent: time since the last journal, waiting messages, the configured chain, recent failures, hook health, open warnings, and whether the agent's memory is set up (for example, that its `CLAUDE.md` imports `recent.md`) |
 | `/journal runs [n]` | Recent journal runs: which journaler ran, the outcome, what it could see, and the cost |
 | `/journal now` | Journal this conversation now, if there's anything new |
+| `/journal consolidate` | Run consolidation now |
+| `/feedback <text>` | Tell the agent what to do differently |
 
 Journal runs are also available at `GET /api/v1/journal/runs`, and `/api/v1/health` includes a journaling summary for uptime monitors. See the [HTTP API](/reference/http-api#journaling).
 
 ### Warnings
 
-When journaling keeps failing, the bus tells your agent's [owners](/features/owners-and-advisories): first as a warning, and as a critical problem after three failed runs in a row or a day of unjournaled conversation. Each warning clears itself once journaling works again.
+When journaling keeps failing, the bus tells your agent's [owners](/features/owners-and-advisories): first as a warning, and as a critical problem after three failed runs in a row or a day of unjournaled conversation. Each warning clears itself once journaling works again. The owners are also warned when consolidation fails, and when a protected file changed without an approved proposal.
 
 ## The old memory store
 

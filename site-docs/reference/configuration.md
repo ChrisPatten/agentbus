@@ -167,6 +167,39 @@ The bus checks the chain when it starts. It refuses to start if none of the jour
 
 For a `cc-headless` agent without this block, the older `journaling` options under `adapters.cc-headless` still apply. They're deprecated; move them here.
 
+#### consolidation
+
+The nightly pass that turns journals into lasting memory. See [Consolidation](/features/journaling-and-memory#consolidation).
+
+```yaml
+agents:
+  "agent:assistant":
+    journaling:
+      consolidation:
+        cron: "0 3 * * *"
+```
+
+| Option | Default | What it does |
+|---|---|---|
+| `consolidation.enabled` | `true` | Turn consolidation off for this agent |
+| `consolidation.cron` | `0 3 * * *` (03:00 every day) | When it runs. Skipped when nothing new was journaled. |
+| `consolidation.timezone` | the bus computer's time zone | Time zone for `cron`, for example `Europe/London` |
+| `consolidation.max_memory_lines` | `200` | How long `MEMORY.md` may get. Claude Code loads at most 200 lines, so that's the maximum. |
+| `consolidation.timeout_ms` | `timeout_ms` | How long one pass may take |
+| `consolidation.prompt` | a built-in instruction | What the agent is asked to do |
+
+### protected_paths
+
+Files and folders the agent may not edit itself; it proposes changes for its owners to approve. See [Approve improvements to the agent's instructions](/features/journaling-and-memory#approve-improvements-to-the-agent-s-instructions).
+
+```yaml
+agents:
+  "agent:assistant":
+    protected_paths: [CLAUDE.md, skills/, .claude/]
+```
+
+Paths are inside the agent's working folder (or full paths); folders end in `/`. The default is `CLAUDE.md`, the files the runtime's `system_prompt` pulls in with `@path`, `skills/` and `.claude/`. Setting the list replaces the default. The memory folder is never protected.
+
 ### memory
 
 Where the agent's memory files are, and how much of its recent journals it sees. See [How memory is organized](/features/agent-memory).

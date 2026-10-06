@@ -34,6 +34,8 @@ Slash commands let you control the bus from any chat. Type a message starting wi
 | `/journal` | When this conversation was last journaled, how many messages are waiting, and how journaling is doing for its agent |
 | `/journal runs [n]` | The last `n` journal runs (default 5, up to 20): which journaler ran, the outcome, what it could see, and the cost |
 | `/journal now` | Journals this conversation now, if there's anything new since the last run |
+| `/journal consolidate` | Has the agent consolidate its memory now, instead of waiting for the nightly pass |
+| `/feedback <text>` | Tells the agent what to do differently. The bus acknowledges it; the agent takes it into account the next time it journals this conversation. |
 
 See [Journaling and memory](/features/journaling-and-memory).
 

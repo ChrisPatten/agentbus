@@ -1,6 +1,6 @@
 # Agent learning (E68)
 
-> **Status: in progress (S68.1–S68.4).** Journaling (E66) records what happened; this page covers what turns it into learning. User-facing guide: `site-docs/features/journaling-and-memory.md`.
+> **Status: E68 complete (S68.1–S68.5).** Journaling (E66) records what happened; this page covers what turns it into learning. User-facing guide: `site-docs/features/journaling-and-memory.md`.
 
 Code: `src/journaling/consolidation.ts`, `src/journaling/engine.ts` (`consolidate`), `src/journaling/prompt.ts` (`DEFAULT_CONSOLIDATION_PROMPT`, `feedbackLines`), `src/journaling/feedback.ts`, `src/journaling/feedback-producers.ts`, `src/commands/feedback.ts`, `src/learning/protected-paths.ts`, `src/learning/monitor.ts`, `src/learning/proposals.ts`, `src/learning/diff.ts`, `src/mcp/tools/proposals.ts`. Migrations 032 (`feedback_events`), 033 (`self_edit_proposals`). Design record: `_bmad-output/planning-artifacts/journaling/decisions.md` ("Consolidation").
 
@@ -161,3 +161,25 @@ The first owner to answer decides; the other owners' requests go `stale`.
 ### Recurring corrections
 
 Consolidation's recurring-correction check is the main source of proposals: when the feedback counts show a correction recurring after a rule already exists, and the rule lives in a protected file, the pass proposes strengthening it.
+
+## Operator setup
+
+1. **Owners.** Proposals need `agents.<id>.owners` reachable on a channel with interactive approvals (Telegram today). Advisories (consolidation failures, unapproved protected-file changes) go to the same owners.
+2. **Consolidation** is on by default for `agents.<id>.journaling` agents. Set `consolidation.timezone` if the bus host's zone isn't yours, and make sure the chain has a journaler that can run it (cc-headless on cc-headless/cc-pool agents, a script elsewhere; System Message needs an owner and a live pane).
+3. **Protected paths.** Check the default list in `/journal` (`protected:`) and set `protected_paths` if the agent's instructions live elsewhere.
+4. **The agent's `CLAUDE.md`.** Tell it about proposals and feedback:
+
+   ```markdown
+   ## Improving your instructions
+   CLAUDE.md, your skills and your settings are protected: don't edit them. When you find a
+   rule that should change, call `propose_change` with the file, the new content or a diff,
+   why, and the evidence. Your owner approves or denies it. Memory files are yours to edit.
+   A journal run may list feedback signals (corrections, denied approvals, tool errors):
+   record the lessons as `feedback` memories.
+   ```
+
+5. **Scripts.** A script journaler that should consolidate must handle `kind: "consolidate"` (the reference script does). Return `proposals[]` instead of editing protected files.
+
+## Verification
+
+`src/learning/e2e.test.ts` runs the whole loop on one agent with a fake LLM behind the real script journaler: `/feedback` is recorded and journaled into the daily file below `min_human_messages`, consolidation promotes it into a native `feedback` memory and the `MEMORY.md` index, the same correction in another conversation makes the next consolidation's recurring-correction check return a `CLAUDE.md` proposal, and the owner's approval applies it without a protected-path warning.

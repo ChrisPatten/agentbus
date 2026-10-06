@@ -64,6 +64,8 @@ Each problem is raised once. If it keeps happening, the same advisory is updated
 | The agent's journaling chain could run out of options (it doesn't end with `script`) | info, at startup |
 | A journal run failed with every journaler | warning; critical after 3 failed runs in a row or a day of unjournaled conversation |
 | The agent's journal hook stopped reporting | warning |
+| A consolidation pass failed with every journaler | warning |
+| A protected file (such as `CLAUDE.md`) changed during a journal run without an approved proposal | warning, until you acknowledge it |
 
 See [Journaling and memory](/features/journaling-and-memory).
 

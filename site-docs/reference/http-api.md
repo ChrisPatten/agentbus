@@ -85,6 +85,16 @@ See [Choosing models](/features/models).
 
 Answering through the API skips the check that only the addressed contact may answer. See [Approvals](/features/approvals).
 
+## Proposals
+
+| Method and path | Does |
+|---|---|
+| `POST /api/v1/proposals` | Used by the `propose_change` tool: proposes a change to a protected file for the agent's owners to approve |
+| `GET /api/v1/proposals?agent=agent:assistant&status=pending` | Lists proposals, newest first. `status` is `pending`, `applied`, `denied`, `stale`, `expired` or `failed`. |
+| `GET /api/v1/proposals/<id>` | One proposal, with the proposed content and diff |
+
+See [Approve improvements to the agent's instructions](/features/journaling-and-memory#approve-improvements-to-the-agent-s-instructions).
+
 ## Journaling
 
 | Method and path | Returns |

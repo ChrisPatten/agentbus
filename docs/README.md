@@ -24,6 +24,7 @@ Technical reference for operators and contributors. The public landing page live
 | [MEMORY_MODEL.md](MEMORY_MODEL.md) | Why the agent's own files are the memory system |
 | [MEMORY.md](MEMORY.md) | Session tracker settings (`memory` block); the removed legacy memory store |
 | [AGENT_MEMORY.md](AGENT_MEMORY.md) | Agent memory layout, native loading, `recent.md`, freshness hook (E67) |
+| [AGENT_LEARNING.md](AGENT_LEARNING.md) | Consolidation, feedback events and `/feedback`, self-edit proposals, protected paths (E68) |
 | [KNOWLEDGE_STORE.md](KNOWLEDGE_STORE.md) | The agent-managed structured knowledge store (Phase 1, always-on) |
 
 ## Channels
