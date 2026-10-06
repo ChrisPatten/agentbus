@@ -49,11 +49,10 @@
  * full rationale. In short: it opts pool sessions out of
  * `SessionTracker.closeIdleSessions()`'s legacy idle-close path (which
  * requires `claude_session_id IS NULL`) since the pool manages its own
- * idle/hard-idle eviction via `pool_leases`, and it opts pool sessions INTO
- * `dispatchJournaling()`'s candidate query — which is why every cc-pool
- * instance MUST register a `JournalingRunner` (even a documented no-op) with
- * `SessionTracker`, exactly like cc-headless does, or that dispatch loop has
- * no runner to call for a pool-owned agent_id.
+ * idle/hard-idle eviction via `pool_leases`, and it lets the journaling
+ * engine (E66) resume or fork the pane's transcript (the cc-headless
+ * journaler's `claude -p --resume <id> --fork-session`) after the pane is
+ * gone.
  */
 
 /** Lifecycle state of one tmux pane in a pool. */

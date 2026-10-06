@@ -167,11 +167,24 @@ journalEngine.addTicker(createHookHealthTicker({
   agents: () => journalEngine.allSettings().map((s) => ({ agentId: s.agentId, runtime: runtimeResolver.resolve(s.agentId) })),
 }));
 for (const [poolAgentId, pool] of poolManagers) {
-  // S66.9 makes this await the run (bounded) before the pane is cleared.
-  pool.setReleaseHook(({ reason, conversationId }) => {
+  // E66 S66.9 — pool release (LRU eviction and hard-idle) waits for the
+  // conversation's journal run, bounded by the journaling timeout, before
+  // the pane is cleared or killed.
+  pool.setReleaseHook(async ({ reason, conversationId }) => {
     const handle = journalEngine.trigger({ reason, conversationId });
     if (handle.status === 'unknown-session') {
       console.warn(`[journaling] ${poolAgentId}: no session for released conversation ${conversationId.slice(0, 8)}`);
+      return;
+    }
+    if (handle.status !== 'queued' && handle.status !== 'merged') return;
+    const settings = journalEngine.settingsFor(poolAgentId);
+    const bound = Math.max(settings?.timeoutMs ?? 0, settings?.journalers['system-message'].timeoutMs ?? 0) || 300_000;
+    const outcome = await Promise.race([
+      handle.done.then((r) => r.status),
+      new Promise<'timeout'>((resolve) => { const t = setTimeout(() => resolve('timeout'), bound); t.unref?.(); }),
+    ]);
+    if (outcome === 'timeout') {
+      console.warn(`[journaling] ${poolAgentId}: journal for ${conversationId.slice(0, 8)} still running after ${bound} ms; releasing the pane`);
     }
   });
 }

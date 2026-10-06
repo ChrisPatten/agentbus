@@ -24,12 +24,6 @@ import type { AppConfig } from '../config/schema.js';
 import type { Summarizer } from './summarizer.js';
 import type { SessionRow } from './types.js';
 
-/**
- * Pre-E66 journaling runner signature, still the shape of
- * `PoolManager.journalingRunner`. The journaling engine no longer calls it.
- */
-export type JournalingRunner = (conversationId: string) => Promise<{ skipped?: boolean }>;
-
 /** Days after expiry before a memory is hard-deleted. */
 const HARD_DELETE_AFTER_DAYS = 30;
 /** Max summarization attempts before giving up. */

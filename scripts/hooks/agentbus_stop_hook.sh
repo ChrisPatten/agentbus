@@ -21,7 +21,9 @@
 set -uo pipefail
 
 AGENTBUS_URL="${AGENTBUS_URL:-http://127.0.0.1:3000}"
-TOKEN="${AGENTBUS_TOKEN:-}"
+# bus.auth_token: AGENTBUS_BUS_TOKEN (cc-pool exports it into every pane),
+# else the older AGENTBUS_TOKEN, else AGENTBUS_TOKEN_FILE.
+TOKEN="${AGENTBUS_BUS_TOKEN:-${AGENTBUS_TOKEN:-}}"
 if [[ -z "$TOKEN" && -n "${AGENTBUS_TOKEN_FILE:-}" && -r "${AGENTBUS_TOKEN_FILE}" ]]; then
   TOKEN="$(head -n 1 "$AGENTBUS_TOKEN_FILE" 2>/dev/null | tr -d '[:space:]')"
 fi
@@ -32,9 +34,19 @@ SESSION_ID="$(jq -r '.session_id // empty' <<<"$INPUT")"
 [[ -n "$SESSION_ID" ]] || exit 0
 
 BODY="$(jq -nc --arg sid "$SESSION_ID" '{harness_session_id: $sid, event: "turn-ended"}')"
-HEADERS=(-H 'Content-Type: application/json')
-[[ -n "$TOKEN" ]] && HEADERS+=(-H "X-Bus-Token: $TOKEN")
 
-( curl -s --max-time 3 -X POST "$AGENTBUS_URL/api/v1/journal/events" "${HEADERS[@]}" -d "$BODY" >/dev/null 2>&1 & )
+# The token goes to curl on stdin (-K -) so it never shows in the process list.
+bus_post() {
+  if [[ -n "$TOKEN" ]]; then
+    local t="${TOKEN//\\/\\\\}"
+    t="${t//\"/\\\"}"
+    printf 'header = "X-Bus-Token: %s"\n' "$t" \
+      | curl -s --max-time 3 -K - -X POST "$AGENTBUS_URL/api/v1/journal/events" -H 'Content-Type: application/json' -d "$BODY"
+  else
+    curl -s --max-time 3 -X POST "$AGENTBUS_URL/api/v1/journal/events" -H 'Content-Type: application/json' -d "$BODY" </dev/null
+  fi
+}
+
+( bus_post >/dev/null 2>&1 & )
 
 exit 0

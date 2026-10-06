@@ -964,10 +964,95 @@ describe('PoolManager', () => {
     });
   });
 
-  describe('journalingRunner', () => {
-    it('resolves to { skipped: true }', async () => {
+  describe('journaling release hook (E66 S66.9)', () => {
+    it('evict: a quick hook runs before release, inline', async () => {
+      const db = makeDb();
+      const paneLauncher = makeFakeLauncher();
+      const manager = new PoolManager({ transcriptExists: () => true, cfg: makeCfg({ panes: 1 }), db, busBaseUrl: 'http://127.0.0.1:3000', paneLauncher, evictJournalGraceMs: 200 });
+      const order: string[] = [];
+      manager.setReleaseHook(async (e) => { order.push(`hook:${e.reason}:${e.conversationId}`); });
+      paneLauncher.release.mockImplementation(async () => { order.push('release'); });
+      await manager.ensureStarted();
+      await manager.resolveRoute('conv-old', { contact_id: 'alice', channel: 'telegram' });
+      const pane = manager.leaseStore.findByConversation(manager.poolId, 'conv-old')!;
+      manager.leaseStore.touch(manager.poolId, pane.pane_id, new Date('2000-01-01T00:00:00.000Z'));
+      expect(await manager.resolveRoute('conv-new', { contact_id: 'bob', channel: 'telegram' })).toBe('agent:peggy-pool-1');
+      expect(order).toEqual(['hook:evict:conv-old', 'release']);
+    });
+
+    it('evict: a hook still waiting on a journal run parks the incoming message; the pane comes up afterwards', async () => {
+      const db = makeDb();
+      const paneLauncher = makeFakeLauncher();
+      const manager = new PoolManager({ transcriptExists: () => true, cfg: makeCfg({ panes: 1 }), db, busBaseUrl: 'http://127.0.0.1:3000', paneLauncher, evictJournalGraceMs: 20 });
+      let finishJournal: () => void = () => {};
+      manager.setReleaseHook(() => new Promise<void>((resolve) => { finishJournal = resolve; }));
+      await manager.ensureStarted();
+      await manager.resolveRoute('conv-old', { contact_id: 'alice', channel: 'telegram' });
+      const pane = manager.leaseStore.findByConversation(manager.poolId, 'conv-old')!;
+      manager.leaseStore.touch(manager.poolId, pane.pane_id, new Date('2000-01-01T00:00:00.000Z'));
+      paneLauncher.release.mockClear();
+
+      expect(await manager.resolveRoute('conv-new', { contact_id: 'bob', channel: 'telegram' })).toBe(manager.parkedRecipientId());
+      expect(paneLauncher.release).not.toHaveBeenCalled(); // the old context is not cleared before the journal finishes
+      // A retry (drainParked) waits for the in-flight operation and then routes to the pane.
+      const retry = manager.resolveRoute('conv-new', { contact_id: 'bob', channel: 'telegram' });
+      finishJournal();
+      expect(await retry).toBe('agent:peggy-pool-1');
+      expect(paneLauncher.release).toHaveBeenCalledWith(pane.pane_id, 'clear');
+    });
+
+    it('hard-idle: keeps the pane when the conversation came back while the hook waited', async () => {
+      const { manager, paneLauncher, db } = makeManager({
+        panes: 1, lease: { idle_evict_ms: 1_800_000, hard_idle_ms: 5_000, park_timeout_ms: 300_000 },
+      });
+      await manager.ensureStarted();
+      await manager.resolveRoute('conv-1', { contact_id: 'alice', channel: 'telegram' });
+      const pane = manager.leaseStore.findByConversation(manager.poolId, 'conv-1')!;
+      manager.leaseStore.touch(manager.poolId, pane.pane_id, new Date(Date.now() - 10_000));
+      paneLauncher.release.mockClear();
+      db.prepare(`INSERT INTO sessions (id, conversation_id, channel, contact_id, started_at, last_activity) VALUES ('s-1','conv-1','telegram','alice','x','x')`).run();
+      manager.setReleaseHook(async (e) => {
+        expect(e.reason).toBe('release');
+        db.prepare(`INSERT INTO transcripts (id, message_id, conversation_id, session_id, created_at, channel, contact_id, direction, body, metadata)
+          VALUES ('t1','m1','conv-1','s-1',?, 'telegram','alice','inbound','back again','{}')`).run(new Date(Date.now() + 5).toISOString());
+      });
+
+      await manager.sweepHardIdle();
+
+      expect(paneLauncher.release).not.toHaveBeenCalled();
+      expect(manager.leaseStore.findByConversation(manager.poolId, 'conv-1')?.state).toBe('leased');
+    });
+  });
+
+  describe('clearConversation (E66 S66.9, /clear)', () => {
+    it('detaches the pane at once, then clears and frees it; the next message gets a fresh session', async () => {
+      const { manager, paneLauncher } = makeManager({ panes: 1 });
+      await manager.ensureStarted();
+      await manager.resolveRoute('conv-1', { contact_id: 'alice', channel: 'telegram' });
+      const pane = manager.leaseStore.findByConversation(manager.poolId, 'conv-1')!;
+      let finishRelease: () => void = () => {};
+      paneLauncher.release.mockImplementation(() => new Promise<void>((resolve) => { finishRelease = resolve; }));
+
+      const cleared = manager.clearConversation('conv-1');
+      expect(cleared?.paneId).toBe(pane.pane_id);
+      // Detached immediately: the conversation no longer owns the pane.
+      expect(manager.leaseStore.findByConversation(manager.poolId, 'conv-1')).toBeNull();
+      expect(manager.leaseStore.findByPane(manager.poolId, pane.pane_id)?.state).toBe('draining');
+      await new Promise((r) => setTimeout(r, 0));
+      expect(paneLauncher.release).toHaveBeenCalledWith(pane.pane_id, 'clear');
+      finishRelease();
+      await cleared!.done;
+      expect(manager.leaseStore.findByPane(manager.poolId, pane.pane_id)?.state).toBe('free');
+
+      paneLauncher.launch.mockClear();
+      expect(await manager.resolveRoute('conv-1', { contact_id: 'alice', channel: 'telegram' })).toBe('agent:peggy-pool-1');
+      const params = paneLauncher.launch.mock.calls[0]![0];
+      expect(params.resume).toBe(false); // no open session row: a fresh Claude session
+    });
+
+    it('returns null when no pane is leased to the conversation', () => {
       const { manager } = makeManager();
-      await expect(manager.journalingRunner('some-conversation-id')).resolves.toEqual({ skipped: true });
+      expect(manager.clearConversation('nope')).toBeNull();
     });
   });
 

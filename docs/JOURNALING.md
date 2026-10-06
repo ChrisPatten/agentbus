@@ -82,8 +82,8 @@ A trigger means "evaluate", never "journal now". `JournalEngine.trigger({ reason
 | `pause` | Engine tick: idle past the channel threshold. The idle clock starts at the latest of the session's last inbound message, its last agent message, and the last `turn-ended` event. |
 | `ceiling` | Engine tick: `ceiling_ms` since `last_journaled_at` (or `started_at`) |
 | `close` | `SessionTracker` closing a session (idle close or mid-flight close) |
-| `clear` | Bus `/clear`, or the harness `clear` event |
-| `evict`, `release` | `PoolManager` LRU eviction and hard-idle release, through `setReleaseHook` |
+| `clear` | Bus `/clear` (on cc-pool it also detaches and clears the pane), or the harness `clear` event |
+| `evict`, `release` | `PoolManager` LRU eviction and hard-idle release, through `setReleaseHook`. The pane is cleared only after the run (bounded by the journaling timeout); see [CC_POOL_ADAPTER.md](CC_POOL_ADAPTER.md#session-tracker-interaction) |
 | `pre-compact`, `session-end` | Harness hook events |
 | `shutdown` | Bus shutdown (see below) |
 | `manual` | `/journal now` *(part B)* |

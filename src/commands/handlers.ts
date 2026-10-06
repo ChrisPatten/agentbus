@@ -392,6 +392,8 @@ async function scheduleHandler(
  * the closed session. The trigger is persisted, bypasses
  * `min_human_messages`, and runs the agent's journaler chain in the
  * background; the closed session's Claude transcript stays resumable on disk.
+ * On cc-pool the conversation's pane is detached and cleared (or killed,
+ * per `on_evict`), so the next message starts a fresh Claude session.
  */
 async function clearHandler(
   _args: string[],
@@ -424,6 +426,19 @@ async function clearHandler(
     .run(new Date().toISOString(), session.id);
 
   const journal = deps.journal?.trigger({ reason: 'clear', sessionId: session.id });
+
+  // E66 S66.9 — on cc-pool the leased pane still holds the old Claude
+  // context. Detach it now (the next message gets a fresh pane and session)
+  // and clear or free it in the background. Journalers read the closed
+  // session's transcript on disk, which /clear does not remove.
+  for (const pool of deps.poolManagers?.values() ?? []) {
+    const cleared = pool.clearConversation(conversationId);
+    if (cleared) {
+      void cleared.done.catch((err: unknown) => console.error(`[commands] /clear: releasing ${cleared.paneId} failed:`, err));
+      break;
+    }
+  }
+
   if (journal && (journal.status === 'queued' || journal.status === 'merged')) {
     return {
       body: 'Context cleared — your next message starts a fresh session. Journaling the previous session in the background.',

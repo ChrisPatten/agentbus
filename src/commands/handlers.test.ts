@@ -770,6 +770,18 @@ describe('command handlers', () => {
       expect(journal.trigger).toHaveBeenCalledWith({ reason: 'clear', sessionId: 'sess-1' });
     });
 
+    it('detaches and clears the cc-pool pane leased to the conversation (E66 S66.9)', async () => {
+      const db = makeDb();
+      insertSession(db, { id: 'pool-sess', agentId: 'agent:peggy-pool-1' });
+      const conversationId = computeConversationId('chris', 'telegram', 'general');
+      const otherPool = { clearConversation: vi.fn(() => null) };
+      const pool = { clearConversation: vi.fn(() => ({ paneId: 'peggy-pool:1', done: Promise.resolve() })) };
+      const poolManagers = new Map<string, unknown>([['agent:other', otherPool], ['agent:peggy', pool]]);
+      const clear = createBuiltinCommands({ ...makeDeps({ db }), journal: journalMock(), poolManagers } as never).find((c) => c.name === 'clear')!;
+      await clear.handler([], makeCtx(db));
+      expect(pool.clearConversation).toHaveBeenCalledWith(conversationId);
+    });
+
     it('clears the bound Telegram session when the command arrives through app', async () => {
       const db = makeDb();
       insertSession(db, { id: 'bound-clear', agentId: 'agent:peggy' });
