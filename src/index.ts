@@ -70,6 +70,7 @@ import { reviewChains } from './journaling/advisories.js';
 import { JournalEngine } from './journaling/engine.js';
 import { JournalerRegistry } from './journaling/registry.js';
 import { ProvisionalHeadlessJournaler } from './journaling/journalers/cc-headless-provisional.js';
+import { HarnessEvents, createHookHealthTicker } from './journaling/events.js';
 
 const configPath = process.env['AGENTBUS_CONFIG'] ?? resolve(process.cwd(), 'config.yaml');
 
@@ -137,6 +138,12 @@ journalers.register(headlessJournaler);
 const journalEngine = new JournalEngine({
   db, config, resolver: runtimeResolver, registry: journalers, advisories, owners: ownerDirectory, settings: journalingSettings,
 });
+// Harness hook events (POST /api/v1/journal/events) and hook health.
+const journalEvents = new HarnessEvents({ db, engine: journalEngine, store: journalEngine.store, poolManagers });
+journalEngine.addTicker(createHookHealthTicker({
+  db, store: journalEngine.store, advisories,
+  agents: () => journalEngine.allSettings().map((s) => ({ agentId: s.agentId, runtime: runtimeResolver.resolve(s.agentId) })),
+}));
 for (const [poolAgentId, pool] of poolManagers) {
   // S66.9 makes this await the run (bounded) before the pane is cleared.
   pool.setReleaseHook(({ reason, conversationId }) => {
@@ -197,7 +204,7 @@ const app = config.adapters.app?.enabled
   ? new AppAdapter(db, (contactId) => routedAgent(config, contactId), getHeadlessSnapshots) : undefined;
 if (app) registry.register(app);
 
-const httpServer = await createHttpServer({ queue, registry, config, pipeline, db, commandRegistry, pauseSet, siri, app, poolManagers, getHeadlessSnapshots, runtimeResolver, advisories });
+const httpServer = await createHttpServer({ queue, registry, config, pipeline, db, commandRegistry, pauseSet, siri, app, poolManagers, getHeadlessSnapshots, runtimeResolver, advisories, journalEvents });
 
 // ── Platform adapter registration ────────────────────────────────────────────
 // Platform adapters run in-process. They are instantiated from config,

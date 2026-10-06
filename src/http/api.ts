@@ -85,6 +85,7 @@ import { resolveApprovalTarget } from '../approvals/resolve-target.js';
 import { dispatchApproval } from '../approvals/dispatch.js';
 import { resolveApproval } from '../approvals/resolve.js';
 import { APPROVAL_TIMEOUT_MS, type ApprovalStatus } from '../approvals/types.js';
+import { parseHarnessEvent, type HarnessEvents } from '../journaling/events.js';
 import type { AdvisoryService } from '../advisories/service.js';
 import type { AdvisoryState } from '../advisories/types.js';
 import { writeKnowledge, getKnowledge, forgetKnowledge, searchKnowledge } from '../knowledge/store.js';
@@ -117,6 +118,8 @@ export interface HttpServerDeps {
   runtimeResolver?: Pick<RuntimeResolver, 'list'>;
   /** E65 — when present, the /api/v1/advisories routes are mounted. */
   advisories?: AdvisoryService;
+  /** E66 — when present, POST /api/v1/journal/events is mounted (harness hook events). */
+  journalEvents?: Pick<HarnessEvents, 'handle'>;
 }
 
 const MessagePayloadSchema = z.discriminatedUnion('type', [
@@ -738,6 +741,24 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       return { ok: true };
     },
   );
+
+  // ── Journal events (E66) ───────────────────────────────────────────────────
+  // POST /api/v1/journal/events — posted by scripts/hooks/agentbus_journal_hook.sh.
+  // Body: { harness_session_id, event: turn-ended|pre-compact|session-end|clear,
+  //         snapshot_path?, transcript_path? }. The bus resolves agent and
+  // conversation from the harness session id. 404 when it knows no session
+  // for that id; a rejected snapshot path is reported in `snapshot_error`
+  // while the event itself still counts. See docs/JOURNALING.md.
+  if (deps.journalEvents) {
+    const journalEvents = deps.journalEvents;
+    server.post<{ Body: unknown }>('/api/v1/journal/events', async (req, reply) => {
+      const parsed = parseHarnessEvent(req.body);
+      if ('error' in parsed) return reply.status(400).send({ ok: false, error: parsed.error });
+      const result = journalEvents.handle(parsed);
+      if (!result.ok) return reply.status(result.status).send({ ok: false, error: result.error });
+      return result;
+    });
+  }
 
   // ── Approval requests (E51) ────────────────────────────────────────────────
   // See docs/APPROVALS.md. Reception (POST), observability (GET), resolution
