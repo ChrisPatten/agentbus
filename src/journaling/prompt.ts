@@ -1,7 +1,20 @@
 /**
  * Journaling prompt helpers shared by the built-in journalers (E66).
  */
+import { join, relative } from 'node:path';
+import { RECENT_FILE } from '../memory/layout.js';
 import type { JournalJob } from './types.js';
+
+/**
+ * E67: journalers must not write `recent.md`; the bus regenerates it from
+ * the daily journals after the run.
+ */
+export function recentNotice(job: Pick<JournalJob, 'memoryDir' | 'workingDir'>): string {
+  const path = job.memoryDir
+    ? (job.workingDir ? relative(job.workingDir, join(job.memoryDir, RECENT_FILE)) : join(job.memoryDir, RECENT_FILE))
+    : `memory/${RECENT_FILE}`;
+  return `Do not edit ${path}: AgentBus generates it from the daily journals after this run. Write today's entries to the daily journal.`;
+}
 
 /**
  * Lines describing the job, appended to a journaler's prompt: what is new
@@ -23,6 +36,7 @@ export function jobContextLines(job: JournalJob): string[] {
     for (const s of job.snapshots) lines.push(`- ${s.path} (${s.event}, ${s.created_at})`);
   }
   if (job.harnessTranscriptPath) lines.push(`Full harness transcript: ${job.harnessTranscriptPath}`);
+  lines.push(recentNotice(job));
   return lines;
 }
 

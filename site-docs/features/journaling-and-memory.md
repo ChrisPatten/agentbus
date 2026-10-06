@@ -82,6 +82,8 @@ The script tells the bus how it went through its exit code:
 
 It can also print `{"notes": "...", "files_changed": [...], "cost_usd": 0.02}` to have those recorded with the run.
 
+Don't have your script write `memory/recent.md`. The bus builds that file from the daily journals after each run and replaces whatever is there; write to the daily journal instead.
+
 Scripts run without a shell, in the agent's working folder, with a minimal environment: `PATH`, `HOME`, a few `AGENTBUS_*` variables and whatever you add under `script.env`. None of the bus's secrets are passed in. A script that runs too long is stopped, along with anything it started.
 
 The included `claude-p-journal.sh` hands the conversation to `claude -p` and is a good starting point for your own. It needs `jq`. If `claude` isn't on the bus's `PATH`, set `CLAUDE_BIN` under `script.env`.

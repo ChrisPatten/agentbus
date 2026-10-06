@@ -209,6 +209,34 @@ describe('JournalEngine final triggers (E66 S66.3)', () => {
     expect((await engine.trigger({ reason: 'manual', sessionId: 's1' }).done).status).toBe('nothing');
   });
 
+  it('calls onJournaled after a successful run only (E67 recent.md hook)', async () => {
+    const onJournaled = vi.fn();
+    const engine = engineFor(makeConfig(), [fakeJournaler()], { onJournaled });
+    session('s1'); msg('s1', 1);
+    await engine.trigger({ reason: 'manual', sessionId: 's1' }).done;
+    expect(onJournaled).toHaveBeenCalledTimes(1);
+    expect(onJournaled.mock.calls[0]![0]).toMatchObject({ status: 'journaled', agentId: 'agent:baxter', sessionId: 's1' });
+    const quiet = vi.fn();
+    const engine2 = engineFor(makeConfig(), [fakeJournaler('cc-headless', 'nothing-to-do')], { onJournaled: quiet });
+    session('s2'); msg('s2', 1);
+    await engine2.trigger({ reason: 'manual', sessionId: 's2' }).done;
+    expect(quiet).not.toHaveBeenCalled();
+  });
+
+  it('job memoryDir comes from agents.<id>.memory (E67 S67.1)', async () => {
+    const j = fakeJournaler('script');
+    const config = AppConfigSchema.parse({
+      bus: { db_path: ':memory:' },
+      adapters: { 'cc-pool': { agent_id: 'peggy', tmux_session: 'peggy-pool', claude_bin: '/usr/local/bin/claude', working_dir: '/agents/peggy' } },
+      memory: {},
+      agents: { peggy: { memory: { dir: 'notes' }, journaling: { chain: ['script'], script: { command: '/bin/true' } } } },
+    });
+    const engine = engineFor(config, [j]);
+    session('p1', { agentId: 'agent:peggy-pool-1' }); msg('p1', 1);
+    await engine.trigger({ reason: 'manual', sessionId: 'p1' }).done;
+    expect(j.jobs[0]!.memoryDir).toBe('/agents/peggy/notes');
+  });
+
   it('shutdown persists a trigger for sessions with unjournaled human content', async () => {
     const engine = engineFor(makeConfig(), [fakeJournaler()]);
     session('s1'); msg('s1', 1);

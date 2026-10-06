@@ -101,6 +101,11 @@ export interface JournalEngineDeps {
   tickIntervalMs?: number;
   log?: (line: string) => void;
   newRunId?: () => string;
+  /**
+   * E67 — called after a chain ends `done` (status `journaled`), e.g. to
+   * regenerate the agent's `recent.md`. Errors are logged, never thrown.
+   */
+  onJournaled?: (result: EvaluationResult) => void;
 }
 
 interface Slot {
@@ -362,7 +367,15 @@ export class JournalEngine {
     });
     const status: EvaluationStatus =
       summary.outcome === 'done' ? 'journaled' : summary.outcome === 'nothing-to-do' ? 'nothing-to-do' : 'exhausted';
-    return { status, ...base, summary };
+    const result: EvaluationResult = { status, ...base, summary };
+    if (status === 'journaled' && this.deps.onJournaled) {
+      try {
+        this.deps.onJournaled(result);
+      } catch (err) {
+        this.log(`[journaling] onJournaled failed for ${agentId}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    return result;
   }
 
   private buildJob(

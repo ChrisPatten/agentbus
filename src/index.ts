@@ -76,6 +76,7 @@ import { JournalRunGate, SystemMessageJournaler, BUSY_NOTICE_TEXT, type ActiveSy
 import { createJournalInstructionDelivery } from './journaling/delivery.js';
 import { createJournalHoldNotice } from './pipeline/stages/journal-hold.js';
 import { HarnessEvents, createHookHealthTicker } from './journaling/events.js';
+import { RecentMemory } from './memory/recent-service.js';
 
 const configPath = process.env['AGENTBUS_CONFIG'] ?? resolve(process.cwd(), 'config.yaml');
 
@@ -157,9 +158,14 @@ journalers.register(new SystemMessageJournaler({
     if (row?.status === 'pending') queue.deadLetter(messageId, reason);
   },
 }));
+// E67 — bus-generated memory/recent.md for every agent with a memory layout:
+// at startup, after each successful journal run and at local midnight.
+const recentMemory = new RecentMemory({ config, resolver: runtimeResolver });
 const journalEngine = new JournalEngine({
   db, config, resolver: runtimeResolver, registry: journalers, advisories, owners: ownerDirectory, settings: journalingSettings,
+  onJournaled: (result) => { if (result.agentId) recentMemory.regenerate(result.agentId, 'journaled'); },
 });
+journalEngine.addTicker(() => recentMemory.tick());
 // Harness hook events (POST /api/v1/journal/events) and hook health.
 const journalEvents = new HarnessEvents({ db, engine: journalEngine, store: journalEngine.store, poolManagers });
 journalEngine.addTicker(createHookHealthTicker({
@@ -456,6 +462,7 @@ for (const pool of poolManagers.values()) {
 }
 
 sessionTracker.start();
+recentMemory.regenerateAll('startup');
 journalEngine.start();
 attachmentSweeper.start();
 scheduler.loadConfig();
