@@ -152,6 +152,8 @@ Decisions marked 2026-10-02 are confirmed by the user.
 
 2. **Remove the legacy structured memory feature entirely.** The operator is its only user and it is dead. Remove the `recall_memory`/`log_memory` tools, `/api/v1/memories` routes, the memory-inject stage and its config; retired keys warn and are ignored at load so an old `config.yaml` still starts. Migration 031 drops `memories` and `session_summaries`.
 
+3. **Critical journaling degrades health.** When the journaling summary's status is `critical`, `/api/v1/health` reports top-level status `degraded`.
+
 ## Epics
 
 - E64 Runtime capability taxonomy → E65 Owner contacts and bus advisories → E66 Pluggable journaling core; E67 Native memory layout and read side (parallel to E66); E68 Agent learning (after E66, E67).

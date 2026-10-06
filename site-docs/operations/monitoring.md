@@ -20,7 +20,7 @@ The report includes:
 
 | Field | Meaning |
 |---|---|
-| `status` | `healthy` when every channel is online, otherwise `degraded` |
+| `status` | `healthy` when every channel is online and journaling isn't `critical`, otherwise `degraded` |
 | `version` | The AgentBus version running |
 | `adapters` | Each channel with its status: `online`, `degraded` or `unhealthy` |
 | `queue` | Messages `pending` (waiting for an agent), `processing`, `delivered`, and in `dead_letter` (couldn't be delivered) |

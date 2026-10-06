@@ -695,9 +695,12 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     const allHealthy = Object.values(adapters).every(
       (a) => (a as { status: string }).status === 'online'
     );
+    const journaling = deps.journalStatus ? safeJournalingHealth(deps.journalStatus) : null;
+    // Post-E66: critical journaling (3 exhausted runs in a row, or a day of backlog) degrades the bus.
+    const journalingCritical = journaling?.status === 'critical';
     return {
       ok: true,
-      status: allHealthy ? 'healthy' : 'degraded',
+      status: allHealthy && !journalingCritical ? 'healthy' : 'degraded',
       version: VERSION,
       adapters,
       ...(deps.runtimeResolver
@@ -710,7 +713,7 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
         delivered: counts['delivered'] ?? 0,
         dead_letter: counts['dead_letter'] ?? 0,
       },
-      ...(deps.journalStatus ? { journaling: safeJournalingHealth(deps.journalStatus) } : {}),
+      ...(journaling ? { journaling } : {}),
     };
   });
 

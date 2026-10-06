@@ -76,7 +76,7 @@ Set `bus.host: 0.0.0.0` to accept connections from other hosts, for example a re
 
 ### `GET /api/v1/health`
 
-Always returns `200`. `status` is `healthy` when every adapter reports `online`, otherwise `degraded`. Each adapter entry carries a `status` of `online`, `degraded`, or `unhealthy`, its capabilities, and any `lastActivity`, `latencyMs`, or `details` fields the adapter reports.
+Always returns `200`. `status` is `healthy` when every adapter reports `online` and journaling isn't `critical`, otherwise `degraded` (post-E66: a `critical` `journaling.status` degrades the bus; `warning` doesn't). Each adapter entry carries a `status` of `online`, `degraded`, or `unhealthy`, its capabilities, and any `lastActivity`, `latencyMs`, or `details` fields the adapter reports.
 
 ```json
 {

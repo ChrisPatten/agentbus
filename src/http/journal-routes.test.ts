@@ -163,6 +163,18 @@ describe('GET /api/v1/journal/runs and the health summary (S66.10)', () => {
       expect((await app.inject({ method: 'GET', url: '/api/v1/journal/runs?conversation=other' })).json().count).toBe(0);
       const health = (await app.inject({ method: 'GET', url: '/api/v1/health' })).json();
       expect(health.journaling).toMatchObject({ status: 'ok', agents: { 'agent:peggy': { chain: ['cc-headless'], consecutive_exhaustions: 0 } } });
+      expect(health.status).toBe('healthy');
+
+      // Post-E66: critical journaling (3 exhausted runs in a row) makes the bus report degraded.
+      engine.store.recordAgentExhausted('agent:peggy', 'boom');
+      engine.store.recordAgentExhausted('agent:peggy', 'boom');
+      const warning = (await app.inject({ method: 'GET', url: '/api/v1/health' })).json();
+      expect(warning.journaling.status).toBe('warning');
+      expect(warning.status).toBe('healthy');
+      engine.store.recordAgentExhausted('agent:peggy', 'boom');
+      const critical = (await app.inject({ method: 'GET', url: '/api/v1/health' })).json();
+      expect(critical.journaling.status).toBe('critical');
+      expect(critical.status).toBe('degraded');
     } finally {
       await app.close();
     }

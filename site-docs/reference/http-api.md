@@ -26,7 +26,7 @@ The tables below list the routes that are useful to you. Other routes exist for 
 
 `/api/v1/health` always answers `200` while the bus is running, so it's suitable for uptime monitors. See [Health and logs](/operations/monitoring).
 
-The `journaling` summary has its own `status`: `critical` when an agent's journal runs have failed 3 times in a row or a conversation has waited a day to be journaled, `warning` after a failed run, otherwise `ok`. For each agent it gives the age of the oldest unjournaled conversation (`backlog_age_ms`), failed runs in a row, and the last success and failure. It doesn't change the overall `status`, so point a monitor at `journaling.status` if you want to be alerted.
+The `journaling` summary has its own `status`: `critical` when an agent's journal runs have failed 3 times in a row or a conversation has waited a day to be journaled, `warning` after a failed run, otherwise `ok`. For each agent it gives the age of the oldest unjournaled conversation (`backlog_age_ms`), failed runs in a row, and the last success and failure. When it's `critical`, the overall `status` is `degraded` too; a `warning` doesn't change it.
 
 ## Sessions and transcripts
 
