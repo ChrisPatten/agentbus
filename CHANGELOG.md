@@ -10,6 +10,9 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+### Changed
+- **Landing page rewritten for users.** `site/index.html` now leads with what you can do with your agent (reach it from Telegram and email, schedules and reminders, separate conversations, approvals, `/stop`, live progress) in plain language, and links to the documentation site at `/docs/` instead of listing terminal commands.
+
 ## [0.14.0] - 2026-09-29
 
 ### Added

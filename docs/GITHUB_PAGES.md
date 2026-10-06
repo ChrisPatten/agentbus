@@ -9,7 +9,8 @@ public-facing pitch.
 
 ```
 site/
-  index.html    # the whole page — hero, architecture, features, quick start
+  index.html    # the whole page — hero, what you can do, channels, control,
+                #   how it works, getting started
   styles.css
   favicon.svg
   CNAME         # custom domain — replace the placeholder with the real one
@@ -36,7 +37,11 @@ The version/license/last-commit badges on the page are shields.io badges
 pointed at the GitHub repo — they update automatically, no edits needed on
 release.
 
-Everything else (pitch, feature list, quick start commands) is hand-written
-copy. The release checklist in [VERSIONING.md](VERSIONING.md) includes a
+Everything else (pitch, use cases, channel list, requirements) is
+hand-written copy aimed at users, not contributors: plain language, no
+terminal commands. Setup steps live in the documentation site; the page links
+to `/docs/` and `/docs/getting-started`, so keep those paths in sync if the
+docs site moves. Only describe shipped features, and label early or
+extra-setup channels as such. The release checklist in [VERSIONING.md](VERSIONING.md) includes a
 step to review `site/index.html` when a release changes user-facing
 behavior — update it there rather than letting it drift from the README.
