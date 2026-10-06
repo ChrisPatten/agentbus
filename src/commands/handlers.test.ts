@@ -566,6 +566,23 @@ describe('command handlers', () => {
       expect(result.body).toContain('America/New_York');
     });
 
+    it('shows the next run in the labelled time zone, not UTC', async () => {
+      const db = makeDb();
+      insertSchedule(db, {
+        channel: 'telegram', timezone: 'America/New_York', type: 'cron', cron_expr: '0 8 * * *',
+        fire_at: '2099-07-01T12:00:00.000Z',
+      });
+      insertSchedule(db, { channel: 'telegram', timezone: 'UTC', fire_at: '2099-07-02T12:00:00.000Z' });
+
+      const deps = makeDeps({ db });
+      const commands = createBuiltinCommands(deps);
+      const schedule = commands.find((c) => c.name === 'schedule')!;
+      const result = await schedule.handler(['list'], makeCtx(db, { channel: 'telegram' }));
+
+      expect(result.body).toContain('next: 2099-07-01 08:00 (America/New_York)');
+      expect(result.body).toContain('next: 2099-07-02 12:00 UTC');
+    });
+
     it('shows the model in brackets when the job has one', async () => {
       const db = makeDb();
       insertSchedule(db, { channel: 'telegram', label: 'Email Watch', model: 'haiku' });

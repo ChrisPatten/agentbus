@@ -6,7 +6,7 @@ The bus runs a small web API on your computer. AgentBus's own parts use it to ta
 
 - **Address.** `http://127.0.0.1:3000` by default (`bus.host` and `bus.http_port`). It's only reachable from the same computer unless you change `bus.host`.
 - **Format.** Requests and responses are JSON. Successful responses include `"ok": true`; errors include `"ok": false` and an `error` message.
-- **Authentication.** None by default. The Mac app, Siri and Pebble routes check their own per-contact token. (`bus.auth_token` exists but [shouldn't be set yet](/reference/configuration#bus).)
+- **Authentication.** None by default. The Mac app, Siri and Pebble routes check their own per-contact token. If you set [`bus.auth_token`](/reference/configuration#bus), every request except `GET /api/v1/health` must also send `X-Bus-Token`; AgentBus's own agents and hooks do this for you.
 
 Try it from a terminal:
 

@@ -48,6 +48,7 @@ import {
   dkimAuthenticated,
 } from './email-thread.js';
 import { renderEmail, resolveInboundText } from './email-render.js';
+import { loadImapCursor, saveImapCursor, resolveStartUid } from './email-imap-state.js';
 
 const BACKOFF_INITIAL_MS = 2000;
 const BACKOFF_MAX_MS = 60_000;
@@ -108,6 +109,8 @@ export class EmailAdapter implements AdapterInstance {
   private stopController = new AbortController();
   /** Highest IMAP UID already processed; new mail has a higher UID. */
   private lastUid = 0;
+  /** UIDVALIDITY of the open mailbox; `lastUid` is only meaningful within it. */
+  private uidValidity = '';
   /** Serializes fetches triggered by overlapping `exists` events. */
   private fetchChain: Promise<void> = Promise.resolve();
   private lastActivity: string | null = null;
@@ -313,13 +316,24 @@ export class EmailAdapter implements AdapterInstance {
 
     await client.connect();
     const mailbox = await client.mailboxOpen(this.cfg.imap.mailbox);
-    // Start watching after existing mail: only act on messages that arrive now.
-    this.lastUid = Math.max(0, Number(mailbox.uidNext ?? 1) - 1);
+    // Resume from the last processed UID (saved in the DB) so mail that
+    // arrived while the bus was down or reconnecting is caught up. With no
+    // saved cursor (first setup) or a UIDVALIDITY change, start after the
+    // mail already in the mailbox, so old mail is never replayed.
+    this.uidValidity = String(mailbox.uidValidity ?? '');
+    const saved = loadImapCursor(this.deps.db, this.id, this.cfg.imap.mailbox);
+    const start = resolveStartUid(saved, this.uidValidity, Number(mailbox.uidNext ?? 1));
+    this.lastUid = start.lastUid;
+    this.saveCursor();
     this.consecutiveFailures = 0;
-    console.log(`${this.tag} Connected — watching ${this.cfg.imap.mailbox} for uid > ${this.lastUid}`);
+    console.log(
+      `${this.tag} Connected — watching ${this.cfg.imap.mailbox} for uid > ${this.lastUid}` +
+        (start.catchUp ? ' (catching up on mail that arrived while disconnected)' : ''),
+    );
 
     const onExists = (): void => this.scheduleFetch(client);
     client.on('exists', onExists);
+    if (start.catchUp) this.scheduleFetch(client);
 
     // Block until the connection closes or we shut down, so supervise() can
     // reconnect on an unexpected drop.
@@ -334,6 +348,17 @@ export class EmailAdapter implements AdapterInstance {
       });
     } finally {
       client.removeListener('exists', onExists);
+    }
+  }
+
+  private saveCursor(): void {
+    try {
+      saveImapCursor(this.deps.db, this.id, this.cfg.imap.mailbox, {
+        uidValidity: this.uidValidity,
+        lastUid: this.lastUid,
+      });
+    } catch (err) {
+      console.error(`${this.tag} Failed to save IMAP cursor: ${String(err)}`);
     }
   }
 
@@ -352,6 +377,9 @@ export class EmailAdapter implements AdapterInstance {
       if (this.stopping) return;
       if (msg.uid <= this.lastUid) continue;
       this.lastUid = Math.max(this.lastUid, msg.uid);
+      // Saved before handling (at-most-once, like the in-memory cursor), so a
+      // crash mid-message never replays it to the agent on reconnect.
+      this.saveCursor();
       if (!msg.source) continue;
       try {
         await this.handleRawMessage(msg.source);

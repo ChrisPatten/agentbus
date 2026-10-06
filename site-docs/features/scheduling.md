@@ -41,8 +41,8 @@ schedules:
 |---|---|---|
 | `id` | required | A unique name for the schedule |
 | `cron` | | When a recurring schedule runs: minute, hour, day of month, month, day of week |
-| `fire_at` | | When a one-off schedule runs, as a date and time. Use UTC, ending in `Z`. |
-| `timezone` | `UTC` | The time zone `cron` is read in, for example `Europe/London` |
+| `fire_at` | | When a one-off schedule runs, as a date and time, for example `"2027-04-01T09:00"`. See below. |
+| `timezone` | `UTC` | The time zone `cron`, and a `fire_at` without an offset, are read in, for example `Europe/London` |
 | `channel` | required | The channel the prompt arrives on, and the reply goes to |
 | `sender` | required | Who the prompt is from, usually `contact:<you>` |
 | `prompt` | required | What to ask the agent |
@@ -50,21 +50,28 @@ schedules:
 | `topic` | see above | Put the job in a specific topic instead |
 | `priority` | `normal` | `normal`, `high` or `urgent` |
 | `model` | | The model for this job, for example `haiku` for a cheap daily check. See [Choosing models](/features/models). |
+| `max_fires` | | Stop a recurring schedule after this many runs, for example `52` for a year of weekly runs |
 
 Give each schedule either `cron` or `fire_at`.
 
-**Write `fire_at` in UTC, ending in `Z`.** A time with an offset, such as `-05:00`, is currently read as if it were UTC, so the schedule fires early.
+**Writing `fire_at`.** You can write it three ways:
+
+- **In your schedule's time zone**, with no offset: `"2027-04-01T09:00"` with `timezone: America/New_York` runs at 9 am New York time.
+- **With an offset**: `"2027-04-01T09:00:00-04:00"`. The offset wins over `timezone`.
+- **In UTC**, ending in `Z`: `"2027-04-01T13:00:00Z"`.
+
+If you change the `fire_at` of a one-off schedule that hasn't run yet, the new time is used next time the bus starts.
 
 ### Changing config schedules
 
 The bus reads `schedules` each time it starts:
 
 - **New entries** are added.
-- **Changed entries** pick up the new prompt, cron, time zone, label, topic, priority and model. A new cron time takes effect after the next run under the old one.
+- **Changed entries** pick up the new prompt, cron, time zone, label, topic, priority, model and `max_fires`. A new cron time takes effect after the next run under the old one.
 - **Removed entries** are cancelled.
 - **A config schedule you cancel stays cancelled**, even if it's still in the file. To bring it back, give it a new `id`.
 
-`max_fires` (stop after a number of runs) is accepted in `config.yaml` but not applied yet. To limit a recurring schedule, create it by asking your agent or through the API.
+A schedule that reaches its `max_fires` is marked completed and stops running.
 
 ## Asking your agent
 
@@ -85,7 +92,7 @@ See [MCP tools](/reference/mcp-tools#scheduling).
 
 | To | Do this |
 |---|---|
-| See what's scheduled on this channel | Send `/schedule`. Next run times are shown in UTC. |
+| See what's scheduled on this channel | Send `/schedule`. Each next run time is shown in that schedule's own time zone, which is named next to it. |
 | Cancel a schedule | `/schedule cancel <id>`, using the first characters of the ID from the list |
 | Pause or resume, rename, or change a schedule's model or topic | Ask your agent, or use `PATCH /api/v1/schedules/<id>` |
 | Change a schedule's time or prompt | Cancel it and create a new one, or edit `config.yaml` for config schedules |

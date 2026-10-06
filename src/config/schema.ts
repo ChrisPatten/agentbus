@@ -15,6 +15,7 @@
  */
 import { z } from 'zod';
 import { isAbsolute } from 'node:path';
+import { parseFireAt } from '../scheduler/time.js';
 
 /** Platform identifiers and credentials for a known contact. */
 const ContactPlatformsSchema = z.object({
@@ -714,9 +715,14 @@ const ScheduleEntrySchema = z
   .refine(
     (d) => {
       if (!d.fire_at) return true;
-      return !isNaN(new Date(d.fire_at).getTime());
+      try {
+        parseFireAt(d.fire_at, d.timezone);
+        return true;
+      } catch {
+        return false;
+      }
     },
-    { message: 'fire_at must be a valid ISO 8601 timestamp' },
+    { message: 'fire_at must be a valid ISO 8601 timestamp, and timezone a valid IANA time zone' },
   );
 
 const SchedulerConfigSchema = z.object({

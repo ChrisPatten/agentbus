@@ -12,6 +12,7 @@ import type { AdapterRegistry } from '../core/registry.js';
 import type { MessageQueue } from '../core/queue.js';
 import { computeConversationId } from '../pipeline/conversation-id.js';
 import type { HeadlessCapacitySnapshot } from '../adapters/cc-headless.js';
+import { formatInZone } from '../scheduler/time.js';
 
 /**
  * Mutable holder for the headless adapter's control hooks. Populated by
@@ -301,8 +302,10 @@ async function scheduleHandler(
     for (const row of rows) {
       const shortId = row.id.slice(0, 8);
       const name = row.label ?? (row.type === 'cron' ? row.cron_expr! : 'one-shot');
-      const nextFire = row.fire_at.slice(0, 16).replace('T', ' ');
-      const tz = row.timezone && row.timezone !== 'UTC' ? ` (${row.timezone})` : ' UTC';
+      // fire_at is stored in UTC; show it in the schedule's own zone (the one
+      // its cron is evaluated in), labelled with that zone.
+      const { text: nextFire, zone } = formatInZone(row.fire_at, row.timezone || 'UTC');
+      const tz = zone !== 'UTC' ? ` (${zone})` : ' UTC';
       const fires =
         row.max_fires !== null ? `${row.fire_count}/${row.max_fires}` : `${row.fire_count} fired`;
       const model = row.model ? `  [${row.model}]` : '';

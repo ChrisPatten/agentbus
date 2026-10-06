@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import type { TmuxController } from './tmux.js';
 import type { CcPoolInstanceConfig } from '../config/schema.js';
 import { writePaneMcpConfig, cleanupPaneMcpConfig } from './mcp-config.js';
-import { PaneLifecycle, PaneLaunchError, LAUNCH_READY_TIMEOUT_MS, INHERITED_CLAUDE_SESSION_VARS, type LaunchParams } from './pane.js';
+import { PaneLifecycle, PaneLaunchError, LAUNCH_READY_TIMEOUT_MS, INHERITED_CLAUDE_SESSION_VARS, dedupeDevChannelsArgs, isShellCommand, type LaunchParams } from './pane.js';
 
 // writePaneMcpConfig/cleanupPaneMcpConfig are mocked wholesale (rather than
 // exercising the real fs-touching module) — pane.ts's own responsibility is
@@ -258,6 +258,31 @@ describe('PaneLifecycle.launch — optional flags', () => {
       expect(line).toContain(q(arg));
     }
     expect(line.trimEnd().endsWith(`${q('--add-dir')} ${q('/extra/dir')} ${q('--verbose')}`)).toBe(true);
+  });
+
+  it('does not repeat --dangerously-load-development-channels when launch_args already has it', async () => {
+    const tmux = makeTmux({ capturePane: makeNoAckCapture() });
+    const cfg = makeCfg({ launch_args: ['--dangerously-load-development-channels', '--verbose'] });
+    const pl = new PaneLifecycle({ tmux, busBaseUrl: 'http://x', cfg, scratchDir, fetchFn: makeReadyFetch() });
+
+    const launchPromise = pl.launch(makeLaunchParams());
+    await vi.advanceTimersByTimeAsync(600);
+    await launchPromise;
+
+    const line = tmux.sendCommand.mock.calls[0]![1] as string;
+    expect(line.split(q('--dangerously-load-development-channels')).length - 1).toBe(1);
+    expect(line).toContain(`${q('--dangerously-load-development-channels')} ${q('server:agentbus')}`);
+    expect(line.trimEnd().endsWith(q('--verbose'))).toBe(true);
+  });
+
+  it('dedupeDevChannelsArgs drops the flag and server:agentbus forms, keeps other channels', () => {
+    expect(dedupeDevChannelsArgs(['--dangerously-load-development-channels'])).toEqual([]);
+    expect(dedupeDevChannelsArgs(['--dangerously-load-development-channels', 'server:agentbus', '-v'])).toEqual(['-v']);
+    expect(dedupeDevChannelsArgs(['--dangerously-load-development-channels=server:agentbus'])).toEqual([]);
+    expect(dedupeDevChannelsArgs(['--dangerously-load-development-channels', 'server:other'])).toEqual([
+      '--dangerously-load-development-channels', 'server:other',
+    ]);
+    expect(dedupeDevChannelsArgs(['--add-dir', '/x'])).toEqual(['--add-dir', '/x']);
   });
 
   it('shell-quotes an awkward launch_arg containing a single quote and spaces', async () => {
@@ -609,5 +634,108 @@ describe('PaneLifecycle.release', () => {
     const sendKeysOrder = tmux.sendKeys.mock.invocationCallOrder[0]!;
     const killOrder = tmux.killWindow.mock.invocationCallOrder[0]!;
     expect(sendKeysOrder).toBeLessThan(killOrder);
+  });
+});
+
+// ── reuse after on_evict: clear ──────────────────────────────────────────────
+
+describe('PaneLifecycle.launch — pane still running claude (after on_evict: clear)', () => {
+  it('stops the old claude and recreates the window instead of typing the launch line into it', async () => {
+    let alive = true;
+    const tmux = makeTmux({
+      paneAlive: vi.fn(async () => alive),
+      paneCommand: vi.fn(async () => 'claude'),
+      killWindow: vi.fn(async () => { alive = false; }),
+      capturePane: makeNoAckCapture(),
+    });
+    const pl = new PaneLifecycle({ tmux, busBaseUrl: 'http://x', cfg: makeCfg(), scratchDir, fetchFn: makeReadyFetch() });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await pl.release('peggy-pool:1', 'clear');
+    const launchPromise = pl.launch(makeLaunchParams());
+    await vi.advanceTimersByTimeAsync(1000);
+    await launchPromise;
+
+    expect(tmux.sendKeys).toHaveBeenCalledWith('peggy-pool:1', 'C-c');
+    expect(tmux.killWindow).toHaveBeenCalledWith('peggy-pool:1');
+    expect(tmux.createWindow).toHaveBeenCalledTimes(1);
+    const launchLineCall = tmux.sendCommand.mock.calls.findIndex((c) => String(c[1]).includes(q('--session-id')));
+    expect(tmux.killWindow.mock.invocationCallOrder[0]!).toBeLessThan(
+      tmux.sendCommand.mock.invocationCallOrder[launchLineCall]!,
+    );
+  });
+
+  it('launches straight into a live pane that is at a shell prompt', async () => {
+    const tmux = makeTmux({
+      paneAlive: vi.fn(async () => true),
+      paneCommand: vi.fn(async () => 'zsh'),
+      capturePane: makeNoAckCapture(),
+    });
+    const pl = new PaneLifecycle({ tmux, busBaseUrl: 'http://x', cfg: makeCfg(), scratchDir, fetchFn: makeReadyFetch() });
+
+    const launchPromise = pl.launch(makeLaunchParams());
+    await vi.advanceTimersByTimeAsync(600);
+    await launchPromise;
+
+    expect(tmux.killWindow).not.toHaveBeenCalled();
+    expect(tmux.createWindow).not.toHaveBeenCalled();
+  });
+
+  it('isShellCommand recognises shells, including login-shell names', () => {
+    expect(isShellCommand('zsh')).toBe(true);
+    expect(isShellCommand('-bash')).toBe(true);
+    expect(isShellCommand('claude')).toBe(false);
+    expect(isShellCommand('node')).toBe(false);
+  });
+});
+
+// ── poll_interval_ms ─────────────────────────────────────────────────────────
+
+describe('PaneLifecycle — poll_interval_ms', () => {
+  it("passes the pool's poll_interval_ms to the pane's MCP config", async () => {
+    const tmux = makeTmux({ paneAlive: vi.fn(async () => false), capturePane: makeNoAckCapture() });
+    const pl = new PaneLifecycle({
+      tmux, busBaseUrl: 'http://127.0.0.1:3000', cfg: makeCfg({ poll_interval_ms: 250 }), scratchDir, fetchFn: makeReadyFetch(),
+    });
+
+    const launchPromise = pl.launch(makeLaunchParams());
+    await vi.advanceTimersByTimeAsync(600);
+    await launchPromise;
+
+    expect(mockWritePaneMcpConfig).toHaveBeenCalledWith(expect.objectContaining({ pollIntervalMs: 250 }));
+  });
+});
+
+// ── bus.auth_token ───────────────────────────────────────────────────────────
+
+describe('PaneLifecycle — bus.auth_token', () => {
+  it('sends X-Bus-Token on the readiness poll and exports AGENTBUS_BUS_TOKEN into the new window', async () => {
+    const tmux = makeTmux({ paneAlive: vi.fn(async () => false), capturePane: makeNoAckCapture() });
+    const fetchFn = makeReadyFetch();
+    const pl = new PaneLifecycle({
+      tmux, busBaseUrl: 'http://127.0.0.1:3000', cfg: makeCfg(), scratchDir, fetchFn, busToken: 'tok-1',
+    });
+
+    const launchPromise = pl.launch(makeLaunchParams());
+    await vi.advanceTimersByTimeAsync(600);
+    await launchPromise;
+
+    expect(tmux.createWindow.mock.calls[0]![3]).toMatchObject({ AGENTBUS_BUS_TOKEN: 'tok-1' });
+    const calls = fetchFn.mock.calls as unknown as Array<[string, RequestInit | undefined]>;
+    expect(new Headers(calls[0]![1]?.headers).get('X-Bus-Token')).toBe('tok-1');
+  });
+
+  it('adds no token env or header when bus.auth_token is unset', async () => {
+    const tmux = makeTmux({ paneAlive: vi.fn(async () => false), capturePane: makeNoAckCapture() });
+    const fetchFn = makeReadyFetch();
+    const pl = new PaneLifecycle({ tmux, busBaseUrl: 'http://127.0.0.1:3000', cfg: makeCfg(), scratchDir, fetchFn });
+
+    const launchPromise = pl.launch(makeLaunchParams());
+    await vi.advanceTimersByTimeAsync(600);
+    await launchPromise;
+
+    expect(tmux.createWindow.mock.calls[0]![3]).not.toHaveProperty('AGENTBUS_BUS_TOKEN');
+    const calls = fetchFn.mock.calls as unknown as Array<[string, RequestInit | undefined]>;
+    expect(calls[0]![1]).toBeUndefined();
   });
 });

@@ -68,7 +68,7 @@ Approvals use a Claude Code hook in your agent's working folder.
 
    The bus starts fresh panes as conversations need them, and each conversation resumes its Claude session.
 
-The hook needs `jq` and `curl`, and sends requests to `http://127.0.0.1:3000`. If your bus uses another port, edit `AGENTBUS_BASE` at the top of the script.
+The hook needs `jq` and `curl`, and sends requests to `http://127.0.0.1:3000`. If your bus uses another port, edit `AGENTBUS_BASE` at the top of the script. If you set `bus.auth_token`, the hook sends it from `AGENTBUS_BUS_TOKEN`, which cc-pool sets in each pane for you.
 
 ## Checking requests
 
