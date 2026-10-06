@@ -96,7 +96,7 @@ Lists recent sessions (default: 10, max: 50). Optionally filter by channel name 
 
 The `/clear` equivalent for headless (`cc-headless`) agents: start a fresh context window. It closes the current selected session, so your next message in that conversation spawns a brand-new `claude -p` with no `--resume`. The close is immediate — there is no window where a follow-up re-attaches to the old session. From the Mac app, `/clear` targets the selected foreign or app session.
 
-The previous session is **not discarded**: after closing it, the bus fires a silent background journaling turn (resuming the old `claude_session_id`) so the agent reviews the conversation one last time and updates its memory files before the context is left behind. Nothing is delivered to the user from that turn. Because journaling resumes the underlying claude session by id and writes to the agent's memory *files*, it works correctly even though the DB session row is already closed.
+The previous session is **not discarded**: after closing it, the bus fires the journaling `clear` trigger for it (E66, [JOURNALING.md](JOURNALING.md)). The trigger is persisted (it survives a restart), bypasses `min_human_messages`, and runs the agent's journaler chain in the background; on `cc-headless` that resumes the old `claude_session_id` so the agent reviews the conversation one last time and updates its memory files. Nothing is delivered to the user from that run. It works even though the DB session row is already closed.
 
 ```
 /clear
@@ -107,9 +107,9 @@ Scope and edge cases:
 
 - **Conversation-scoped.** `/clear` only closes the active session in the selected conversation. A Telegram `/clear` leaves a `system:peggy` (scheduler) session untouched, and vice versa. An app command bound to a Telegram session closes that Telegram session.
 - **Nothing to clear.** If you have no active session with a live `claude_session_id` on that channel, it replies `No active session to clear` and does nothing.
-- **Headless not running.** On an MCP-only deployment the session is still closed, but there is no background memory pass (the reply says so).
+- **Journaling not set up.** When the session's agent has no journaling settings (or they're disabled), the session is still closed, but there is no memory pass (the reply says so).
 
-This command is most useful for headless agents (see [CC_HEADLESS_ADAPTER.md](./CC_HEADLESS_ADAPTER.md)); the journaling step is a no-op pass-through when the headless adapter isn't running.
+This command is most useful for headless agents (see [CC_HEADLESS_ADAPTER.md](./CC_HEADLESS_ADAPTER.md)).
 
 ### `/stop`
 

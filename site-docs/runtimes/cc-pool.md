@@ -117,15 +117,16 @@ make pool
 
 ## Optional hooks
 
-Three Claude Code hooks, in `scripts/hooks/` in the AgentBus folder, make a pool work better. Install them in your agent's working folder:
+Claude Code hooks in `scripts/hooks/` in the AgentBus folder make a pool work better. Install them in your agent's working folder:
 
 | Hook | Claude Code event | What it adds |
 |---|---|---|
 | `agentbus_approval_hook.sh` | `PermissionRequest` | Lets you answer permission prompts from Telegram. See [Approvals](/features/approvals). |
 | `agentbus_tool_status_hook.sh` | `UserPromptSubmit` and `PostToolUse` | Telegram's "typing…" indicator and live tool list while the agent works. |
-| `agentbus_stop_hook.sh` | `Stop` | Tells the bus each time a turn finishes, so a long-running turn isn't mistaken for an idle conversation. |
+| `agentbus_journal_hook.sh` | `Stop`, `PreCompact` and `SessionEnd` | Tells the bus each time a turn finishes, so a long-running turn isn't mistaken for an idle conversation. Before the conversation's context is compacted or cleared, it saves a copy of the transcript for journaling. |
+| `agentbus_stop_hook.sh` | `Stop` | The older turn-finished hook. Keep it if you already have it, or use `agentbus_journal_hook.sh` instead. |
 
-Each script has a few settings at the top: the bus address (`http://127.0.0.1:3000`), and for the stop hook, the pool's `agent_id` (`POOL_AGENT_ID`). Edit them to match your setup. The scripts need `jq` and `curl`; the tool-status hook also needs `python3`.
+The scripts talk to the bus at `http://127.0.0.1:3000`. The approval and tool-status hooks have this address at the top of the file; the journal and stop hooks read `AGENTBUS_URL` from the environment instead and need no editing. The scripts need `jq` and `curl`; the tool-status hook also needs `python3`.
 
 Panes only pick up new hook settings when they next start.
 

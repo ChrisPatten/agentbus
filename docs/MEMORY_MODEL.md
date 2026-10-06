@@ -21,7 +21,7 @@ So E20 stops the bus from trying to **be** the memory store and makes it **orche
 | Recent conversation continuity | **Claude Code** — the resumed `claude_session_id`, bounded by auto-compaction |
 | Deciding when to capture durable knowledge | **The bus** — the journaling dispatcher fires on pause or on a hard ceiling (E30) |
 | Actually writing the knowledge | **The agent** — the silent journaling turn edits its own files; high-stakes content (E30) is written inline in the reply-producing turn instead of waiting on the sweep |
-| What's due for journaling and when | **The bus** — `sessions` telemetry (`last_activity`, `last_journaled_at`, `claude_session_id`) |
+| What's due for journaling and when | **The bus** — `sessions` telemetry (`last_activity`, `journal_cursor_at`, `last_journaled_at`, `claude_session_id`) and `journal_state` (E66) |
 
 ## The two pillars
 
@@ -29,19 +29,7 @@ So E20 stops the bus from trying to **be** the memory store and makes it **orche
 
 2. **Journaling on pause or ceiling** — the idle threshold is repurposed from a *teardown* signal into a *journaling* signal. When a conversation pauses, the bus fires a **silent** `--resume` journaling turn: the agent reviews the conversation and updates its files, sends the user nothing, and the session stays open. A hard ceiling alongside the idle debounce makes a long, continuously-active conversation flush periodically instead of only on pause. See [CC_HEADLESS_ADAPTER.md → Memory logging](./CC_HEADLESS_ADAPTER.md#memory-logging).
 
-   **All-or-nothing dependency on `cc-headless` (E33).** The dispatcher
-   (`SessionTracker.dispatchJournaling()`, `src/memory/session-tracker.ts`) is
-   gated entirely on at least one configured *and* registered `cc-headless`
-   instance — if the config block is absent, or no instance has registered a
-   journaling runner, the sweep no-ops for **every** headless session
-   bus-wide on every tick, not just sessions tied to the missing instance.
-   Removing the last `cc-headless` instance (e.g. an operator swap to a
-   different Claude Code adapter) silently pauses the sweep. This is now
-   surfaced via a one-time `console.warn` (edge-triggered, not per-tick) the
-   moment the condition is detected with at least one session actually
-   waiting on the sweep — look for `[session-tracker] Journaling sweep is a
-   no-op bus-wide` if `last_journaled_at` looks stuck while `last_activity`
-   keeps advancing.
+   **E66.** The dispatcher is now the journaling engine (`src/journaling/engine.ts`), shared by every runtime, with per-agent journaler chains, a per-session cursor (`sessions.journal_cursor_at`), eligibility rules (`min_human_messages`, default 2) and `journal_runs` records. The E33 "sweep is a no-op bus-wide" warning is gone: a session whose agent has no journaling settings is simply not journaled, and a chain that can't run raises an advisory. See [JOURNALING.md](JOURNALING.md).
 
 3. **No memory work inside the reply-producing turn** — the turn that answers the user ends at `reply()`/`send_message()`; it does not keep running afterward to journal. That responsibility belongs entirely to the debounced sweep above, with one exception: financial, health, scheduling, or safety/security-relevant content is still captured immediately, inline, before the turn's process exits — see [CC_HEADLESS_ADAPTER.md → High-stakes immediate-logging exception](./CC_HEADLESS_ADAPTER.md#high-stakes-immediate-logging-exception).
 

@@ -119,6 +119,12 @@ The block format is shared: `src/core/system-block.ts` (`renderSystemBlock`, `ne
 - `/status` has an `Advisories:` section listing every active advisory, most severe first ([SLASH_COMMANDS.md](SLASH_COMMANDS.md)).
 - `GET /api/v1/advisories?agent=<id>&state=<active|all|open|delivered|acknowledged|resolved>` and `GET /api/v1/advisories/:id` ([HTTP_API.md](HTTP_API.md#advisories)).
 
+## Producers
+
+| Producer | Condition keys | See |
+|---|---|---|
+| Journaling (E66) | `journaling:chain-can-exhaust` (info, startup), `journaling:chain-exhausted` (warning → critical), `journaling:hook-stopped:turn-ended` (warning) | [JOURNALING.md](JOURNALING.md#advisories) |
+
 ## Adding a producer
 
 Producers are in-process bus code. There is deliberately no HTTP route to raise an advisory, because its text is rendered into a bus-originated block.

@@ -93,7 +93,7 @@ adapters:
       index_file: MEMORY.md
       daily_subdir: daily
       journal_lookback_days: 3       # today plus the previous 2 days (0 = index only)
-    journaling:                      # silent memory-update turn on pause or ceiling
+    journaling:                      # DEPRECATED alias: prefer agents.<id>.journaling (docs/JOURNALING.md)
       enabled: true
       threshold_ms:                  # idle debounce per channel; a number, or a map with `default`
         telegram: 300000             # 5 min
@@ -179,7 +179,7 @@ memory:
   context_window_hours: 48
   claude_api_model: claude-sonnet-4-6
 
-# Per-agent settings keyed by recipient id — docs/ATTACHMENTS.md, docs/ADVISORIES.md
+# Per-agent settings keyed by recipient id — docs/ATTACHMENTS.md, docs/ADVISORIES.md, docs/JOURNALING.md
 agents:
   "agent:claude":
     media:
@@ -188,6 +188,14 @@ agents:
     owners:                          # who receives bus advisories about this agent
       - channel: telegram            # exact channel of the owner's conversation
         contact_id: alice            # a key under contacts
+    # journaling:                    # E66 per-agent journaling; replaces the cc-headless block above
+    #   chain: [system-message, cc-headless, script]   # tried in order; unsupported entries are skipped
+    #   threshold_ms: { default: 1800000, telegram: 300000 }
+    #   ceiling_ms: 14400000
+    #   min_human_messages: 2        # final triggers (/clear, close, shutdown) journal any human content
+    #   timeout_ms: 300000
+    #   script:                      # the always-available last resort (journaler ships in E66 part B)
+    #     command: /path/to/agentbus/scripts/journalers/claude-p-journal.sh
 
 pipeline:
   dedup_window_ms: 30000

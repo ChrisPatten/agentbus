@@ -226,9 +226,13 @@ Symptom: pm2 shows `errored` and keeps restarting.
 
 ### Journaling never runs
 
-Symptom: `last_journaled_at` on headless sessions stays stale while `last_activity` advances.
+Symptom: `journal_cursor_at` / `last_journaled_at` on sessions stays stale while `last_activity` advances.
 
-Look for `[session-tracker] Journaling sweep is a no-op bus-wide` in the logs. It means no `cc-headless` instance is configured or registered. See [MEMORY_MODEL.md](MEMORY_MODEL.md).
+- Check the agent has journaling settings: `agents.<id>.journaling`, or the deprecated `adapters.cc-headless.journaling` block (on by default for every `cc-headless` instance).
+- Look for `[journaling]` log lines. Each run logs one JSON line with its trigger, outcome and attempts. `exhausted` means every journaler in the chain was unavailable or failed; the `journaling:chain-exhausted` advisory says why.
+- With the default `min_human_messages: 2`, a conversation with a single message waits up to 24 h (or until `/clear`, a session end or a bus restart).
+
+See [JOURNALING.md](JOURNALING.md).
 
 ### Summarizer not running
 

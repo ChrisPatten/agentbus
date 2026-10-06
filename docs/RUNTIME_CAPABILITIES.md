@@ -82,7 +82,7 @@ Runtime capability check failed:
   journaling chain: script: agent agent:ghost has no runtime (no cc-headless/cc-pool instance or agent route)
 ```
 
-No feature declares requirements yet; journaling chains (E66) are the first. Advisories (E65) use `systemMessages` but don't require it: a runtime without it gets advisories directly on the owner's channel (see [ADVISORIES.md](ADVISORIES.md#delivery-paths)). Owners configured for an agent that resolves to no runtime only log a startup warning.
+Journaling chains (E66) are the first consumer: a chain with no journaler the agent's runtime can support (for example `[system-message, cc-headless]` on `claude-code`) fails here, one line per journaler, and so does journaling on an agent with no runtime. Entries that only some runtimes support are skipped at run time instead, so `[system-message, cc-headless, script]` is valid everywhere. See [JOURNALING.md](JOURNALING.md#configuration). Advisories (E65) use `systemMessages` but don't require it: a runtime without it gets advisories directly on the owner's channel (see [ADVISORIES.md](ADVISORIES.md#delivery-paths)). Owners configured for an agent that resolves to no runtime only log a startup warning.
 
 ## Where it shows
 

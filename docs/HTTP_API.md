@@ -26,7 +26,8 @@ Set `bus.host: 0.0.0.0` to accept connections from other hosts, for example a re
 |---|---|---|
 | GET | `/api/v1/health` | Liveness, adapter health, agent runtimes, queue counts |
 | GET | `/api/v1/pool` | cc-pool pane leases and parked-queue depth (when configured) |
-| POST | `/api/v1/pool/:agentId/turn-ended` | Real-time pane activity signal, fed by a `Stop` hook |
+| POST | `/api/v1/pool/:agentId/turn-ended` | Real-time pane activity signal, fed by a `Stop` hook (superseded by `/api/v1/journal/events`) |
+| POST | `/api/v1/journal/events` | Harness hook events for journaling (`turn-ended`, `pre-compact`, `session-end`, `clear`) |
 | POST | `/api/v1/approvals` | Raise an interactive-approval request for a blocked pane |
 | GET | `/api/v1/approvals` | List approval requests, optionally by status |
 | GET | `/api/v1/approvals/:id` | Fetch one approval request |
@@ -153,7 +154,26 @@ Real-time correction to a pane's `last_activity_at`, which also records `last_tu
 |---|---|---|
 | `session_id` | Yes (to have any effect) | The pane's `claude_session_id`; matched against `pool_leases` |
 
-Fire-and-forget, like `/typing` and `/tool-status`: always `200 { "ok": true }`, silently a no-op if the pool or a matching pane isn't found. The pane stall watchdog compares `last_turn_ended_at` against message acks to detect a pane that received a message but never finished a turn; the timestamp is cleared when the pane is leased to a new conversation or released. Does not decide journal-worthiness or run any journaling turn — see [CC_POOL_ADAPTER.md#session-tracker-interaction](CC_POOL_ADAPTER.md#session-tracker-interaction) for that separate, still-open gap.
+Fire-and-forget, like `/typing` and `/tool-status`: always `200 { "ok": true }`, silently a no-op if the pool or a matching pane isn't found. The pane stall watchdog compares `last_turn_ended_at` against message acks to detect a pane that received a message but never finished a turn; the timestamp is cleared when the pane is leased to a new conversation or released. Does not decide journal-worthiness or run any journaling turn. Since E66 the bundled `Stop` hook posts `turn-ended` to [`POST /api/v1/journal/events`](#post-apiv1journalevents) instead, which marks the same pane and needs no agent id in the URL.
+
+## Journaling
+
+See [JOURNALING.md](JOURNALING.md).
+
+### `POST /api/v1/journal/events`
+
+Posted by `scripts/hooks/agentbus_journal_hook.sh` (and the cc-pool `Stop` hook). The bus resolves the agent and conversation from the harness session id.
+
+| Field | Required | Notes |
+|---|---|---|
+| `harness_session_id` | Yes | The harness's session id (Claude Code's `session_id`), matched against `sessions.claude_session_id`, open sessions first |
+| `event` | Yes | `turn-ended`, `pre-compact`, `session-end` or `clear` |
+| `snapshot_path` | No | Absolute path of a transcript snapshot the hook saved. Must be a file under the agent's working directory or `~/.agentbus/journal-snapshots`. |
+| `transcript_path` | No | The harness's own transcript file, recorded for journalers |
+
+`turn-ended` re-anchors the journaling pause timer (and marks a cc-pool pane's turn ended) and never journals. The other events register the snapshot, if any, and fire the journaling trigger of the same name, which bypasses `min_human_messages`.
+
+Returns `200 { ok: true, session_id, agent_id, action: "turn-ended" | "triggered", trigger?, snapshot_id?, snapshot_error? }`. `trigger` is the engine's answer (`queued`, `merged`, `not-configured`, `disabled`). A rejected snapshot path is reported in `snapshot_error` while the event still counts. `400` for a malformed body, `404` when no bus session matches the harness session id. Subject to `bus.auth_token` (`X-Bus-Token`) like every route.
 
 ## Approvals
 

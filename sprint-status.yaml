@@ -1003,14 +1003,18 @@ epics:
       S65.3: complete  # Delivery paths and advisory_ack (src/advisories/service.ts, transport.ts, advisory-inject stage, src/core/system-block.ts)
       S65.4: complete  # Visibility and docs (/status Advisories:, GET /api/v1/advisories, docs/ADVISORIES.md)
   E66:
-    status: pending
-    notes: Pluggable journaling core (triggers + journaler chain; system-message, cc-headless, script journalers); retires the Anthropic-API summarizer. Depends on E64, E65.
+    status: in-progress
+    notes: >
+      Pluggable journaling core (triggers + journaler chain; system-message, cc-headless, script journalers); retires
+      the Anthropic-API summarizer. Depends on E64, E65. Part A (S66.1-S66.5) done on feat/e64-e68-journaling:
+      src/journaling/ (config, eligibility, store, engine, runner, registry, events), migration 026, provisional
+      cc-headless journaler. Part B is S66.6-S66.11. Migration 030 is reserved for another branch; use 027-029, 031+.
     stories:
-      S66.1: pending  # Per-agent journaling config
-      S66.2: pending  # Journal state, eligibility, journal_runs
-      S66.3: pending  # Bus-side triggers and evaluation engine
-      S66.4: pending  # Harness event endpoint and generic hook
-      S66.5: pending  # Journaler interface and chain runner
+      S66.1: complete  # Per-agent journaling config (agents.<id>.journaling, deprecated cc-headless alias, chain validation, chain-can-exhaust advisory)
+      S66.2: complete  # Journal cursor + state, eligibility, journal_runs (migration 026, src/journaling/store.ts, eligibility.ts)
+      S66.3: complete  # Evaluation engine and bus-side triggers (src/journaling/engine.ts; replaces SessionTracker.dispatchJournaling)
+      S66.4: complete  # POST /api/v1/journal/events, scripts/hooks/agentbus_journal_hook.sh, snapshots, hook health (src/journaling/events.ts)
+      S66.5: complete  # Journaler interface, registry, chain runner, advisories (src/journaling/types.ts, registry.ts, runner.ts)
       S66.6: pending  # cc-headless journaler
       S66.7: pending  # Script journaler and reference claude-p script
       S66.8: pending  # System Message journaler

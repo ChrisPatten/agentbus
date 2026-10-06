@@ -103,6 +103,37 @@ agents:
 
 See [Attachments](/features/attachments).
 
+### journaling
+
+How and when the bus has this agent record what's worth remembering from its conversations. See [Journaling and memory](/features/journaling-and-memory).
+
+```yaml
+agents:
+  "agent:assistant":
+    journaling:
+      chain: [cc-headless]
+      threshold_ms: { default: 1800000, telegram: 300000 }
+      ceiling_ms: 14400000
+      min_human_messages: 2
+```
+
+| Option | Default | What it does |
+|---|---|---|
+| `enabled` | `true` | Turn journaling on or off for this agent |
+| `chain` | every journaler the agent can use | The journalers to try, in order. If one can't run, the bus tries the next. Today only `cc-headless` is available; `system-message` and `script` are coming. |
+| `threshold_ms` | `1800000` (30 min) | How long a conversation must be quiet before it's journaled. A number, or one value per channel with a required `default`. |
+| `ceiling_ms` | none | Journal an ongoing conversation at least this often, even if it never goes quiet |
+| `min_human_messages` | `2` | How many new messages from a person a conversation needs before a pause journals it. `/clear`, the end of a session and a bus restart journal it with fewer. Content that waits more than a day is journaled anyway. |
+| `timeout_ms` | `300000` (5 min) | How long one journal run may take |
+| `model` | the agent's model | The model journal runs use |
+| `prompt` | a built-in instruction | What the agent is asked to do when it journals |
+
+Scheduled jobs, slash commands and messages from other agents don't count toward `min_human_messages`.
+
+The bus checks the chain when it starts. It refuses to start if none of the journalers can work with the agent's runtime. If the chain could run out of options, it logs a warning and tells the agent's owners (`agents.<id>.owners`).
+
+For a `cc-headless` agent without this block, the older `journaling` options under `adapters.cc-headless` still apply. They're deprecated; move them here.
+
 ## pipeline
 
 How messages are sorted and routed.
@@ -173,7 +204,7 @@ Required, but can be empty: `memory: {}`.
 |---|---|---|
 | `session_idle_threshold_ms` | `1800000` (30 min) | For conversations without a resumable Claude session (such as those on `claude-code`), how long a conversation can be quiet before its session ends |
 
-The other options in this section, and the `memory` and `journaling` options under `cc-headless`, are part of journaling and memory, which is being rebuilt. See [Journaling and memory](/features/journaling-and-memory).
+The other options in this section, and the `memory` options under `cc-headless`, are part of the memory system, which is being rebuilt. Journaling is configured per agent, under [`agents`](#journaling). See [Journaling and memory](/features/journaling-and-memory).
 
 ## Environment variables
 

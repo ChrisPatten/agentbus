@@ -151,7 +151,7 @@ Each file becomes a block wrapped in a `=== <relative path> ===` marker. Missing
 - `runClaudeTurn` (`cc-headless.ts`) only prepends a block to the **user turn** (not the system prompt) when `shouldSendBlock` says its hash is new or has changed for that session — so each block's content is sent at most once per session, not once per turn.
 - Once the turn completes successfully, `markBlockSent` records the hash for every block that was sent, in the same success path as `persistSessionId`/`recordCost`.
 - The system prompt no longer carries `{{memories}}` for a session with a real, resumable session row (`opts.session !== null`): it renders with `memories: ''`, the same way `src/pool/pane.ts`'s `renderAndWriteSystemPrompt` already does for pool sessions (for a different reason — pool sessions rely on native `CLAUDE.md` auto-loading). The system prompt is now a frozen cache prefix instead of changing every turn.
-- **No-session fallback.** When there's no session row to track a ledger against (`opts.session === null`, e.g. `/clear`'s `journalResumeId`), the adapter falls back to the pre-ledger behavior: the full `assembleMemoryContext` string goes into `{{memories}}` on the system prompt, every turn, same as before this change.
+- **No-session fallback.** When there's no session row to track a ledger against (`opts.session === null`, e.g. a journaling turn for a session `/clear` already closed), the adapter falls back to the pre-ledger behavior: the full `assembleMemoryContext` string goes into `{{memories}}` on the system prompt, every turn, same as before this change.
 
 **Compaction detection.** `--resume` transcripts are subject to Claude Code's own auto-compaction (see [Session continuity](#session-continuity-long-lived-sessions)), which can summarize away content the ledger believes is already in context. `detectCompaction` reads the two most recent `turn_costs` rows for the session (`input_tokens IS NOT NULL`, most recent first) and calls it a compaction when the more recent row's `input_tokens` is under `COMPACTION_DROP_THRESHOLD` (0.6) times the older row's — auto-compaction summarization produces a sharp drop that ordinary conversation growth does not. When true, `runClaudeTurn` calls `clearLedger` before assembling blocks for that turn, so everything is resent from scratch. The threshold is deliberately biased toward false positives: a false positive just costs one redundant resend, while a false negative would silently leave the ledger believing content is in context that compaction actually removed.
 
@@ -161,19 +161,18 @@ Each file becomes a block wrapped in a `=== <relative path> ===` marker. Missing
 
 When a conversation goes idle past a per-channel threshold, or too long has passed since its last sweep, the bus fires a silent journaling turn: the agent reviews the conversation and updates its memory files. Nothing is delivered to the user, and the session stays open.
 
-- **Dispatcher.** `SessionTracker.dispatchJournaling()` runs on the tracker tick. It selects open headless sessions not journaled since their last activity (`last_journaled_at IS NULL OR last_journaled_at < last_activity`) and fires when either leg trips:
-  - **Idle debounce.** `last_activity` is older than `journaling.threshold_ms` for the session's channel. A short value (3 to 5 minutes) catches a real pause without journaling after every reply.
-  - **Hard ceiling.** Time since `last_journaled_at` (or `started_at`) exceeds `journaling.ceiling_ms`, regardless of idle state, so a continuously active conversation still flushes. Unset disables this leg.
-- **Overlap suppression.** A conversation with a journaling turn in flight is skipped on later ticks.
-- **Turn.** `runJournalingTurn(conversationId)` spawns `claude -p <journaling.prompt> --resume <id>` with the same working directory, MCP config, and memory context as a normal turn, serialized through its conversation queue and the agent-wide journal lane. A session with no `claude_session_id` yet is skipped and stamped as journaled.
-- **Failure.** A failed turn leaves `last_journaled_at` unchanged so a later tick retries, bounded by an in-memory attempt cap that new activity resets.
-- **Ownership.** Each session is routed to the instance recorded in `sessions.agent_id`. See [Multi-instance deployments](#multi-instance-deployments).
+Since E66 the triggers, eligibility and fallback chain live in the journaling engine, shared by every runtime: see [JOURNALING.md](JOURNALING.md). What is specific to this adapter:
+
+- **Turn.** The `cc-headless` journaler runs `claude -p <prompt> --resume <claude_session_id>` with the same working directory, MCP config, and memory context as a normal turn (`HeadlessHandle.journalSession`), serialized through its conversation queue and the instance-wide journal lane. It is `unavailable` when the session has no `claude_session_id` yet or its transcript is gone from disk, and the chain moves on. (Part A ships a provisional wrapper; S66.6 replaces it.)
+- **Triggers.** Pause (`threshold_ms`, measured from the latest inbound or agent message), ceiling (`ceiling_ms`), `/clear`, and bus shutdown. With the defaults, a conversation needs two human messages before a pause or ceiling journals it; `/clear` and shutdown journal any human content.
+- **`system-message` never runs here** (no live agent between turns), so a chain such as `[system-message, cc-headless, script]` starts at `cc-headless`.
+- **Ownership.** Each session belongs to the instance recorded in `sessions.agent_id`. See [Multi-instance deployments](#multi-instance-deployments).
 
 The silent turn appends an assistant turn to the resumed transcript; auto-compaction absorbs the cost. If the journaling agent crashes mid-write, the transcript in the bus is unaffected and the next trigger retries.
 
-If no `cc-headless` instance is configured or registered, the dispatcher is a no-op for every session and logs a one-time warning. Set `journaling.enabled: false` to disable it deliberately.
+**Config.** Prefer `agents.<id>.journaling`. The `journaling` block below is a **deprecated alias** used when the agent has no `agents.<id>.journaling`: it maps to `chain: [cc-headless]` and the new defaults for `min_human_messages` (2) and `timeout_ms`. Set `journaling.enabled: false` to disable journaling for the agent.
 
-`/clear` forces the same journaling turn immediately after closing the active session. See [SLASH_COMMANDS.md](SLASH_COMMANDS.md#clear).
+`/clear` closes the active session and fires the journaling `clear` trigger for it. See [SLASH_COMMANDS.md](SLASH_COMMANDS.md#clear).
 
 ## Memory logging
 
@@ -270,10 +269,10 @@ adapters:
 | `memory.index_file` | `MEMORY.md` | Loaded into every turn |
 | `memory.daily_subdir` | `daily` | Daily journal files `YYYY-MM-DD.md` |
 | `memory.journal_lookback_days` | `3` | Days of journal to load (today plus N-1) |
-| `journaling.enabled` | `true` | Master switch |
-| `journaling.threshold_ms` | `{ default: 1800000 }` | Per-channel idle debounce; a number, or a map with a required `default` |
-| `journaling.ceiling_ms` | unset | Hard ceiling since the last sweep, regardless of idle state |
-| `journaling.prompt` | see schema | Prompt for the silent journaling turn |
+| `journaling.enabled` | `true` | Deprecated alias (use `agents.<id>.journaling`). Master switch |
+| `journaling.threshold_ms` | `{ default: 1800000 }` | Deprecated alias. Per-channel idle debounce; a number, or a map with a required `default` |
+| `journaling.ceiling_ms` | unset | Deprecated alias. Hard ceiling since the last sweep, regardless of idle state |
+| `journaling.prompt` | see schema | Deprecated alias. Prompt for the silent journaling turn |
 
 ## Multi-instance deployments
 
@@ -298,7 +297,7 @@ Instance names must match `^[a-z0-9_-]+$` and `agent_id` must be unique. `getCcH
 
 **Runtime isolation.** Each entry is its own `HeadlessInstance` with a private poll timer, per-conversation queue, capacity limiter, working directory, and config. `startHeadless(db)` starts one poller per instance and returns a `Map<string, HeadlessHandle>` keyed by `agent:<agent_id>`; `stopHeadless()` stops them all.
 
-**Session ownership.** Migration 011 adds `sessions.agent_id`, set by the transcript-log stage from the route that created the session. The journaling dispatcher, `/clear`, `/stop`, and `/cost` use it to find the owning instance. Sessions with `agent_id IS NULL` (created before migration 011, or by a single-instance deployment) fall back to the sole configured instance when there is exactly one. With several instances, such a session is skipped rather than guessed.
+**Session ownership.** Migration 011 adds `sessions.agent_id`, set by the transcript-log stage from the route that created the session. The journaling engine, `/stop`, and `/cost` use it to find the owning instance. Sessions with `agent_id IS NULL` (created before migration 011, or by a single-instance deployment) fall back to the sole configured instance when there is exactly one. With several instances, such a session is skipped rather than guessed.
 
 ## Cross-contact isolation
 

@@ -20,6 +20,7 @@ Technical reference for operators and contributors. The public landing page live
 | [CC_POOL_ADAPTER.md](CC_POOL_ADAPTER.md) | Pool of tmux panes, each an interactive session leased per conversation: lease lifecycle, allocation and eviction, observability, attaching by hand |
 | [ADVISORIES.md](ADVISORIES.md) | Owner contacts and bus advisories: lifecycle, severities, delivery paths, the spoof-proof system block, adding a producer |
 | [APPROVALS.md](APPROVALS.md) | Answering a blocked pane's permission prompt from Telegram: request lifecycle, staleness rules, setup, adding a backend |
+| [JOURNALING.md](JOURNALING.md) | Pluggable journaling: per-agent config and journaler chain, triggers, eligibility, the cursor, harness hooks, `journal_runs`, advisories |
 | [MEMORY_MODEL.md](MEMORY_MODEL.md) | Why the agent's own files are the memory system |
 | [MEMORY.md](MEMORY.md) | The legacy structured memory store (dormant by default) |
 | [KNOWLEDGE_STORE.md](KNOWLEDGE_STORE.md) | The agent-managed structured knowledge store (Phase 1, always-on) |
