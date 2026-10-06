@@ -57,3 +57,31 @@ The bus supplies `autoMemoryDirectory` itself, so no per-agent settings file is 
 **Spike (2026-10-06, Claude Code 2.1.287, `claude -p --max-turns 1 --model haiku` in a temp project).** (a) After editing an `@import`ed file and `MEMORY.md`, `claude -p --resume <id>` answered with the new contents: a resumed print-mode session rebuilds `CLAUDE.md`, imports and auto memory from disk on each invocation. (b) `autoMemoryDirectory` set through `--settings '<json>'` and through `.claude/settings.local.json` both load `MEMORY.md` in `-p` mode, also with `--system-prompt-file` (as cc-headless uses). `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` turns it off (the import still loads). So headless needs no bus injection.
 
 **Bus injection (`memory.native: false`, or a runtime without `nativeMemory`).** cc-headless keeps the E20 path, reading the index and `recent.md` instead of raw dailies (`assembleMemoryBlocks`), through the context ledger, with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`. `mcp-polled` runtimes have no file-based injection: the bus can't put files into a harness it doesn't run, and they have no working dir. Give such an agent an absolute `memory.dir` so `recent.md` is still generated for its own harness to read.
+
+## Freshness hook
+
+A live session (a cc-pool pane) loads `recent.md` through its `CLAUDE.md` import only when it starts, after `/compact` and after `/clear`. `scripts/hooks/agentbus_recent_memory_hook.sh` keeps it current. Code: `src/memory/recent-freshness.ts` (`RecentFreshness`), route in `src/http/api.ts`, wiring in `src/index.ts`. cc-headless doesn't need it: every turn is a new `claude -p` that reloads the file.
+
+**Wiring** (agent project `.claude/settings.json`; a symlink to the script in the AgentBus repo is the recommended setup):
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "scripts/hooks/agentbus_recent_memory_hook.sh" }] }],
+    "SessionStart":     [{ "hooks": [{ "type": "command", "command": "scripts/hooks/agentbus_recent_memory_hook.sh" }] }]
+  }
+}
+```
+
+**Flow.** The hook sends `GET /api/v1/memory/recent?harness_session_id=<session_id>&event=prompt|session-start` (plus `&agent=$AGENTBUS_AGENT_ID` when that is set, as a fallback for sessions the bus doesn't know, such as a `claude-code` session). The bus resolves the agent from the Claude session id (bus session by `claude_session_id`, `journal_state.harness_session_id`, then a pool pane lease), regenerates `recent.md` (so dailies written in-turn since the last journal run count), hashes it and compares with `memory_recent_seen` (migration 027, keyed by harness session id, swept after 30 days untouched):
+
+| Case | Response | Hook prints |
+|---|---|---|
+| `session-start`, or the session's first check | `reason: baseline`, hash recorded | nothing |
+| Hash unchanged | `reason: unchanged` | nothing |
+| Hash changed | `changed: true`, `context`, hash recorded | `context`: "AgentBus: memory/recent.md (your recent daily journals) changed since this session loaded it. This is the current version; …" plus the full file |
+| No agent / bus down / error | `404`, or nothing | nothing |
+
+Registering `SessionStart` makes the baseline exact: the session has just loaded the file, so the first prompt doesn't repeat it, and every `/compact`, `/clear` or resume resets it. Without it, a session's first prompt is the baseline (anything that changed between launch and that prompt is missed until the next change). The hook is best-effort: it needs `jq` and `curl`, uses a 2 s timeout, prints nothing on any failure and always exits 0. It follows the common hook convention: `AGENTBUS_URL`, token from `AGENTBUS_BUS_TOKEN` (else `AGENTBUS_TOKEN`, else `AGENTBUS_TOKEN_FILE`) through curl's stdin.
+
+Injected content is never subtracted: a session that received a new `recent.md` holds both versions in its context until it compacts. The note tells the agent the new one replaces the earlier one.

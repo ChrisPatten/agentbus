@@ -77,6 +77,7 @@ import { createJournalInstructionDelivery } from './journaling/delivery.js';
 import { createJournalHoldNotice } from './pipeline/stages/journal-hold.js';
 import { HarnessEvents, createHookHealthTicker } from './journaling/events.js';
 import { RecentMemory } from './memory/recent-service.js';
+import { RecentFreshness } from './memory/recent-freshness.js';
 
 const configPath = process.env['AGENTBUS_CONFIG'] ?? resolve(process.cwd(), 'config.yaml');
 
@@ -250,7 +251,22 @@ const app = config.adapters.app?.enabled
 if (app) registry.register(app);
 
 const journalStatus = { db, engine: journalEngine, resolver: runtimeResolver, advisories, gate: journalGate };
-const httpServer = await createHttpServer({ queue, registry, config, pipeline, db, commandRegistry, pauseSet, siri, app, poolManagers, getHeadlessSnapshots, runtimeResolver, advisories, journalEvents, journalGate, journalStatus });
+// E67 — UserPromptSubmit freshness hook: recent.md for a live session, only when it changed.
+const memoryRecent = new RecentFreshness({
+  db,
+  recent: recentMemory,
+  resolveAgent: (harnessSessionId) => {
+    const session = journalEvents.findSession(harnessSessionId);
+    const agent = session ? journalEngine.agentForSession(session) : null;
+    if (agent?.runtime) return agent.agentId;
+    for (const [poolAgentId, manager] of poolManagers) {
+      if (manager.leaseStore.list(manager.poolId).some((p) => p.claude_session_id === harnessSessionId)) return poolAgentId;
+    }
+    return null;
+  },
+  knownAgent: (agentId) => runtimeResolver.resolve(agentId.startsWith('agent:') ? agentId : `agent:${agentId}`) !== undefined,
+});
+const httpServer = await createHttpServer({ queue, registry, config, pipeline, db, commandRegistry, pauseSet, siri, app, poolManagers, getHeadlessSnapshots, runtimeResolver, advisories, journalEvents, journalGate, journalStatus, memoryRecent });
 
 // E66 — busy notice for a held message: the channel's native queued/status
 // signal where it has one, a short text elsewhere, nothing on email.

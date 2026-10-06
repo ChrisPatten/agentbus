@@ -86,6 +86,7 @@ import { resolveApprovalTarget } from '../approvals/resolve-target.js';
 import { dispatchApproval } from '../approvals/dispatch.js';
 import { resolveApproval } from '../approvals/resolve.js';
 import { APPROVAL_TIMEOUT_MS, type ApprovalStatus } from '../approvals/types.js';
+import { parseFreshnessQuery, type RecentFreshness } from '../memory/recent-freshness.js';
 import { parseHarnessEvent, type HarnessEvents } from '../journaling/events.js';
 import type { AdvisoryService } from '../advisories/service.js';
 import type { AdvisoryState } from '../advisories/types.js';
@@ -129,6 +130,8 @@ export interface HttpServerDeps {
   journalGate?: JournalGateLike;
   /** E66 — when present, GET /api/v1/journal/runs is mounted and /api/v1/health includes a journaling summary. */
   journalStatus?: JournalStatusDeps;
+  /** E67 — when present, GET /api/v1/memory/recent is mounted (the recent.md freshness hook). */
+  memoryRecent?: Pick<RecentFreshness, 'check'>;
 }
 
 const MessagePayloadSchema = z.discriminatedUnion('type', [
@@ -793,6 +796,25 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       const parsed = parseHarnessEvent(req.body);
       if ('error' in parsed) return reply.status(400).send({ ok: false, error: parsed.error });
       const result = journalEvents.handle(parsed);
+      if (!result.ok) return reply.status(result.status).send({ ok: false, error: result.error });
+      return result;
+    });
+  }
+
+  // ── Recent memory freshness (E67) ──────────────────────────────────────────
+  // GET /api/v1/memory/recent?harness_session_id=&event=prompt|session-start&agent=
+  // — called by scripts/hooks/agentbus_recent_memory_hook.sh. Resolves the
+  // agent from the Claude session id (agent= is only a fallback), regenerates
+  // the agent's recent.md and returns it in `context` only when its hash
+  // differs from what that session last saw. session-start (and a session's
+  // first check) records a baseline. 404 when no agent resolves. See
+  // docs/AGENT_MEMORY.md#freshness-hook.
+  if (deps.memoryRecent) {
+    const memoryRecent = deps.memoryRecent;
+    server.get<{ Querystring: Record<string, unknown> }>('/api/v1/memory/recent', async (req, reply) => {
+      const parsed = parseFreshnessQuery(req.query ?? {});
+      if ('error' in parsed) return reply.status(400).send({ ok: false, error: parsed.error });
+      const result = memoryRecent.check(parsed);
       if (!result.ok) return reply.status(result.status).send({ ok: false, error: result.error });
       return result;
     });

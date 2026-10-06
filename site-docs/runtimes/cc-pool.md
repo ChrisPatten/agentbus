@@ -126,8 +126,9 @@ Claude Code hooks in `scripts/hooks/` in the AgentBus folder make a pool work be
 | `agentbus_tool_status_hook.sh` | `UserPromptSubmit` and `PostToolUse` | Telegram's "typing…" indicator and live tool list while the agent works. |
 | `agentbus_journal_hook.sh` | `Stop`, `PreCompact` and `SessionEnd` | Tells the bus each time a turn finishes, so a long-running turn isn't mistaken for an idle conversation. Before the conversation's context is compacted or cleared, it saves a copy of the transcript for journaling. |
 | `agentbus_stop_hook.sh` | `Stop` | The older turn-finished hook. Keep it if you already have it, or use `agentbus_journal_hook.sh` instead. |
+| `agentbus_recent_memory_hook.sh` | `UserPromptSubmit` and `SessionStart` | Shows a long-running pane the agent's latest journals (`memory/recent.md`) when they change, instead of only when the pane starts. See [Journaling and memory](/features/journaling-and-memory). |
 
-All four scripts read the bus address from `AGENTBUS_URL` (default `http://127.0.0.1:3000`), so there's nothing to edit unless your bus uses another address. If you set [`bus.auth_token`](/reference/configuration#bus), the pool gives each pane the token as `AGENTBUS_BUS_TOKEN`, and every hook sends it. The scripts need `jq` and `curl`; the tool-status hook also needs `python3`.
+All five scripts read the bus address from `AGENTBUS_URL` (default `http://127.0.0.1:3000`), so there's nothing to edit unless your bus uses another address. If you set [`bus.auth_token`](/reference/configuration#bus), the pool gives each pane the token as `AGENTBUS_BUS_TOKEN`, and every hook sends it. The scripts need `jq` and `curl`; the tool-status hook also needs `python3`.
 
 Panes only pick up new hook settings when they next start.
 

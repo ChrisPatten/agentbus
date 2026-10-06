@@ -145,6 +145,11 @@ function loadMigrations(): Migration[] {
       sql: readFileSync(join(migrationsDir, '026_journaling.sql'), 'utf-8'),
     },
     {
+      version: 27,
+      description: 'Recent-memory freshness per harness session (E67)',
+      sql: readFileSync(join(migrationsDir, '027_memory_recent_seen.sql'), 'utf-8'),
+    },
+    {
       version: 30,
       description: 'Email IMAP catch-up state',
       sql: readFileSync(join(migrationsDir, '030_email_imap_state.sql'), 'utf-8'),

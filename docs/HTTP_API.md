@@ -32,6 +32,7 @@ Set `bus.host: 0.0.0.0` to accept connections from other hosts, for example a re
 | POST | `/api/v1/journal/events` | Harness hook events for journaling (`turn-ended`, `pre-compact`, `session-end`, `clear`) |
 | POST | `/api/v1/journal/complete` | Finish a System Message journal run (the `journal_complete` tool) |
 | GET | `/api/v1/journal/runs` | Journal run attempts, by agent, conversation or session |
+| GET | `/api/v1/memory/recent` | The agent's `recent.md` for a live Claude session, only when it changed since that session saw it (E67 freshness hook) |
 | POST | `/api/v1/approvals` | Raise an interactive-approval request for a blocked pane |
 | GET | `/api/v1/approvals` | List approval requests, optionally by status |
 | GET | `/api/v1/approvals/:id` | Fetch one approval request |
@@ -184,6 +185,12 @@ Returns `200 { ok: true, session_id, agent_id, action: "turn-ended" | "triggered
 ### `GET /api/v1/journal/runs`
 
 `?agent=<id>` (bare or prefixed; a pool pane maps to its pool), `?conversation=<conversation id>`, `?session=<session id>`, `?limit=` (1 to 500, default 50). Returns `{ ok, count, runs }`, newest first, one row per journaler attempt: `run_id`, `agent_id`, `session_id`, `conversation_id`, `kind`, `trigger`, `journaler`, `chain_position`, `fallback_from`, `outcome`, `error`, `fidelity`, `window_from`, `window_to`, `message_count`, `started_at`, `duration_ms`, `files_changed` (array), `notes`, `cost_usd`, `input_tokens`, `output_tokens`. Rows are kept 90 days.
+
+### `GET /api/v1/memory/recent`
+
+Called by `scripts/hooks/agentbus_recent_memory_hook.sh` (`UserPromptSubmit`, `SessionStart`). Query: `harness_session_id` (required, the Claude Code session id), `event` (`prompt`, the default, or `session-start`), `agent` (optional fallback agent id, used only when the session id resolves to no agent and the id names a configured agent). The agent is resolved from the session id: the bus session with that `claude_session_id` (or `journal_state.harness_session_id`), else a cc-pool pane whose lease has it. The bus regenerates the agent's `recent.md`, then compares its sha256 with what that harness session last saw (`memory_recent_seen`, migration 027).
+
+Returns `200 { ok: true, agent_id, changed, hash, reason?, context? }`. `changed: true` carries `context`: a one-line note followed by the full current `recent.md`, for the hook to print. `reason` is `baseline` (`session-start`, or the session's first check: the hash is recorded and nothing returned), `unchanged`, or `no-recent` (no memory dir or no `recent.md`). `400` for a missing `harness_session_id` or a bad `event`, `404` when no agent resolves. Subject to `bus.auth_token`. See [AGENT_MEMORY.md](AGENT_MEMORY.md#freshness-hook).
 
 ### `POST /api/v1/journal/complete`
 
