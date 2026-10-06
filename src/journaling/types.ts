@@ -4,6 +4,7 @@
  */
 import type { RequiredCapability, RuntimeKind } from '../core/runtime-capabilities.js';
 import type { JournalerId } from '../config/schema.js';
+import type { JournalingSettings } from './config.js';
 
 export type { JournalerId };
 
@@ -125,6 +126,8 @@ export interface JournalJob {
   prompt: string;
   model: string | null;
   timeoutMs: number;
+  /** The agent's effective journaling settings; per-journaler settings live under `settings.journalers`. */
+  settings: JournalingSettings;
 }
 
 /** Result of `Journaler.canJournal`: cheap, side-effect free. */

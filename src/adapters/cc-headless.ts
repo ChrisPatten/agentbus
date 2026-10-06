@@ -260,6 +260,13 @@ export interface HeadlessHandle {
    */
   journalResumeId(opts: { claudeSessionId: string; contactId: string; channel: string; conversationId?: string }): void;
   /**
+   * E66 — run one silent `--resume` journaling turn and report how it went.
+   * Used by the journaling engine's cc-headless journaler. Works for open
+   * and closed (`/clear`) sessions alike: the ledger is only consulted when
+   * the conversation's active session still owns `claudeSessionId`.
+   */
+  journalSession(opts: JournalSessionRequest): Promise<JournalSessionResult>;
+  /**
    * Kill the in-flight `claude -p` turn for `contactId`, if one is running
    * (used by `/stop`). Returns true if a turn was found and killed, false if
    * none was running.
@@ -267,6 +274,23 @@ export interface HeadlessHandle {
   stopTurn(conversationId: string): boolean;
   subscribeActivity(listener: (event: HeadlessActivityEvent) => void): () => void;
   snapshot(): HeadlessCapacitySnapshot;
+}
+
+export interface JournalSessionRequest {
+  conversationId: string;
+  claudeSessionId: string;
+  contactId: string;
+  channel: string;
+  /** Defaults to the instance's `journaling.prompt`. */
+  prompt?: string;
+}
+
+export interface JournalSessionResult {
+  /** Null when the turn completed. */
+  error: string | null;
+  costUsd: number | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
 }
 
 export interface HeadlessCapacitySnapshot {
@@ -942,26 +966,49 @@ class HeadlessInstance {
     if (!session || !session.claude_session_id) {
       return Promise.resolve({ skipped: true });
     }
+    return this.journalSession(db, {
+      conversationId,
+      claudeSessionId: session.claude_session_id,
+      contactId: session.contact_id,
+      channel: session.channel,
+    }).then((result) => {
+      if (result.error) throw new Error(result.error);
+      return {};
+    });
+  }
 
-    return new Promise((resolvePromise, rejectPromise) => {
-      void this.enqueue(conversationId, session.id, 'system', true, async () => {
-        const result = await this.runClaudeTurn({
-          db,
-          session,
-          contactId: session.contact_id,
-          conversationId,
-          channel: session.channel,
-          prompt: this.cfg.journaling.prompt,
-          resumeId: session.claude_session_id,
-        });
-        // Silent: never deliver. Any reply/send_message the agent chose to call
-        // already went through the MCP tool — the adapter posts nothing here.
-        if (result.error) {
-          rejectPromise(new Error(result.error));
-          return;
+  /**
+   * E66 — one silent `--resume` journaling turn, resolved with its outcome
+   * instead of rejecting. Serialized through the conversation queue and the
+   * instance-wide journal lane like every journaling turn. Silent: never
+   * delivers; any reply/send_message the agent chose to call already went
+   * through the MCP tool.
+   */
+  journalSession(db: Database.Database, opts: JournalSessionRequest): Promise<JournalSessionResult> {
+    const active = getActiveSession(db, opts.conversationId);
+    const session = active && active.claude_session_id === opts.claudeSessionId ? active : null;
+    return new Promise((resolvePromise) => {
+      const fail = (err: unknown) => resolvePromise({
+        error: err instanceof Error ? err.message : String(err), costUsd: null, inputTokens: null, outputTokens: null,
+      });
+      void this.enqueue(opts.conversationId, session?.id, 'system', true, async () => {
+        try {
+          const result = await this.runClaudeTurn({
+            db,
+            session,
+            contactId: opts.contactId,
+            conversationId: opts.conversationId,
+            channel: opts.channel,
+            prompt: opts.prompt ?? this.cfg.journaling.prompt,
+            resumeId: opts.claudeSessionId,
+          });
+          resolvePromise({
+            error: result.error, costUsd: result.totalCostUsd, inputTokens: result.inputTokens, outputTokens: result.outputTokens,
+          });
+        } catch (err) {
+          fail(err);
         }
-        resolvePromise({});
-      }, session.claude_session_id).catch(rejectPromise);
+      }, opts.claudeSessionId).catch(fail);
     });
   }
 
@@ -1066,6 +1113,7 @@ class HeadlessInstance {
     return {
       runJournalingTurn: (conversationId: string) => this.runJournalingTurn(conversationId, db),
       journalResumeId: (opts) => this.journalResumeId(db, opts),
+      journalSession: (opts) => this.journalSession(db, opts),
       stopTurn: (conversationId: string) => this.stopTurn(conversationId),
       subscribeActivity: (listener) => this.subscribeActivity(listener),
       snapshot: () => this.snapshot(),
