@@ -19,6 +19,7 @@ import { exec, type ExecOptionsWithStringEncoding } from 'node:child_process';
 import type Database from 'better-sqlite3';
 import type { AppConfig } from '../config/schema.js';
 import { getCcHeadlessInstances, journalingThresholdForChannel } from '../config/schema.js';
+import { RuntimeResolver } from '../core/runtime-resolver.js';
 import type { Summarizer } from './summarizer.js';
 import type { SessionRow } from './types.js';
 
@@ -160,7 +161,8 @@ export class SessionTracker {
     }
     this.journalingConfigWarned = false;
 
-    const instanceByAgentId = new Map(instances.map((i) => [`agent:${i.agent_id}`, i]));
+    // E64 — one runtime lookup instead of a local agent_id → instance map.
+    const runtimes = new RuntimeResolver(this.config);
     const soleInstanceKey = instances.length === 1 ? `agent:${instances[0]!.agent_id}` : null;
 
     const now = Date.now();
@@ -179,7 +181,8 @@ export class SessionTracker {
     for (const session of candidates) {
       const agentKey = session.agent_id ?? soleInstanceKey;
       if (!agentKey) continue;
-      const instCfg = instanceByAgentId.get(agentKey);
+      const runtime = runtimes.resolve(agentKey);
+      const instCfg = runtime?.kind === 'cc-headless' ? runtime.instance : undefined;
       const runner = this.journalingRunners.get(agentKey);
       if (!instCfg || !instCfg.journaling.enabled || !runner) continue;
 

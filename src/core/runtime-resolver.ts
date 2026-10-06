@@ -134,14 +134,15 @@ export class RuntimeResolver {
     this.deps = deps;
     for (const inst of getCcHeadlessInstances(config)) this.headless.set(toPrefixed(inst.agent_id), inst);
     for (const inst of getCcPoolInstances(config)) this.pools.set(toPrefixed(inst.agent_id), inst);
-    for (const rule of config.pipeline.routes) {
+    // Optional chaining tolerates the partial configs tests build by cast.
+    for (const rule of config.pipeline?.routes ?? []) {
       for (const target of [rule.target, ...(rule.also_notify ?? [])]) {
         if (!target.recipientId.startsWith(AGENT_PREFIX)) continue;
         if (target.adapterId === 'cc-headless' || target.adapterId === 'cc-pool') continue;
         if (!this.routed.has(target.recipientId)) this.routed.set(target.recipientId, target.adapterId);
       }
     }
-    const pollIntervalMs = config.adapters['claude-code']?.poll_interval_ms ?? 1000;
+    const pollIntervalMs = config.adapters?.['claude-code']?.poll_interval_ms ?? 1000;
     this.pollFreshMs = deps.pollFreshMs ?? Math.max(15_000, pollIntervalMs * 3);
   }
 
