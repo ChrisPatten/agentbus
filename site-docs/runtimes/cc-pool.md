@@ -79,7 +79,7 @@ Routes reach the pool with `adapterId: cc-pool` and `recipientId: agent:<agent_i
 | `launch_ack_max_attempts` | `3` | How many times to try confirming that warning. |
 | `launch_ack_pattern` | `loading development channels` | The text that identifies the warning, in case Claude Code rewords it. |
 
-**Don't add `--dangerously-load-development-channels` to `launch_args`.** The bus already starts every pane with the options it needs to connect.
+You don't need `--dangerously-load-development-channels` in `launch_args`: the bus already starts every pane with the options it needs to connect. If your `launch_args` has it anyway (older example configs added it), the bus leaves out the copy, so it's only passed once.
 
 The pool starts every session with `--permission-mode auto`. Tool permissions otherwise follow your working folder's `.claude/settings.json`.
 

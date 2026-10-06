@@ -194,6 +194,34 @@ function shellQuoteArg(s: string): string {
   return `'${s.split("'").join("'\\''")}'`;
 }
 
+const DEV_CHANNELS_FLAG = '--dangerously-load-development-channels';
+const AGENTBUS_CHANNEL = 'server:agentbus';
+
+/**
+ * Drop `--dangerously-load-development-channels` (and a following
+ * `server:agentbus`, or the `=server:agentbus` form) from operator
+ * `launch_args`: `buildLaunchLine` always adds that pair itself, and older
+ * example configs told operators to add the flag too. The flag followed by a
+ * different channel value (e.g. `server:other`) is left alone.
+ */
+export function dedupeDevChannelsArgs(launchArgs: readonly string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < launchArgs.length; i++) {
+    const arg = launchArgs[i]!;
+    if (arg === `${DEV_CHANNELS_FLAG}=${AGENTBUS_CHANNEL}`) continue;
+    if (arg === DEV_CHANNELS_FLAG) {
+      const next = launchArgs[i + 1];
+      if (next === AGENTBUS_CHANNEL) {
+        i++;
+        continue;
+      }
+      if (next === undefined || next.startsWith('-')) continue;
+    }
+    out.push(arg);
+  }
+  return out;
+}
+
 /** "session:window" -> ["session", "window"]. */
 function splitPaneTarget(paneId: string): [session: string, window: string] {
   const idx = paneId.indexOf(':');
@@ -374,7 +402,7 @@ export class PaneLifecycle {
 
     args.push('--dangerously-load-development-channels', 'server:agentbus');
 
-    for (const extra of this.cfg.launch_args) {
+    for (const extra of dedupeDevChannelsArgs(this.cfg.launch_args)) {
       args.push(extra);
     }
 

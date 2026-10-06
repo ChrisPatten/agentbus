@@ -25,6 +25,7 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 - **`/stop` is scoped to its conversation.** In Telegram, stopping one topic no longer interrupts another topic for the same contact. A waiting turn can also be cancelled. Journaling turns share an agent-wide lane, and turns in one conversation never overlap after early delivery.
 
 ### Fixed
+- **cc-pool passed `--dangerously-load-development-channels` twice.** `config.yaml.example` no longer adds it to the pool's `launch_args`, and the launcher drops it from `launch_args` if a config still has it, since every pane launch already includes it.
 - **cc-pool `poll_interval_ms` had no effect.** Each pane's MCP server now polls at the pool's `poll_interval_ms` (passed as `AGENTBUS_POLL_INTERVAL_MS`) instead of the `claude-code` adapter's setting.
 - **`/schedule list` showed UTC times labelled with the schedule's time zone.** Next run times are now converted to the schedule's own time zone before they're shown.
 - **Config `fire_at` with a UTC offset fired at the wrong time.** One-off config schedules are now converted to UTC before they're stored. A `fire_at` with an offset uses it; one without an offset is read in the schedule's `timezone`. Editing the `fire_at` of a one-off schedule that hasn't run yet now takes effect on restart.

@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import type { TmuxController } from './tmux.js';
 import type { CcPoolInstanceConfig } from '../config/schema.js';
 import { writePaneMcpConfig, cleanupPaneMcpConfig } from './mcp-config.js';
-import { PaneLifecycle, PaneLaunchError, LAUNCH_READY_TIMEOUT_MS, INHERITED_CLAUDE_SESSION_VARS, type LaunchParams } from './pane.js';
+import { PaneLifecycle, PaneLaunchError, LAUNCH_READY_TIMEOUT_MS, INHERITED_CLAUDE_SESSION_VARS, dedupeDevChannelsArgs, type LaunchParams } from './pane.js';
 
 // writePaneMcpConfig/cleanupPaneMcpConfig are mocked wholesale (rather than
 // exercising the real fs-touching module) — pane.ts's own responsibility is
@@ -258,6 +258,31 @@ describe('PaneLifecycle.launch — optional flags', () => {
       expect(line).toContain(q(arg));
     }
     expect(line.trimEnd().endsWith(`${q('--add-dir')} ${q('/extra/dir')} ${q('--verbose')}`)).toBe(true);
+  });
+
+  it('does not repeat --dangerously-load-development-channels when launch_args already has it', async () => {
+    const tmux = makeTmux({ capturePane: makeNoAckCapture() });
+    const cfg = makeCfg({ launch_args: ['--dangerously-load-development-channels', '--verbose'] });
+    const pl = new PaneLifecycle({ tmux, busBaseUrl: 'http://x', cfg, scratchDir, fetchFn: makeReadyFetch() });
+
+    const launchPromise = pl.launch(makeLaunchParams());
+    await vi.advanceTimersByTimeAsync(600);
+    await launchPromise;
+
+    const line = tmux.sendCommand.mock.calls[0]![1] as string;
+    expect(line.split(q('--dangerously-load-development-channels')).length - 1).toBe(1);
+    expect(line).toContain(`${q('--dangerously-load-development-channels')} ${q('server:agentbus')}`);
+    expect(line.trimEnd().endsWith(q('--verbose'))).toBe(true);
+  });
+
+  it('dedupeDevChannelsArgs drops the flag and server:agentbus forms, keeps other channels', () => {
+    expect(dedupeDevChannelsArgs(['--dangerously-load-development-channels'])).toEqual([]);
+    expect(dedupeDevChannelsArgs(['--dangerously-load-development-channels', 'server:agentbus', '-v'])).toEqual(['-v']);
+    expect(dedupeDevChannelsArgs(['--dangerously-load-development-channels=server:agentbus'])).toEqual([]);
+    expect(dedupeDevChannelsArgs(['--dangerously-load-development-channels', 'server:other'])).toEqual([
+      '--dangerously-load-development-channels', 'server:other',
+    ]);
+    expect(dedupeDevChannelsArgs(['--add-dir', '/x'])).toEqual(['--add-dir', '/x']);
   });
 
   it('shell-quotes an awkward launch_arg containing a single quote and spaces', async () => {
