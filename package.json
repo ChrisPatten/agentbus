@@ -8,6 +8,9 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "test": "vitest run",
+    "docs:dev": "vitepress dev site-docs",
+    "docs:build": "vitepress build site-docs",
+    "docs:preview": "vitepress preview site-docs",
     "preversion": "vitest run",
     "release:patch": "npm version patch -m \"chore(release): v%s\"",
     "release:minor": "npm version minor -m \"chore(release): v%s\"",
@@ -26,6 +29,7 @@
     "pm2": "^6.0.14",
     "tsx": "^4.21.0",
     "typescript": "^6.0.2",
+    "vitepress": "^1.6.4",
     "vitest": "^4.1.4"
   },
   "dependencies": {
