@@ -41,8 +41,9 @@ Nothing in AgentBus bounds a long-lived transcript; Claude Code's auto-compactio
 - `--system-prompt-file <tmp>`: replaces the default coding-agent prompt. `CLAUDE.md` auto-loading is unaffected.
 - `--model <model>`: only when a model resolves. See [Runtime model overrides](#runtime-model-overrides).
 - `--resume <id>`: when the session has a `claude_session_id`.
+- `--settings '{"autoMemoryDirectory":"<memory dir>"}'` (E67): when the agent loads memory natively (the default), so Claude Code's auto memory loads the agent's `MEMORY.md` and topic files. See [AGENT_MEMORY.md](AGENT_MEMORY.md#loading).
 
-Temp files are written immediately before the spawn and deleted after the result is captured. The process runs with `cwd` set to `working_dir` and with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, because the adapter already injects the agent's memory files through `{{memories}}` and the CLI's own auto-memory would load `MEMORY.md` a second time.
+Temp files are written immediately before the spawn and deleted after the result is captured. The process runs with `cwd` set to `working_dir`. With native memory an inherited `CLAUDE_CODE_DISABLE_AUTO_MEMORY` is removed from its environment; an agent with `agents.<id>.memory.native: false` gets `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` instead, because the bus injects its memory files and auto memory would load `MEMORY.md` a second time.
 
 ### Runtime model overrides
 
@@ -120,7 +121,7 @@ A turn killed by `/stop` sends nothing. See [SLASH_COMMANDS.md](SLASH_COMMANDS.m
 | `{{contact_id}}` | For example `contact:alice` |
 | `{{channel}}` | For example `telegram:peggy` |
 | `{{date}}` | Local date, `YYYY-MM-DD` |
-| `{{memories}}` | Empty for a turn with a real, resumable session — memory blocks go into the user turn instead. Falls back to the assembled memory files when there's no session to track. See [Context assembly](#context-assembly-memory-files) |
+| `{{memories}}` | Always empty with native memory (E67 default). With `memory.native: false`: empty for a turn with a real, resumable session (memory blocks go into the user turn instead), the assembled memory files when there's no session to track. See [Context assembly](#context-assembly-memory-files) |
 | `{{agent_id}}` | For example `agent:claude` |
 | `{{session_summary}}` | Deprecated. Always empty |
 
@@ -134,12 +135,14 @@ The user message is formatted by `formatMessagesForSampling` (`src/adapters/cc.t
 
 ## Context assembly (memory files)
 
-The agent's memory files are read fresh on every turn by `assembleMemoryBlocks` (`src/adapters/memory-context.ts`):
+**Native memory (E67, the default).** The bus injects no memory. Every `claude -p`, `--resume` included, rebuilds its context from the files on disk: the `CLAUDE.md` hierarchy and its `@import`s (the agent's `CLAUDE.md` imports `@memory/recent.md`, the bus-generated digest of recent dailies) and auto memory pointed at the agent's memory dir (`--settings autoMemoryDirectory`), which loads the first 200 lines / 25KB of `MEMORY.md` and reads topic files on demand. A journaling update is therefore visible on the next turn. Verified with the real CLI in the E67 spike: an edited `@import` and an edited `MEMORY.md` both show up in the next `--resume` turn. No memory blocks are assembled and the context ledger below records nothing. See [AGENT_MEMORY.md](AGENT_MEMORY.md#loading).
 
-1. `<working_dir>/<memory.dir>/<memory.index_file>` (default `memory/MEMORY.md`).
-2. Daily journal files for today and the previous `journal_lookback_days - 1` days at `<memory.dir>/<memory.daily_subdir>/YYYY-MM-DD.md`, newest first.
+**Bus injection (`agents.<id>.memory.native: false`).** The agent's memory files are read fresh on every turn by `assembleMemoryBlocks` (`src/adapters/memory-context.ts`):
 
-Each file becomes a block wrapped in a `=== <relative path> ===` marker. Missing files are skipped. `journal_lookback_days: 0` loads the index only. Daily file names use the local date. `assembleMemoryContext` joins all blocks into one string and remains for callers (and the no-session fallback below) that want that; it is no longer what fills the system prompt on a resumed session. Because the blocks are read fresh every turn, a journaling update is visible on the next turn.
+1. The index, `<memory dir>/<index_file>` (default `memory/MEMORY.md`).
+2. `<memory dir>/recent.md`, which already carries the last `lookback_days` of dailies within `recent_budget_chars` ([AGENT_MEMORY.md](AGENT_MEMORY.md#recentmd)). Before E67 the adapter read the dailies itself.
+
+Each file becomes a block wrapped in a `=== <relative path> ===` marker. Missing files are skipped. `assembleMemoryContext` joins all blocks into one string for the no-session fallback below.
 
 ### Per-session context-block ledger
 
@@ -147,7 +150,7 @@ Each file becomes a block wrapped in a `=== <relative path> ===` marker. Missing
 
 `context_blocks` (migration 017) and `src/adapters/context-ledger.ts` fix the resend problem for real, resumable sessions:
 
-- Each memory file from `assembleMemoryBlocks` is hashed (`hashBlock`, sha256) and keyed as `memory:<dir>/<index_file>` or `memory:<dir>/<daily_subdir>/<YYYY-MM-DD>.md`.
+- Only used with `memory.native: false`. Each memory file from `assembleMemoryBlocks` is hashed (`hashBlock`, sha256) and keyed as `memory:<dir>/<index_file>` or `memory:<dir>/recent.md` (before E67: one key per daily file; those old rows are simply never matched again).
 - `runClaudeTurn` (`cc-headless.ts`) only prepends a block to the **user turn** (not the system prompt) when `shouldSendBlock` says its hash is new or has changed for that session — so each block's content is sent at most once per session, not once per turn.
 - Once the turn completes successfully, `markBlockSent` records the hash for every block that was sent, in the same success path as `persistSessionId`/`recordCost`.
 - The system prompt no longer carries `{{memories}}` for a session with a real, resumable session row (`opts.session !== null`): it renders with `memories: ''`, the same way `src/pool/pane.ts`'s `renderAndWriteSystemPrompt` already does for pool sessions (for a different reason — pool sessions rely on native `CLAUDE.md` auto-loading). The system prompt is now a frozen cache prefix instead of changing every turn.

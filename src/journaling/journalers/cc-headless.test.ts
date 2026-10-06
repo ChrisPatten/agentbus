@@ -119,6 +119,19 @@ describe('CcHeadlessJournaler on cc-pool (direct claude -p)', () => {
     expect(args).toContain('--model claude-haiku-4-5');
     expect(args).toContain('--strict-mcp-config');
     expect(opts.env).toEqual({ PATH: '/bin', HOME: '/home/me', EXTRA: '1' });
+    expect(opts.args).not.toContain('--settings');
+  });
+
+  it('native memory (E67): points auto memory at the memory dir and drops CLAUDE_CODE_DISABLE_AUTO_MEMORY', async () => {
+    const runProcess = vi.fn(async (_o: RunProcessOptions) => proc({ stdout: resultJson() }));
+    const j = new CcHeadlessJournaler({
+      resolver: resolver(), runProcess, env: () => ({ PATH: '/bin', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' }),
+    });
+    await j.run(job({ nativeMemory: true }));
+    const opts = runProcess.mock.calls[0]![0];
+    const i = opts.args.indexOf('--settings');
+    expect(JSON.parse(opts.args[i + 1]!)).toEqual({ autoMemoryDirectory: '/agents/peggy/memory' });
+    expect(opts.env).not.toHaveProperty('CLAUDE_CODE_DISABLE_AUTO_MEMORY');
   });
 
   it('reports spawn failures, timeouts, CLI errors and nothing-to-do', async () => {

@@ -16,7 +16,7 @@ Code: `src/core/runtime-capabilities.ts` (types and matrix) and `src/core/runtim
 | `sessionFork` | The bus can branch a new conversation from an existing Claude session | static + live |
 | `exclusiveSession` | Each conversation has its own session; no other conversation shares it | static + live |
 | `liveAgent` | An agent process stays running between turns and holds the session in memory | static + live |
-| `nativeMemory` | The harness loads `CLAUDE.md` and Claude Code auto memory itself | static |
+| `nativeMemory` | The harness loads `CLAUDE.md` and Claude Code auto memory itself. Since E67 the bus points auto memory at the agent's memory dir and injects nothing on these runtimes ([AGENT_MEMORY.md](AGENT_MEMORY.md#loading)) | static |
 | `contextInjection` | The bus can add context alongside each delivered turn | static |
 | `hookEvents` | Harness events the runtime can report through hooks: `turn-ended`, `pre-compact`, `session-end`, `clear` | static |
 

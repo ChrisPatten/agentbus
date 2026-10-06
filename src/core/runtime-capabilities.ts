@@ -105,8 +105,10 @@ const ALL_HOOK_EVENTS: readonly HookEvent[] = HOOK_EVENTS;
  *     resumable transcript; the bus does not pass `--fork-session`.
  *   exclusiveSession: one Claude session per conversation_id.
  *   liveAgent: false — no process between turns.
- *   nativeMemory: true for the harness; the bus currently sets
- *     CLAUDE_CODE_DISABLE_AUTO_MEMORY and injects memory itself until E67.
+ *   nativeMemory: Claude Code loads CLAUDE.md (and its @memory/recent.md
+ *     import) and auto memory itself; since E67 the bus passes
+ *     autoMemoryDirectory via --settings and injects nothing (unless the
+ *     agent sets memory.native: false).
  *   contextInjection: memory blocks via the context ledger.
  *   hookEvents: only `pre-compact` — the bus sees turn end and process exit
  *     directly, and `/clear` is a bus command, not a harness event.

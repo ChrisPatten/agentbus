@@ -36,8 +36,10 @@ import type Database from 'better-sqlite3';
 import { loadConfig } from '../config/loader.js';
 import { getCcHeadlessInstances, type CcHeadlessInstanceConfig } from '../config/schema.js';
 import { renderSystemPrompt, expandFileReferences, type PromptContext } from './prompt-renderer.js';
-import { assembleMemoryContext, assembleMemoryBlocks, formatLocalDate, type MemoryConfig } from './memory-context.js';
-import { memorySettingsFor } from '../memory/layout.js';
+import { assembleMemoryContext, assembleMemoryBlocks, formatLocalDate } from './memory-context.js';
+import { memoryLayout, memorySettingsFor, type MemoryLayout } from '../memory/layout.js';
+import { DISABLE_AUTO_MEMORY_ENV, autoMemoryArgs, usesNativeMemory } from '../memory/native.js';
+import { runtimeCapabilities } from '../core/runtime-capabilities.js';
 import type { MessageEnvelope } from '../types/envelope.js';
 import { formatMessagesForSampling } from './cc.js';
 import { isSystemOnly } from '../core/system-block.js';
@@ -334,7 +336,9 @@ class HeadlessInstance {
   private readonly agentId: string;
   private readonly workingDir: string;
   /** E67 — the agent's memory layout (agents.<id>.memory, else the deprecated cfg.memory). */
-  private readonly memory: MemoryConfig;
+  private readonly memory: MemoryLayout;
+  /** E67 — Claude Code auto memory loads the memory dir; the bus injects nothing. */
+  private readonly nativeMemory: boolean;
   private readonly busBaseUrl: string;
   /** Fetch that adds X-Bus-Token to bus requests when bus.auth_token is set. */
   private readonly busFetch: typeof fetch;
@@ -358,12 +362,26 @@ class HeadlessInstance {
     this.cfg = cfg;
     this.agentId = `agent:${cfg.agent_id}`;
     this.workingDir = cfg.working_dir ?? process.cwd();
-    const mem = memorySettingsFor(config, this.agentId);
-    this.memory = { dir: mem.dir, index_file: mem.indexFile, daily_subdir: mem.dailySubdir, journal_lookback_days: mem.lookbackDays };
+    this.memory = memoryLayout(memorySettingsFor(config, this.agentId), this.workingDir);
+    this.nativeMemory = usesNativeMemory(this.memory, runtimeCapabilities('cc-headless'));
     this.busBaseUrl = busBaseUrl;
     this.busFetch = withBusToken(busBaseUrl, resolveBusToken(config));
     this.label = cfg.name ? `cc-headless:${cfg.name}` : 'cc-headless';
     this.limiter = new HeadlessLimiter(cfg.max_concurrent_turns, cfg.reserved_system_slots);
+  }
+
+  /** Environment for `claude -p` children. */
+  private childEnv(): NodeJS.ProcessEnv {
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      AGENTBUS_CONFIG: configPath,
+      AGENTBUS_AGENT_ID: this.cfg.agent_id,
+      AGENTBUS_TOOLS_ONLY: 'true',
+      ...busTokenEnv(resolveBusToken(config)),
+    };
+    if (this.nativeMemory) delete env[DISABLE_AUTO_MEMORY_ENV];
+    else env[DISABLE_AUTO_MEMORY_ENV] = '1';
+    return env;
   }
 
   snapshot(): HeadlessCapacitySnapshot {
@@ -512,15 +530,18 @@ class HeadlessInstance {
     if (resumeId) {
       args.push('--resume', resumeId);
     }
+    // E67 — native memory: point Claude Code auto memory at the agent's
+    // memory dir (no per-agent settings file needed).
+    args.push(...autoMemoryArgs(this.memory, runtimeCapabilities('cc-headless')));
 
     const trackingId = conversationId;
 
     return new Promise((resolvePromise) => {
       // cwd drives which CLAUDE.md hierarchy claude -p auto-loads into context.
-      // CLAUDE_CODE_DISABLE_AUTO_MEMORY: the adapter already injects the agent's
-      // memory files via {{memories}} in the system prompt, so the CLI's native
-      // auto-memory feature would load MEMORY.md a second time. Disable it here so
-      // every headless agent avoids the double-load without per-agent config.
+      // E67: with native memory, auto memory loads the memory dir (--settings
+      // above) and an inherited CLAUDE_CODE_DISABLE_AUTO_MEMORY is dropped.
+      // An agent that keeps bus injection (memory.native: false) gets the
+      // variable set, so the CLI doesn't load MEMORY.md a second time.
       const child = spawn(this.cfg.claude_bin, args, {
         stdio: ['ignore', 'pipe', 'pipe'],
         cwd: this.workingDir,
@@ -531,14 +552,7 @@ class HeadlessInstance {
         // ahead of the per-server env block. Keep these absolute and scoped to
         // this headless instance so cc.ts does not look for config.yaml in the
         // agent's working directory or fall back to the wrong agent.
-        env: {
-          ...process.env,
-          CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
-          AGENTBUS_CONFIG: configPath,
-          AGENTBUS_AGENT_ID: this.cfg.agent_id,
-          AGENTBUS_TOOLS_ONLY: 'true',
-          ...busTokenEnv(resolveBusToken(config)),
-        },
+        env: this.childEnv(),
       });
       this.activeChildren.set(trackingId, child);
 
@@ -826,7 +840,10 @@ class HeadlessInstance {
     let promptForClaude = opts.prompt;
     let blocksSentThisTurn: Array<{ key: string; hash: string }> = [];
 
-    if (opts.session) {
+    // E67: with native memory there are no memory blocks and nothing for the
+    // ledger to track; Claude Code reloads CLAUDE.md, its imports (recent.md)
+    // and auto memory from disk on every invocation, --resume included.
+    if (opts.session && !this.nativeMemory) {
       // Sharp input-token drop since the last turn: Claude Code's own
       // auto-compaction likely summarized the resumed transcript, so the
       // ledger's record of "this session already has block X in context" no
@@ -835,7 +852,7 @@ class HeadlessInstance {
         clearLedger(opts.db, opts.session.id);
       }
 
-      const hashedBlocks = assembleMemoryBlocks(this.workingDir, this.memory, now).map((b) => ({
+      const hashedBlocks = assembleMemoryBlocks(this.memory).map((b) => ({
         block: b,
         hash: hashBlock(b.content),
       }));
@@ -864,7 +881,7 @@ class HeadlessInstance {
       // `promptForClaude` instead. When there's no session to track a ledger
       // against, fall back to the old behavior of inlining the full context
       // via {{memories}}.
-      memories: opts.session ? '' : assembleMemoryContext(this.workingDir, this.memory, now),
+      memories: opts.session || this.nativeMemory ? '' : assembleMemoryContext(this.memory),
       // E20: structured DB summaries are retired; files are the source of truth.
       session_summary: '',
       agent_id: this.agentId,

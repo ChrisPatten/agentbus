@@ -121,4 +121,4 @@ If `claude -p` crashes, exits with an error or produces nothing, and the agent h
 - **The first reply in a conversation is slower.** Claude Code needs a few seconds to start.
 - **Conversations are isolated.** The agent can't see what was said in another conversation, unless it looks it up with `search_transcripts` or keeps notes in its files.
 - **Don't turn off auto-compaction.** Long sessions rely on Claude Code's automatic context compaction. Leave `DISABLE_AUTO_COMPACT` unset.
-- **Claude Code's own auto memory is off** for headless turns. AgentBus manages the agent's memory files itself.
+- **Claude Code's own auto memory is on and points at the agent's memory folder.** Each turn loads `CLAUDE.md` (with `recent.md`) and `MEMORY.md` fresh from disk, so changes the agent or a journal run made are seen on the next turn. See [How memory is organized](/features/journaling-and-memory).

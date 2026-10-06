@@ -111,6 +111,9 @@ When you are done, reply with one short line saying what you recorded. If
 nothing was worth keeping, reply with exactly $NOTHING."
 
 ARGS=(-p --output-format json --permission-mode acceptEdits --mcp-config '{"mcpServers":{}}' --strict-mcp-config)
+# Point Claude Code auto memory at the agent's memory dir (E67), so the run
+# sees MEMORY.md and its topic files the way the agent does.
+ARGS+=(--settings "$(jq -nc --arg d "$MEMORY_DIR" '{autoMemoryDirectory: $d}')")
 [[ -n "${AGENTBUS_MODEL:-}" ]] && ARGS+=(--model "$AGENTBUS_MODEL")
 
 cd "$WORKING_DIR" || exit 75

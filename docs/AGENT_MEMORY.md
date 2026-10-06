@@ -34,3 +34,26 @@ Claude Code's native memory has no notion of daily journals, so the bus keeps `<
 **When.** `RecentMemory.regenerateAll('startup')` at bus start; `regenerate(agentId, 'journaled')` from the journaling engine's `onJournaled` callback (every evaluation whose chain ended `done`, any journaler); `tick()` on the engine's tick regenerates every agent once the local date changes (`midnight`). The freshness endpoint also regenerates before hashing (S67.4).
 
 **Journalers don't write it.** The cc-headless and System Message prompts end with `recentNotice()` (`src/journaling/prompt.ts`): "Do not edit memory/recent.md: AgentBus generates it …". Script journalers get the same rule in the contract ([JOURNALING.md](JOURNALING.md#script-journaler)), and the reference script tells its `claude -p`. `snapshotMemoryDir` ignores `recent.md` and its temp files, so a regeneration during a System Message run never shows up in `files_changed`.
+
+## Loading
+
+Code: `src/memory/native.ts` (`usesNativeMemory`, `autoMemoryArgs`), `src/adapters/cc-headless.ts`, `src/pool/pane.ts`, `src/journaling/journalers/cc-headless.ts`.
+
+**Native (runtimes with `nativeMemory` and `memory.native: true`, the default).** The bus injects no memory. Everything is loaded by Claude Code from disk:
+
+| Layer | How it loads |
+|---|---|
+| `CLAUDE.md` and its `@` imports (persona, rules, pinned memory such as `@memory/vocabulary.md`, and `@memory/recent.md`) | Claude Code's `CLAUDE.md` hierarchy for the working dir, in full, on every session start and after `/compact` |
+| `MEMORY.md` | Auto memory, `autoMemoryDirectory` = the memory dir: the first 200 lines or 25KB |
+| Topic files | Auto memory, read on demand |
+
+The bus supplies `autoMemoryDirectory` itself, so no per-agent settings file is needed:
+
+- **cc-headless:** every `claude -p` gets `--settings '{"autoMemoryDirectory":"<memory dir>"}'`; an inherited `CLAUDE_CODE_DISABLE_AUTO_MEMORY` is removed from the child environment. No memory blocks, nothing in the context ledger, `{{memories}}` renders empty.
+- **cc-pool:** the pane launch line gets the same `--settings` (unless the operator's `launch_args` already pass `--settings`; then their file must set it) and unsets `CLAUDE_CODE_DISABLE_AUTO_MEMORY`. `PoolManager` gets the dir from `createPoolManagers` (`autoMemoryDir`).
+- **Journal runs:** the cc-headless journaler's direct pool fork (`claude -p --resume --fork-session`) passes it when `JournalJob.nativeMemory`; cc-headless sessions journal through the instance, which passes it anyway. The reference script journaler passes `--settings` with `AGENTBUS_MEMORY_DIR`.
+- **claude-code** (one shared session the bus doesn't launch): set `autoMemoryDirectory` yourself, in the agent project's `.claude/settings.local.json` or user settings. Claude Code ignores it in a checked-in project `.claude/settings.json`.
+
+**Spike (2026-10-06, Claude Code 2.1.287, `claude -p --max-turns 1 --model haiku` in a temp project).** (a) After editing an `@import`ed file and `MEMORY.md`, `claude -p --resume <id>` answered with the new contents: a resumed print-mode session rebuilds `CLAUDE.md`, imports and auto memory from disk on each invocation. (b) `autoMemoryDirectory` set through `--settings '<json>'` and through `.claude/settings.local.json` both load `MEMORY.md` in `-p` mode, also with `--system-prompt-file` (as cc-headless uses). `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` turns it off (the import still loads). So headless needs no bus injection.
+
+**Bus injection (`memory.native: false`, or a runtime without `nativeMemory`).** cc-headless keeps the E20 path, reading the index and `recent.md` instead of raw dailies (`assembleMemoryBlocks`), through the context ledger, with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`. `mcp-polled` runtimes have no file-based injection: the bus can't put files into a harness it doesn't run, and they have no working dir. Give such an agent an absolute `memory.dir` so `recent.md` is still generated for its own harness to read.

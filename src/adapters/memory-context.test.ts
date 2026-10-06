@@ -2,19 +2,16 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { assembleMemoryContext, formatLocalDate, type MemoryConfig } from './memory-context.js';
+import { assembleMemoryBlocks, assembleMemoryContext, formatLocalDate } from './memory-context.js';
+import { memoryLayout, type MemorySettings } from '../memory/layout.js';
 
-const CFG: MemoryConfig = {
-  dir: 'memory',
-  index_file: 'MEMORY.md',
-  daily_subdir: 'daily',
-  journal_lookback_days: 3,
+const SETTINGS: MemorySettings = {
+  agentId: 'agent:x', source: 'default', dir: 'memory', indexFile: 'MEMORY.md', dailySubdir: 'daily',
+  lookbackDays: 3, recentBudgetChars: 20_000, native: false,
 };
 
-describe('assembleMemoryContext (E20)', () => {
+describe('assembleMemoryContext (E20, E67 S67.3)', () => {
   let workingDir: string;
-  // Fixed reference date so daily file names are deterministic.
-  const now = new Date(2026, 5, 18, 9, 0, 0); // 2026-06-18 local
 
   beforeEach(() => {
     workingDir = mkdtempSync(join(tmpdir(), 'agentbus-mem-'));
@@ -26,63 +23,31 @@ describe('assembleMemoryContext (E20)', () => {
   });
 
   function writeMemory(rel: string, content: string) {
-    const abs = join(workingDir, 'memory', rel);
-    mkdirSync(join(abs, '..'), { recursive: true });
-    writeFileSync(abs, content, 'utf-8');
+    writeFileSync(join(workingDir, 'memory', rel), content, 'utf-8');
   }
 
-  it('includes index + all present daily files in order (newest first)', () => {
+  it('injects the index, then recent.md, and never reads the dailies directly', () => {
     writeMemory('MEMORY.md', '# Index');
-    writeMemory('daily/2026-06-18.md', 'today');
-    writeMemory('daily/2026-06-17.md', 'yesterday');
-    writeMemory('daily/2026-06-16.md', 'two days ago');
-
-    const block = assembleMemoryContext(workingDir, CFG, now);
-
-    expect(block).toContain('=== memory/MEMORY.md ===');
-    expect(block).toContain('# Index');
-    // Order: index, then today, yesterday, two-days-ago
-    const idxIndex = block.indexOf('memory/MEMORY.md');
-    const idxToday = block.indexOf('2026-06-18.md');
-    const idxYesterday = block.indexOf('2026-06-17.md');
-    const idxOldest = block.indexOf('2026-06-16.md');
-    expect(idxIndex).toBeLessThan(idxToday);
-    expect(idxToday).toBeLessThan(idxYesterday);
-    expect(idxYesterday).toBeLessThan(idxOldest);
+    writeMemory('recent.md', '# Recent journal\n## 2026-06-18 (today)\ntoday');
+    writeMemory('daily/2026-06-18.md', 'raw daily');
+    const layout = memoryLayout(SETTINGS, workingDir);
+    const block = assembleMemoryContext(layout);
+    expect(block.indexOf('=== memory/MEMORY.md ===')).toBeLessThan(block.indexOf('=== memory/recent.md ==='));
+    expect(block).not.toContain('raw daily');
+    expect(assembleMemoryBlocks(layout).map((b) => b.key)).toEqual(['memory:memory/MEMORY.md', 'memory:memory/recent.md']);
   });
 
-  it('skips a missing day without erroring', () => {
+  it('skips missing files and a missing memory dir', () => {
     writeMemory('MEMORY.md', '# Index');
-    writeMemory('daily/2026-06-18.md', 'today');
-    // 2026-06-17 missing
-    writeMemory('daily/2026-06-16.md', 'two days ago');
-
-    const block = assembleMemoryContext(workingDir, CFG, now);
-    expect(block).toContain('2026-06-18.md');
-    expect(block).not.toContain('2026-06-17.md');
-    expect(block).toContain('2026-06-16.md');
+    expect(assembleMemoryBlocks(memoryLayout(SETTINGS, workingDir)).map((b) => b.label)).toEqual(['memory/MEMORY.md']);
+    expect(assembleMemoryContext(memoryLayout(SETTINGS, join(tmpdir(), 'agentbus-mem-does-not-exist-xyz')))).toBe('');
+    expect(assembleMemoryContext(memoryLayout(SETTINGS, null))).toBe('');
   });
 
-  it('returns an empty block when the memory dir is missing', () => {
-    const empty = join(tmpdir(), 'agentbus-mem-does-not-exist-xyz');
-    const block = assembleMemoryContext(empty, CFG, now);
-    expect(block).toBe('');
-  });
-
-  it('journal_lookback_days: 0 → index only', () => {
-    writeMemory('MEMORY.md', '# Index');
-    writeMemory('daily/2026-06-18.md', 'today');
-
-    const block = assembleMemoryContext(workingDir, { ...CFG, journal_lookback_days: 0 }, now);
-    expect(block).toContain('memory/MEMORY.md');
-    expect(block).not.toContain('2026-06-18.md');
-  });
-
-  it('returns only daily files when the index is absent', () => {
-    writeMemory('daily/2026-06-18.md', 'today');
-    const block = assembleMemoryContext(workingDir, CFG, now);
-    expect(block).not.toContain('MEMORY.md');
-    expect(block).toContain('2026-06-18.md');
+  it('follows an absolute memory dir', () => {
+    writeMemory('MEMORY.md', '# Abs index');
+    const layout = memoryLayout({ ...SETTINGS, dir: join(workingDir, 'memory') }, null);
+    expect(assembleMemoryContext(layout)).toContain('# Abs index');
   });
 });
 

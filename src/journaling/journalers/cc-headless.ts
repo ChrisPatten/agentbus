@@ -23,6 +23,7 @@
  * The agent may end its reply with `NOTHING_TO_RECORD` to report that the
  * window held nothing worth keeping (`nothing-to-do`).
  */
+import { DISABLE_AUTO_MEMORY_ENV, autoMemorySettings } from '../../memory/native.js';
 import type { JournalSessionRequest, JournalSessionResult } from '../../adapters/cc-headless.js';
 import type { RuntimeResolver } from '../../core/runtime-resolver.js';
 import { INHERITED_CLAUDE_SESSION_VARS } from '../../pool/pane.js';
@@ -167,12 +168,15 @@ export class CcHeadlessJournaler implements Journaler {
       '--mcp-config', '{"mcpServers":{}}',
       '--strict-mcp-config',
       ...(model ? ['--model', model] : []),
+      // E67 — the fork sees the pool's memory the way its panes do.
+      ...(job.nativeMemory && job.memoryDir ? ['--settings', autoMemorySettings(job.memoryDir)] : []),
     ];
     const base = this.deps.env?.() ?? process.env;
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries({ ...base, ...runtime.pool.pane_env })) {
       if (typeof v === 'string' && !(INHERITED_CLAUDE_SESSION_VARS as readonly string[]).includes(k) && k !== 'TMUX') env[k] = v;
     }
+    if (job.nativeMemory) delete env[DISABLE_AUTO_MEMORY_ENV];
     const proc = await this.run_({
       command: runtime.pool.claude_bin,
       args,

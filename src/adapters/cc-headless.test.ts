@@ -1053,7 +1053,8 @@ describe('context-block ledger (per-session memory dedup)', () => {
     vi.restoreAllMocks();
   });
 
-  it('sends the memory block on a fresh session, then withholds it on the next turn of the same session', async () => {
+  /** Two turns of one open session; returns the spawn calls. */
+  async function runTwoTurns(): Promise<unknown[][]> {
     const conversationId = fallbackConversationId('contact:alice', 'telegram', undefined);
     const now = new Date().toISOString();
     // Pre-seed an open session for this conversation, matching what a real
@@ -1117,16 +1118,42 @@ describe('context-block ledger (per-session memory dedup)', () => {
 
     expect(spawnMock).toHaveBeenCalledTimes(2);
 
+    return spawnMock.mock.calls as unknown[][];
+  }
+
+  it('memory.native: false — sends the memory block on a fresh session, then withholds it on the next turn of the same session', async () => {
+    currentConfig = { ...singleInstanceConfig, agents: { 'agent:peggy': { memory: { native: false } } } } as unknown as AppConfig;
+    const calls = await runTwoTurns();
     // spawn(claude_bin, args, opts) — args[1] is the `-p` prompt (args = ['-p', prompt, ...]).
-    const turn1Args = spawnMock.mock.calls[0]![1] as string[];
-    const turn2Args = spawnMock.mock.calls[1]![1] as string[];
+    const turn1Args = calls[0]![1] as string[];
+    const turn2Args = calls[1]![1] as string[];
     expect(turn1Args[1]).toContain('=== memory/MEMORY.md ===');
     expect(turn1Args[1]).toContain('# Peggy memory index');
     expect(turn2Args[1]).not.toContain('=== memory/MEMORY.md ===');
+    expect(turn1Args).not.toContain('--settings');
+    expect((calls[0]![2] as { env: NodeJS.ProcessEnv }).env['CLAUDE_CODE_DISABLE_AUTO_MEMORY']).toBe('1');
 
     const ledgerRows = realDb
       .prepare(`SELECT block_key FROM context_blocks WHERE session_id = 'sess-1'`)
       .all() as Array<{ block_key: string }>;
     expect(ledgerRows.map((r) => r.block_key)).toEqual(['memory:memory/MEMORY.md']);
+  });
+
+  it('native memory (E67 default) — injects nothing, points auto memory at the memory dir, leaves the ledger empty', async () => {
+    process.env['CLAUDE_CODE_DISABLE_AUTO_MEMORY'] = '1'; // inherited from the bus's environment
+    try {
+      const calls = await runTwoTurns();
+      for (const call of calls.slice(0, 2)) {
+        const args = call[1] as string[];
+        expect(args[1]).not.toContain('=== memory/');
+        const i = args.indexOf('--settings');
+        expect(i).toBeGreaterThan(0);
+        expect(JSON.parse(args[i + 1]!)).toEqual({ autoMemoryDirectory: join(workingDir, 'memory') });
+        expect((call[2] as { env: NodeJS.ProcessEnv }).env).not.toHaveProperty('CLAUDE_CODE_DISABLE_AUTO_MEMORY');
+      }
+      expect(realDb.prepare(`SELECT COUNT(*) AS n FROM context_blocks`).get()).toEqual({ n: 0 });
+    } finally {
+      delete process.env['CLAUDE_CODE_DISABLE_AUTO_MEMORY'];
+    }
   });
 });

@@ -22,6 +22,9 @@
  * queue/enqueue machinery itself, and never talks to tmux directly — all
  * pane mechanics go through the injected `PaneLauncher` seam.
  */
+import { memoryLayout, memorySettingsFor } from '../memory/layout.js';
+import { usesNativeMemory } from '../memory/native.js';
+import { runtimeCapabilities } from '../core/runtime-capabilities.js';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -144,6 +147,11 @@ export interface PoolManagerDeps {
    * windows get it as `AGENTBUS_BUS_TOKEN`.
    */
   busToken?: string;
+  /**
+   * E67 — the pool's memory dir when it loads memory natively. Every pane
+   * launch passes it to `claude` as `--settings {"autoMemoryDirectory":…}`.
+   */
+  autoMemoryDir?: string;
   /** Override for the recurring `sweepHardIdle()`+`drainParked()` interval
    *  `start()` schedules. Defaults to `DEFAULT_SWEEP_INTERVAL_MS` (60s). */
   sweepIntervalMs?: number;
@@ -317,6 +325,7 @@ export class PoolManager {
         busBaseUrl: deps.busBaseUrl,
         cfg: deps.cfg,
         ...(deps.busToken ? { busToken: deps.busToken } : {}),
+        ...(deps.autoMemoryDir ? { autoMemoryDir: deps.autoMemoryDir } : {}),
         scratchDir: deps.scratchDir ?? join(tmpdir(), 'agentbus-pool-scratch'),
       });
     }
@@ -1378,7 +1387,12 @@ export function createPoolManagers(
     const resolveModel = (scheduleModel: string | null): PoolResolvedModel =>
       resolveModelFromStore({ scheduleModel, db, agentId, configModel: cfg.model });
     const busToken = resolveBusToken(config);
-    managers.set(agentId, new PoolManager({ cfg, db, busBaseUrl, queue, resolveModel, ...(busToken ? { busToken } : {}) }));
+    // E67 — native memory: panes load the pool's memory dir through auto memory.
+    const layout = memoryLayout(memorySettingsFor(config, agentId), cfg.working_dir ?? process.cwd());
+    const autoMemoryDir = usesNativeMemory(layout, runtimeCapabilities('cc-pool')) ? layout.memoryDir : null;
+    managers.set(agentId, new PoolManager({
+      cfg, db, busBaseUrl, queue, resolveModel, ...(busToken ? { busToken } : {}), ...(autoMemoryDir ? { autoMemoryDir } : {}),
+    }));
   }
   return managers;
 }

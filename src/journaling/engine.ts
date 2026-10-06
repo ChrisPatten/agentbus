@@ -41,6 +41,7 @@ import { runChain, type ChainRunSummary } from './runner.js';
 import { JournalStore } from './store.js';
 import { isFinalTrigger, type JournalJob, type JournalTrigger } from './types.js';
 import { memoryLayout, memorySettingsFor, runtimeWorkingDir } from '../memory/layout.js';
+import { usesNativeMemory } from '../memory/native.js';
 
 /** Exhausted runs per window before non-manual triggers stop retrying it (new content re-arms). */
 export const MAX_ATTEMPTS_PER_WINDOW = 3;
@@ -400,6 +401,7 @@ export class JournalEngine {
       runtime: runtime.kind,
       workingDir,
       memoryDir: layout.memoryDir,
+      nativeMemory: usesNativeMemory(layout, runtime.capabilities),
       sessionId: session.id,
       conversationId: session.conversation_id,
       channel: session.channel,

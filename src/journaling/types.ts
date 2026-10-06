@@ -97,6 +97,12 @@ export interface JournalJob {
   workingDir: string | null;
   /** Absolute memory dir from the agent's memory layout (E67, `agents.<id>.memory.dir`); null without one. */
   memoryDir: string | null;
+  /**
+   * E67 — the agent loads memory natively (layout `native` and the runtime's
+   * `nativeMemory`). Journalers that start `claude` point auto memory at
+   * `memoryDir` (`--settings`) and drop `CLAUDE_CODE_DISABLE_AUTO_MEMORY`.
+   */
+  nativeMemory?: boolean;
   sessionId: string;
   conversationId: string;
   channel: string;
