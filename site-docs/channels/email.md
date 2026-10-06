@@ -100,7 +100,7 @@ Your agent can start a new email to you with the `send_email` tool: a Markdown b
 
 ## Things to know
 
-- **Mail that arrives while the bus is stopped isn't processed.** Each time the bus connects to the mailbox, including after a dropped connection, it only picks up messages that arrive from then on. Resend anything important.
+- **Mail that arrives while the bus is stopped is picked up when it's back.** The bus remembers the last message it handled, and each time it connects to the mailbox (at start-up or after a dropped connection) it processes anything newer, once. The first time a mailbox is connected, mail already in it is left alone; only new mail reaches the agent.
 - **No typing indicator or live progress**, as email has neither.
 - **Messages aren't marked as read** by the bus.
 - **A forward that your mail app threads with an earlier message** continues that thread's conversation.
