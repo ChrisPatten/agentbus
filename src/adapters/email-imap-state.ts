@@ -1,5 +1,5 @@
 /**
- * Email catch-up cursor (migration 025): the highest IMAP UID an email
+ * Email catch-up cursor (migration 030): the highest IMAP UID an email
  * adapter has processed per mailbox, so mail that arrives while the bus is
  * down or reconnecting is fetched on the next connect instead of skipped.
  */

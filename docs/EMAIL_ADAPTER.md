@@ -24,7 +24,7 @@ The adapter class implements `AdapterInstance` and provides:
   per-thread topic, and submitted to the pipeline via `processInbound()` (no HTTP
   hop). The connection is supervised: an unexpected drop reconnects with backoff.
 - **Catch-up on connect** — the highest processed IMAP UID is saved per
-  `(adapter id, mailbox)` in `email_imap_state` (migration 025,
+  `(adapter id, mailbox)` in `email_imap_state` (migration 030,
   `src/adapters/email-imap-state.ts`), together with the mailbox's UIDVALIDITY.
   On every connect or reconnect the adapter resumes from that UID and fetches
   anything newer, so mail that arrived while the bus was down or reconnecting

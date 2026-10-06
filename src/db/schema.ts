@@ -135,9 +135,9 @@ function loadMigrations(): Migration[] {
       sql: readFileSync(join(migrationsDir, '024_app_events.sql'), 'utf-8'),
     },
     {
-      version: 25,
+      version: 30,
       description: 'Email IMAP catch-up state',
-      sql: readFileSync(join(migrationsDir, '025_email_imap_state.sql'), 'utf-8'),
+      sql: readFileSync(join(migrationsDir, '030_email_imap_state.sql'), 'utf-8'),
     },
   ];
 }
