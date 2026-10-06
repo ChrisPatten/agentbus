@@ -36,7 +36,6 @@ import { createTopicClassify } from './pipeline/stages/topic-classify.js';
 import { createPriorityScore } from './pipeline/stages/priority-score.js';
 import { createRouteResolve } from './pipeline/stages/route-resolve.js';
 import { createTranscriptLog } from './pipeline/stages/transcript-log.js';
-import { createMemoryInject } from './pipeline/stages/memory-inject.js';
 import { TelegramAdapter } from './adapters/telegram.js';
 import { EmailAdapter } from './adapters/email.js';
 import { SiriAdapter } from './adapters/siri.js';
@@ -238,7 +237,6 @@ pipeline.use({ slot: 70, name: 'route-resolve',    stage: createRouteResolve(con
 // route targets (e.g. an also_notify entry).
 pipeline.use({ slot: 72, name: 'pool-route-resolve', stage: createPoolRouteResolve(poolManagers), critical: false });
 pipeline.use({ slot: 80, name: 'transcript-log',   stage: createTranscriptLog(db, config), critical: false });
-pipeline.use({ slot: 85, name: 'memory-inject',    stage: createMemoryInject(db, config),  critical: false });
 // E65 — open advisories ride along with an owner's next message, as a
 // bus-originated system block for the owned agent's route only.
 pipeline.use({ slot: 86, name: 'advisory-inject',  stage: createAdvisoryInject(advisories), critical: false });

@@ -173,9 +173,8 @@ topics:
 memory:
   summarizer_interval_ms: 60000      # session-tracker and journaling-engine tick
   session_idle_threshold_ms: 1800000 # idle gap that closes a polling-adapter session
-  context_window_hours: 48
-  # claude_api_model, summary_max_tokens and structured_extraction are retired (E66):
-  # still accepted with a deprecation warning, and ignored. See docs/MEMORY.md.
+  # claude_api_model, summary_max_tokens, structured_extraction, context_window_hours and
+  # memory_inject_exclude are retired: ignored with a startup warning. See docs/MEMORY.md.
 
 # Per-agent settings keyed by recipient id — docs/ATTACHMENTS.md, docs/ADVISORIES.md, docs/JOURNALING.md
 agents:

@@ -25,7 +25,6 @@ const mockSession = {
   last_activity: '2026-01-01T01:00:00Z',
   ended_at: null,
   message_count: 5,
-  summary: null,
 };
 
 describe('get_session tool', () => {

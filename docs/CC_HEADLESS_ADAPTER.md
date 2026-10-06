@@ -90,7 +90,6 @@ Every tool except `get_adapter_status`, which has no meaning without a poll loop
 | `list_channels`, `get_session`, `list_sessions`, `get_transcript`, `search_transcripts`, `fetch_attachment` | Discovery and history |
 | `schedule_message`, `list_schedules`, `cancel_schedule` | Scheduling |
 | `set_model_override`, `get_model_override`, `list_model_overrides`, `delete_model_override` | Model overrides. `set_headless_model`/`get_headless_model`/`list_headless_model`/`delete_headless_model` are deprecated aliases |
-| `recall_memory`, `log_memory` | Legacy. Read and write your memory files instead |
 
 ## Response delivery
 
@@ -127,7 +126,7 @@ A turn killed by `/stop` sends nothing. See [SLASH_COMMANDS.md](SLASH_COMMANDS.m
 
 After variable substitution, `@<path>` tokens are replaced with the referenced file's contents, resolved relative to `working_dir` (`expandFileReferences` in `src/adapters/prompt-renderer.ts`). Unknown variables and unreadable paths are left verbatim so mistakes are visible. Expansion runs only on this operator-authored template, never on user messages.
 
-The user message is formatted by `formatMessagesForSampling` (`src/adapters/cc.ts`) with `includeMemoryContext: false`, so the legacy `<memory>` block is not also prepended.
+The user message is formatted by `formatMessagesForSampling` (`src/adapters/cc.ts`).
 
 ## Context loading (`CLAUDE.md` and file references)
 
@@ -312,5 +311,5 @@ Each contact gets an isolated Claude conversation, because `--resume` is keyed t
 ## What does not change
 
 - Platform adapters are unaffected.
-- Sessions from the polling MCP adapter (`claude_session_id IS NULL`) keep their idle teardown, the `on_session_close` hook, and, with `memory.structured_extraction: true`, the summarizer.
+- Sessions from the polling MCP adapter (`claude_session_id IS NULL`) keep their idle teardown, the `on_session_close` hook.
 - Every MCP tool stays registered. The structured memory tools are marked legacy, not removed.

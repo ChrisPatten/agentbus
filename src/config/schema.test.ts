@@ -17,7 +17,6 @@ function makeConfig(telegram: AppConfig['adapters']['telegram']): AppConfig {
     memory: {
       summarizer_interval_ms: 60000,
       session_idle_threshold_ms: 1800000,
-      context_window_hours: 48,
       claude_api_model: 'claude-opus-4-6',
       summary_max_tokens: 8192,
       session_close_min_messages: 0,
@@ -686,10 +685,14 @@ describe('AppConfigSchema — cc-headless memory + journaling (E20)', () => {
     expect(h.memory.journal_lookback_days).toBe(0);
   });
 
-  it('accepts the retired summarizer keys without defaults (E66)', () => {
-    expect(AppConfigSchema.parse(base).memory.structured_extraction).toBeUndefined();
-    const parsed = AppConfigSchema.parse({ ...base, memory: { ...base.memory, structured_extraction: true, claude_api_model: 'x', summary_max_tokens: 10 } });
-    expect(parsed.memory).toMatchObject({ structured_extraction: true, claude_api_model: 'x', summary_max_tokens: 10 });
+  it('accepts and drops the retired memory keys', () => {
+    const parsed = AppConfigSchema.parse({
+      ...base,
+      memory: { ...base.memory, structured_extraction: true, claude_api_model: 'x', summary_max_tokens: 10, context_window_hours: 48, memory_inject_exclude: ['telegram'] },
+    });
+    for (const k of ['structured_extraction', 'claude_api_model', 'summary_max_tokens', 'context_window_hours', 'memory_inject_exclude']) {
+      expect(parsed.memory).not.toHaveProperty(k);
+    }
   });
 });
 

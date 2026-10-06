@@ -235,7 +235,7 @@ See [JOURNALING.md](JOURNALING.md).
 
 ### `memory.claude_api_model … are deprecated and ignored`
 
-E66 retired the Anthropic-API summarizer. `memory.claude_api_model`, `memory.summary_max_tokens` and `memory.structured_extraction` still load, with this warning, and do nothing. Remove them from `config.yaml`; `ANTHROPIC_API_KEY` is no longer needed by the bus. Journaling replaces the summarizer ([JOURNALING.md](JOURNALING.md)).
+E66 retired the Anthropic-API summarizer, and the legacy memory store was removed after it. `memory.claude_api_model`, `memory.summary_max_tokens`, `memory.structured_extraction`, `memory.context_window_hours` and `memory.memory_inject_exclude` still load, with this warning, and do nothing. Remove them from `config.yaml`; `ANTHROPIC_API_KEY` is no longer needed by the bus. Journaling replaces the summarizer ([JOURNALING.md](JOURNALING.md)).
 
 ### Claude Code MCP adapter not connecting
 

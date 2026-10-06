@@ -38,7 +38,6 @@ const stubConfig = {
   memory: {
     summarizer_interval_ms: 60000,
     session_idle_threshold_ms: 1800000,
-    context_window_hours: 48,
     claude_api_model: 'claude-opus-4-6',
   },
   pipeline: {

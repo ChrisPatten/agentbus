@@ -82,10 +82,6 @@ if (TOOLS_ONLY) {
  * Format a batch of message envelopes into a single string for delivery.
  * Each message becomes one paragraph; multiple messages in a batch are
  * separated by a blank line.
- *
- * If the first envelope carries E9 memory context (metadata.memory_context),
- * it is prepended before the message text so Claude receives it as part of
- * the channel notification for that new session.
  */
 function fmtTs(iso: string, full: boolean): string {
   const d = new Date(iso);
@@ -101,10 +97,7 @@ function fmtTs(iso: string, full: boolean): string {
   return full ? `${get('year')}-${get('month')}-${get('day')}T${time}` : time;
 }
 
-export function formatMessagesForSampling(
-  envelopes: MessageEnvelope[],
-  opts?: { includeMemoryContext?: boolean },
-): string {
+export function formatMessagesForSampling(envelopes: MessageEnvelope[]): string {
   const parts: string[] = [];
 
   // Bus-originated system blocks (E65) go first, deduplicated across the
@@ -112,23 +105,10 @@ export function formatMessagesForSampling(
   // so no message text can open or close a block of its own.
   const systemBlocks = [...new Set(envelopes.flatMap((env) => readSystemBlocks(env.metadata)))];
 
-  // The cc-headless adapter injects memories/summary via the system prompt and
-  // passes includeMemoryContext:false so the Stage-85 <memory> block is not also
-  // prepended to the user message (which would be a double injection).
-  const includeMemoryContext = opts?.includeMemoryContext ?? true;
   const firstMeta = envelopes[0]?.metadata;
-  const memoryContext = firstMeta?.memory_context;
-  if (includeMemoryContext && typeof memoryContext === 'string' && memoryContext.length > 0) {
-    parts.push(memoryContext);
-    // Clear after consuming so a retry call doesn't prepend the block twice.
-    delete firstMeta!['memory_context'];
-  }
 
   // One-shot context injected by create_telegram_topic (E28) for a brand-new
-  // topic's first turn — unlike memory_context, this always applies (not
-  // gated by includeMemoryContext): cc-headless suppresses memory_context
-  // because it injects memory via the system prompt instead, but has no
-  // equivalent alternate path for agent-supplied topic context.
+  // topic's first turn.
   const topicContext = firstMeta?.injected_topic_context;
   if (typeof topicContext === 'string' && topicContext.length > 0) {
     parts.push(`[Context for this new topic, provided when it was created]\n${topicContext}`);

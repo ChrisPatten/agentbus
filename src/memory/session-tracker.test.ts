@@ -19,7 +19,6 @@ const stubConfig: AppConfig = {
   memory: {
     summarizer_interval_ms: 60000,
     session_idle_threshold_ms: 900000, // 15 min
-    context_window_hours: 48,
     session_close_min_messages: 0,
   },
   pipeline: {
@@ -253,36 +252,6 @@ describe('SessionTracker.tick()', () => {
     expect((db.prepare('SELECT status FROM sessions WHERE id = ?').get(sessionId) as { status: string }).status).toBe('summarize_failed');
   });
 
-  it('hard-deletes memories expired more than 30 days ago', () => {
-    const expiredLong = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString();
-    const expiredRecent = new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString();
-
-    // These should be deleted (expired > 30 days ago)
-    db.prepare(
-      `INSERT INTO memories (id, contact_id, category, content, confidence, source, created_at, expires_at, superseded_by)
-       VALUES ('mem-old', 'contact:chris', 'general', 'Old fact', 0.8, 'summarizer', ?, ?, NULL)`,
-    ).run(expiredLong, expiredLong);
-
-    // These should be kept (expired only recently)
-    db.prepare(
-      `INSERT INTO memories (id, contact_id, category, content, confidence, source, created_at, expires_at, superseded_by)
-       VALUES ('mem-recent', 'contact:chris', 'general', 'Recent fact', 0.8, 'summarizer', ?, ?, NULL)`,
-    ).run(expiredRecent, expiredRecent);
-
-    // Active memory — should never be deleted
-    db.prepare(
-      `INSERT INTO memories (id, contact_id, category, content, confidence, source, created_at, expires_at, superseded_by)
-       VALUES ('mem-active', 'contact:chris', 'general', 'Active fact', 0.9, 'summarizer', ?, NULL, NULL)`,
-    ).run(new Date().toISOString());
-
-    tracker.tick();
-
-    const remaining = db.prepare('SELECT id FROM memories').all() as { id: string }[];
-    const ids = remaining.map((r) => r.id);
-    expect(ids).not.toContain('mem-old');
-    expect(ids).toContain('mem-recent');
-    expect(ids).toContain('mem-active');
-  });
 });
 
 describe('SessionTracker close notifications (E66)', () => {

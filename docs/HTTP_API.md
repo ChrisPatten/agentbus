@@ -59,8 +59,6 @@ Set `bus.host: 0.0.0.0` to accept connections from other hosts, for example a re
 | GET | `/api/v1/sessions/:id/transcript` | Ordered transcript for a session |
 | GET | `/api/v1/transcripts/search` | Full-text search across transcripts |
 | GET | `/api/v1/attachments/:id` | Resolve a stored attachment |
-| GET | `/api/v1/memories/recall` | Search the legacy memory store |
-| POST | `/api/v1/memories` | Insert into the legacy memory store |
 | POST | `/api/v1/knowledge` | Write a knowledge row |
 | GET | `/api/v1/knowledge/search` | Search knowledge rows |
 | GET | `/api/v1/knowledge/:id` | Fetch one knowledge row |
@@ -357,7 +355,7 @@ Body `{ "name": string, "context"?: string }`. Creates a Telegram forum topic in
 
 ## Sessions and transcripts
 
-Session objects have this shape. `contact_id` is the bare contact ID (`chris`, not `contact:chris`). `topic` comes from `conversation_registry`. `summary` is `null` unless the legacy summarizer wrote one.
+Session objects have this shape. `contact_id` is the bare contact ID (`chris`, not `contact:chris`). `topic` comes from `conversation_registry`; `title` is the app topic title (`Main` or the named topic), `null` on other channels. The `summary` field was removed with the legacy memory store.
 
 ```json
 {
@@ -370,7 +368,7 @@ Session objects have this shape. `contact_id` is the bare contact ID (`chris`, n
   "ended_at": null,
   "message_count": 15,
   "topic": "general",
-  "summary": null
+  "title": null
 }
 ```
 
@@ -420,24 +418,6 @@ Returns `{ "ok": true, "results": [<same row shape as a transcript>], "count": n
 ### `GET /api/v1/attachments/:id`
 
 Returns `{ "ok": true, "attachment": { "id", "local_path", "mime_type", "original_filename" } }`. `404` if the ID is unknown or the attachment has expired. See [ATTACHMENTS.md](ATTACHMENTS.md).
-
-## Memories (legacy)
-
-The structured memory store is read-only since E66 (the summarizer was retired). See [MEMORY.md](MEMORY.md).
-
-### `GET /api/v1/memories/recall`
-
-| Param | Notes |
-|---|---|
-| `q` | Required. FTS5 query |
-| `contact_id`, `category` | Optional filters |
-| `limit` | 1 to 50, default 10 |
-
-Returns active memories (not superseded, not expired) ordered by confidence, then recency: `{ "ok": true, "memories": [...], "count": n }`.
-
-### `POST /api/v1/memories`
-
-Retired (E66): returns `410 { ok: false, error }` and writes nothing. It used to insert a memory (the `log_memory` tool).
 
 ## Knowledge
 

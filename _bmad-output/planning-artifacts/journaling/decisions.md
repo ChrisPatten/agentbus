@@ -150,6 +150,8 @@ Decisions marked 2026-10-02 are confirmed by the user.
 
 1. **Pool eviction no longer waits for the journal.** On LRU eviction the pane is released and reused right away; the evicted conversation's journal runs in the background from the on-disk transcript (cc-headless `--fork-session`, script journalers). Hard-idle release keeps the bounded wait (the pane is still leased, so `system-message` can run).
 
+2. **Remove the legacy structured memory feature entirely.** The operator is its only user and it is dead. Remove the `recall_memory`/`log_memory` tools, `/api/v1/memories` routes, the memory-inject stage and its config; retired keys warn and are ignored at load so an old `config.yaml` still starts. Migration 031 drops `memories` and `session_summaries`.
+
 ## Epics
 
 - E64 Runtime capability taxonomy → E65 Owner contacts and bus advisories → E66 Pluggable journaling core; E67 Native memory layout and read side (parallel to E66); E68 Agent learning (after E66, E67).

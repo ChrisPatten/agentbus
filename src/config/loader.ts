@@ -43,8 +43,14 @@ function substituteEnvVars(obj: unknown): unknown {
   return obj;
 }
 
-/** Retired summarizer keys (E66) present in the raw `memory` block. */
-export const RETIRED_MEMORY_KEYS = ['claude_api_model', 'summary_max_tokens', 'structured_extraction'] as const;
+/**
+ * Retired keys of the raw `memory` block: the summarizer's (E66) and the
+ * legacy structured memory store's (removed after E66). Ignored with a
+ * warning, so an old config.yaml still starts.
+ */
+export const RETIRED_MEMORY_KEYS = [
+  'claude_api_model', 'summary_max_tokens', 'structured_extraction', 'context_window_hours', 'memory_inject_exclude',
+] as const;
 
 export function retiredMemoryKeys(raw: unknown): string[] {
   const memory = (raw as { memory?: unknown } | null)?.memory;
@@ -119,13 +125,13 @@ export function loadConfig(path: string, envPath?: string): AppConfig {
     );
   }
 
-  // E66 — summarizer settings are accepted but ignored.
+  // Retired memory-store and summarizer settings are ignored.
   const retired = retiredMemoryKeys(substituted);
   if (retired.length > 0) {
     console.warn(
       `[config] ${retired.map((k) => `memory.${k}`).join(', ')} ${retired.length === 1 ? 'is' : 'are'} deprecated and ignored: ` +
-        'the Anthropic-API summarizer was retired (journaling replaces it, see docs/JOURNALING.md). Remove ' +
-        `${retired.length === 1 ? 'it' : 'them'} from config.yaml.`,
+        'the summarizer and the legacy memory store were removed (journaling and the agent\'s memory files replace them, ' +
+        `see docs/JOURNALING.md and docs/AGENT_MEMORY.md). Remove ${retired.length === 1 ? 'it' : 'them'} from config.yaml.`,
     );
   }
 

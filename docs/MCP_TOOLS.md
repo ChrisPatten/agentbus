@@ -20,7 +20,6 @@ Errors come back as `{ "content": [{ "type": "text", "text": "Error: ..." }], "i
 | `fetch_attachment` | Resolve an attachment ID to a file path | Always |
 | `schedule_message`, `list_schedules`, `cancel_schedule`, `update_schedule` | Scheduled messages | Always |
 | `set_model_override`, `get_model_override`, `list_model_overrides`, `delete_model_override` | Runtime model overrides (agent or global) | Always |
-| `recall_memory`, `log_memory` | Legacy structured memory store (read-only; `log_memory` always errors) | Always |
 | `write_knowledge`, `get_knowledge`, `forget_knowledge`, `search_knowledge` | Agent-managed structured knowledge store (Phase 1) | Always |
 | `advisory_ack` | Acknowledge a bus advisory after relaying it to the owner | Always |
 | `journal_complete` | Finish a System Message journal run | Polling adapter and cc-pool panes (not cc-headless) |
@@ -176,22 +175,9 @@ Output: `{ "ok": true, "overrides": [{ "id", "scope", "model", "created_at", "up
 Input: `{ "agent_id"? }` deletes that agent's override; `{ "scope": "global" }` deletes the global one; `{ "all": true }` deletes every override.
 Output: `{ "ok": true, "deleted_count": n, "message" }`.
 
-## Legacy memory store
-
-Read-only since E66: the summarizer that filled it was retired, and the file-based memory model replaces it. See [MEMORY.md](MEMORY.md).
-
-### `recall_memory`
-
-Input: `{ "query": "...", "contact_id"?, "category"?, "limit"?: 10 }`. `limit` max 50; categories are `preference`, `fact`, `plan`, `relationship`, `work`, `health`, and `general`.
-Output: `{ "memories": [...], "count": n }`.
-
-### `log_memory`
-
-Deprecated (E66). Still registered so prompts that mention it get a clear answer, but it records nothing and returns `isError` telling the agent to write the fact to its memory files. Arguments are ignored.
-
 ## Knowledge store
 
-Agent-managed structured knowledge (Phase 1: FTS5 keyword search, no embeddings yet). New and always-on, independent of the legacy memory store above. See [KNOWLEDGE_STORE.md](KNOWLEDGE_STORE.md).
+Agent-managed structured knowledge (Phase 1: FTS5 keyword search, no embeddings yet). New and always-on. (The legacy `recall_memory` / `log_memory` tools were removed after E66; see [MEMORY.md](MEMORY.md).) See [KNOWLEDGE_STORE.md](KNOWLEDGE_STORE.md).
 
 ### `write_knowledge`
 

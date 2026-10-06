@@ -15,7 +15,7 @@ import { OwnerDirectory } from '../core/owners.js';
 const config = {
   bus: { http_port: 0, db_path: ':memory:', log_level: 'info' },
   adapters: {}, contacts: {}, topics: ['general'], agents: {},
-  memory: { summarizer_interval_ms: 60000, session_idle_threshold_ms: 1800000, context_window_hours: 48 },
+  memory: { summarizer_interval_ms: 60000, session_idle_threshold_ms: 1800000 },
   pipeline: { dedup_window_ms: 30000, drop_unrouted: false, topic_rules: [], priority_weights: { base_score: 0, topic_bonus: 40, vip_sender_bonus: 20, urgency_keyword_bonus: 15 }, urgency_keywords: [], vip_contacts: [], routes: [] },
 } as unknown as AppConfig;
 

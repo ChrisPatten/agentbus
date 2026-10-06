@@ -13,8 +13,8 @@ afterEach(() => {
 
 describe('retired summarizer keys (E66)', () => {
   it('finds the retired memory keys in raw config', () => {
-    expect(retiredMemoryKeys({ memory: { claude_api_model: 'x', structured_extraction: false, session_idle_threshold_ms: 1 } }))
-      .toEqual(['claude_api_model', 'structured_extraction']);
+    expect(retiredMemoryKeys({ memory: { claude_api_model: 'x', structured_extraction: false, session_idle_threshold_ms: 1, memory_inject_exclude: [] } }))
+      .toEqual(['claude_api_model', 'structured_extraction', 'memory_inject_exclude']);
     expect(retiredMemoryKeys({ memory: {} })).toEqual([]);
     expect(retiredMemoryKeys(null)).toEqual([]);
   });

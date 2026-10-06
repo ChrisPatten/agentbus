@@ -261,7 +261,7 @@ Required, but can be empty: `memory: {}`.
 | `session_idle_threshold_ms` | `1800000` (30 min) | For conversations without a resumable Claude session (such as those on `claude-code`), how long a conversation can be quiet before its session ends |
 | `summarizer_interval_ms` | `60000` | How often the bus checks for idle sessions and conversations due for journaling |
 
-`claude_api_model`, `summary_max_tokens` and `structured_extraction` belonged to the old memory store, which has been removed. They're ignored, with a warning at startup; delete them. Journaling is configured per agent, under [`agents`](#journaling). See [Journaling and memory](/features/journaling-and-memory).
+`claude_api_model`, `summary_max_tokens`, `structured_extraction`, `context_window_hours` and `memory_inject_exclude` belonged to the old memory store, which has been removed. They're ignored, with a warning at startup; delete them. Journaling is configured per agent, under [`agents`](#journaling). See [Journaling and memory](/features/journaling-and-memory).
 
 ## Environment variables
 

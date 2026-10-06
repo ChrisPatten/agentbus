@@ -6,7 +6,6 @@
  *   2. Processes sessions closed mid-conversation by Stage 80 (ended_at set,
  *      status still 'active') — fires the on_session_close hook for those
  *      that meet the min-messages threshold.
- *   3. Hard-deletes memories expired more than 30 days ago.
  *
  * Every close is reported to the journaling engine (`onSessionClosed`, the
  * `close` trigger) and the session moves to status `closed`. E66 retired the
@@ -20,9 +19,6 @@ import { exec, type ExecOptionsWithStringEncoding } from 'node:child_process';
 import type Database from 'better-sqlite3';
 import type { AppConfig } from '../config/schema.js';
 import type { SessionRow } from './types.js';
-
-/** Days after expiry before a memory is hard-deleted. */
-const HARD_DELETE_AFTER_DAYS = 30;
 
 export class SessionTracker {
   private db: Database.Database;
@@ -77,12 +73,6 @@ export class SessionTracker {
       this.processMidFlightClosedSessions();
     } catch (err) {
       console.error('[session-tracker] Error processing mid-flight closed sessions:', err);
-    }
-
-    try {
-      this.sweepExpiredMemories();
-    } catch (err) {
-      console.error('[session-tracker] Error sweeping expired memories:', err);
     }
   }
 
@@ -210,23 +200,5 @@ export class SessionTracker {
         if (stdout.trim()) console.log('[session-tracker] hook stdout:', stdout.trim());
       }
     });
-  }
-
-  /**
-   * Hard-delete legacy memories that expired more than HARD_DELETE_AFTER_DAYS
-   * ago (retention for the read-only `memories` table).
-   */
-  private sweepExpiredMemories(): void {
-    const result = this.db
-      .prepare(
-        `DELETE FROM memories
-         WHERE expires_at IS NOT NULL
-           AND datetime(expires_at, '+${HARD_DELETE_AFTER_DAYS} days') < datetime('now')`,
-      )
-      .run();
-
-    if (result.changes > 0) {
-      console.log(`[session-tracker] Swept ${result.changes} expired memory record(s)`);
-    }
   }
 }

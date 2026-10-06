@@ -154,6 +154,11 @@ function loadMigrations(): Migration[] {
       description: 'Email IMAP catch-up state',
       sql: readFileSync(join(migrationsDir, '030_email_imap_state.sql'), 'utf-8'),
     },
+    {
+      version: 31,
+      description: 'Drop the legacy structured memory store (memories, session_summaries)',
+      sql: readFileSync(join(migrationsDir, '031_drop_legacy_memory.sql'), 'utf-8'),
+    },
   ];
 }
 
@@ -219,11 +224,4 @@ export function runMigrations(db: Database.Database): void {
  */
 export function rebuildFts(db: Database.Database): void {
   db.exec(`INSERT INTO transcripts_fts (transcripts_fts) VALUES ('rebuild')`);
-  // Rebuild memories FTS if the table exists (post-migration 003)
-  const exists = db
-    .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='memories_fts'`)
-    .get();
-  if (exists) {
-    db.exec(`INSERT INTO memories_fts (memories_fts) VALUES ('rebuild')`);
-  }
 }

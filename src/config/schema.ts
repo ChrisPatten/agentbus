@@ -10,7 +10,7 @@
  *   adapters  — Per-adapter credentials and tuning
  *   contacts  — Known sender → contact mappings
  *   topics    — Recognised topic labels
- *   memory    — Session and transcript retention settings
+ *   memory    — Session tracking settings (idle close, close hooks)
  *   pipeline  — Inbound message processing rules
  */
 import { z } from 'zod';
@@ -511,14 +511,9 @@ const AdaptersConfigSchema = z.object({
 const MemoryConfigSchema = z.object({
   summarizer_interval_ms: z.number().int().positive().default(60000),
   session_idle_threshold_ms: z.number().int().positive().default(1800000),
-  context_window_hours: z.number().positive().default(48),
-  /**
-   * @deprecated E66 — the Anthropic-API summarizer was retired. Accepted and
-   * ignored (the loader logs a deprecation warning) so old configs still start.
-   */
-  claude_api_model: z.string().optional(),
-  /** @deprecated E66 — see `claude_api_model`. Accepted and ignored. */
-  summary_max_tokens: z.number().int().positive().optional(),
+  // Retired keys (context_window_hours, memory_inject_exclude, claude_api_model,
+  // summary_max_tokens, structured_extraction) are not in the schema: zod
+  // drops them, and the loader warns (RETIRED_MEMORY_KEYS in loader.ts).
   /**
    * Shell command(s) to run when a session is closed due to inactivity.
    * Executed via /bin/sh -c, so shell syntax is supported.
@@ -562,21 +557,6 @@ const MemoryConfigSchema = z.object({
   session_close_min_messages: z
     .union([z.number().int().min(0), z.record(z.string(), z.number().int().min(0))])
     .default(0),
-  /**
-   * Channels for which memory injection (Stage 85) is disabled.
-   * Useful for agents that manage their own memory (e.g. pokeclaude).
-   *
-   * Example:
-   *   memory_inject_exclude:
-   *     - telegram:pokeclaude
-   */
-  memory_inject_exclude: z.array(z.string()).default([]),
-  /**
-   * @deprecated E66 — the summarizer that wrote the `memories` and
-   * `session_summaries` tables was retired; the tables are read-only. Accepted
-   * and ignored (the loader logs a deprecation warning).
-   */
-  structured_extraction: z.boolean().optional(),
 });
 
 /**

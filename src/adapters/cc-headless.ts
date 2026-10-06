@@ -980,9 +980,7 @@ class HeadlessInstance {
     const session = getActiveSession(db, conversationId);
     const resumeId = session?.claude_session_id ?? null;
 
-    // Memory is injected via the system prompt (assembleMemoryContext), so suppress
-    // the Stage-85 <memory> block in the user message to avoid double injection.
-    const prompt = formatMessagesForSampling(envelopes, { includeMemoryContext: false });
+    const prompt = formatMessagesForSampling(envelopes);
 
     // E53: the scheduler stamps metadata.schedule_model on the fired envelope
     // when the schedule that triggered this batch has its own `model`. Only

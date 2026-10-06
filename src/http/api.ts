@@ -1391,14 +1391,12 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     let sql = `
       SELECT s.id, s.conversation_id, s.channel, s.contact_id,
              s.started_at, s.last_activity, s.ended_at, s.message_count,
-             ss.summary, ss.model, ss.token_count, ss.created_at AS summary_created_at,
              cr.topic,
              CASE WHEN s.channel = 'app' AND cr.topic = 'general' THEN 'Main'
                   WHEN s.channel = 'app' THEN json_extract(
                     (SELECT t.metadata FROM threads t WHERE t.channel = 'app' AND t.topic = cr.topic), '$.title')
                   ELSE NULL END AS title
       FROM sessions s
-      LEFT JOIN session_summaries ss ON ss.session_id = s.id
       LEFT JOIN conversation_registry cr ON cr.id = s.conversation_id
       WHERE 1=1
     `;
@@ -1429,20 +1427,11 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
         last_activity: string;
         ended_at: string | null;
         message_count: number;
-        summary: string | null;
-        model: string | null;
-        token_count: number | null;
-        summary_created_at: string | null;
         topic: string | null;
         title: string | null;
       }>;
 
-      const sessions = rows.map(({ summary, model, token_count, summary_created_at, ...s }) => ({
-        ...s,
-        summary: summary
-          ? { summary, model, token_count, created_at: summary_created_at }
-          : null,
-      }));
+      const sessions = rows;
 
       return { ok: true, sessions, count: sessions.length };
     } catch (err) {
@@ -1458,14 +1447,12 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       .prepare(
         `SELECT s.id, s.conversation_id, s.channel, s.contact_id,
                 s.started_at, s.last_activity, s.ended_at, s.message_count,
-                ss.summary, ss.model, ss.token_count, ss.created_at AS summary_created_at,
                 cr.topic,
                 CASE WHEN s.channel = 'app' AND cr.topic = 'general' THEN 'Main'
                      WHEN s.channel = 'app' THEN json_extract(
                        (SELECT t.metadata FROM threads t WHERE t.channel = 'app' AND t.topic = cr.topic), '$.title')
                      ELSE NULL END AS title
          FROM sessions s
-         LEFT JOIN session_summaries ss ON ss.session_id = s.id
          LEFT JOIN conversation_registry cr ON cr.id = s.conversation_id
          WHERE s.id = ?`
       )
@@ -1479,10 +1466,6 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
           last_activity: string;
           ended_at: string | null;
           message_count: number;
-          summary: string | null;
-          model: string | null;
-          token_count: number | null;
-          summary_created_at: string | null;
           topic: string | null;
           title: string | null;
         }
@@ -1492,15 +1475,7 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       return reply.status(404).send({ ok: false, error: 'Session not found' });
     }
 
-    const { summary, model, token_count, summary_created_at, ...sessionFields } = row;
-    const session = {
-      ...sessionFields,
-      summary: summary
-        ? { summary, model, token_count, created_at: summary_created_at }
-        : null,
-    };
-
-    return { ok: true, session };
+    return { ok: true, session: row };
   });
 
   // GET /api/v1/sessions/:id/transcript — full ordered message history for a
@@ -1654,73 +1629,9 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     }
   );
 
-  // ── Memory endpoints (E8) ────────────────────────────────────────────────────
-
-  // GET /api/v1/memories/recall — FTS5 search over memories for a contact
-  server.get<{ Querystring: { q?: string; contact_id?: string; category?: string; limit?: string } }>(
-    '/api/v1/memories/recall',
-    async (req, reply) => {
-      const { q, contact_id, category } = req.query;
-      const limit = Math.min(Math.max(1, parseInt(req.query.limit ?? '10', 10)), 50);
-
-      if (!q || q.trim().length === 0) {
-        return reply.status(400).send({ ok: false, error: 'Query parameter "q" is required' });
-      }
-
-      // Graceful degradation if memories table doesn't exist
-      const tableExists = db
-        .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='memories'`)
-        .get();
-      if (!tableExists) {
-        return { ok: true, available: false, reason: 'Memory system not yet initialized', memories: [] };
-      }
-
-      const now = new Date().toISOString();
-      try {
-        let sql = `
-          SELECT m.id, m.session_id, m.contact_id, m.category, m.content,
-                 m.confidence, m.source, m.created_at, m.expires_at
-          FROM memories m
-          JOIN memories_fts fts ON fts.rowid = m.rowid
-          WHERE fts.content MATCH ?
-            AND m.superseded_by IS NULL
-            AND (m.expires_at IS NULL OR m.expires_at > ?)
-        `;
-        const params: unknown[] = [q, now];
-
-        if (contact_id) {
-          sql += ' AND m.contact_id = ?';
-          params.push(contact_id);
-        }
-        if (category) {
-          sql += ' AND m.category = ?';
-          params.push(category);
-        }
-        sql += ' ORDER BY m.confidence DESC, m.created_at DESC LIMIT ?';
-        params.push(limit);
-
-        const memories = db.prepare(sql).all(...params);
-        return { ok: true, memories, count: memories.length };
-      } catch (err) {
-        return reply.status(500).send({ ok: false, error: String(err) });
-      }
-    }
-  );
-
-  // POST /api/v1/memories — formerly logged a memory (log_memory).
-  // E66 — the legacy structured memory store is read-only: the summarizer
-  // that filled it is gone and agents keep memory in their own files.
-  server.post<{ Body: unknown }>('/api/v1/memories', async (_req, reply) => {
-    return reply.status(410).send({
-      ok: false,
-      error: 'The legacy memory store is read-only. Write durable facts to your memory files (MEMORY.md, daily journal) instead.',
-    });
-  });
-
   // ── Knowledge store endpoints (agent-managed structured knowledge, Phase 1) ──
   //
-  // Unlike the /api/v1/memories endpoints above, this table is new and
-  // always-on (no config flag gates it, no `available: false` degradation —
+  // Always-on (no config flag gates it, no `available: false` degradation —
   // ordinary 400/404/500 is correct here). See src/knowledge/store.ts and
   // docs/KNOWLEDGE_STORE.md.
 

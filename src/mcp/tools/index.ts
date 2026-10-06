@@ -5,7 +5,7 @@
  *   - reply, get_adapter_status (E2 core tools)
  *   - list_channels (S7.1)
  *   - send_message (S7.2)
- *   - recall_memory, log_memory, search_transcripts (S7.3)
+ *   - search_transcripts (S7.3; recall_memory/log_memory removed after E66)
  *   - write_knowledge, get_knowledge, forget_knowledge, search_knowledge (agent-managed knowledge store, Phase 1)
  *   - get_session, list_sessions (S7.4)
  *   - react_to_message (S7.5)
@@ -21,7 +21,7 @@ import { toolError, toolSuccess } from './helpers.js';
 import type { AppConfig } from '../../config/schema.js';
 import { registerChannelTools } from './channels.js';
 import { registerMessagingTools, registerEmailTool, buildEmailToolConfig } from './messaging.js';
-import { registerMemoryTools } from './memory.js';
+import { registerTranscriptTools } from './transcripts.js';
 import { registerKnowledgeTools } from './knowledge.js';
 import { registerSessionTools } from './sessions.js';
 import { registerReactionTools } from './reactions.js';
@@ -68,7 +68,7 @@ export function registerAllTools(
   // E7 tools
   registerChannelTools(server, busBaseUrl);
   registerMessagingTools(server, busBaseUrl, agentId);
-  registerMemoryTools(server, busBaseUrl);
+  registerTranscriptTools(server, busBaseUrl);
   registerKnowledgeTools(server, busBaseUrl);
   registerSessionTools(server, busBaseUrl);
   registerReactionTools(server, busBaseUrl);
@@ -124,7 +124,7 @@ export function registerHeadlessTools(
   registerReplyTool(server, busBaseUrl);
   registerChannelTools(server, busBaseUrl);
   registerMessagingTools(server, busBaseUrl, agentId);
-  registerMemoryTools(server, busBaseUrl);
+  registerTranscriptTools(server, busBaseUrl);
   registerKnowledgeTools(server, busBaseUrl);
   registerSessionTools(server, busBaseUrl);
   registerReactionTools(server, busBaseUrl);

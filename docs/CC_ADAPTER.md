@@ -61,7 +61,6 @@ Here is the document
 - A quoted reply renders as a `[Replying to <name>: "<text>"]` line before the body.
 - Attachments append `[Image: <path>]` and `[File: <path> — <name>]` lines; inline email images append a `fetch_attachment` hint. See [ATTACHMENTS.md](ATTACHMENTS.md).
 - One-shot context from `create_telegram_topic` is prepended to a topic's first message.
-- In polling mode only, the legacy `<memory>` block from the memory-inject stage is prepended when a new session starts and summaries exist.
 
 The agent replies with `reply(message_id="<id>", body="...")`. The tool resolves channel and recipient from the original message.
 

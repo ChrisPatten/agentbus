@@ -154,9 +154,10 @@ Code: `src/journaling/journalers/{cc-headless,script,system-message}.ts`, `proce
 
 - ~~**Eviction wait.**~~ Resolved 2026-10-06: eviction doesn't wait (post-E66 decision 1).
 - **Health top-level status.** `journaling.status` is separate; should `critical` journaling make `/api/v1/health` report `degraded`?
-- **`log_memory`/`POST /api/v1/memories`** now refuse writes (the "read-only" reading of the brief). If an MCP-adapter deployment still relies on them, they can be restored without the summarizer.
+- ~~**`log_memory`/`POST /api/v1/memories`**~~ Resolved 2026-10-06: the whole legacy store was removed (post-E66 decision 2).
 
 
 ### Post-E66 changes (2026-10-06, operator decisions; see decisions.md "Post-E66 decisions")
 
 - **1. Eviction doesn't wait for the journal.** `PoolManager.resolveRoute()` calls the release hook for `evict` without awaiting it and releases + relaunches the pane at once; `evictJournalGraceMs` and the eviction parking path are gone. The bus's hook returns right after firing the `evict` trigger, so the journal runs in the background from the transcript on disk (`cc-headless --fork-session`, `script`). Hard-idle `release` keeps the bounded wait and the keep-the-pane checks.
+- **2. Legacy structured memory store removed.** `recall_memory`/`log_memory` (`src/mcp/tools/memory.ts` → `transcripts.ts`, which keeps `search_transcripts`), `GET /api/v1/memories/recall`, `POST /api/v1/memories`, stage 85 `memory-inject` and `metadata.memory_context` rendering in `formatMessagesForSampling` (the `includeMemoryContext` option is gone), the session tracker's expired-memory sweep, the `memories` FTS rebuild, the `MemoryRow`/`SummaryResult` types and the `summary` object on the sessions API and session tools. Migration **031** drops `memories`, `memories_fts` (and its triggers) and `session_summaries`. `memory.context_window_hours` and `memory.memory_inject_exclude` left the schema and joined `RETIRED_MEMORY_KEYS` (warn and ignore), like the summarizer keys, which also left the schema (zod drops unknown keys).

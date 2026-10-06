@@ -141,4 +141,4 @@ When journaling keeps failing, the bus tells your agent's [owners](/features/own
 
 ## The old memory store
 
-Earlier versions could extract facts into a database with the Anthropic API (`memory.structured_extraction`). That summarizer has been removed: agents keep their memory in their own files, and journaling keeps those files up to date. Facts already in the old store can still be read with `recall_memory`, but nothing new is written to it. The old `memory.claude_api_model`, `memory.summary_max_tokens` and `memory.structured_extraction` settings are ignored, with a warning when the bus starts.
+Earlier versions kept a separate memory database, filled by an Anthropic API summarizer. It has been removed, along with the `recall_memory` and `log_memory` tools and its API: agents keep their memory in their own files, and journaling keeps those files up to date. Upgrading deletes the old database tables. The old `memory.claude_api_model`, `memory.summary_max_tokens`, `memory.structured_extraction`, `memory.context_window_hours` and `memory.memory_inject_exclude` settings are ignored, with a warning when the bus starts.

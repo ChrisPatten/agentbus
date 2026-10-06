@@ -31,7 +31,6 @@ const stubConfig = {
   memory: {
     summarizer_interval_ms: 60000,
     session_idle_threshold_ms: 1800000,
-    context_window_hours: 48,
     claude_api_model: 'claude-opus-4-6',
   },
   pipeline: { dedup_window_ms: 30000, drop_unrouted: false, topic_rules: [], priority_weights: { base_score: 0, topic_bonus: 40, vip_sender_bonus: 20, urgency_keyword_bonus: 15 }, urgency_keywords: [], vip_contacts: [], routes: [] },
@@ -991,10 +990,10 @@ describe('GET /api/v1/sessions and GET /api/v1/sessions/:id', () => {
     const id = insertSession();
     const res = await server.inject({ method: 'GET', url: `/api/v1/sessions/${id}` });
     expect(res.statusCode).toBe(200);
-    const body = JSON.parse(res.body) as { ok: boolean; session: { id: string; summary: null } };
+    const body = JSON.parse(res.body) as { ok: boolean; session: { id: string } };
     expect(body.ok).toBe(true);
     expect(body.session.id).toBe(id);
-    expect(body.session.summary).toBeNull();
+    expect(body.session).not.toHaveProperty('summary');
   });
 
   it('exposes the session topic via conversation_registry on the default topic (E32)', async () => {
@@ -1310,89 +1309,19 @@ describe('POST /api/v1/messages/:id/react', () => {
   });
 });
 
-// ── Memory API (E8) ───────────────────────────────────────────────────────────
+// ── Legacy memory API (removed after E66) ─────────────────────────────────────
 
-describe('POST /api/v1/memories (read-only since E66)', () => {
-  it('returns 410: the legacy memory store no longer takes writes', async () => {
+describe('/api/v1/memories (removed)', () => {
+  it('is gone', async () => {
     const { server } = await makeServer();
     try {
-      const res = await server.inject({
-        method: 'POST',
-        url: '/api/v1/memories',
-        payload: { contact_id: 'alice', content: 'Alice prefers morning meetings', category: 'preference' },
-      });
-      expect(res.statusCode).toBe(410);
-      expect(JSON.parse(res.body)).toMatchObject({ ok: false, error: expect.stringContaining('read-only') });
+      expect((await server.inject({ method: 'POST', url: '/api/v1/memories', payload: {} })).statusCode).toBe(404);
+      expect((await server.inject({ method: 'GET', url: '/api/v1/memories/recall?q=x' })).statusCode).toBe(404);
     } finally {
       await server.close();
     }
   });
 });
-
-/** Insert a legacy memory row directly (the store is read-only over HTTP). */
-function seedMemory(db: Database.Database, m: { id?: string; contact: string; content: string; category: string; supersededBy?: string }): string {
-  const id = m.id ?? randomUUID();
-  db.prepare(`INSERT INTO memories (id, session_id, contact_id, category, content, confidence, source, created_at, expires_at, superseded_by)
-    VALUES (?, NULL, ?, ?, ?, 0.9, 'manual', ?, NULL, ?)`).run(id, m.contact, m.category, m.content, new Date().toISOString(), m.supersededBy ?? null);
-  return id;
-}
-
-describe('GET /api/v1/memories/recall', () => {
-  let server: FastifyInstance;
-  let db: Database.Database;
-
-  beforeEach(async () => {
-    ({ server, db } = await makeServer());
-    seedMemory(db, { contact: 'alice', content: 'Alice enjoys hiking on weekends', category: 'preference' });
-    seedMemory(db, { contact: 'bob', content: 'Bob is a software engineer', category: 'work' });
-  });
-
-  afterEach(async () => {
-    await server.close();
-  });
-
-  it('returns 400 when q is missing', async () => {
-    const res = await server.inject({ method: 'GET', url: '/api/v1/memories/recall' });
-    expect(res.statusCode).toBe(400);
-  });
-
-  it('returns memories matching the query', async () => {
-    const res = await server.inject({ method: 'GET', url: '/api/v1/memories/recall?q=hiking' });
-    expect(res.statusCode).toBe(200);
-    const body = JSON.parse(res.body) as { ok: boolean; memories: { content: string }[]; count: number };
-    expect(body.ok).toBe(true);
-    expect(body.count).toBeGreaterThan(0);
-    expect(body.memories[0]!.content).toContain('hiking');
-  });
-
-  it('filters results by contact_id', async () => {
-    const res = await server.inject({ method: 'GET', url: '/api/v1/memories/recall?q=engineer&contact_id=bob' });
-    const body = JSON.parse(res.body) as { memories: { contact_id: string }[] };
-    expect(body.memories.every((m) => m.contact_id === 'bob')).toBe(true);
-  });
-
-  it('filters results by category', async () => {
-    const res = await server.inject({ method: 'GET', url: '/api/v1/memories/recall?q=hiking&category=preference' });
-    const body = JSON.parse(res.body) as { memories: { category: string }[] };
-    expect(body.memories.every((m) => m.category === 'preference')).toBe(true);
-  });
-
-  it('does not return superseded memories', async () => {
-    const newId = seedMemory(db, { contact: 'carol', content: 'Carol now drives an EV', category: 'fact' });
-    const oldId = seedMemory(db, { contact: 'carol', content: 'Carol drives a sedan', category: 'fact', supersededBy: newId });
-
-    const res = await server.inject({ method: 'GET', url: '/api/v1/memories/recall?q=sedan' });
-    const body = JSON.parse(res.body) as { memories: { id: string }[] };
-    expect(body.memories.find((m) => m.id === oldId)).toBeUndefined();
-  });
-
-  it('clamps limit to a maximum of 50', async () => {
-    const res = await server.inject({ method: 'GET', url: '/api/v1/memories/recall?q=hiking&limit=999' });
-    expect(res.statusCode).toBe(200);
-  });
-});
-
-// ── Schedule endpoints (E18) ──────────────────────────────────────────────────
 
 describe('Schedule CRUD endpoints', () => {
   let server: FastifyInstance;
