@@ -25,6 +25,7 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 - **`/stop` is scoped to its conversation.** In Telegram, stopping one topic no longer interrupts another topic for the same contact. A waiting turn can also be cancelled. Journaling turns share an agent-wide lane, and turns in one conversation never overlap after early delivery.
 
 ### Fixed
+- **cc-pool could type its launch command into a still-running Claude session.** After an `on_evict: clear` release, the old `claude` keeps running in the pane, and reusing the pane sent the launch line to that session as a prompt. The launcher now stops whatever isn't a shell in the pane and recreates the window before launching.
 - **Email that arrived while the bus was down or reconnecting was never processed.** The email adapter now saves the last IMAP UID it handled and, on every connect and reconnect, processes newer mail once. A mailbox connected for the first time (including on upgrade) still starts after its existing mail.
 - **cc-pool passed `--dangerously-load-development-channels` twice.** `config.yaml.example` no longer adds it to the pool's `launch_args`, and the launcher drops it from `launch_args` if a config still has it, since every pane launch already includes it.
 - **cc-pool `poll_interval_ms` had no effect.** Each pane's MCP server now polls at the pool's `poll_interval_ms` (passed as `AGENTBUS_POLL_INTERVAL_MS`) instead of the `claude-code` adapter's setting.

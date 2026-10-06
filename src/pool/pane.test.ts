@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import type { TmuxController } from './tmux.js';
 import type { CcPoolInstanceConfig } from '../config/schema.js';
 import { writePaneMcpConfig, cleanupPaneMcpConfig } from './mcp-config.js';
-import { PaneLifecycle, PaneLaunchError, LAUNCH_READY_TIMEOUT_MS, INHERITED_CLAUDE_SESSION_VARS, dedupeDevChannelsArgs, type LaunchParams } from './pane.js';
+import { PaneLifecycle, PaneLaunchError, LAUNCH_READY_TIMEOUT_MS, INHERITED_CLAUDE_SESSION_VARS, dedupeDevChannelsArgs, isShellCommand, type LaunchParams } from './pane.js';
 
 // writePaneMcpConfig/cleanupPaneMcpConfig are mocked wholesale (rather than
 // exercising the real fs-touching module) — pane.ts's own responsibility is
@@ -634,6 +634,58 @@ describe('PaneLifecycle.release', () => {
     const sendKeysOrder = tmux.sendKeys.mock.invocationCallOrder[0]!;
     const killOrder = tmux.killWindow.mock.invocationCallOrder[0]!;
     expect(sendKeysOrder).toBeLessThan(killOrder);
+  });
+});
+
+// ── reuse after on_evict: clear ──────────────────────────────────────────────
+
+describe('PaneLifecycle.launch — pane still running claude (after on_evict: clear)', () => {
+  it('stops the old claude and recreates the window instead of typing the launch line into it', async () => {
+    let alive = true;
+    const tmux = makeTmux({
+      paneAlive: vi.fn(async () => alive),
+      paneCommand: vi.fn(async () => 'claude'),
+      killWindow: vi.fn(async () => { alive = false; }),
+      capturePane: makeNoAckCapture(),
+    });
+    const pl = new PaneLifecycle({ tmux, busBaseUrl: 'http://x', cfg: makeCfg(), scratchDir, fetchFn: makeReadyFetch() });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await pl.release('peggy-pool:1', 'clear');
+    const launchPromise = pl.launch(makeLaunchParams());
+    await vi.advanceTimersByTimeAsync(1000);
+    await launchPromise;
+
+    expect(tmux.sendKeys).toHaveBeenCalledWith('peggy-pool:1', 'C-c');
+    expect(tmux.killWindow).toHaveBeenCalledWith('peggy-pool:1');
+    expect(tmux.createWindow).toHaveBeenCalledTimes(1);
+    const launchLineCall = tmux.sendCommand.mock.calls.findIndex((c) => String(c[1]).includes(q('--session-id')));
+    expect(tmux.killWindow.mock.invocationCallOrder[0]!).toBeLessThan(
+      tmux.sendCommand.mock.invocationCallOrder[launchLineCall]!,
+    );
+  });
+
+  it('launches straight into a live pane that is at a shell prompt', async () => {
+    const tmux = makeTmux({
+      paneAlive: vi.fn(async () => true),
+      paneCommand: vi.fn(async () => 'zsh'),
+      capturePane: makeNoAckCapture(),
+    });
+    const pl = new PaneLifecycle({ tmux, busBaseUrl: 'http://x', cfg: makeCfg(), scratchDir, fetchFn: makeReadyFetch() });
+
+    const launchPromise = pl.launch(makeLaunchParams());
+    await vi.advanceTimersByTimeAsync(600);
+    await launchPromise;
+
+    expect(tmux.killWindow).not.toHaveBeenCalled();
+    expect(tmux.createWindow).not.toHaveBeenCalled();
+  });
+
+  it('isShellCommand recognises shells, including login-shell names', () => {
+    expect(isShellCommand('zsh')).toBe(true);
+    expect(isShellCommand('-bash')).toBe(true);
+    expect(isShellCommand('claude')).toBe(false);
+    expect(isShellCommand('node')).toBe(false);
   });
 });
 

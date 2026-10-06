@@ -74,7 +74,7 @@ Routes reach the pool with `adapterId: cc-pool` and `recipientId: agent:<agent_i
 | `lease.idle_evict_ms` | `1800000` (30 min) | How long a conversation must be idle before another conversation can take its pane. |
 | `lease.hard_idle_ms` | `21600000` (6 h) | How long a conversation can be idle before its pane is released anyway. |
 | `lease.park_timeout_ms` | `300000` (5 min) | How long a message waits for a pane before giving up. |
-| `on_evict` | `clear` | What happens to a released pane: `clear` sends `/clear` to the session; `kill` closes the window. |
+| `on_evict` | `clear` | What happens to a released pane: `clear` sends `/clear` to the session; `kill` closes the window. Either way, when the pane is next given to a conversation, the bus starts a fresh Claude session in it for that conversation. |
 | `launch_ack_delay_ms` | `5000` | How long to watch for Claude Code's "Loading development channels" warning at start-up, which the bus confirms for you. |
 | `launch_ack_max_attempts` | `3` | How many times to try confirming that warning. |
 | `launch_ack_pattern` | `loading development channels` | The text that identifies the warning, in case Claude Code rewords it. |

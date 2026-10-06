@@ -194,6 +194,14 @@ function shellQuoteArg(s: string): string {
   return `'${s.split("'").join("'\\''")}'`;
 }
 
+/** Foreground commands that mean "the pane is at a shell prompt", per tmux's `pane_current_command`. */
+const SHELL_COMMANDS = new Set(['bash', 'zsh', 'sh', 'fish', 'dash', 'ksh', 'tcsh', 'csh', 'nu']);
+
+export function isShellCommand(command: string): boolean {
+  const name = command.trim().replace(/^-/, '').split('/').pop() ?? '';
+  return SHELL_COMMANDS.has(name);
+}
+
 const DEV_CHANNELS_FLAG = '--dangerously-load-development-channels';
 const AGENTBUS_CHANNEL = 'server:agentbus';
 
@@ -316,9 +324,33 @@ export class PaneLifecycle {
 
   // ── Launch steps ──────────────────────────────────────────────────────────
 
+  /**
+   * Make sure the target window exists AND is sitting at a shell prompt, so
+   * the launch line about to be typed into it reaches the shell.
+   *
+   * A pane released with `on_evict: 'clear'` (eviction or the hard-idle
+   * sweep) still has its old `claude` running in the foreground — `/clear`
+   * only resets that session's context. Typing the launch line into it would
+   * send it to the old session as a prompt, and since that session's cc.ts
+   * still polls under the same pane agent id, the readiness poll would pass
+   * and the new conversation would be served by the wrong session. So when
+   * the foreground process isn't a shell, stop it the same way a `kill`
+   * release does and recreate the window. (An unknown foreground command,
+   * `null`, is left alone.)
+   */
   private async ensureWindowExists(params: LaunchParams): Promise<void> {
     const alreadyAlive = await this.tmux.paneAlive(params.paneId);
-    if (alreadyAlive) return;
+    if (alreadyAlive) {
+      const foreground = await this.tmux.paneCommand(params.paneId);
+      if (foreground === null || isShellCommand(foreground)) return;
+      console.warn(
+        `[pool] Pane ${params.paneId} is still running "${foreground}" — stopping it before launching ` +
+          `session ${params.sessionId}`,
+      );
+      await this.tmux.sendKeys(params.paneId, 'C-c');
+      await this.sleepFn(RELEASE_KILL_PAUSE_MS);
+      await this.tmux.killWindow(params.paneId);
+    }
 
     const [session, windowName] = splitPaneTarget(params.paneId);
     const env = this.buildWindowEnv(params.ensureWindow.env);
