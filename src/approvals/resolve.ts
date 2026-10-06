@@ -18,7 +18,16 @@ import type { ApprovalDecision, ApprovalRequest } from './types.js';
 export interface ResolveApprovalDeps {
   store: ApprovalStore;
   poolManagers: Map<string, PoolManager>;
+  /**
+   * E68 S68.2 — called once a request is answered (approved or denied by
+   * this call). The bus records a `denied-approval` feedback event for
+   * denials. Errors are logged, never thrown.
+   */
+  onResolved?: (request: ApprovalRequest, status: 'approved' | 'denied') => void;
 }
+
+/** The optional parts of `ResolveApprovalDeps`, shared by every resolution path (Telegram taps, the HTTP route). */
+export type ApprovalResolveHooks = Omit<ResolveApprovalDeps, 'store' | 'poolManagers'>;
 
 export type ResolveApprovalOutcome =
   | { outcome: 'not_found' }
@@ -63,7 +72,15 @@ export async function resolveApproval(
     const status = decision === 'approve' ? 'approved' : 'denied';
     deps.store.resolve(id, status, resolvedBy, now, { keys_sent: delivery.key });
     console.log(`[approvals] ${id} ${status} by ${resolvedBy} — sent "${delivery.key}" (${row.summary})`);
-    return { outcome: status, request: deps.store.getById(id)! };
+    const resolved = deps.store.getById(id)!;
+    if (deps.onResolved) {
+      try {
+        deps.onResolved(resolved, status);
+      } catch (err) {
+        console.error(`[approvals] onResolved for ${id} failed: ${String(err)}`);
+      }
+    }
+    return { outcome: status, request: resolved };
   } finally {
     inFlight.delete(id);
   }

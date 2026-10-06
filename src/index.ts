@@ -57,7 +57,7 @@ import { SessionTracker } from './memory/session-tracker.js';
 import { Scheduler } from './scheduler/scheduler.js';
 import { AttachmentSweeper } from './media/attachment-sweeper.js';
 import { ApprovalStore } from './approvals/store.js';
-import { resolveApproval } from './approvals/resolve.js';
+import { resolveApproval, type ApprovalResolveHooks } from './approvals/resolve.js';
 import { sweepApprovals } from './approvals/sweep.js';
 import type { ApprovalDecision } from './approvals/types.js';
 import { OwnerDirectory } from './core/owners.js';
@@ -77,6 +77,8 @@ import { createJournalHoldNotice } from './pipeline/stages/journal-hold.js';
 import { HarnessEvents, createHookHealthTicker } from './journaling/events.js';
 import { RecentMemory } from './memory/recent-service.js';
 import { ConsolidationScheduler } from './journaling/consolidation.js';
+import { recordApprovalOutcome, recordDeliveryFailure, recordToolError, type FeedbackProducerDeps } from './journaling/feedback-producers.js';
+import { createFeedbackCommand } from './commands/feedback.js';
 import { RecentFreshness } from './memory/recent-freshness.js';
 import { checkMemorySetup } from './memory/setup-check.js';
 
@@ -171,6 +173,15 @@ journalEngine.addTicker(() => recentMemory.tick());
 // E68 S68.1 — nightly (per-agent cron) consolidation, on the engine tick.
 const consolidationScheduler = new ConsolidationScheduler({ engine: journalEngine });
 journalEngine.addTicker(() => { consolidationScheduler.tick(); });
+// E68 S68.2 — feedback events: denied approvals, /feedback, tool errors.
+const feedbackProducers: FeedbackProducerDeps = {
+  db, feedback: journalEngine.feedback, logicalAgentId: (id) => ownerDirectory.logicalAgentId(id),
+};
+const safeFeedback = (fn: () => void) => { try { fn(); } catch (err) { console.error(`[feedback] failed to record: ${String(err)}`); } };
+// Shared by every approval resolution path (Telegram taps, POST /api/v1/approvals/:id/resolve).
+const approvalHooks: ApprovalResolveHooks = {
+  onResolved: (request, status) => safeFeedback(() => recordApprovalOutcome(feedbackProducers, request, status)),
+};
 // E67 S67.5 — memory setup checks: /journal shows them; startup logs them.
 const memorySetup = (agentId: string) => checkMemorySetup(recentMemory.layoutFor(agentId), runtimeResolver.resolve(recentMemory.layoutFor(agentId).agentId));
 // Harness hook events (POST /api/v1/journal/events) and hook health.
@@ -223,6 +234,7 @@ commandRegistry.register(createCostCommand({ db, headlessControl }));
 commandRegistry.register(createPoolCommand({ poolManagers }));
 commandRegistry.register(createPaneCommand({ poolManagers }));
 commandRegistry.register(createRcCommand({ poolManagers }));
+commandRegistry.register(createFeedbackCommand({ db, engine: journalEngine }));
 commandRegistry.register(createJournalCommand({
   db, engine: journalEngine, resolver: runtimeResolver, advisories, gate: journalGate, memorySetup, consolidation: consolidationScheduler,
 }));
@@ -276,7 +288,7 @@ const memoryRecent = new RecentFreshness({
   },
   knownAgent: (agentId) => runtimeResolver.resolve(agentId.startsWith('agent:') ? agentId : `agent:${agentId}`) !== undefined,
 });
-const httpServer = await createHttpServer({ queue, registry, config, pipeline, db, commandRegistry, pauseSet, siri, app, poolManagers, getHeadlessSnapshots, runtimeResolver, advisories, journalEvents, journalGate, journalStatus, memoryRecent });
+const httpServer = await createHttpServer({ queue, registry, config, pipeline, db, commandRegistry, pauseSet, siri, app, poolManagers, getHeadlessSnapshots, runtimeResolver, advisories, journalEvents, journalGate, journalStatus, memoryRecent, approvalHooks });
 
 // E66 — busy notice for a held message: the channel's native queued/status
 // signal where it has one, a short text elsewhere, nothing on email.
@@ -334,7 +346,7 @@ const adapterDeps = { config, queue, pipeline, db, registry, commandRegistry, pa
 // expiry sweep below.
 const approvalStore = new ApprovalStore(db);
 const resolveApprovalFn = (id: string, decision: ApprovalDecision, resolvedBy: string, onlyContactId?: string) =>
-  resolveApproval({ store: approvalStore, poolManagers }, id, decision, resolvedBy, undefined, onlyContactId);
+  resolveApproval({ store: approvalStore, poolManagers, ...approvalHooks }, id, decision, resolvedBy, undefined, onlyContactId);
 
 for (const inst of getTelegramInstances(config)) {
   const telegram = new TelegramAdapter({
@@ -359,7 +371,10 @@ for (const inst of getEmailInstances(config)) {
 // Dequeues contact-bound messages and dispatches to platform adapters.
 // Agent-bound messages (agent:*) stay in the queue for CC adapter to poll.
 
-const deliveryWorker = new DeliveryWorker({ queue, registry, db });
+const deliveryWorker = new DeliveryWorker({
+  queue, registry, db,
+  onFailed: (envelope, reason) => safeFeedback(() => recordDeliveryFailure(feedbackProducers, envelope, reason)),
+});
 
 // E65 — proactive advisory delivery: system-only turns through the pipeline,
 // or direct messages to owners through the delivery worker above.
@@ -464,7 +479,9 @@ deliveryWorker.start();
 // their journaling runners are wired in before the tracker's first tick
 // (E20). Each instance registers its own runner, keyed by agent_id, so a
 // multi-agent deployment (E23) journals each session with its owning agent.
-for (const [agentId, headless] of startHeadless(db)) {
+for (const [agentId, headless] of startHeadless(db, {
+  onToolError: (event) => safeFeedback(() => recordToolError(feedbackProducers, event)),
+})) {
   // E66 — the cc-headless journaler runs this instance's journaling turns
   // through its handle (serialized with live turns on the same session).
   headlessJournaler.addHandle(agentId, headless);

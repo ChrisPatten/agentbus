@@ -900,6 +900,42 @@ describe('turn cost persistence (E39)', () => {
     expect(JSON.stringify(outbound[0]![1])).toContain('I could not use the reply tool.');
   });
 
+  it('reports failed tool calls of a normal turn through onToolError (E68 S68.2)', async () => {
+    setupOneMessagePoll();
+    const child = makeFakeChild();
+    spawnMock.mockImplementation(() => child as unknown as import('node:child_process').ChildProcess);
+    const onToolError = vi.fn();
+
+    const { startHeadless } = await import('./cc-headless.js');
+    startHeadless(realDb as unknown as Database.Database, { onToolError });
+    await new Promise((r) => setTimeout(r, 30));
+
+    writeEvent(child.stdout, {
+      type: 'assistant',
+      message: { content: [
+        { type: 'tool_use', id: 'tool-1', name: 'Bash', input: { command: 'ls /nope' } },
+        { type: 'tool_use', id: 'tool-2', name: 'mcp__agentbus__reply', input: {} },
+        { type: 'tool_use', id: 'tool-3', name: 'Read', input: {} },
+      ] },
+    });
+    writeEvent(child.stdout, {
+      type: 'user',
+      message: { content: [
+        { type: 'tool_result', tool_use_id: 'tool-1', is_error: true, content: [{ type: 'text', text: 'ls: /nope: No such file' }] },
+        { type: 'tool_result', tool_use_id: 'tool-2', is_error: true, content: 'channel rejected the reply' },
+        { type: 'tool_result', tool_use_id: 'tool-3', content: 'ok' },
+      ] },
+    });
+    writeEvent(child.stdout, { type: 'result', result: 'done' });
+    child.emit('close', 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    expect(onToolError).toHaveBeenCalledTimes(2);
+    expect(onToolError.mock.calls[0]![0]).toMatchObject({ agentId: 'agent:peggy', toolName: 'Bash', error: 'ls: /nope: No such file', delivery: false });
+    expect(onToolError.mock.calls[1]![0]).toMatchObject({ toolName: 'mcp__agentbus__reply', error: 'channel rejected the reply', delivery: true });
+    expect(typeof onToolError.mock.calls[0]![0].conversationId).toBe('string');
+  });
+
   it('persists cost/usage/turn count from a successful result event (S39.2/S39.3)', async () => {
     setupOneMessagePoll();
     const child = makeFakeChild();

@@ -5,6 +5,7 @@
 import type { RequiredCapability, RuntimeKind } from '../core/runtime-capabilities.js';
 import type { JournalerId } from '../config/schema.js';
 import type { JournalingSettings } from './config.js';
+import type { FeedbackItem, FeedbackSummary } from './feedback.js';
 
 export type { JournalerId };
 
@@ -101,6 +102,8 @@ export interface ConsolidationContext {
   /** MEMORY.md budget: native auto memory loads the first 200 lines / 25 KB. */
   maxMemoryLines: number;
   maxMemoryBytes: number;
+  /** E68 S68.2 — feedback events across conversations since the last pass. */
+  feedback?: FeedbackSummary;
 }
 
 /**
@@ -151,6 +154,12 @@ export interface JournalJob {
   messages: JournalMessage[];
   humanMessageCount: number;
   snapshots: JournalSnapshot[];
+  /**
+   * E68 S68.2 — feedback events of the conversation not yet journaled
+   * (denied approvals, `/feedback`, tool errors), oldest first. Consumed
+   * when the run succeeds. Session jobs only.
+   */
+  feedback?: FeedbackItem[];
   /** Journaling instruction (journaling-level; journalers may override from their own settings). */
   prompt: string;
   model: string | null;

@@ -54,6 +54,10 @@ A request becomes `stale`, and no key is sent, when any of these hold at answer 
 
 Repeated hook firings for the same unanswered prompt (same pane, tool, and summary) collapse into one request and one notification.
 
+### Denials are feedback (E68)
+
+Every request answered **Deny** (through a Telegram tap or `POST /api/v1/approvals/:id/resolve`) is recorded as a `denied-approval` feedback event for the agent (a pool pane maps to its pool), in the request's conversation. The conversation's next journal run sees it and may run below `min_human_messages` because of it. The hook is `ResolveApprovalDeps.onResolved`. See [AGENT_LEARNING.md](AGENT_LEARNING.md#feedback-events).
+
 ## Telegram behavior
 
 - The notification goes to the contact's **DM**, not the conversation's chat, so a group-topic session's tool summary isn't shown to the rest of the group.

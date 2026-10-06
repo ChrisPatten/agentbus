@@ -89,6 +89,16 @@ describe.skipIf(!hasJq)('scripts/journalers/claude-p-journal.sh (S66.7)', { time
     expect((await journaler().run(job({ CLAUDE_BIN: '/nonexistent/claude' }))).outcome).toBe('unavailable');
   });
 
+  it('lists feedback signals as quoted data (E68)', async () => {
+    await journaler().run(job({ CLAUDE_BIN: fakeClaude('ok') }, {
+      feedback: [{ id: 'f1', kind: 'user-feedback', created_at: '2026-10-06T07:06:00.000Z', text: 'Use 24-hour time. $(touch pwned2)', ref_message_id: 'm0', contact_id: 'chris', detail: null }],
+    }));
+    const prompt = readFileSync(join(dir, 'prompt.txt'), 'utf-8');
+    expect(prompt).toContain('Feedback signals since the last journal');
+    expect(prompt).toContain('- 2026-10-06T07:06:00.000Z user-feedback from chris: "Use 24-hour time. $(touch pwned2)"');
+    expect(existsSync(join(dir, 'pwned2'))).toBe(false);
+  });
+
   it('runs consolidation jobs with the payload prompt and no conversation (E68)', async () => {
     const result = await journaler().run(job({ CLAUDE_BIN: fakeClaude('Merged duplicates.') }, {
       kind: 'consolidate', trigger: 'scheduled', messages: [], humanMessageCount: 0, sessionId: '', conversationId: '',

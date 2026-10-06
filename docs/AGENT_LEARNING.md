@@ -1,8 +1,8 @@
 # Agent learning (E68)
 
-> **Status: in progress (S68.1).** Journaling (E66) records what happened; this page covers what turns it into learning. User-facing guide: `site-docs/features/journaling-and-memory.md`.
+> **Status: in progress (S68.1–S68.2).** Journaling (E66) records what happened; this page covers what turns it into learning. User-facing guide: `site-docs/features/journaling-and-memory.md`.
 
-Code: `src/journaling/consolidation.ts`, `src/journaling/engine.ts` (`consolidate`), `src/journaling/prompt.ts` (`DEFAULT_CONSOLIDATION_PROMPT`). Design record: `_bmad-output/planning-artifacts/journaling/decisions.md` ("Consolidation").
+Code: `src/journaling/consolidation.ts`, `src/journaling/engine.ts` (`consolidate`), `src/journaling/prompt.ts` (`DEFAULT_CONSOLIDATION_PROMPT`, `feedbackLines`), `src/journaling/feedback.ts`, `src/journaling/feedback-producers.ts`, `src/commands/feedback.ts`. Migration 032. Design record: `_bmad-output/planning-artifacts/journaling/decisions.md` ("Consolidation").
 
 ## Consolidation
 
@@ -77,3 +77,33 @@ Script payload additions (`ScriptPayloadV1`, still `version: 1`): session fields
 ### Observability
 
 `/journal` shows `consolidation: last …, next … UTC` (or `off`). `/journal runs` lists passes as `consolidate(scheduled)` / `consolidate(manual)`. The run log line has `"kind":"consolidate"`.
+
+## Feedback events
+
+Signals that the agent went wrong, recorded in `feedback_events` (migration 032) and handed to its journalers.
+
+| Kind | Producer | Bypasses `min_human_messages` |
+|---|---|---|
+| `user-feedback` | `/feedback <text>` in a conversation | yes |
+| `denied-approval` | Any approval request answered **Deny** (the E51 resolution path: Telegram taps and `POST /api/v1/approvals/:id/resolve`, through `ResolveApprovalDeps.onResolved`), including denied self-edit proposals | yes |
+| `tool-error` | A `tool_result` with `is_error` in a normal cc-headless turn (`HeadlessHooks.onToolError`; journaling turns are excluded), and a message an agent sent that the delivery worker dead-lettered (`DeliveryWorkerDeps.onFailed`) | no (too frequent) |
+
+Not recorded: `/stop` (usually a change of mind), reactions, edits, quick follow-ups.
+
+Each event has the logical agent id (a pool pane maps to its pool), the conversation and session when known, the agent message it most likely refers to (`ref_message_id`: the conversation's latest non-command outbound message), the contact who gave it, the text (truncated to 2000 characters) and a JSON `detail` (tool name, approval id, channel). Events are kept 90 days.
+
+### `/feedback <text>`
+
+The bus records the event and acknowledges at once ("Thanks, noted. …"). The text is never delivered to the agent as a message, and `/feedback` doesn't start a journal run. The agent is the conversation's session agent, else the only journaling agent. See [SLASH_COMMANDS.md](SLASH_COMMANDS.md#feedback-text).
+
+### Session jobs
+
+A session run receives the conversation's **unconsumed** events, oldest first (`JournalJob.feedback`), whatever their time. They are marked consumed when the run ends `done` or `nothing-to-do`; an exhausted run leaves them for the next one.
+
+- **Eligibility.** An unconsumed `user-feedback` or `denied-approval` makes the session eligible at its next evaluation even below `min_human_messages`, or with no new human message at all (the feedback is the content; eligibility reason `feedback`). The tick also considers sessions that were fully journaled when such an event arrives.
+- **Pause clock.** A bypass event re-anchors the pause clock like activity, so `/feedback` rides with the journal run one pause threshold later instead of starting one at once.
+- **Prompts.** cc-headless and System Message prompts list the events (`feedbackLines`: time, kind, who, which message, the text as a JSON string marked as data). Scripts get `feedback[]` in the payload (`id`, `kind`, `created_at`, `text`, `ref_message_id`, `contact_id`, `detail`). The reference script lists them too.
+
+### Consolidation
+
+Consolidation jobs get cross-conversation counts since the last pass (`ConsolidationContext.feedback`, script `consolidation.feedback`): counts per kind and the 20 most frequent texts (grouped case- and whitespace-insensitively) with how often and in how many conversations they occurred. The prompt points them at the recurring-correction check.

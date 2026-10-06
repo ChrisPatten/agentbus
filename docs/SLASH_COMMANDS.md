@@ -13,6 +13,7 @@ Slash commands let you operate AgentBus from any connected channel without SSH a
 | `/sessions [channel] [--limit N]` | List recent sessions | `/sessions telegram --limit 5` |
 | `/clear` | Start a fresh session; journal the previous one in the background | `/clear` |
 | `/stop` | Cancel the current in-flight turn | `/stop` |
+| `/feedback <text>` | Tell the agent what to do differently; used when it next journals | `/feedback Use 24-hour time.` |
 | `/journal [runs [n] \| now \| consolidate]` | Journaling status, recent journal runs, journal this conversation now, or consolidate memory now | `/journal runs 10` |
 | `/cost` | Show day/week/month API cost for this agent | `/cost` |
 | `/pool [pool-agent-id]` | Show cc-pool pane leases and parked-queue depth | `/pool peggy` |
@@ -124,6 +125,15 @@ Journaling status and control for the conversation you send it from (E66, [JOURN
 ```
 /journal now
 -> Journaled with cc-headless.
+```
+
+### `/feedback <text>`
+
+A correction for the conversation's agent (E68, [AGENT_LEARNING.md](AGENT_LEARNING.md#feedback-text)). The bus records it as a `user-feedback` event about the agent's latest message in the conversation and acknowledges at once. It is not delivered to the agent as a message and doesn't start a journal run: the conversation's next journal run gets it (even below `min_human_messages`), and consolidation counts it across conversations. Without text it prints its usage.
+
+```
+/feedback Use 24-hour time when you list my meetings.
+-> Thanks, noted. Your feedback is used the next time this conversation is journaled.
 ```
 
 ### `/stop`

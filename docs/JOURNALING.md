@@ -62,6 +62,8 @@ Validation (`AgentJournalingSchema`, `journalingRequirements`):
 
 ## Eligibility and window
 
+> E68: an unconsumed `/feedback` or denied approval for the conversation makes the session eligible regardless of `min_human_messages` ([AGENT_LEARNING.md](AGENT_LEARNING.md#session-jobs)).
+
 A human message is an inbound transcript row that is not from an `agent:` or `system:` sender, not scheduler-fired (`metadata.scheduled`), not a bus system-only turn (`metadata.system_only`), not a slash command, and not a reaction. Any human counts, not only owners; owners are flagged `is_owner` in the job for the journaler's benefit.
 
 | Trigger kind | Needs |
@@ -253,9 +255,12 @@ The bus's own environment (API keys, `bus.auth_token`) is not passed. If your sc
     "scheduled": false, "context": false
   }],
   "snapshots": [{ "id": "…", "event": "pre-compact", "path": "/…/snap.jsonl", "created_at": "…" }],
+  "feedback": [{ "id": "…", "kind": "user-feedback", "created_at": "…", "text": "Use 24-hour time.", "ref_message_id": "…", "contact_id": "chris", "detail": { "channel": "telegram" } }],
   "prompt": "…", "model": "claude-sonnet-4-6", "timeout_ms": 300000
 }
 ```
+
+`feedback[]` (E68) lists the conversation's feedback events not yet journaled: `/feedback`, denied approvals and tool errors ([AGENT_LEARNING.md](AGENT_LEARNING.md#feedback-events)). Consolidation payloads (`kind: "consolidate"`) carry a `consolidation` object instead of a conversation ([AGENT_LEARNING.md](AGENT_LEARNING.md#journalers)).
 
 `messages[]` starts with the agent message before the first new human message (`context: true`), so a reply to a scheduled briefing comes with the briefing.
 

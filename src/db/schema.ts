@@ -159,6 +159,11 @@ function loadMigrations(): Migration[] {
       description: 'Drop the legacy structured memory store (memories, session_summaries)',
       sql: readFileSync(join(migrationsDir, '031_drop_legacy_memory.sql'), 'utf-8'),
     },
+    {
+      version: 32,
+      description: 'Feedback events for agent learning (E68)',
+      sql: readFileSync(join(migrationsDir, '032_feedback_events.sql'), 'utf-8'),
+    },
   ];
 }
 

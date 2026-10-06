@@ -44,6 +44,7 @@ import { memoryLayout, memorySettingsFor, runtimeWorkingDir } from '../memory/la
 import { usesNativeMemory } from '../memory/native.js';
 import { formatLocalDate } from '../adapters/memory-context.js';
 import { consolidationPrompt } from './prompt.js';
+import { BYPASS_KINDS, FeedbackStore, toFeedbackItem } from './feedback.js';
 
 /** Dailies older than this many days may be archived by consolidation once promoted. */
 export const ARCHIVE_DAILIES_AFTER_DAYS = 30;
@@ -103,6 +104,8 @@ export interface JournalEngineDeps {
   /** Defaults to `resolveJournalingSettings(config)`. */
   settings?: Map<string, JournalingSettings>;
   store?: JournalStore;
+  /** E68 — feedback events. Default: a store over `db`. */
+  feedback?: FeedbackStore;
   now?: () => Date;
   /** Default: `memory.summarizer_interval_ms` (the pre-E66 sweep cadence). */
   tickIntervalMs?: number;
@@ -141,6 +144,8 @@ const resolved = (r: EvaluationResult) => Promise.resolve(r);
 
 export class JournalEngine {
   readonly store: JournalStore;
+  /** E68 S68.2 — feedback events handed to journal runs. */
+  readonly feedback: FeedbackStore;
   private readonly settings: Map<string, JournalingSettings>;
   private readonly slots = new Map<string, Slot>();
   private readonly lanes = new Map<string, Promise<void>>();
@@ -153,6 +158,9 @@ export class JournalEngine {
 
   constructor(private readonly deps: JournalEngineDeps) {
     this.store = deps.store ?? new JournalStore(deps.db, deps.now);
+    this.feedback = deps.feedback ?? new FeedbackStore(deps.db, deps.now);
+    // A new feedback event re-arms its conversation's evaluation on the next tick.
+    this.feedback.onRecorded((row) => { if (row.conversation_id) this.forgetConversation(row.conversation_id); });
     this.settings = deps.settings ?? resolveJournalingSettings(deps.config);
     const headless = getCcHeadlessInstances(deps.config);
     this.soleHeadlessKey = headless.length === 1 ? toPrefixed(headless[0]!.agent_id) : null;
@@ -250,6 +258,12 @@ export class JournalEngine {
       out.set(agent.agentId, entry);
     }
     return out;
+  }
+
+  /** Drop the "nothing to do yet" memo of every session in a conversation. */
+  private forgetConversation(conversationId: string): void {
+    const ids = this.deps.db.prepare('SELECT id FROM sessions WHERE conversation_id = ?').all(conversationId) as Array<{ id: string }>;
+    for (const { id } of ids) this.memo.delete(id);
   }
 
   /** True while an evaluation for the session is queued or running. */
@@ -373,8 +387,10 @@ export class JournalEngine {
     const state = this.store.getState(session.id);
     const pendingTrigger = (state?.pending_trigger as JournalTrigger | null) ?? null;
     const trigger: JournalTrigger = rank(slot.trigger) > 0 ? slot.trigger : (pendingTrigger ?? slot.trigger);
+    const feedback = this.feedback.pendingForConversation(session.conversation_id);
     const eligibility = assessEligibility(window, {
       minHumanMessages: settings.minHumanMessages, trigger, hasPendingFinal: pendingTrigger !== null, now,
+      feedback: feedback.some((f) => BYPASS_KINDS.has(f.kind)),
     });
     const base = { sessionId: session.id, agentId };
 
@@ -395,6 +411,7 @@ export class JournalEngine {
     }
 
     const job = this.buildJob(session, agentId, runtime, settings, trigger, window);
+    job.feedback = feedback.map(toFeedbackItem);
     const summary = await runChain(job, {
       chain: settings.chain,
       capabilities: runtime.capabilities,
@@ -404,6 +421,7 @@ export class JournalEngine {
     });
     const status: EvaluationStatus =
       summary.outcome === 'done' ? 'journaled' : summary.outcome === 'nothing-to-do' ? 'nothing-to-do' : 'exhausted';
+    if (summary.outcome !== 'exhausted') this.feedback.consume(feedback.map((f) => f.id), job.runId);
     const result: EvaluationResult = { status, ...base, summary };
     if (status === 'journaled' && this.deps.onJournaled) {
       try {
@@ -494,6 +512,7 @@ export class JournalEngine {
         archiveBefore,
         maxMemoryLines: settings.consolidation.maxMemoryLines,
         maxMemoryBytes: NATIVE_MEMORY_MAX_BYTES,
+        feedback: this.feedback.summary(agentId, lastPassAt),
       },
     };
     job.prompt = consolidationPrompt(settings.consolidation.prompt, job);
@@ -583,11 +602,16 @@ export class JournalEngine {
     const rows = this.deps.db
       .prepare(
         `SELECT s.*, js.last_turn_ended_at AS js_turn_ended,
-                (SELECT MAX(t.created_at) FROM transcripts t WHERE t.session_id = s.id AND t.direction = 'outbound') AS last_outbound
+                (SELECT MAX(t.created_at) FROM transcripts t WHERE t.session_id = s.id AND t.direction = 'outbound') AS last_outbound,
+                (SELECT MAX(f.created_at) FROM feedback_events f
+                   WHERE f.conversation_id = s.conversation_id AND f.consumed_at IS NULL
+                     AND f.kind IN ('denied-approval', 'user-feedback')) AS last_feedback
          FROM sessions s LEFT JOIN journal_state js ON js.session_id = s.id
-         WHERE s.ended_at IS NULL AND (s.journal_cursor_at IS NULL OR s.journal_cursor_at < s.last_activity)`,
+         WHERE s.ended_at IS NULL AND (s.journal_cursor_at IS NULL OR s.journal_cursor_at < s.last_activity
+           OR EXISTS (SELECT 1 FROM feedback_events f WHERE f.conversation_id = s.conversation_id AND f.consumed_at IS NULL
+                        AND f.kind IN ('denied-approval', 'user-feedback')))`,
       )
-      .all() as Array<SessionRow & { js_turn_ended: string | null; last_outbound: string | null }>;
+      .all() as Array<SessionRow & { js_turn_ended: string | null; last_outbound: string | null; last_feedback: string | null }>;
 
     for (const s of rows) {
       if (this.slots.has(s.id)) continue;
@@ -601,6 +625,9 @@ export class JournalEngine {
         new Date(s.last_activity).getTime(),
         s.js_turn_ended ? new Date(s.js_turn_ended).getTime() : 0,
         s.last_outbound ? new Date(s.last_outbound).getTime() : 0,
+        // E68: feedback re-anchors the pause clock like activity, so /feedback
+        // rides with the next journal instead of starting one at once.
+        s.last_feedback ? new Date(s.last_feedback).getTime() : 0,
       );
       if (now - anchor >= thresholdForChannel(settings.thresholdMs, s.channel)) {
         this.trigger({ reason: 'pause', sessionId: s.id });
@@ -619,6 +646,8 @@ export class JournalEngine {
     this.lastRetentionSweep = now;
     const swept = this.store.sweepRuns();
     if (swept > 0) this.log(`[journaling] swept ${swept} journal_runs row(s) older than 90 days`);
+    const sweptFeedback = this.feedback.sweep();
+    if (sweptFeedback > 0) this.log(`[journaling] swept ${sweptFeedback} feedback event(s) older than 90 days`);
   }
 
   // ── Shutdown ───────────────────────────────────────────────────────────────

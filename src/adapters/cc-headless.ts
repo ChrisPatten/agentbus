@@ -224,6 +224,19 @@ const DELIVERY_TOOL_NAMES = new Set(['mcp__agentbus__reply', 'mcp__agentbus__sen
 
 const ERROR_DETAIL_MAX_LENGTH = 500;
 
+/** Text of a stream-json tool_result `content` (a string or an array of text blocks). */
+export function toolResultText(content: unknown): string {
+  if (typeof content === 'string') return content.slice(0, ERROR_DETAIL_MAX_LENGTH);
+  if (Array.isArray(content)) {
+    return content
+      .map((c) => (c && typeof c === 'object' && typeof (c as { text?: unknown }).text === 'string' ? (c as { text: string }).text : ''))
+      .filter(Boolean)
+      .join('\n')
+      .slice(0, ERROR_DETAIL_MAX_LENGTH);
+  }
+  return String(content ?? '').slice(0, ERROR_DETAIL_MAX_LENGTH);
+}
+
 /** One tool_use content block from a stream-json `assistant` event, with
  * delivery-tool detection folded in so extraction and delivery detection
  * happen in a single pass over `event.message.content`. */
@@ -276,6 +289,26 @@ export function selectReportableCalls(
     }
   }
   return { reportable, delivered };
+}
+
+/**
+ * E68 S68.2 — a tool call that failed in a normal (non-journaling) turn:
+ * a `tool_result` with `is_error` in the stream. `delivery` marks a failed
+ * reply/send_message call.
+ */
+export interface HeadlessToolError {
+  /** Prefixed agent id of the instance. */
+  agentId: string;
+  conversationId: string;
+  sessionId: string | null;
+  toolName: string;
+  error: string;
+  delivery: boolean;
+}
+
+/** E68 — bus hooks for headless instances. */
+export interface HeadlessHooks {
+  onToolError?: (event: HeadlessToolError) => void;
 }
 
 /** Handle returned per instance for the bus to drive journaling turns. */
@@ -378,7 +411,7 @@ class HeadlessInstance {
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
   private shuttingDown = false;
 
-  constructor(cfg: CcHeadlessInstanceConfig, busBaseUrl: string) {
+  constructor(cfg: CcHeadlessInstanceConfig, busBaseUrl: string, private readonly hooks: HeadlessHooks = {}) {
     this.cfg = cfg;
     this.agentId = `agent:${cfg.agent_id}`;
     this.workingDir = cfg.working_dir ?? process.cwd();
@@ -515,7 +548,11 @@ class HeadlessInstance {
      * learn the session identity promptly.
      */
     onSessionId?: (id: string) => void,
-    opts?: { db?: Database.Database; scheduleModel?: string | null; agentId?: string | null; journal?: JournalTurnOptions },
+    opts?: {
+      db?: Database.Database; scheduleModel?: string | null; agentId?: string | null; journal?: JournalTurnOptions;
+      /** E68 — a tool_result with is_error arrived (tool name, error text). */
+      onToolError?: (toolName: string, error: string, delivery: boolean) => void;
+    },
   ): Promise<SpawnResult> {
     const journal = opts?.journal;
     const args = [
@@ -594,6 +631,8 @@ class HeadlessInstance {
       let resultText: string | null = null;
       let deliveredViaTool = false;
       const pendingDeliveryIds = new Set<string>();
+      /** E68: tool_use id → tool name, to name a failed tool_result. */
+      const toolNames = new Map<string, string>();
       let completedDelivery = false;
       let errorOutput = '';
       let spawnError: string | null = null;
@@ -641,8 +680,20 @@ class HeadlessInstance {
           deliveredViaTool = delivered;
           if (event.type === 'assistant') {
             for (const block of event.message?.content ?? []) {
+              if (block.type === 'tool_use' && block.id && block.name) toolNames.set(block.id, block.name);
               if (block.type === 'tool_use' && block.id && block.name && DELIVERY_TOOL_NAMES.has(block.name)) {
                 pendingDeliveryIds.add(block.id);
+              }
+            }
+          }
+          if (event.type === 'user' && opts?.onToolError) {
+            for (const block of event.message?.content ?? []) {
+              if (block.type !== 'tool_result' || !block.is_error || !block.tool_use_id) continue;
+              const name = toolNames.get(block.tool_use_id) ?? 'unknown tool';
+              try {
+                opts.onToolError(name, toolResultText(block.content), DELIVERY_TOOL_NAMES.has(name));
+              } catch (err) {
+                console.error(`[${this.label}] onToolError failed:`, err);
               }
             }
           }
@@ -962,6 +1013,14 @@ class HeadlessInstance {
           agentId: this.agentId,
           scheduleModel: opts.scheduleModel,
           journal: opts.journal,
+          // E68: tool errors in normal turns become feedback events; journaling turns are bus internals.
+          ...(!opts.journal && this.hooks.onToolError
+            ? {
+                onToolError: (toolName: string, error: string, delivery: boolean) => this.hooks.onToolError!({
+                  agentId: this.agentId, conversationId: opts.conversationId, sessionId: opts.session?.id ?? null, toolName, error, delivery,
+                }),
+              }
+            : {}),
         },
       );
       // Final persist covers the case where the session id changed (rare) or
@@ -1222,7 +1281,7 @@ const instances = new Map<string, HeadlessInstance>();
  * SessionTracker uses to dispatch journaling turns to the right instance, or
  * an empty map when no `cc-headless` config is present.
  */
-export function startHeadless(db: Database.Database): Map<string, HeadlessHandle> {
+export function startHeadless(db: Database.Database, hooks: HeadlessHooks = {}): Map<string, HeadlessHandle> {
   const handles = new Map<string, HeadlessHandle>();
   const configs = getCcHeadlessInstances(config);
   if (configs.length === 0) {
@@ -1232,7 +1291,7 @@ export function startHeadless(db: Database.Database): Map<string, HeadlessHandle
 
   const busBaseUrl = `http://127.0.0.1:${config.bus.http_port}`;
   for (const instCfg of configs) {
-    const instance = new HeadlessInstance(instCfg, busBaseUrl);
+    const instance = new HeadlessInstance(instCfg, busBaseUrl, hooks);
     instances.set(`agent:${instCfg.agent_id}`, instance);
     handles.set(`agent:${instCfg.agent_id}`, instance.start(db));
   }

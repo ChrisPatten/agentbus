@@ -106,6 +106,17 @@ describe('resolveApproval', () => {
     expect(store.getById(request.id)!.status).toBe('denied');
   });
 
+  it('calls onResolved after a decision, not for stale requests (E68 feedback)', async () => {
+    const { deps, request } = setup();
+    const onResolved = vi.fn();
+    await resolveApproval({ ...deps, onResolved }, request.id, 'deny', 'contact:chris');
+    expect(onResolved).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: request.id, status: 'denied' }), 'denied');
+    const stale = setup('❯ \nsome ordinary prompt');
+    const onStale = vi.fn();
+    await resolveApproval({ ...stale.deps, onResolved: onStale }, stale.request.id, 'deny', 'contact:chris');
+    expect(onStale).not.toHaveBeenCalled();
+  });
+
   it('sends no keystroke and marks the row stale when the pane is not showing a permission dialog', async () => {
     const { deps, tmux, store, request } = setup('❯ \nsome ordinary prompt');
 

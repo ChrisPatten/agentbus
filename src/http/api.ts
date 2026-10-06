@@ -84,7 +84,7 @@ import { ApprovalStore } from '../approvals/store.js';
 import { defaultScheduleTopic } from '../scheduler/default-topic.js';
 import { resolveApprovalTarget } from '../approvals/resolve-target.js';
 import { dispatchApproval } from '../approvals/dispatch.js';
-import { resolveApproval } from '../approvals/resolve.js';
+import { resolveApproval, type ApprovalResolveHooks } from '../approvals/resolve.js';
 import { APPROVAL_TIMEOUT_MS, type ApprovalStatus } from '../approvals/types.js';
 import { parseFreshnessQuery, type RecentFreshness } from '../memory/recent-freshness.js';
 import { parseHarnessEvent, type HarnessEvents } from '../journaling/events.js';
@@ -132,6 +132,8 @@ export interface HttpServerDeps {
   journalStatus?: JournalStatusDeps;
   /** E67 — when present, GET /api/v1/memory/recent is mounted (the recent.md freshness hook). */
   memoryRecent?: Pick<RecentFreshness, 'check'>;
+  /** E68 — hooks for POST /api/v1/approvals/:id/resolve (denied-approval feedback, self-edit proposals). */
+  approvalHooks?: ApprovalResolveHooks;
 }
 
 const MessagePayloadSchema = z.discriminatedUnion('type', [
@@ -1024,7 +1026,7 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
         return reply.status(400).send({ ok: false, error: 'decision must be "approve" or "deny"' });
       }
       const result = await resolveApproval(
-        { store: approvalStore, poolManagers: poolManagers ?? new Map() },
+        { store: approvalStore, poolManagers: poolManagers ?? new Map(), ...deps.approvalHooks },
         req.params.id,
         decision,
         resolvedBy ?? 'api',

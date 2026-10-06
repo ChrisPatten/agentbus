@@ -65,6 +65,16 @@ export interface ScriptPayloadV1 {
     context: boolean;
   }>;
   snapshots: Array<{ id: string; event: string; path: string; created_at: string }>;
+  /** E68 — feedback events of the conversation since the last journal (session jobs; empty otherwise). */
+  feedback: Array<{
+    id: string;
+    kind: 'denied-approval' | 'user-feedback' | 'tool-error';
+    created_at: string;
+    text: string;
+    ref_message_id: string | null;
+    contact_id: string | null;
+    detail: Record<string, unknown> | null;
+  }>;
   prompt: string;
   model: string | null;
   timeout_ms: number;
@@ -82,6 +92,12 @@ export interface ScriptPayloadV1 {
     archive_before: string;
     max_memory_lines: number;
     max_memory_bytes: number;
+    /** Feedback across conversations since the last pass. */
+    feedback: {
+      since: string | null;
+      counts: { 'denied-approval': number; 'user-feedback': number; 'tool-error': number };
+      recurring: Array<{ kind: string; text: string; count: number; conversations: number; first_at: string; last_at: string }>;
+    } | null;
   };
 }
 
@@ -120,6 +136,7 @@ export function buildScriptPayload(job: JournalJob): ScriptPayloadV1 {
       context: m.context,
     })),
     snapshots: job.snapshots.map((s) => ({ ...s })),
+    feedback: (job.feedback ?? []).map((f) => ({ ...f, detail: f.detail ? { ...f.detail } : null })),
     prompt: job.prompt,
     model: script?.model ?? job.model,
     timeout_ms: script?.timeoutMs ?? job.timeoutMs,
@@ -134,6 +151,7 @@ export function buildScriptPayload(job: JournalJob): ScriptPayloadV1 {
             archive_before: job.consolidation.archiveBefore,
             max_memory_lines: job.consolidation.maxMemoryLines,
             max_memory_bytes: job.consolidation.maxMemoryBytes,
+            feedback: job.consolidation.feedback ?? null,
           },
         }
       : {}),

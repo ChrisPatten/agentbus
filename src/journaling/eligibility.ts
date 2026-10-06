@@ -16,7 +16,8 @@
  * Thresholds: a non-final trigger needs `min_human_messages`; below that the
  * content is "pending". Final triggers (close, clear, evict, release,
  * pre-compact, session-end, shutdown) and `manual` bypass the threshold.
- * Pending content older than 24 h is journaled anyway.
+ * Pending content older than 24 h is journaled anyway. E68: an unconsumed
+ * denied approval or `/feedback` makes the session eligible right away.
  */
 import type Database from 'better-sqlite3';
 import type { JournalMessage, JournalTrigger } from './types.js';
@@ -52,7 +53,7 @@ export interface JournalWindow {
 export type Eligibility =
   | { kind: 'nothing' }
   | { kind: 'pending'; humanCount: number; firstHumanAt: string }
-  | { kind: 'eligible'; reason: 'threshold' | 'final' | 'aged' | 'manual'; humanCount: number };
+  | { kind: 'eligible'; reason: 'threshold' | 'final' | 'aged' | 'manual' | 'feedback'; humanCount: number };
 
 function parseMeta(raw: string): Record<string, unknown> {
   try {
@@ -176,12 +177,24 @@ export function loadWindow(
 /** Decide whether a window should be journaled for this trigger. */
 export function assessEligibility(
   window: Pick<JournalWindow, 'humanTimes'>,
-  opts: { minHumanMessages: number; trigger: JournalTrigger; hasPendingFinal?: boolean; now: Date },
+  opts: {
+    minHumanMessages: number;
+    trigger: JournalTrigger;
+    hasPendingFinal?: boolean;
+    now: Date;
+    /**
+     * E68 S68.2 — an unconsumed denied approval or `/feedback` for the
+     * conversation: eligible now, even below min_human_messages or with no
+     * new human message at all (the feedback is the content).
+     */
+    feedback?: boolean;
+  },
 ): Eligibility {
   const humanCount = window.humanTimes.length;
-  if (humanCount === 0) return { kind: 'nothing' };
+  if (humanCount === 0) return opts.feedback ? { kind: 'eligible', reason: 'feedback', humanCount } : { kind: 'nothing' };
   if (opts.trigger === 'manual') return { kind: 'eligible', reason: 'manual', humanCount };
   if (isFinalTrigger(opts.trigger) || opts.hasPendingFinal) return { kind: 'eligible', reason: 'final', humanCount };
+  if (opts.feedback) return { kind: 'eligible', reason: 'feedback', humanCount };
   if (humanCount >= opts.minHumanMessages) return { kind: 'eligible', reason: 'threshold', humanCount };
   const firstHumanAt = window.humanTimes[0]!;
   if (opts.now.getTime() - new Date(firstHumanAt).getTime() >= PENDING_MAX_AGE_MS) {
