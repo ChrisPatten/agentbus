@@ -167,6 +167,29 @@ The bus checks the chain when it starts. It refuses to start if none of the jour
 
 For a `cc-headless` agent without this block, the older `journaling` options under `adapters.cc-headless` still apply. They're deprecated; move them here.
 
+### memory
+
+Where the agent's memory files are, and how much of its recent journals it sees. See [Journaling and memory](/features/journaling-and-memory).
+
+```yaml
+agents:
+  "agent:assistant":
+    memory:
+      dir: memory
+      lookback_days: 3
+```
+
+| Option | Default | What it does |
+|---|---|---|
+| `dir` | `memory` | The memory folder, inside the agent's working folder (or a full path) |
+| `index_file` | `MEMORY.md` | The memory index, loaded at the start of every session |
+| `daily_subdir` | `daily` | The folder inside `dir` with one journal file per day (`2026-10-06.md`) |
+| `lookback_days` | `3` | How many days of journals go into `recent.md`, counting today. `0` leaves it empty. |
+| `recent_budget_chars` | `20000` | The most characters `recent.md` may hold. The newest days are kept; older ones are cut. |
+| `native` | `true` | Let Claude Code load the memory folder itself. Set `false` to have the bus add `MEMORY.md` and `recent.md` to each turn instead (`cc-headless` only). |
+
+For a `cc-headless` agent, the older `memory` options under `adapters.cc-headless` still apply where this block doesn't set them (`journal_lookback_days` there is `lookback_days` here). They're deprecated; move them here.
+
 ## pipeline
 
 How messages are sorted and routed.

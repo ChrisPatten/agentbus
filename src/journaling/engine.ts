@@ -28,7 +28,6 @@
  * restart re-evaluates them on the next tick.
  */
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
 import type Database from 'better-sqlite3';
 import { getCcHeadlessInstances, type AppConfig } from '../config/schema.js';
 import type { AgentRuntime, RuntimeResolver } from '../core/runtime-resolver.js';
@@ -41,6 +40,7 @@ import type { JournalerRegistry } from './registry.js';
 import { runChain, type ChainRunSummary } from './runner.js';
 import { JournalStore } from './store.js';
 import { isFinalTrigger, type JournalJob, type JournalTrigger } from './types.js';
+import { memoryLayout, memorySettingsFor, runtimeWorkingDir } from '../memory/layout.js';
 
 /** Exhausted runs per window before non-manual triggers stop retrying it (new content re-arms). */
 export const MAX_ATTEMPTS_PER_WINDOW = 3;
@@ -376,8 +376,8 @@ export class JournalEngine {
     const state = this.store.getState(session.id);
     const topic = (this.deps.db.prepare('SELECT topic FROM conversation_registry WHERE id = ?').get(session.conversation_id) as
       | { topic: string } | undefined)?.topic ?? null;
-    const workingDir = runtime.kind === 'cc-headless' || runtime.kind === 'cc-pool' ? runtime.workingDir : null;
-    const memorySubdir = runtime.kind === 'cc-headless' ? runtime.instance.memory.dir : 'memory';
+    const workingDir = runtimeWorkingDir(runtime);
+    const layout = memoryLayout(memorySettingsFor(this.deps.config, agentId), workingDir);
     return {
       runId: this.deps.newRunId?.() ?? randomUUID(),
       kind: 'session',
@@ -386,7 +386,7 @@ export class JournalEngine {
       sessionAgentId: session.agent_id ?? agentId,
       runtime: runtime.kind,
       workingDir,
-      memoryDir: workingDir ? join(workingDir, memorySubdir) : null,
+      memoryDir: layout.memoryDir,
       sessionId: session.id,
       conversationId: session.conversation_id,
       channel: session.channel,

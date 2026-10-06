@@ -36,7 +36,8 @@ import type Database from 'better-sqlite3';
 import { loadConfig } from '../config/loader.js';
 import { getCcHeadlessInstances, type CcHeadlessInstanceConfig } from '../config/schema.js';
 import { renderSystemPrompt, expandFileReferences, type PromptContext } from './prompt-renderer.js';
-import { assembleMemoryContext, assembleMemoryBlocks, formatLocalDate } from './memory-context.js';
+import { assembleMemoryContext, assembleMemoryBlocks, formatLocalDate, type MemoryConfig } from './memory-context.js';
+import { memorySettingsFor } from '../memory/layout.js';
 import type { MessageEnvelope } from '../types/envelope.js';
 import { formatMessagesForSampling } from './cc.js';
 import { isSystemOnly } from '../core/system-block.js';
@@ -332,6 +333,8 @@ class HeadlessInstance {
   private readonly cfg: CcHeadlessInstanceConfig;
   private readonly agentId: string;
   private readonly workingDir: string;
+  /** E67 — the agent's memory layout (agents.<id>.memory, else the deprecated cfg.memory). */
+  private readonly memory: MemoryConfig;
   private readonly busBaseUrl: string;
   /** Fetch that adds X-Bus-Token to bus requests when bus.auth_token is set. */
   private readonly busFetch: typeof fetch;
@@ -355,6 +358,8 @@ class HeadlessInstance {
     this.cfg = cfg;
     this.agentId = `agent:${cfg.agent_id}`;
     this.workingDir = cfg.working_dir ?? process.cwd();
+    const mem = memorySettingsFor(config, this.agentId);
+    this.memory = { dir: mem.dir, index_file: mem.indexFile, daily_subdir: mem.dailySubdir, journal_lookback_days: mem.lookbackDays };
     this.busBaseUrl = busBaseUrl;
     this.busFetch = withBusToken(busBaseUrl, resolveBusToken(config));
     this.label = cfg.name ? `cc-headless:${cfg.name}` : 'cc-headless';
@@ -830,7 +835,7 @@ class HeadlessInstance {
         clearLedger(opts.db, opts.session.id);
       }
 
-      const hashedBlocks = assembleMemoryBlocks(this.workingDir, this.cfg.memory, now).map((b) => ({
+      const hashedBlocks = assembleMemoryBlocks(this.workingDir, this.memory, now).map((b) => ({
         block: b,
         hash: hashBlock(b.content),
       }));
@@ -859,7 +864,7 @@ class HeadlessInstance {
       // `promptForClaude` instead. When there's no session to track a ledger
       // against, fall back to the old behavior of inlining the full context
       // via {{memories}}.
-      memories: opts.session ? '' : assembleMemoryContext(this.workingDir, this.cfg.memory, now),
+      memories: opts.session ? '' : assembleMemoryContext(this.workingDir, this.memory, now),
       // E20: structured DB summaries are retired; files are the source of truth.
       session_summary: '',
       agent_id: this.agentId,

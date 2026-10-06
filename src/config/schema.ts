@@ -216,9 +216,11 @@ const CcHeadlessAdapterSchema = z.object({
    */
   error_passthrough: z.boolean().default(false),
   /**
-   * E20 — memory file assembly. The agent's own files are the source of truth;
-   * the bus front-loads them into each turn's context. All paths are resolved
-   * relative to `working_dir`. Missing files are skipped silently.
+   * E20 — memory file layout. DEPRECATED since E67: use
+   * `agents.<agent-id>.memory` (`journal_lookback_days` is `lookback_days`
+   * there). Still read as a fallback for fields the agent block leaves
+   * unset; the loader warns when it is set. All paths are resolved relative
+   * to `working_dir`.
    */
   memory: z
     .object({
@@ -681,6 +683,36 @@ const AgentJournalingSchema = z.object({
 export type AgentJournalingConfig = z.infer<typeof AgentJournalingSchema>;
 
 /**
+ * Per-agent memory layout (E67 S67.1): where the agent's memory files live
+ * and how the bus builds `recent.md` from the daily journals. Shared by
+ * journaling (the memory dir handed to journalers) and loading (native auto
+ * memory's `autoMemoryDirectory`, or bus injection on runtimes without
+ * native memory). Every field is optional; unset fields fall back to the
+ * deprecated `adapters.cc-headless.memory` block, then to the defaults.
+ * See docs/AGENT_MEMORY.md.
+ */
+const AgentMemorySchema = z.object({
+  /** Memory directory: relative to the agent's working_dir, or absolute. Default `memory`. */
+  dir: z.string().min(1).optional(),
+  /** Index file inside `dir`. Default `MEMORY.md`. */
+  index_file: z.string().min(1).optional(),
+  /** Subdirectory of `dir` with the daily journals `YYYY-MM-DD.md`. Default `daily`. */
+  daily_subdir: z.string().min(1).optional(),
+  /** Days of daily journals in `recent.md` (today and the previous N-1, local dates). Default 3; 0 = none. */
+  lookback_days: z.number().int().nonnegative().optional(),
+  /** Character budget for the whole `recent.md`. Default 20000. */
+  recent_budget_chars: z.number().int().min(500).optional(),
+  /**
+   * Load memory natively (Claude Code auto memory pointed at `dir`) on
+   * runtimes that support it. Default true. false keeps bus injection of
+   * the index and `recent.md` (cc-headless only).
+   */
+  native: z.boolean().optional(),
+});
+
+export type AgentMemoryConfig = z.infer<typeof AgentMemorySchema>;
+
+/**
  * Per-agent configuration, keyed by recipient id (e.g. "agent:claude").
  * Additional agent-scoped settings live here under the same key: E65 adds
  * `owners`; E66 adds `journaling`, E67 `memory`.
@@ -689,6 +721,7 @@ const AgentConfigSchema = z.object({
   media: AgentMediaSchema.optional(),
   owners: z.array(AgentOwnerSchema).optional(),
   journaling: AgentJournalingSchema.optional(),
+  memory: AgentMemorySchema.optional(),
 });
 
 /**

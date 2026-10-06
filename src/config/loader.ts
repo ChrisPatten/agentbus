@@ -6,6 +6,7 @@ import dotenv from 'dotenv';
 import { AppConfigSchema, type AppConfig } from './schema.js';
 import { RuntimeResolver, collectRuntimeRequirements, validateRuntimeRequirements } from '../core/runtime-resolver.js';
 import { legacyJournalingBlocks, resolveJournalingSettings } from '../journaling/config.js';
+import { legacyMemoryBlocks } from '../memory/layout.js';
 
 /**
  * Walk an unknown object tree and replace all `${VAR_NAME}` tokens in string
@@ -104,6 +105,17 @@ export function loadConfig(path: string, envPath?: string): AppConfig {
     console.warn(
       `[config] ${legacy.join(', ')} is deprecated; move it to agents.<agent-id>.journaling (see docs/JOURNALING.md).` +
         (shadowed ? ' Agents that have agents.<id>.journaling ignore their cc-headless block.' : ''),
+    );
+  }
+
+  // E67 — the cc-headless `memory` block is a deprecated alias for
+  // agents.<id>.memory. Its fields still apply where the agent block is unset.
+  const legacyMemory = legacyMemoryBlocks(substituted);
+  if (legacyMemory.length > 0) {
+    console.warn(
+      `[config] ${legacyMemory.join(', ')} is deprecated; move it to agents.<agent-id>.memory ` +
+        '(journal_lookback_days is lookback_days there; see docs/AGENT_MEMORY.md). ' +
+        'Fields set in agents.<id>.memory take precedence.',
     );
   }
 

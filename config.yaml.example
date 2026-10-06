@@ -90,11 +90,7 @@ adapters:
       memory files later. Exception: log financial decisions, health facts,
       scheduling commitments, and security-relevant account events immediately.
       {{memories}}
-    memory:                          # memory files, relative to working_dir
-      dir: memory
-      index_file: MEMORY.md
-      daily_subdir: daily
-      journal_lookback_days: 3       # today plus the previous 2 days (0 = index only)
+    # memory: { dir: memory, journal_lookback_days: 3 }   # DEPRECATED alias: use agents.<id>.memory (docs/AGENT_MEMORY.md)
     journaling:                      # DEPRECATED alias: prefer agents.<id>.journaling (docs/JOURNALING.md)
       enabled: true
       threshold_ms:                  # idle debounce per channel; a number, or a map with `default`
@@ -190,6 +186,13 @@ agents:
     owners:                          # who receives bus advisories about this agent
       - channel: telegram            # exact channel of the owner's conversation
         contact_id: alice            # a key under contacts
+    # memory:                        # E67 memory layout; replaces the cc-headless memory block (docs/AGENT_MEMORY.md)
+    #   dir: memory                  # relative to the runtime's working_dir, or absolute
+    #   index_file: MEMORY.md        # native auto memory loads its first 200 lines / 25KB
+    #   daily_subdir: daily          # daily journals YYYY-MM-DD.md, written by journalers
+    #   lookback_days: 3             # days of dailies in the bus-generated memory/recent.md (0 = none)
+    #   recent_budget_chars: 20000   # size cap for recent.md (newest days first)
+    #   native: true                 # false: the bus injects MEMORY.md + recent.md (cc-headless) instead
     # journaling:                    # E66 per-agent journaling; replaces the cc-headless block above
     #   chain: [system-message, cc-headless, script]   # tried in order; unsupported entries are skipped
     #   threshold_ms: { default: 1800000, telegram: 300000 }

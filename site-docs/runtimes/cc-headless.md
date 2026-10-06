@@ -59,7 +59,7 @@ Routes reach this agent with `recipientId: agent:<agent_id>`.
 | `error_passthrough` | `false` | Add the technical error (up to 500 characters) to `error_reply`. Useful while setting up; turn it off afterwards, as errors can include file paths. |
 | `poll_interval_ms` | `1000` | How often the agent checks for new messages, in milliseconds. |
 
-This runtime also has `memory` and `journaling` settings. The `journaling` settings here are deprecated: configure journaling under [`agents.<id>.journaling`](/reference/configuration#journaling) instead. The `memory` settings are being redesigned; see [Journaling and memory](/features/journaling-and-memory).
+This runtime also has `memory` and `journaling` settings. The `journaling` settings here are deprecated: configure journaling under [`agents.<id>.journaling`](/reference/configuration#journaling) instead. The `memory` settings here are deprecated too: set them under [`agents.<id>.memory`](/reference/configuration#memory).
 
 ### The system prompt
 

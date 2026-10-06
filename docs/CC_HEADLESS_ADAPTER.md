@@ -265,10 +265,10 @@ adapters:
 | `working_dir` | bus cwd | `cwd` for `claude -p`; selects the `CLAUDE.md` hierarchy and the `@path` base |
 | `error_reply` | see above | Sent to the user on invocation failure |
 | `error_passthrough` | `false` | Append the raw failure detail (500 characters max) to `error_reply` |
-| `memory.dir` | `memory` | Memory directory, relative to `working_dir` |
-| `memory.index_file` | `MEMORY.md` | Loaded into every turn |
-| `memory.daily_subdir` | `daily` | Daily journal files `YYYY-MM-DD.md` |
-| `memory.journal_lookback_days` | `3` | Days of journal to load (today plus N-1) |
+| `memory.dir` | `memory` | Deprecated (E67): use `agents.<id>.memory.dir` ([AGENT_MEMORY.md](AGENT_MEMORY.md)). Still the fallback |
+| `memory.index_file` | `MEMORY.md` | Deprecated: `agents.<id>.memory.index_file` |
+| `memory.daily_subdir` | `daily` | Deprecated: `agents.<id>.memory.daily_subdir` |
+| `memory.journal_lookback_days` | `3` | Deprecated: `agents.<id>.memory.lookback_days` |
 | `journaling.enabled` | `true` | Deprecated alias (use `agents.<id>.journaling`). Master switch |
 | `journaling.threshold_ms` | `{ default: 1800000 }` | Deprecated alias. Per-channel idle debounce; a number, or a map with a required `default` |
 | `journaling.ceiling_ms` | unset | Deprecated alias. Hard ceiling since the last sweep, regardless of idle state |

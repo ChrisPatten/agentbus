@@ -95,7 +95,7 @@ export interface JournalJob {
   sessionAgentId: string;
   runtime: RuntimeKind;
   workingDir: string | null;
-  /** `<workingDir>/memory` by convention (E67 formalizes it). */
+  /** Absolute memory dir from the agent's memory layout (E67, `agents.<id>.memory.dir`); null without one. */
   memoryDir: string | null;
   sessionId: string;
   conversationId: string;
