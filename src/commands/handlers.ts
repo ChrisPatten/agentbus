@@ -15,6 +15,7 @@ import type { HeadlessCapacitySnapshot } from '../adapters/cc-headless.js';
 import type { RuntimeResolver } from '../core/runtime-resolver.js';
 import { formatCapabilities } from '../core/runtime-capabilities.js';
 import type { AdvisoryService } from '../advisories/service.js';
+import type { JournalEngine } from '../journaling/engine.js';
 
 /**
  * Mutable holder for the headless adapter's control hooks. Populated by
@@ -22,14 +23,6 @@ import type { AdvisoryService } from '../advisories/service.js';
  * not running (e.g. an MCP-only deployment), so commands degrade gracefully.
  */
 export interface HeadlessControl {
-  /**
-   * Fire a silent background journaling turn for a claude session whose DB row
-   * has already been closed. Used by /clear to journal the old session after
-   * starting a fresh one. Keyed by the owning cc-headless agent_id (e.g.
-   * "agent:peggy") so /clear journals the right agent's session when more
-   * than one headless instance is running (E23).
-   */
-  journalResumeId: Map<string, (opts: { claudeSessionId: string; contactId: string; channel: string; conversationId?: string }) => void>;
   /**
    * Kill the in-flight `claude -p` turn for a contact, keyed by the owning
    * cc-headless agent_id (e.g. "agent:peggy"). Used by `/stop`. Returns true
@@ -58,6 +51,8 @@ export interface HandlerDeps {
   runtimeResolver?: Pick<RuntimeResolver, 'list'>;
   /** E65 — active advisories for the /status Advisories section. Omitted or none → section omitted. */
   advisories?: Pick<AdvisoryService, 'listActive'>;
+  /** E66 — the journaling engine; /clear fires its `clear` trigger. Omitted → /clear closes without journaling. */
+  journal?: Pick<JournalEngine, 'trigger'>;
 }
 
 /** "3m", "2h", "4d" since `iso`. */
@@ -391,12 +386,12 @@ async function scheduleHandler(
 // ── /clear ────────────────────────────────────────────────────────────────────
 
 /**
- * Start a fresh headless session for the sender on this channel. Closes the
- * current active session immediately (so the next message spawns a fresh
- * `claude -p` with no `--resume`), then journals the now-closed session in the
- * background — the agent reviews the conversation one last time and updates its
- * memory files. The close is atomic; journaling runs against the captured
- * `claude_session_id`, which persists on disk independent of the DB `ended_at`.
+ * Start a fresh session for the sender on this channel. Closes the current
+ * active session immediately (so the next message starts with no
+ * `--resume`), then fires the journaling engine's `clear` trigger (E66) for
+ * the closed session. The trigger is persisted, bypasses
+ * `min_human_messages`, and runs the agent's journaler chain in the
+ * background; the closed session's Claude transcript stays resumable on disk.
  */
 async function clearHandler(
   _args: string[],
@@ -428,26 +423,15 @@ async function clearHandler(
     .prepare(`UPDATE sessions SET ended_at = ? WHERE id = ?`)
     .run(new Date().toISOString(), session.id);
 
-  // Journal the now-closed session in the background, if the owning headless
-  // instance is running. The claude session is resumable on disk regardless of
-  // the DB flag. Sessions with no agent_id (created before migration 011, or by
-  // a single-instance deployment) fall back to the sole registered instance —
-  // mirrors SessionTracker.dispatchJournaling (E23).
-  const runners = deps.headlessControl?.journalResumeId;
-  const journal = session.agent_id
-    ? runners?.get(session.agent_id)
-    : runners?.size === 1
-      ? [...runners.values()][0]
-      : undefined;
-  if (journal) {
-    journal({ claudeSessionId: session.claude_session_id, contactId, channel: session.channel, conversationId });
+  const journal = deps.journal?.trigger({ reason: 'clear', sessionId: session.id });
+  if (journal && (journal.status === 'queued' || journal.status === 'merged')) {
     return {
       body: 'Context cleared — your next message starts a fresh session. Journaling the previous session in the background.',
     };
   }
 
   return {
-    body: 'Context cleared — your next message starts a fresh session. (No headless journaling agent available for this session; closed without a memory pass.)',
+    body: 'Context cleared — your next message starts a fresh session. (Journaling is not set up for this agent; closed without a memory pass.)',
   };
 }
 

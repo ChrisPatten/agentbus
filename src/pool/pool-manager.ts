@@ -189,6 +189,23 @@ export interface PoolPromptContext {
   background?: boolean;
 }
 
+/**
+ * E66 — called before a leased pane is released from its conversation, so
+ * journaling can evaluate the conversation (`evict` / `release` triggers).
+ * Awaited: S66.9 makes the journaling side wait for the run (bounded by the
+ * journaling timeout) before the pane is cleared. Must not throw; a
+ * rejection is logged and the release proceeds.
+ */
+export type PoolReleaseHook = (event: {
+  reason: 'evict' | 'release';
+  poolAgentId: string;
+  paneId: string;
+  /** Prefixed pane agent id, e.g. "agent:peggy-pool-2". */
+  paneAgentId: string;
+  conversationId: string;
+  claudeSessionId: string | null;
+}) => Promise<void> | void;
+
 export class PoolManager {
   /** = cfg.agent_id (bare) — validated unique across instances already by getCcPoolInstances. */
   readonly poolId: string;
@@ -200,6 +217,7 @@ export class PoolManager {
 
   private readonly cfg: CcPoolInstanceConfig;
   private readonly db: Database.Database;
+  private releaseHook: PoolReleaseHook | undefined;
   private readonly paneLauncher: PaneLauncher;
   private readonly tmux: TmuxController;
   private readonly busBaseUrl: string;
@@ -335,6 +353,20 @@ export class PoolManager {
     };
   }
 
+  /** E66 — install the journaling release hook (see `PoolReleaseHook`). */
+  setReleaseHook(hook: PoolReleaseHook | undefined): void {
+    this.releaseHook = hook;
+  }
+
+  private async beforeRelease(event: Parameters<PoolReleaseHook>[0]): Promise<void> {
+    if (!this.releaseHook) return;
+    try {
+      await this.releaseHook(event);
+    } catch (err) {
+      console.error(`[pool:${this.poolId}] release hook failed for ${event.paneId} (${event.reason}):`, err);
+    }
+  }
+
   /**
    * Idempotent cold-start: for each of `cfg.panes` pane slots (1-based index
    * 1..panes), derive its pane id (`${cfg.tmux_session}:${derivePaneWindowName(i)}`)
@@ -456,6 +488,11 @@ export class PoolManager {
       // just the launch call `runTrackedLaunch()` makes.
       const launched = await this.trackPaneOperation(lease.pane_id, async () => {
         if (result.kind === 'evict') {
+          await this.beforeRelease({
+            reason: 'evict', poolAgentId: toPrefixedAgentId(this.cfg.agent_id), paneId: lease.pane_id,
+            paneAgentId: lease.agent_id, conversationId: result.evicted.conversationId,
+            claudeSessionId: result.evicted.claudeSessionId,
+          });
           // A failed /clear or kill on the displaced occupant must not block
           // seating the new conversation.
           try {
@@ -1019,6 +1056,12 @@ export class PoolManager {
     const idleRows = this.leaseStore.findIdleOlderThan(this.poolId, cutoffIso);
 
     for (const row of idleRows) {
+      if (row.conversation_id) {
+        await this.beforeRelease({
+          reason: 'release', poolAgentId: toPrefixedAgentId(this.cfg.agent_id), paneId: row.pane_id,
+          paneAgentId: row.agent_id, conversationId: row.conversation_id, claudeSessionId: row.claude_session_id,
+        });
+      }
       try {
         await this.paneLauncher.release(row.pane_id, this.cfg.on_evict);
       } catch (err) {

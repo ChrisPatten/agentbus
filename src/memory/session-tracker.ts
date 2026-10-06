@@ -14,70 +14,55 @@
  * Stage 80 (transcript-log) sets ended_at when a new message arrives after the
  * idle threshold, but does not fire the hook or update status. This tracker
  * picks those up on its next tick via processMidFlightClosedSessions().
+ *
+ * E66: journaling moved to `src/journaling/engine.ts`. The tracker only
+ * reports session closes to it (`onSessionClosed`, the `close` trigger).
  */
 import { exec, type ExecOptionsWithStringEncoding } from 'node:child_process';
 import type Database from 'better-sqlite3';
 import type { AppConfig } from '../config/schema.js';
-import { getCcHeadlessInstances, journalingThresholdForChannel } from '../config/schema.js';
-import { RuntimeResolver } from '../core/runtime-resolver.js';
 import type { Summarizer } from './summarizer.js';
 import type { SessionRow } from './types.js';
 
-/** Drives a silent journaling turn for a paused conversation (cc-headless). */
+/**
+ * Pre-E66 journaling runner signature, still the shape of
+ * `PoolManager.journalingRunner`. The journaling engine no longer calls it.
+ */
 export type JournalingRunner = (conversationId: string) => Promise<{ skipped?: boolean }>;
 
 /** Days after expiry before a memory is hard-deleted. */
 const HARD_DELETE_AFTER_DAYS = 30;
 /** Max summarization attempts before giving up. */
 const MAX_SUMMARY_ATTEMPTS = 3;
-/** Max consecutive journaling failures per conversation before backing off (re-armed by new activity). */
-const MAX_JOURNALING_ATTEMPTS = 3;
 
 export class SessionTracker {
   private db: Database.Database;
   private config: AppConfig;
   private summarizer: Summarizer;
   private timer: ReturnType<typeof setInterval> | null = null;
-  /**
-   * Injected by index.ts, one per running cc-headless instance, keyed by
-   * agent_id (e.g. "agent:peggy"). Without an entry for a session's agent_id,
-   * journaling dispatch for that session is a no-op (E23).
-   */
-  private journalingRunners = new Map<string, JournalingRunner>();
-  /** conversation_id → { lastActivity seen, consecutive failures }. Re-armed when last_activity advances. */
-  private journalingAttempts = new Map<string, { lastActivity: string; count: number }>();
-  /**
-   * E30 — conversation_ids with a journaling turn currently enqueued/running.
-   * `runner()` enqueues onto the same per-contact serialization queue as live
-   * turns, so two dispatches for the same conversation would never actually
-   * execute concurrently — but without this guard, a tick that lands while
-   * the first is still in flight would enqueue a redundant second one behind
-   * it. Checked before dispatch, cleared once the runner's promise settles
-   * (success or failure) so a genuinely stuck turn cannot suppress dispatch
-   * forever — MAX_JOURNALING_ATTEMPTS still bounds retries independently.
-   */
-  private journalingInFlight = new Set<string>();
-  /**
-   * E33 — whether the "no cc-headless instances/runners" no-op in
-   * dispatchJournaling() has already been warned about for the current
-   * occurrence of that condition. Edge-triggered: reset to false as soon as
-   * instances/runners are non-empty again, so a later recurrence re-warns.
-   */
-  private journalingConfigWarned = false;
+  /** E66 — the journaling engine's `close` trigger. */
+  private readonly onSessionClosed: ((session: SessionRow) => void) | undefined;
 
   constructor(deps: {
     db: Database.Database;
     config: AppConfig;
     summarizer: Summarizer;
+    /** Called once for each session the tracker closes or finds closed mid-flight. */
+    onSessionClosed?: (session: SessionRow) => void;
   }) {
     this.db = deps.db;
     this.config = deps.config;
     this.summarizer = deps.summarizer;
+    this.onSessionClosed = deps.onSessionClosed;
   }
 
-  /** Register the journaling runner for one cc-headless instance, keyed by its agent_id (e.g. "agent:peggy"). */
-  registerJournalingRunner(agentId: string, runner: JournalingRunner): void {
-    this.journalingRunners.set(agentId, runner);
+  private notifyClosed(session: SessionRow): void {
+    if (!this.onSessionClosed) return;
+    try {
+      this.onSessionClosed(session);
+    } catch (err) {
+      console.error(`[session-tracker] onSessionClosed failed for ${session.id.slice(0, 8)}:`, err);
+    }
   }
 
   /** Start the background tick loop. Runs one immediate tick before the interval. */
@@ -124,148 +109,6 @@ export class SessionTracker {
     } catch (err) {
       console.error('[session-tracker] Error sweeping expired memories:', err);
     }
-
-    try {
-      this.dispatchJournaling();
-    } catch (err) {
-      console.error('[session-tracker] Error dispatching journaling:', err);
-    }
-  }
-
-  /**
-   * E20/E23/E30 — fire a silent journaling turn for each headless conversation
-   * that either (a) has paused (idle past the per-channel journaling
-   * threshold — the debounce leg) or (b) has gone too long since its last
-   * sweep regardless of idle state (the hard-ceiling leg, E30) — and has not
-   * been journaled since its last activity. One journaling turn per
-   * trigger; new activity advances last_activity past last_journaled_at and
-   * re-arms it.
-   *
-   * Each session is routed to the cc-headless instance that owns it
-   * (`sessions.agent_id`, migration 011) — its own `journaling` config and its
-   * own registered runner, never another agent's. Sessions with no agent_id
-   * (created before migration 011, or by a single-instance deployment) fall
-   * back to the sole configured instance when there is exactly one; with
-   * multiple instances configured there is no safe attribution, so they are
-   * skipped. A session whose agent_id has no matching configured instance
-   * (agent removed/renamed since the session started) is skipped, not thrown.
-   *
-   * No-op when no cc-headless instances are configured or no runner is
-   * registered. Never sets ended_at — sessions stay long-lived.
-   */
-  private dispatchJournaling(): void {
-    const instances = getCcHeadlessInstances(this.config);
-    if (instances.length === 0 || this.journalingRunners.size === 0) {
-      this.warnIfJournalingBlocked(instances.length === 0);
-      return;
-    }
-    this.journalingConfigWarned = false;
-
-    // E64 — one runtime lookup instead of a local agent_id → instance map.
-    const runtimes = new RuntimeResolver(this.config);
-    const soleInstanceKey = instances.length === 1 ? `agent:${instances[0]!.agent_id}` : null;
-
-    const now = Date.now();
-    const nowIso = new Date(now).toISOString();
-
-    // Candidate sessions: headless-managed (claude_session_id set), still open,
-    // not journaled since their last activity.
-    const candidates = this.db
-      .prepare(
-        `SELECT * FROM sessions
-         WHERE ended_at IS NULL AND claude_session_id IS NOT NULL
-           AND (last_journaled_at IS NULL OR last_journaled_at < last_activity)`,
-      )
-      .all() as SessionRow[];
-
-    for (const session of candidates) {
-      const agentKey = session.agent_id ?? soleInstanceKey;
-      if (!agentKey) continue;
-      const runtime = runtimes.resolve(agentKey);
-      const instCfg = runtime?.kind === 'cc-headless' ? runtime.instance : undefined;
-      const runner = this.journalingRunners.get(agentKey);
-      if (!instCfg || !instCfg.journaling.enabled || !runner) continue;
-
-      const thresholdMs = journalingThresholdForChannel(instCfg.journaling.threshold_ms, session.channel);
-      const idleMs = now - new Date(session.last_activity).getTime();
-      const idleTriggered = idleMs >= thresholdMs;
-
-      // E30 hard ceiling: elapsed since the last sweep (or session start, if
-      // never journaled) regardless of idle state — catches long,
-      // continuously-active conversations that never go idle long enough to
-      // trip the debounce leg above.
-      const ceilingMs = instCfg.journaling.ceiling_ms;
-      const sinceSweepMs = now - new Date(session.last_journaled_at ?? session.started_at).getTime();
-      const ceilingTriggered = ceilingMs != null && sinceSweepMs >= ceilingMs;
-
-      if (!idleTriggered && !ceilingTriggered) continue;
-
-      // E30 overlap suppression: a sweep already in flight for this
-      // conversation suppresses a new trigger rather than queuing a
-      // redundant second one behind it.
-      if (this.journalingInFlight.has(session.conversation_id)) continue;
-
-      // Reset the failure counter when new activity has occurred since last seen.
-      let rec = this.journalingAttempts.get(session.conversation_id);
-      if (!rec || rec.lastActivity !== session.last_activity) {
-        rec = { lastActivity: session.last_activity, count: 0 };
-        this.journalingAttempts.set(session.conversation_id, rec);
-      }
-      if (rec.count >= MAX_JOURNALING_ATTEMPTS) continue;
-
-      // Fire-and-forget. Stamp last_journaled_at on success (or skip); on failure
-      // leave it unchanged so a later tick retries, bounded by the attempt cap.
-      this.journalingInFlight.add(session.conversation_id);
-      runner(session.conversation_id)
-        .then(() => {
-          this.journalingAttempts.delete(session.conversation_id);
-          this.db
-            .prepare(`UPDATE sessions SET last_journaled_at = ? WHERE id = ?`)
-            .run(nowIso, session.id);
-        })
-        .catch((err: unknown) => {
-          const current = this.journalingAttempts.get(session.conversation_id);
-          if (current) current.count += 1;
-          console.error(
-            `[session-tracker] Journaling turn failed for ${session.conversation_id.slice(0, 8)} ` +
-              `(attempt ${current?.count ?? 1}):`,
-            err,
-          );
-        })
-        .finally(() => {
-          this.journalingInFlight.delete(session.conversation_id);
-        });
-    }
-  }
-
-  /**
-   * E33 — surfaces the dispatchJournaling() no-op path (no configured
-   * cc-headless instances, or none registered as runners) via a console.warn
-   * instead of leaving it silent. Only warns when at least one session is
-   * actually waiting on the sweep (would otherwise be a journaling
-   * candidate), and only once per occurrence of the condition —
-   * `journalingConfigWarned` is reset as soon as the condition clears.
-   */
-  private warnIfJournalingBlocked(noInstancesConfigured: boolean): void {
-    if (this.journalingConfigWarned) return;
-
-    const waiting = this.db
-      .prepare(
-        `SELECT COUNT(*) as count FROM sessions
-         WHERE ended_at IS NULL AND claude_session_id IS NOT NULL
-           AND (last_journaled_at IS NULL OR last_journaled_at < last_activity)`,
-      )
-      .get() as { count: number };
-    if (waiting.count === 0) return;
-
-    this.journalingConfigWarned = true;
-    const reason = noInstancesConfigured
-      ? 'no cc-headless instances configured'
-      : 'no journaling runners registered';
-    console.warn(
-      `[session-tracker] Journaling sweep is a no-op bus-wide (${reason}); ` +
-        `${waiting.count} session(s) waiting to be journaled.`,
-    );
   }
 
   /** Resolve the minimum message count required before a session can be closed, for a given channel. */
@@ -306,6 +149,7 @@ export class SessionTracker {
 
     for (const session of idleSessions) {
       closeSession.run(now, session.id);
+      this.notifyClosed({ ...session, ended_at: now });
       const meetsThreshold = session.message_count >= this.minMessagesForChannel(session.channel);
       console.log(
         `[session-tracker] Closed idle session ${session.id.slice(0, 8)} ` +
@@ -364,14 +208,21 @@ export class SessionTracker {
       )
       .run(recentCutoff);
 
-    const orphans = (
-      this.db
-        .prepare(
-          `SELECT * FROM sessions
-           WHERE ended_at IS NOT NULL AND status = 'active' AND ended_at >= ?`,
-        )
-        .all(recentCutoff) as SessionRow[]
-    ).filter((s) => s.message_count >= this.minMessagesForChannel(s.channel));
+    const recent = this.db
+      .prepare(
+        `SELECT * FROM sessions
+         WHERE ended_at IS NOT NULL AND status = 'active' AND ended_at >= ?`,
+      )
+      .all(recentCutoff) as SessionRow[];
+    // E66 — every recent close is a journaling `close` trigger; the engine
+    // applies its own eligibility rules. Below-min sessions are promoted
+    // here too, so each is reported once.
+    const promoteQuiet = this.db.prepare(`UPDATE sessions SET status = 'summarize_pending' WHERE id = ?`);
+    for (const s of recent) {
+      this.notifyClosed(s);
+      if (s.message_count < this.minMessagesForChannel(s.channel)) promoteQuiet.run(s.id);
+    }
+    const orphans = recent.filter((s) => s.message_count >= this.minMessagesForChannel(s.channel));
 
     if (orphans.length === 0) return;
 

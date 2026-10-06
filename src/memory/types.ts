@@ -39,6 +39,8 @@ export interface SessionRow {
   last_journaled_at: string | null;
   /** Owning cc-headless agent id (e.g. "agent:peggy"), or null (E23, migration 011). */
   agent_id: string | null;
+  /** E66 journal cursor: created_at of the last transcript row a successful journal run covered (migration 026). */
+  journal_cursor_at?: string | null;
 }
 
 /** Row shape from the transcripts table. */

@@ -67,6 +67,9 @@ import { createBusAdvisoryTransport } from './advisories/transport.js';
 import { createAdvisoryInject } from './pipeline/stages/advisory-inject.js';
 import { resolveJournalingSettings } from './journaling/config.js';
 import { reviewChains } from './journaling/advisories.js';
+import { JournalEngine } from './journaling/engine.js';
+import { JournalerRegistry } from './journaling/registry.js';
+import { ProvisionalHeadlessJournaler } from './journaling/journalers/cc-headless-provisional.js';
 
 const configPath = process.env['AGENTBUS_CONFIG'] ?? resolve(process.cwd(), 'config.yaml');
 
@@ -124,6 +127,26 @@ for (const agentId of ownerDirectory.agentsWithOwners()) {
 const journalingSettings = resolveJournalingSettings(config);
 reviewChains(journalingSettings.values(), runtimeResolver, advisories);
 
+// E66 — one journaling engine for every runtime: bus-side triggers (pause,
+// ceiling, close, /clear, pool evict/release, shutdown) and harness hook
+// events feed it; it walks each agent's journaler chain. Journalers are
+// registered once their runtimes start (below).
+const journalers = new JournalerRegistry();
+const headlessJournaler = new ProvisionalHeadlessJournaler(runtimeResolver);
+journalers.register(headlessJournaler);
+const journalEngine = new JournalEngine({
+  db, config, resolver: runtimeResolver, registry: journalers, advisories, owners: ownerDirectory, settings: journalingSettings,
+});
+for (const [poolAgentId, pool] of poolManagers) {
+  // S66.9 makes this await the run (bounded) before the pane is cleared.
+  pool.setReleaseHook(({ reason, conversationId }) => {
+    const handle = journalEngine.trigger({ reason, conversationId });
+    if (handle.status === 'unknown-session') {
+      console.warn(`[journaling] ${poolAgentId}: no session for released conversation ${conversationId.slice(0, 8)}`);
+    }
+  });
+}
+
 const { registry: commandRegistry, pauseSet, headlessControl } = createCommandSystem({
   adapterRegistry: registry,
   queue,
@@ -132,6 +155,7 @@ const { registry: commandRegistry, pauseSet, headlessControl } = createCommandSy
   poolManagers,
   runtimeResolver,
   advisories,
+  journal: journalEngine,
 });
 
 // ── Custom commands ───────────────────────────────────────────────────────────
@@ -227,7 +251,10 @@ advisories.setTransport(createBusAdvisoryTransport({
 // summarization. Both degrade gracefully when ANTHROPIC_API_KEY is not set.
 
 const summarizer = new Summarizer({ db, config });
-const sessionTracker = new SessionTracker({ db, config, summarizer });
+const sessionTracker = new SessionTracker({
+  db, config, summarizer,
+  onSessionClosed: (session) => { journalEngine.trigger({ reason: 'close', sessionId: session.id }); },
+});
 
 // ── Attachment sweeper (E17) ──────────────────────────────────────────────────
 // Periodically deletes expired image files + their DB rows. Runs on a fixed
@@ -270,10 +297,17 @@ const maintenanceTimer = setInterval(() => {
 
 // ── Shutdown ─────────────────────────────────────────────────────────────────
 
-function shutdown() {
+let shuttingDown = false;
+async function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
   console.log('AgentBus shutting down…');
   scheduler.stop();
   sessionTracker.stop();
+  // E66 — persist a `shutdown` trigger for sessions with unjournaled human
+  // content (journaled after restart) and give in-flight runs a moment.
+  const marked = await journalEngine.shutdown().catch(() => [] as string[]);
+  if (marked.length > 0) console.log(`[journaling] ${marked.length} session(s) will be journaled after restart`);
   attachmentSweeper.stop();
   deliveryWorker.stop();
   stopHeadless();
@@ -288,8 +322,8 @@ function shutdown() {
   });
 }
 
-process.on('SIGTERM', shutdown);
-process.on('SIGINT', shutdown);
+process.on('SIGTERM', () => void shutdown());
+process.on('SIGINT', () => void shutdown());
 
 // ── Start ────────────────────────────────────────────────────────────────────
 
@@ -307,9 +341,9 @@ deliveryWorker.start();
 // (E20). Each instance registers its own runner, keyed by agent_id, so a
 // multi-agent deployment (E23) journals each session with its owning agent.
 for (const [agentId, headless] of startHeadless(db)) {
-  sessionTracker.registerJournalingRunner(agentId, headless.runJournalingTurn);
-  // Let /clear reach the owning instance's journaling hook.
-  headlessControl.journalResumeId.set(agentId, headless.journalResumeId);
+  // E66 — the (provisional) cc-headless journaler runs this instance's
+  // journaling turns.
+  headlessJournaler.addHandle(agentId, headless);
   // Let /stop reach the owning instance's in-flight turn.
   headlessControl.stopTurn.set(agentId, headless.stopTurn);
   headlessControl.snapshots?.set(agentId, headless.snapshot);
@@ -321,18 +355,16 @@ for (const [agentId, headless] of startHeadless(db)) {
 // left over from before a restart / release any whose window actually
 // vanished (reconcileLiveness — see src/pool/pool-manager.ts's doc comment:
 // a free pane with no tmux window yet is normal and is NOT touched here),
-// then start the recurring hard-idle/park-drain sweep. Registering a
-// journaling runner per pool is currently inert (SessionTracker's dispatch
-// only recognizes cc-headless instances — see the maintenance backlog) but
-// costs nothing and keeps parity with cc-headless's own wiring above.
-for (const [agentId, pool] of poolManagers) {
+// then start the recurring hard-idle/park-drain sweep. Pool journaling goes
+// through the journaling engine (release hook above, harness hook events).
+for (const pool of poolManagers.values()) {
   await pool.ensureStarted();
   await pool.reconcileLiveness();
   pool.start();
-  sessionTracker.registerJournalingRunner(agentId, pool.journalingRunner);
 }
 
 sessionTracker.start();
+journalEngine.start();
 attachmentSweeper.start();
 scheduler.loadConfig();
 if (config.scheduler.enabled) scheduler.start();

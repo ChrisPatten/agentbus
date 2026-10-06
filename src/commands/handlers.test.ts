@@ -749,40 +749,37 @@ describe('command handlers', () => {
       );
     }
 
-    it('closes the active session and journals it in the background', async () => {
+    const journalMock = (status = 'queued') => ({
+      trigger: vi.fn(() => ({ status, done: Promise.resolve({ status: 'journaled' }) })),
+    });
+
+    it('closes the active session and fires the journaling clear trigger (E66)', async () => {
       const db = makeDb();
       insertSession(db, { id: 'sess-1' });
-      const journalResumeId = vi.fn();
-      const deps = { ...makeDeps({ db }), headlessControl: { journalResumeId: new Map([['agent:peggy', journalResumeId]]) } };
-      const commands = createBuiltinCommands(deps as never);
+      const journal = journalMock();
+      const commands = createBuiltinCommands({ ...makeDeps({ db }), journal } as never);
       const clear = commands.find((c) => c.name === 'clear')!;
 
       const result = await clear.handler([], makeCtx(db));
 
-      expect(result.body).toContain('fresh session');
+      expect(result.body).toContain('Journaling the previous session in the background');
       const row = db.prepare(`SELECT ended_at FROM sessions WHERE id = 'sess-1'`).get() as {
         ended_at: string | null;
       };
       expect(row.ended_at).not.toBeNull();
-      expect(journalResumeId).toHaveBeenCalledWith({
-        claudeSessionId: 'claude-abc',
-        contactId: 'chris',
-        channel: 'telegram',
-        conversationId: computeConversationId('chris', 'telegram', 'general'),
-      });
+      expect(journal.trigger).toHaveBeenCalledWith({ reason: 'clear', sessionId: 'sess-1' });
     });
 
     it('clears the bound Telegram session when the command arrives through app', async () => {
       const db = makeDb();
       insertSession(db, { id: 'bound-clear', agentId: 'agent:peggy' });
       const conversationId = computeConversationId('chris', 'telegram', 'general');
-      const journal = vi.fn();
-      const deps = { ...makeDeps({ db }), headlessControl: { journalResumeId: new Map([['agent:peggy', journal]]) } };
-      const clear = createBuiltinCommands(deps as never).find(c => c.name === 'clear')!;
+      const journal = journalMock();
+      const clear = createBuiltinCommands({ ...makeDeps({ db }), journal } as never).find(c => c.name === 'clear')!;
       const envelope = { ...makeEnvelope(), channel: 'app', metadata: { bound_session_id: 'bound-clear', conversation_id: conversationId } };
       await clear.handler([], makeCtx(db, { channel: 'app', adapterId: 'app', envelope }));
       expect(db.prepare('SELECT ended_at FROM sessions WHERE id = ?').get('bound-clear')).toMatchObject({ ended_at: expect.any(String) });
-      expect(journal).toHaveBeenCalledWith(expect.objectContaining({ channel: 'telegram', conversationId }));
+      expect(journal.trigger).toHaveBeenCalledWith({ reason: 'clear', sessionId: 'bound-clear' });
     });
 
     it('ignores a forged conversation_id without an authorized binding', async () => {
@@ -797,24 +794,20 @@ describe('command handlers', () => {
 
     it('reports nothing to clear when there is no active session', async () => {
       const db = makeDb();
-      const journalResumeId = vi.fn();
-      const deps = { ...makeDeps({ db }), headlessControl: { journalResumeId: new Map([['agent:peggy', journalResumeId]]) } };
-      const commands = createBuiltinCommands(deps as never);
-      const clear = commands.find((c) => c.name === 'clear')!;
+      const journal = journalMock();
+      const clear = createBuiltinCommands({ ...makeDeps({ db }), journal } as never).find((c) => c.name === 'clear')!;
 
       const result = await clear.handler([], makeCtx(db));
 
       expect(result.body).toContain('No active session');
-      expect(journalResumeId).not.toHaveBeenCalled();
+      expect(journal.trigger).not.toHaveBeenCalled();
     });
 
     it('does not touch a session on a different channel', async () => {
       const db = makeDb();
       insertSession(db, { id: 'sess-sys', channel: 'system:peggy' });
-      const journalResumeId = vi.fn();
-      const deps = { ...makeDeps({ db }), headlessControl: { journalResumeId: new Map([['agent:peggy', journalResumeId]]) } };
-      const commands = createBuiltinCommands(deps as never);
-      const clear = commands.find((c) => c.name === 'clear')!;
+      const journal = journalMock();
+      const clear = createBuiltinCommands({ ...makeDeps({ db }), journal } as never).find((c) => c.name === 'clear')!;
 
       // makeCtx defaults to channel 'telegram'
       const result = await clear.handler([], makeCtx(db));
@@ -824,83 +817,41 @@ describe('command handlers', () => {
         ended_at: string | null;
       };
       expect(row.ended_at).toBeNull();
-      expect(journalResumeId).not.toHaveBeenCalled();
+      expect(journal.trigger).not.toHaveBeenCalled();
     });
 
     it('ignores a session with no claude_session_id (never spoke)', async () => {
       const db = makeDb();
       insertSession(db, { id: 'sess-nul', claudeSessionId: null });
-      const deps = { ...makeDeps({ db }), headlessControl: { journalResumeId: new Map([['agent:peggy', vi.fn()]]) } };
-      const commands = createBuiltinCommands(deps as never);
-      const clear = commands.find((c) => c.name === 'clear')!;
+      const clear = createBuiltinCommands({ ...makeDeps({ db }), journal: journalMock() } as never).find((c) => c.name === 'clear')!;
 
       const result = await clear.handler([], makeCtx(db));
 
       expect(result.body).toContain('No active session');
     });
 
-    it('routes to the owning agent when multiple headless instances are registered (E23)', async () => {
-      const db = makeDb();
-      insertSession(db, { id: 'sess-poke', claudeSessionId: 'claude-poke', agentId: 'agent:pokeclaude' });
-      const peggyJournal = vi.fn();
-      const pokeclaudeJournal = vi.fn();
-      const deps = {
-        ...makeDeps({ db }),
-        headlessControl: {
-          journalResumeId: new Map([
-            ['agent:peggy', peggyJournal],
-            ['agent:pokeclaude', pokeclaudeJournal],
-          ]),
-        },
-      };
-      const commands = createBuiltinCommands(deps as never);
-      const clear = commands.find((c) => c.name === 'clear')!;
-
-      await clear.handler([], makeCtx(db));
-
-      expect(pokeclaudeJournal).toHaveBeenCalledWith({
-        claudeSessionId: 'claude-poke',
-        contactId: 'chris',
-        channel: 'telegram',
-        conversationId: computeConversationId('chris', 'telegram', 'general'),
-      });
-      expect(peggyJournal).not.toHaveBeenCalled();
-    });
-
-    it('skips journaling for an orphaned agent_id with multiple instances registered', async () => {
+    it('says so when journaling is not configured for the agent', async () => {
       const db = makeDb();
       insertSession(db, { id: 'sess-orphan', agentId: 'agent:retired' });
-      const peggyJournal = vi.fn();
-      const pokeclaudeJournal = vi.fn();
-      const deps = {
-        ...makeDeps({ db }),
-        headlessControl: {
-          journalResumeId: new Map([
-            ['agent:peggy', peggyJournal],
-            ['agent:pokeclaude', pokeclaudeJournal],
-          ]),
-        },
-      };
-      const commands = createBuiltinCommands(deps as never);
-      const clear = commands.find((c) => c.name === 'clear')!;
+      const clear = createBuiltinCommands({ ...makeDeps({ db }), journal: journalMock('not-configured') } as never)
+        .find((c) => c.name === 'clear')!;
 
       const result = await clear.handler([], makeCtx(db));
 
-      expect(result.body).toContain('fresh session');
-      expect(peggyJournal).not.toHaveBeenCalled();
-      expect(pokeclaudeJournal).not.toHaveBeenCalled();
+      expect(result.body).toContain('Journaling is not set up for this agent');
+      expect(db.prepare(`SELECT ended_at FROM sessions WHERE id = 'sess-orphan'`).get()).toMatchObject({ ended_at: expect.any(String) });
     });
 
-    it('still closes the session when the headless adapter is not running', async () => {
+    it('still closes the session when no journaling engine is wired', async () => {
       const db = makeDb();
       insertSession(db, { id: 'sess-2' });
-      const deps = makeDeps({ db }); // no headlessControl
+      const deps = makeDeps({ db });
       const commands = createBuiltinCommands(deps);
       const clear = commands.find((c) => c.name === 'clear')!;
 
       const result = await clear.handler([], makeCtx(db));
 
-      expect(result.body).toContain('No headless journaling agent available');
+      expect(result.body).toContain('Journaling is not set up');
       const row = db.prepare(`SELECT ended_at FROM sessions WHERE id = 'sess-2'`).get() as {
         ended_at: string | null;
       };
@@ -941,7 +892,7 @@ describe('command handlers', () => {
       const deps = {
         ...makeDeps({ db }),
         adapterRegistry: { lookup: (id: string) => (id === 'telegram' ? telegramAdapter : undefined), list: () => [telegramAdapter] } as never,
-        headlessControl: { journalResumeId: new Map(), stopTurn: new Map([['agent:peggy', stopTurn]]) },
+        headlessControl: { stopTurn: new Map([['agent:peggy', stopTurn]]) },
       };
       const commands = createBuiltinCommands(deps as never);
       const stop = commands.find((c) => c.name === 'stop')!;
@@ -960,7 +911,7 @@ describe('command handlers', () => {
       insertSession(db, { id: 'bound-stop', agentId: 'agent:peggy' });
       const conversationId = computeConversationId('chris', 'telegram', 'general');
       const stopTurn = vi.fn().mockReturnValue(true);
-      const deps = { ...makeDeps({ db }), headlessControl: { journalResumeId: new Map(), stopTurn: new Map([['agent:peggy', stopTurn]]) } };
+      const deps = { ...makeDeps({ db }), headlessControl: { stopTurn: new Map([['agent:peggy', stopTurn]]) } };
       const stop = createBuiltinCommands(deps as never).find(c => c.name === 'stop')!;
       const envelope = { ...makeEnvelope(), channel: 'app', metadata: { bound_session_id: 'bound-stop', conversation_id: conversationId } };
       await stop.handler([], makeCtx(db, { channel: 'app', adapterId: 'app', envelope }));
@@ -972,7 +923,7 @@ describe('command handlers', () => {
       const db = makeDb();
       insertSession(db, { id: 'foreign-stop', agentId: 'agent:peggy' });
       const stopTurn = vi.fn().mockReturnValue(true);
-      const deps = { ...makeDeps({ db }), headlessControl: { journalResumeId: new Map(), stopTurn: new Map([['agent:peggy', stopTurn]]) } };
+      const deps = { ...makeDeps({ db }), headlessControl: { stopTurn: new Map([['agent:peggy', stopTurn]]) } };
       const stop = createBuiltinCommands(deps as never).find(c => c.name === 'stop')!;
       const envelope = { ...makeEnvelope(), channel: 'app', metadata: { conversation_id: computeConversationId('chris', 'telegram', 'general') } };
       await stop.handler([], makeCtx(db, { channel: 'app', adapterId: 'app', envelope }));
@@ -988,7 +939,7 @@ describe('command handlers', () => {
       const deps = {
         ...makeDeps({ db }),
         adapterRegistry: { lookup: (id: string) => (id === 'telegram' ? telegramAdapter : undefined), list: () => [telegramAdapter] } as never,
-        headlessControl: { journalResumeId: new Map(), stopTurn: new Map([['agent:peggy', stopTurn]]) },
+        headlessControl: { stopTurn: new Map([['agent:peggy', stopTurn]]) },
       };
       const commands = createBuiltinCommands(deps as never);
       const stop = commands.find((c) => c.name === 'stop')!;
@@ -1007,7 +958,7 @@ describe('command handlers', () => {
       const deps = {
         ...makeDeps({ db }),
         adapterRegistry: { lookup: (id: string) => (id === 'telegram' ? telegramAdapter : undefined), list: () => [telegramAdapter] } as never,
-        headlessControl: { journalResumeId: new Map(), stopTurn: new Map([['agent:peggy', stopTurn]]) },
+        headlessControl: { stopTurn: new Map([['agent:peggy', stopTurn]]) },
       };
       const commands = createBuiltinCommands(deps as never);
       const stop = commands.find((c) => c.name === 'stop')!;
@@ -1038,7 +989,6 @@ describe('command handlers', () => {
       const deps = {
         ...makeDeps({ db }),
         headlessControl: {
-          journalResumeId: new Map(),
           stopTurn: new Map([
             ['agent:peggy', peggyStop],
             ['agent:pokeclaude', pokeclaudeStop],
@@ -1060,7 +1010,7 @@ describe('command handlers', () => {
       const soloStop = vi.fn().mockReturnValue(true);
       const deps = {
         ...makeDeps({ db }),
-        headlessControl: { journalResumeId: new Map(), stopTurn: new Map([['agent:peggy', soloStop]]) },
+        headlessControl: { stopTurn: new Map([['agent:peggy', soloStop]]) },
       };
       const commands = createBuiltinCommands(deps as never);
       const stop = commands.find((c) => c.name === 'stop')!;
@@ -1079,7 +1029,6 @@ describe('command handlers', () => {
       const deps = {
         ...makeDeps({ db }),
         headlessControl: {
-          journalResumeId: new Map(),
           stopTurn: new Map([
             ['agent:peggy', peggyStop],
             ['agent:pokeclaude', pokeclaudeStop],
@@ -1102,7 +1051,7 @@ describe('command handlers', () => {
       const stopTurn = vi.fn().mockReturnValue(true);
       const deps = {
         ...makeDeps({ db, adapters: [{ id: 'email:peggy' }] }),
-        headlessControl: { journalResumeId: new Map(), stopTurn: new Map([['agent:peggy', stopTurn]]) },
+        headlessControl: { stopTurn: new Map([['agent:peggy', stopTurn]]) },
       };
       const commands = createBuiltinCommands(deps as never);
       const stop = commands.find((c) => c.name === 'stop')!;

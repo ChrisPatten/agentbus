@@ -49,6 +49,8 @@ export interface CommandSystemDeps {
   runtimeResolver?: import('../core/runtime-resolver.js').RuntimeResolver;
   /** E65 — active advisories, shown in /status. */
   advisories?: Pick<import('../advisories/service.js').AdvisoryService, 'listActive'>;
+  /** E66 — journaling engine, for /clear's `clear` trigger. */
+  journal?: Pick<import('../journaling/engine.js').JournalEngine, 'trigger'>;
 }
 
 export interface CommandSystem {
@@ -82,7 +84,6 @@ export function createCommandSystem(deps: CommandSystemDeps): CommandSystem {
   }
 
   const headlessControl: import('./handlers.js').HeadlessControl = {
-    journalResumeId: new Map(),
     stopTurn: new Map(),
     snapshots: new Map(),
   };
@@ -96,6 +97,7 @@ export function createCommandSystem(deps: CommandSystemDeps): CommandSystem {
     poolManagers: deps.poolManagers,
     runtimeResolver: deps.runtimeResolver,
     advisories: deps.advisories,
+    journal: deps.journal,
   });
 
   for (const cmd of builtins) {
