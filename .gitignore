@@ -19,3 +19,8 @@ xcuserdata/
 *.xcworkspace/xcuserdata/
 apps/ios/Peggy/Peggy/Info.plist
 apps/macos/AgentBus/AgentBus/Info.plist
+
+# VitePress documentation site (site-docs/)
+site-docs/.vitepress/cache/
+site-docs/.vitepress/dist/
+_site/
