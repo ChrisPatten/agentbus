@@ -108,7 +108,7 @@ Implemented 2026-10-06 on `feat/e64-e68-journaling`. Code: `src/journaling/conso
 
 - Config at the agent level, `agents.<id>.protected_paths`, not under `journaling`. Setting it replaces the default. `system_prompt` is inline template text in this codebase, so "the system-prompt file" means the files it imports with `@path` (cc-headless and cc-pool).
 - The memory dir is excluded everywhere (resolution, hashing, deny rules). A protected directory that contains the memory dir gets no deny rule (it would block memory writes); hashing still covers it.
-- Deny rules: `Edit(//abs)` and `Write(//abs)` (`/**` for directories) appended to `--disallowedTools` for cc-headless session turns (handle and pool fork) and consolidation turns. Bash can still write files; hashing is the backstop.
+- Deny rules: `Edit(//abs)` (`/**` for directories) appended to `--disallowedTools` for cc-headless session turns (handle and pool fork) and consolidation turns. Originally `Write(//abs)` was emitted too; the pre-merge spike dropped it (see below). Subprocess writes (python, node, `cp`) aren't covered; hashing is the backstop.
 - Hashing is a generic `RunGuard` in `runChain` (`begin` before the first attempt, `end` after the outcome), implemented by `ProtectedPathMonitor` (sha256, ≤ 2000 files, files > 5 MB by size+mtime). The advisory `protected-paths:unapproved-change` (warning) lists files changed during the run window by anyone, minus hashes the bus wrote for approved proposals. It does not auto-resolve (owners acknowledge it).
 - `/journal` shows `protected: …`.
 
@@ -116,9 +116,27 @@ Implemented 2026-10-06 on `feat/e64-e68-journaling`. Code: `src/journaling/conso
 
 `src/learning/e2e.test.ts` runs the loop on one agent with a fake LLM (a node script) behind the real `ScriptJournaler`: `/feedback` → journaled below `min_human_messages` → consolidated into a native `feedback` memory and the index → the correction recurs in another conversation → the next consolidation returns a `CLAUDE.md` proposal → the owner approves through `resolveApproval` → the bus applies it and the protected-path check stays quiet.
 
+### Pre-merge spike: protected-path deny rules (2026-10-06)
+
+Claude Code 2.1.287 (`~/.local/bin/claude`), a temp project with `CLAUDE.md`, `skills/x.md`, `memory/notes.md`, and exactly the cc-pool `runDirect` flags (`-p … --output-format json --permission-mode acceptEdits --mcp-config '{"mcpServers":{}}' --strict-mcp-config --disallowedTools <rules> --model haiku --max-turns 3`).
+
+**Docs** ([permissions](https://code.claude.com/docs/en/permissions)): `//path` is the absolute-path anchor (a single `/` anchors at the settings source / working dir), patterns are gitignore-style (`**` crosses directories). Claude Code checks file permissions against `Edit(path)`/`Read(path)` rules **only**: a `Write(path)` rule is accepted, never consulted, and warns at startup. An `Edit` deny applies to every built-in editing tool (Edit, Write), to Bash redirect targets (`>`, `>>`, `2>`), `tee` targets and recognized file commands (`sed`, …), but not to subprocesses that open files themselves.
+
+| Case | Before (`Edit` + `Write` rules) | After (`Edit` only) | Source |
+|---|---|---|---|
+| Protected file, Edit tool | **blocked** (live: `permission_denials` = Edit, file unchanged) | blocked (same `Edit` rule) | live + docs |
+| Protected file, Write tool | blocked, by the `Edit` rule; the `Write` rule is ignored | blocked | docs |
+| File in a protected dir (`skills/**`) | blocked | blocked | docs |
+| Memory file (`memory/notes.md`) | allowed (no rule covers it) | allowed | docs + rule list |
+| Bash `echo … >> CLAUDE.md` | blocked (redirect target checked against `Edit` denies) | blocked | docs |
+| Bash subprocess (`python3 -c "open(…,'a')"`) | **allowed** (bypass) | **allowed** (bypass); hashing advisory is the backstop | docs |
+
+Only the first case ran live: after it, the session's auto-mode classifier refused further runs of the CLI outside the Bash sandbox (needed because the sandbox's TLS-inspecting proxy breaks the CLI's API connection). The other rows are taken from the docs and still need a live check by the operator (see the report for the command).
+
+**Change**: `protectedPathDenyRules` and the reference script now emit `Edit(...)` only. The `//abs` syntax and `/**` directory globs were already correct. No Bash pattern rules were added: Bash rules match command text, are easy to get around, and a broad rule would break legitimate Bash use; redirects are already covered by the `Edit` denies.
+
 ### Open questions
 
 - A proposal that goes `stale` (file changed) or `expired` is only visible in `GET /api/v1/proposals`; should it also become a feedback event so the agent knows to re-propose?
 - The daily limit is a rolling 24 h window, not a calendar day.
-- The `//abs` permission-rule syntax for `--disallowedTools` was not verified against the real Claude Code CLI in a spike (E67's spike didn't cover it). Worth a quick check before relying on the deny rules.
 - Tool errors from cc-pool panes and `claude-code` sessions aren't captured (no stream to watch); a PostToolUse hook could report them later.

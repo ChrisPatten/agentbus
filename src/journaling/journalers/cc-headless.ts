@@ -71,14 +71,18 @@ export interface CcHeadlessJournalerDeps {
 /**
  * E68 S68.4 — `--disallowedTools` rules that deny edits to protected paths.
  * Absolute paths use Claude Code's `//` prefix; directories (ending in `/`)
- * get a `**` glob. Both `Edit` and `Write` are listed.
+ * get a `**` glob. Only `Edit(...)` is emitted: Claude Code checks file
+ * permissions against `Edit`/`Read` path rules only, an `Edit` deny covers
+ * the Write tool and Bash redirect/`tee`/`sed` targets, and a `Write(path)`
+ * rule is accepted but never consulted (it only causes a startup warning).
+ * Verified against the real CLI (v2.1.287) in the E68 pre-merge spike.
  */
 export function protectedPathDenyRules(paths: readonly string[] | undefined): string[] {
   const rules: string[] = [];
   for (const p of paths ?? []) {
     const glob = p.endsWith('/') ? `${p}**` : p;
     const spec = glob.startsWith('/') ? `/${glob}` : glob;
-    rules.push(`Edit(${spec})`, `Write(${spec})`);
+    rules.push(`Edit(${spec})`);
   }
   return rules;
 }

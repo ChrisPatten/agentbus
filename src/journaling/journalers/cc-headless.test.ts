@@ -172,8 +172,8 @@ describe('CcHeadlessJournaler consolidation (E68 S68.1)', () => {
     expect(req.prompt).toContain('Consolidate your memory.');
     expect(req.prompt).toContain(NOTHING_TO_RECORD);
     expect(req.denyTools).toEqual([
-      'Edit(//agents/baxter/CLAUDE.md)', 'Write(//agents/baxter/CLAUDE.md)',
-      'Edit(//agents/baxter/skills/**)', 'Write(//agents/baxter/skills/**)',
+      'Edit(//agents/baxter/CLAUDE.md)',
+      'Edit(//agents/baxter/skills/**)',
     ]);
   });
 
@@ -200,12 +200,18 @@ describe('CcHeadlessJournaler consolidation (E68 S68.1)', () => {
     await j.run(job({ protectedPaths: ['/agents/peggy/CLAUDE.md'] }));
     const args = runProcess.mock.calls[0]![0].args;
     expect(args[args.indexOf('--mcp-config') + 1]).toBe('{"mcpServers":{}}');
-    expect(args[args.indexOf('--disallowedTools') + 1]).toBe('Edit(//agents/peggy/CLAUDE.md),Write(//agents/peggy/CLAUDE.md)');
+    expect(args[args.indexOf('--disallowedTools') + 1]).toBe('Edit(//agents/peggy/CLAUDE.md)');
   });
 
   it('protectedPathDenyRules handles relative paths and none', () => {
     expect(protectedPathDenyRules(undefined)).toEqual([]);
-    expect(protectedPathDenyRules(['skills/'])).toEqual(['Edit(skills/**)', 'Write(skills/**)']);
+    expect(protectedPathDenyRules(['skills/'])).toEqual(['Edit(skills/**)']);
+  });
+
+  it('protectedPathDenyRules emits only Edit rules, with // for absolute paths (Write path rules are never consulted)', () => {
+    const rules = protectedPathDenyRules(['/a/CLAUDE.md', '/a/skills/', '/a/.claude/']);
+    expect(rules).toEqual(['Edit(//a/CLAUDE.md)', 'Edit(//a/skills/**)', 'Edit(//a/.claude/**)']);
+    expect(rules.some((r) => r.startsWith('Write('))).toBe(false);
   });
 });
 
