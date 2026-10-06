@@ -611,3 +611,37 @@ describe('PaneLifecycle.release', () => {
     expect(sendKeysOrder).toBeLessThan(killOrder);
   });
 });
+
+// ── bus.auth_token ───────────────────────────────────────────────────────────
+
+describe('PaneLifecycle — bus.auth_token', () => {
+  it('sends X-Bus-Token on the readiness poll and exports AGENTBUS_BUS_TOKEN into the new window', async () => {
+    const tmux = makeTmux({ paneAlive: vi.fn(async () => false), capturePane: makeNoAckCapture() });
+    const fetchFn = makeReadyFetch();
+    const pl = new PaneLifecycle({
+      tmux, busBaseUrl: 'http://127.0.0.1:3000', cfg: makeCfg(), scratchDir, fetchFn, busToken: 'tok-1',
+    });
+
+    const launchPromise = pl.launch(makeLaunchParams());
+    await vi.advanceTimersByTimeAsync(600);
+    await launchPromise;
+
+    expect(tmux.createWindow.mock.calls[0]![3]).toMatchObject({ AGENTBUS_BUS_TOKEN: 'tok-1' });
+    const calls = fetchFn.mock.calls as unknown as Array<[string, RequestInit | undefined]>;
+    expect(new Headers(calls[0]![1]?.headers).get('X-Bus-Token')).toBe('tok-1');
+  });
+
+  it('adds no token env or header when bus.auth_token is unset', async () => {
+    const tmux = makeTmux({ paneAlive: vi.fn(async () => false), capturePane: makeNoAckCapture() });
+    const fetchFn = makeReadyFetch();
+    const pl = new PaneLifecycle({ tmux, busBaseUrl: 'http://127.0.0.1:3000', cfg: makeCfg(), scratchDir, fetchFn });
+
+    const launchPromise = pl.launch(makeLaunchParams());
+    await vi.advanceTimersByTimeAsync(600);
+    await launchPromise;
+
+    expect(tmux.createWindow.mock.calls[0]![3]).not.toHaveProperty('AGENTBUS_BUS_TOKEN');
+    const calls = fetchFn.mock.calls as unknown as Array<[string, RequestInit | undefined]>;
+    expect(calls[0]![1]).toBeUndefined();
+  });
+});

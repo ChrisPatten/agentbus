@@ -16,6 +16,8 @@ bus-core serves a JSON API on `bus.host:bus.http_port` (default `127.0.0.1:3000`
 
 If `bus.auth_token` is set, every request except `GET /api/v1/health` must send a matching `X-Bus-Token` header or it receives `401`. The Pebble webhook additionally requires its own per-contact bearer token; the two checks are layered. The comparison is not constant time; the token is a shared secret between local processes, not a user password.
 
+AgentBus's own clients send the header automatically when a token is configured: the `claude-code` MCP server (`src/adapters/cc.ts`: polling loop and every MCP tool), `cc-headless`, the `cc-pool` manager and pane readiness poll, and the pool hook scripts in `scripts/hooks/`. They share `src/core/bus-auth.ts`, which only attaches the header to requests for the bus's own base URL. The token comes from the loaded config's `bus.auth_token`, falling back to the `AGENTBUS_BUS_TOKEN` environment variable. `cc-headless` passes `AGENTBUS_BUS_TOKEN` to its `claude -p` children, and `cc-pool` sets it in every pane window it creates, so the pane's MCP server and hook scripts inherit it. The hooks read `AGENTBUS_BUS_TOKEN` and hand the header to `curl` on stdin (`-K -`), keeping it out of the process list. With no token configured, none of these requests change.
+
 ### Binding to the LAN
 
 Set `bus.host: 0.0.0.0` to accept connections from other hosts, for example a reverse proxy on another machine. This exposes every route. Set `bus.auth_token` and restrict the proxy to the paths you intend to expose. See [DEPLOYMENT.md](DEPLOYMENT.md#exposing-bus-core-to-a-reverse-proxy).

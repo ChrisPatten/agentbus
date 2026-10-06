@@ -314,6 +314,10 @@ With no `cc-pool` instances configured, both return an empty result (`{ "ok": tr
 
 The `Stop` hook that feeds it is [`scripts/hooks/agentbus_stop_hook.sh`](../scripts/hooks/agentbus_stop_hook.sh) — deployed the same way as the tool-status hook above (symlinked from the pane's own project into this file, registered in that project's `.claude/settings.json`). `POOL_AGENT_ID` inside the script is a hardcoded per-deployment constant, same convention as the tool-status hook's `STATE_DIR`.
 
+### Hooks and `bus.auth_token`
+
+The three HTTP hooks (`agentbus_approval_hook.sh`, `agentbus_tool_status_hook.sh`, `agentbus_stop_hook.sh`) send `X-Bus-Token` when `AGENTBUS_BUS_TOKEN` is set in their environment, passing it to `curl` on stdin (`-K -`) so it stays out of the process list. With `bus.auth_token` configured, `PaneLifecycle` adds `AGENTBUS_BUS_TOKEN` to every pane window it creates (below `pane_env`, which can override it), so the pane's `claude`, its `cc.ts` MCP server and its hooks all inherit it. The pool manager's own requests (system notices, tool-status placeholders) and the pane readiness poll send the header too. A window created before the token was configured doesn't have the variable; kill it (or the pool's tmux session) so it is recreated.
+
 ### Other pool-pane hooks
 
 [`scripts/hooks/agentbus_precompact_snapshot.sh`](../scripts/hooks/agentbus_precompact_snapshot.sh) is deployed the same way (symlink + `.claude/settings.json` registration, as a `PreCompact` hook), but doesn't call any AgentBus endpoint — it's a Claude-Code-native safety net for a pool agent's own memory system: Claude Code's auto-compaction can discard transcript content before it's ever journaled, so this hook snapshots the last 500 lines of the about-to-be-compacted transcript to `memory/precompact-snapshots/` and leaves one pointer line in that day's journal file. It lives alongside the other pool-pane hooks for consistency, not because it's part of the HTTP API surface documented above.

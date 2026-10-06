@@ -43,6 +43,7 @@ import { formatToolCallSummary } from './tool-call-summary.js';
 import { resolveModel } from './model-override-loader.js';
 import { hashBlock, shouldSendBlock, markBlockSent, clearLedger, detectCompaction } from './context-ledger.js';
 import { HeadlessLimiter, type TurnClass } from './headless-limiter.js';
+import { busTokenEnv, resolveBusToken, withBusToken } from '../core/bus-auth.js';
 
 const configPath = resolve(process.env['AGENTBUS_CONFIG'] ?? 'config.yaml');
 const config = loadConfig(configPath);
@@ -295,6 +296,8 @@ class HeadlessInstance {
   private readonly agentId: string;
   private readonly workingDir: string;
   private readonly busBaseUrl: string;
+  /** Fetch that adds X-Bus-Token to bus requests when bus.auth_token is set. */
+  private readonly busFetch: typeof fetch;
   private readonly label: string;
   private readonly queues = new Map<string, Promise<void>>();
   /** Serialize turns that resume the same Claude transcript even after an Earlier fork changes conversation ID. */
@@ -316,6 +319,7 @@ class HeadlessInstance {
     this.agentId = `agent:${cfg.agent_id}`;
     this.workingDir = cfg.working_dir ?? process.cwd();
     this.busBaseUrl = busBaseUrl;
+    this.busFetch = withBusToken(busBaseUrl, resolveBusToken(config));
     this.label = cfg.name ? `cc-headless:${cfg.name}` : 'cc-headless';
     this.limiter = new HeadlessLimiter(cfg.max_concurrent_turns, cfg.reserved_system_slots);
   }
@@ -481,6 +485,7 @@ class HeadlessInstance {
           AGENTBUS_CONFIG: configPath,
           AGENTBUS_AGENT_ID: this.cfg.agent_id,
           AGENTBUS_TOOLS_ONLY: 'true',
+          ...busTokenEnv(resolveBusToken(config)),
         },
       });
       this.activeChildren.set(trackingId, child);
@@ -627,7 +632,7 @@ class HeadlessInstance {
    */
   private startTyping(channel: string, contactId: string, topic?: string, conversationId?: string): void {
     if (channel === 'email' || channel.startsWith('email:')) return;
-    fetch(`${this.busBaseUrl}/api/v1/adapters/${channel}/typing`, {
+    this.busFetch(`${this.busBaseUrl}/api/v1/adapters/${channel}/typing`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ contact_id: contactId, topic, conversation_id: conversationId }),
@@ -643,7 +648,7 @@ class HeadlessInstance {
    */
   private reportToolCall(channel: string, contactId: string, text: string, topic?: string, conversationId?: string): void {
     if (channel === 'email' || channel.startsWith('email:')) return;
-    fetch(`${this.busBaseUrl}/api/v1/adapters/${channel}/tool-status`, {
+    this.busFetch(`${this.busBaseUrl}/api/v1/adapters/${channel}/tool-status`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ contact_id: contactId, text, topic, conversation_id: conversationId }),
@@ -688,7 +693,7 @@ class HeadlessInstance {
       metadata: {},
     };
 
-    const res = await fetch(`${this.busBaseUrl}/api/v1/messages`, {
+    const res = await this.busFetch(`${this.busBaseUrl}/api/v1/messages`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -1000,7 +1005,7 @@ class HeadlessInstance {
     if (this.shuttingDown) return;
 
     try {
-      const res = await fetch(
+      const res = await this.busFetch(
         `${this.busBaseUrl}/api/v1/messages/pending?agent=${this.cfg.agent_id}&limit=20`,
       );
 
@@ -1015,7 +1020,7 @@ class HeadlessInstance {
       const ackResults = await Promise.all(
         data.messages.map(async (env): Promise<MessageEnvelope | null> => {
           try {
-            const ackRes = await fetch(`${this.busBaseUrl}/api/v1/messages/${env.id}/ack`, {
+            const ackRes = await this.busFetch(`${this.busBaseUrl}/api/v1/messages/${env.id}/ack`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ status: 'delivered' }),

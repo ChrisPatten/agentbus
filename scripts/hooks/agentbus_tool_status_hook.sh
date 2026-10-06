@@ -46,6 +46,23 @@
 set -uo pipefail
 
 AGENTBUS_BASE="http://127.0.0.1:3000"
+
+# bus.auth_token support: when AGENTBUS_BUS_TOKEN is set (cc-pool exports it
+# into every pane window it creates; otherwise export it yourself in the
+# shell that starts claude), every POST carries X-Bus-Token. The header goes
+# to curl on stdin (-K -) so the token never shows up in the process list.
+# With no token set, the request is exactly what it was before.
+bus_post() {
+  local url="$1" body="$2"
+  if [[ -n "${AGENTBUS_BUS_TOKEN:-}" ]]; then
+    local t="${AGENTBUS_BUS_TOKEN//\\/\\\\}"
+    t="${t//\"/\\\"}"
+    printf 'header = "X-Bus-Token: %s"\n' "$t" \
+      | curl -s --max-time 3 -K - -X POST "$url" -H 'Content-Type: application/json' -d "$body"
+  else
+    curl -s --max-time 3 -X POST "$url" -H 'Content-Type: application/json' -d "$body" </dev/null
+  fi
+}
 # STATE_DIR is per-agent by convention (one deployment == one agent's project
 # dir with its own hook symlink), not derived from anything at runtime — a
 # second agent reusing this script needs its own STATE_DIR value here.
@@ -68,7 +85,7 @@ post_async() {
   # Fire-and-forget: never let a slow/unreachable bus-core add latency to
   # the turn. Backgrounded + short --max-time as a second layer of safety.
   local url="$1" body="$2"
-  ( curl -s --max-time 3 -X POST "$url" -H 'Content-Type: application/json' -d "$body" >/dev/null 2>&1 & )
+  ( bus_post "$url" "$body" >/dev/null 2>&1 & )
 }
 
 case "$EVENT" in

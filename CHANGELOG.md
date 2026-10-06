@@ -25,6 +25,7 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 - **`/stop` is scoped to its conversation.** In Telegram, stopping one topic no longer interrupts another topic for the same contact. A waiting turn can also be cancelled. Journaling turns share an agent-wide lane, and turns in one conversation never overlap after early delivery.
 
 ### Fixed
+- **Setting `bus.auth_token` stopped agents from receiving or replying.** AgentBus's own clients now send `X-Bus-Token` when a token is configured: the claude-code MCP server and its polling, cc-headless, the cc-pool manager and pane readiness check, and the pool hook scripts. Child processes and pool panes get the token as `AGENTBUS_BUS_TOKEN`; hook scripts read it from there. Nothing changes when no token is set.
 - **App unread counts didn't rise for agent replies.** The bus now sends a `session` event after each outbound message, so the Mac sidebar and Dock badge update while the app is in the background.
 - **Same text in two conversations was rejected as a duplicate.** The dedup stage now keys on channel and topic as well as sender, body, and time bucket. Identical text sent to two app topics (or two Telegram topics) within 30 seconds is no longer dropped with `Aborted at stage "dedup"`.
 - **App activity ended a headless turn at its first message.** A turn that delivers progress messages now stays `running`, with a fresh tool-line list, until the headless agent reports `idle`.

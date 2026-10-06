@@ -19,6 +19,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { loadConfig } from '../config/loader.js';
 import { createMcpServer } from '../mcp/server.js';
 import { registerAllTools, registerHeadlessTools, type HealthState } from '../mcp/tools/index.js';
+import { installBusTokenFetch, resolveBusToken } from '../core/bus-auth.js';
 import type { MessageEnvelope } from '../types/envelope.js';
 
 const AGENT_ID = process.env['AGENTBUS_AGENT_ID'] ?? 'claude';
@@ -33,6 +34,12 @@ const configPath = resolve(process.env['AGENTBUS_CONFIG'] ?? 'config.yaml');
 const config = loadConfig(configPath);
 const pollIntervalMs = config.adapters['claude-code']?.poll_interval_ms ?? 1000;
 const busBaseUrl = `http://127.0.0.1:${config.bus.http_port}`;
+
+// When bus.auth_token is set (in this config, or passed down as
+// AGENTBUS_BUS_TOKEN), every request this process makes to the bus — the
+// polling loop and every MCP tool — must carry X-Bus-Token. Patch the global
+// fetch once, scoped to busBaseUrl, so no call site can forget it.
+installBusTokenFetch(busBaseUrl, resolveBusToken(config));
 
 // ── Shared mutable state ──────────────────────────────────────────────────────
 

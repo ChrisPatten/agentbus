@@ -125,7 +125,7 @@ Three Claude Code hooks, in `scripts/hooks/` in the AgentBus folder, make a pool
 | `agentbus_tool_status_hook.sh` | `UserPromptSubmit` and `PostToolUse` | Telegram's "typing…" indicator and live tool list while the agent works. |
 | `agentbus_stop_hook.sh` | `Stop` | Tells the bus each time a turn finishes, so a long-running turn isn't mistaken for an idle conversation. |
 
-Each script has a few settings at the top: the bus address (`http://127.0.0.1:3000`), and for the stop hook, the pool's `agent_id` (`POOL_AGENT_ID`). Edit them to match your setup. The scripts need `jq` and `curl`; the tool-status hook also needs `python3`.
+Each script has a few settings at the top: the bus address (`http://127.0.0.1:3000`), and for the stop hook, the pool's `agent_id` (`POOL_AGENT_ID`). Edit them to match your setup. The scripts need `jq` and `curl`; the tool-status hook also needs `python3`. If you set [`bus.auth_token`](/reference/configuration#bus), there's nothing to edit: the pool gives each pane the token as `AGENTBUS_BUS_TOKEN`, and the hooks send it.
 
 Panes only pick up new hook settings when they next start.
 

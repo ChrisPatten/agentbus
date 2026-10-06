@@ -36,6 +36,7 @@ import type { TmuxController } from './tmux.js';
 import type { CcPoolInstanceConfig } from '../config/schema.js';
 import { writePaneMcpConfig, cleanupPaneMcpConfig } from './mcp-config.js';
 import { renderSystemPrompt, expandFileReferences, type PromptContext } from '../adapters/prompt-renderer.js';
+import { busTokenEnv, withBusToken } from '../core/bus-auth.js';
 
 /**
  * Overall bound (ms) on one `launch()` call, measured from `launchStartedAt`
@@ -75,6 +76,12 @@ export interface PaneLifecycleDeps {
   scratchDir: string;
   /** Injectable fetch for tests — defaults to global fetch. */
   fetchFn?: typeof fetch;
+  /**
+   * `bus.auth_token`, when set. Added as `X-Bus-Token` to the readiness poll,
+   * and exported into each new pane window as `AGENTBUS_BUS_TOKEN` so the
+   * pane's `claude`, its cc.ts MCP server and its hook scripts all inherit it.
+   */
+  busToken?: string;
   /**
    * Injectable delay for tests (ack-handshake waits, the readiness poll
    * interval, and the kill-release pause in `release()`) — defaults to a
@@ -202,6 +209,7 @@ export class PaneLifecycle {
   private readonly cfg: CcPoolInstanceConfig;
   private readonly scratchDir: string;
   private readonly fetchFn: typeof fetch;
+  private readonly busToken: string | undefined;
   private readonly sleepFn: (ms: number) => Promise<void>;
   /** Resolved once, mirroring cc-headless.ts's module-level `configPath`: same env var, same fallback. */
   private readonly agentbusConfigPath: string;
@@ -211,7 +219,8 @@ export class PaneLifecycle {
     this.busBaseUrl = deps.busBaseUrl;
     this.cfg = deps.cfg;
     this.scratchDir = deps.scratchDir;
-    this.fetchFn = deps.fetchFn ?? fetch;
+    this.busToken = deps.busToken || undefined;
+    this.fetchFn = withBusToken(deps.busBaseUrl, this.busToken, deps.fetchFn);
     this.sleepFn = deps.sleepFn ?? defaultSleep;
     this.agentbusConfigPath = process.env['AGENTBUS_CONFIG'] ?? resolve(process.cwd(), 'config.yaml');
   }
@@ -292,8 +301,9 @@ export class PaneLifecycle {
   }
 
   /**
-   * Merge order: `cfg.pane_env` (operator config) < the caller's own
-   * `ensureWindow.env` < TERM/COLORTERM, which win unconditionally. Per
+   * Merge order: `AGENTBUS_BUS_TOKEN` (when `bus.auth_token` is set) <
+   * `cfg.pane_env` (operator config) < the caller's own `ensureWindow.env` <
+   * TERM/COLORTERM, which win unconditionally. Per
    * `CcPoolAdapterSchema.pane_env`'s own doc comment ("TERM/COLORTERM are
    * added unconditionally by later launch code, not defaulted here") — this
    * is that later code. E48's "Prior Art" gotcha 2: these are load-bearing
@@ -303,6 +313,7 @@ export class PaneLifecycle {
    */
   private buildWindowEnv(callerEnv?: Record<string, string>): Record<string, string> {
     return {
+      ...busTokenEnv(this.busToken),
       ...this.cfg.pane_env,
       ...callerEnv,
       TERM: 'xterm-256color',
