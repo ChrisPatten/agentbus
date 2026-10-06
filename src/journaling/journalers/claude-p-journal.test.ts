@@ -89,6 +89,14 @@ describe.skipIf(!hasJq)('scripts/journalers/claude-p-journal.sh (S66.7)', { time
     expect((await journaler().run(job({ CLAUDE_BIN: '/nonexistent/claude' }))).outcome).toBe('unavailable');
   });
 
+  it('denies edits to protected paths (E68)', async () => {
+    await journaler().run(job({ CLAUDE_BIN: fakeClaude('ok') }, { protectedPaths: ['/agents/peggy/CLAUDE.md', '/agents/peggy/skills/'] }));
+    const args = readFileSync(join(dir, 'args.txt'), 'utf-8').split('\n');
+    expect(args[args.indexOf('--disallowedTools') + 1]).toBe(
+      'Edit(//agents/peggy/CLAUDE.md),Write(//agents/peggy/CLAUDE.md),Edit(//agents/peggy/skills/**),Write(//agents/peggy/skills/**)',
+    );
+  });
+
   it('lists feedback signals as quoted data (E68)', async () => {
     await journaler().run(job({ CLAUDE_BIN: fakeClaude('ok') }, {
       feedback: [{ id: 'f1', kind: 'user-feedback', created_at: '2026-10-06T07:06:00.000Z', text: 'Use 24-hour time. $(touch pwned2)', ref_message_id: 'm0', contact_id: 'chris', detail: null }],

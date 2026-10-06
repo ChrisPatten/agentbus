@@ -1,8 +1,8 @@
 # Agent learning (E68)
 
-> **Status: in progress (S68.1–S68.2).** Journaling (E66) records what happened; this page covers what turns it into learning. User-facing guide: `site-docs/features/journaling-and-memory.md`.
+> **Status: in progress (S68.1, S68.2, S68.4).** Journaling (E66) records what happened; this page covers what turns it into learning. User-facing guide: `site-docs/features/journaling-and-memory.md`.
 
-Code: `src/journaling/consolidation.ts`, `src/journaling/engine.ts` (`consolidate`), `src/journaling/prompt.ts` (`DEFAULT_CONSOLIDATION_PROMPT`, `feedbackLines`), `src/journaling/feedback.ts`, `src/journaling/feedback-producers.ts`, `src/commands/feedback.ts`. Migration 032. Design record: `_bmad-output/planning-artifacts/journaling/decisions.md` ("Consolidation").
+Code: `src/journaling/consolidation.ts`, `src/journaling/engine.ts` (`consolidate`), `src/journaling/prompt.ts` (`DEFAULT_CONSOLIDATION_PROMPT`, `feedbackLines`), `src/journaling/feedback.ts`, `src/journaling/feedback-producers.ts`, `src/commands/feedback.ts`, `src/learning/protected-paths.ts`, `src/learning/monitor.ts`. Migration 032. Design record: `_bmad-output/planning-artifacts/journaling/decisions.md` ("Consolidation").
 
 ## Consolidation
 
@@ -107,3 +107,27 @@ A session run receives the conversation's **unconsumed** events, oldest first (`
 ### Consolidation
 
 Consolidation jobs get cross-conversation counts since the last pass (`ConsolidationContext.feedback`, script `consolidation.feedback`): counts per kind and the 20 most frequent texts (grouped case- and whitespace-insensitively) with how often and in how many conversations they occurred. The prompt points them at the recurring-correction check.
+
+## Protected paths
+
+Memory files are the agent's to manage; its instructions are the owner's. **Protected paths** are files and directories the agent may not edit itself. It proposes changes to them instead ([Self-edit proposals](#self-edit-proposals)).
+
+```yaml
+agents:
+  "agent:baxter":
+    protected_paths: [CLAUDE.md, prompts/baxter.md, skills/, .claude/, docs/policies/]
+```
+
+- Relative to the agent's working dir, or absolute. A trailing `/` marks a directory (everything under it).
+- Setting the list replaces the default: `CLAUDE.md`, every file the runtime's `system_prompt` imports with `@path` (cc-headless and cc-pool), `skills/` and `.claude/`.
+- **The memory dir is never protected**, even when listed or inside a listed directory. That includes pinned memory imported from `CLAUDE.md` (for example `memory/vocabulary.md`).
+- Runtimes without a working dir only get absolute entries.
+- `/journal` shows the list (`protected: …`).
+
+### Enforcement
+
+1. **Deny rules (cc-headless).** Session journaling turns (through the instance and the cc-pool fork) and consolidation turns run with `--disallowedTools` rules `Edit(//<abs path>)` and `Write(//<abs path>)` (`<dir>/**` for directories), added to the usual delivery-tool denials (`protectedPathDenyRules`). A protected directory that contains the memory dir gets no deny rule (it would block memory writes); hashing still covers it. The reference script adds the same rules from the payload's `protected_paths`.
+2. **Hashing (every journaler).** The chain runner hashes every file under the protected entries (sha256; memory dir excluded; at most 2000 files; files over 5 MB by size and mtime) before the first attempt and after the outcome (`RunGuard`, `ProtectedPathMonitor`). Files added, changed or deleted in between, minus the ones the bus wrote for an approved proposal, raise `protected-paths:unapproved-change` (`warning`) listing them. It stays open until an owner acknowledges it; another occurrence updates it. The change may come from the run, the agent on another turn, or a person: the advisory asks the owner to review, not to blame.
+3. **Prompts.** cc-headless and System Message prompts, and the consolidation prompt, list the protected paths and point at `propose_change`. Scripts get `protected_paths` (absolute; directories end in `/`).
+
+System Message runs (a live agent) and scripts can't be prevented from editing; for them hashing is the check.

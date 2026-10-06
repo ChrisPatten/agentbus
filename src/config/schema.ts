@@ -731,13 +731,22 @@ export type AgentMemoryConfig = z.infer<typeof AgentMemorySchema>;
 /**
  * Per-agent configuration, keyed by recipient id (e.g. "agent:claude").
  * Additional agent-scoped settings live here under the same key: E65 adds
- * `owners`; E66 adds `journaling`, E67 `memory`.
+ * `owners`; E66 adds `journaling`, E67 `memory`, E68 `protected_paths`.
  */
 const AgentConfigSchema = z.object({
   media: AgentMediaSchema.optional(),
   owners: z.array(AgentOwnerSchema).optional(),
   journaling: AgentJournalingSchema.optional(),
   memory: AgentMemorySchema.optional(),
+  /**
+   * E68 S68.4 — files and directories (trailing `/`) the agent may not edit
+   * itself; it proposes changes with `propose_change` and an owner approves.
+   * Relative to the agent's working_dir, or absolute. Replaces the default
+   * list: `CLAUDE.md`, the files the runtime's `system_prompt` imports with
+   * `@path`, `skills/` and `.claude/`. The memory dir is never protected.
+   * See docs/AGENT_LEARNING.md#protected-paths.
+   */
+  protected_paths: z.array(z.string().min(1)).optional(),
 });
 
 /**

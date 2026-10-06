@@ -75,6 +75,11 @@ export interface ScriptPayloadV1 {
     contact_id: string | null;
     detail: Record<string, unknown> | null;
   }>;
+  /**
+   * E68 — the agent's protected files and directories (absolute, directories
+   * end in `/`). Don't edit them; return `proposals[]` instead.
+   */
+  protected_paths: string[];
   prompt: string;
   model: string | null;
   timeout_ms: number;
@@ -137,6 +142,7 @@ export function buildScriptPayload(job: JournalJob): ScriptPayloadV1 {
     })),
     snapshots: job.snapshots.map((s) => ({ ...s })),
     feedback: (job.feedback ?? []).map((f) => ({ ...f, detail: f.detail ? { ...f.detail } : null })),
+    protected_paths: [...(job.protectedPaths ?? [])],
     prompt: job.prompt,
     model: script?.model ?? job.model,
     timeout_ms: script?.timeoutMs ?? job.timeoutMs,

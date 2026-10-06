@@ -132,6 +132,9 @@ ARGS=(-p --output-format json --permission-mode acceptEdits --mcp-config '{"mcpS
 # sees MEMORY.md and its topic files the way the agent does.
 ARGS+=(--settings "$(jq -nc --arg d "$MEMORY_DIR" '{autoMemoryDirectory: $d}')")
 [[ -n "${AGENTBUS_MODEL:-}" ]] && ARGS+=(--model "$AGENTBUS_MODEL")
+# E68: deny edits to the agent's protected files (absolute paths; dirs end in /).
+DENY="$(jq -r '[.protected_paths[]? | (if endswith("/") then . + "**" else . end) | ("Edit(/" + . + ")", "Write(/" + . + ")")] | join(",")' <<<"$PAYLOAD")"
+[[ -n "$DENY" ]] && ARGS+=(--disallowedTools "$DENY")
 
 cd "$WORKING_DIR" || exit 75
 OUT="$(printf '%s' "$PROMPT" | "$CLAUDE_BIN" "${ARGS[@]}")"

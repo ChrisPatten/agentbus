@@ -37,7 +37,7 @@ import type { JournalAdvisories } from './advisories.js';
 import { NATIVE_MEMORY_MAX_BYTES, resolveJournalingSettings, thresholdForChannel, type JournalingSettings } from './config.js';
 import { assessEligibility, eligibleSince, loadWindow, PENDING_MAX_AGE_MS } from './eligibility.js';
 import type { JournalerRegistry } from './registry.js';
-import { runChain, type ChainRunSummary } from './runner.js';
+import { runChain, type ChainRunSummary, type RunGuard } from './runner.js';
 import { JournalStore } from './store.js';
 import { isFinalTrigger, type JournalJob, type JournalTrigger } from './types.js';
 import { memoryLayout, memorySettingsFor, runtimeWorkingDir } from '../memory/layout.js';
@@ -106,6 +106,11 @@ export interface JournalEngineDeps {
   store?: JournalStore;
   /** E68 — feedback events. Default: a store over `db`. */
   feedback?: FeedbackStore;
+  /**
+   * E68 S68.4 — protected paths: `jobPaths` fills `JournalJob.protectedPaths`
+   * (deny rules), and the guard hashes them around every run.
+   */
+  protectedPaths?: RunGuard<any> & { jobPaths(agentId: string): string[] };
   now?: () => Date;
   /** Default: `memory.summarizer_interval_ms` (the pre-E66 sweep cadence). */
   tickIntervalMs?: number;
@@ -418,6 +423,7 @@ export class JournalEngine {
       backlogSince: eligibleSince(window, { minHumanMessages: settings.minHumanMessages, pendingSince: state?.pending_since ?? null, now }),
     }, {
       store: this.store, registry: this.deps.registry, advisories: this.deps.advisories, now: this.deps.now, log: this.deps.log,
+      ...(this.deps.protectedPaths ? { guard: this.deps.protectedPaths } : {}),
     });
     const status: EvaluationStatus =
       summary.outcome === 'done' ? 'journaled' : summary.outcome === 'nothing-to-do' ? 'nothing-to-do' : 'exhausted';
@@ -450,6 +456,7 @@ export class JournalEngine {
       chain: settings.chain, capabilities: runtime.capabilities, backlogSince: null,
     }, {
       store: this.store, registry: this.deps.registry, advisories: this.deps.advisories, now: this.deps.now, log: this.deps.log,
+      ...(this.deps.protectedPaths ? { guard: this.deps.protectedPaths } : {}),
     });
     const status: EvaluationStatus =
       summary.outcome === 'done' ? 'journaled' : summary.outcome === 'nothing-to-do' ? 'nothing-to-do' : 'exhausted';
@@ -515,6 +522,7 @@ export class JournalEngine {
         feedback: this.feedback.summary(agentId, lastPassAt),
       },
     };
+    if (this.deps.protectedPaths) job.protectedPaths = this.deps.protectedPaths.jobPaths(agentId);
     job.prompt = consolidationPrompt(settings.consolidation.prompt, job);
     return job;
   }
@@ -559,6 +567,7 @@ export class JournalEngine {
       model: settings.model,
       timeoutMs: settings.timeoutMs,
       settings,
+      ...(this.deps.protectedPaths ? { protectedPaths: this.deps.protectedPaths.jobPaths(agentId) } : {}),
     };
   }
 

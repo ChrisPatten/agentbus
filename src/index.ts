@@ -77,6 +77,7 @@ import { createJournalHoldNotice } from './pipeline/stages/journal-hold.js';
 import { HarnessEvents, createHookHealthTicker } from './journaling/events.js';
 import { RecentMemory } from './memory/recent-service.js';
 import { ConsolidationScheduler } from './journaling/consolidation.js';
+import { ProtectedPathMonitor } from './learning/monitor.js';
 import { recordApprovalOutcome, recordDeliveryFailure, recordToolError, type FeedbackProducerDeps } from './journaling/feedback-producers.js';
 import { createFeedbackCommand } from './commands/feedback.js';
 import { RecentFreshness } from './memory/recent-freshness.js';
@@ -165,8 +166,12 @@ journalers.register(new SystemMessageJournaler({
 // E67 — bus-generated memory/recent.md for every agent with a memory layout:
 // at startup, after each successful journal run and at local midnight.
 const recentMemory = new RecentMemory({ config, resolver: runtimeResolver });
+// E68 S68.4 — protected paths: deny rules on cc-headless journal turns, and
+// before/after hashing of protected files around every journal run.
+const protectedPaths = new ProtectedPathMonitor({ config, resolver: runtimeResolver, advisories });
 const journalEngine = new JournalEngine({
   db, config, resolver: runtimeResolver, registry: journalers, advisories, owners: ownerDirectory, settings: journalingSettings,
+  protectedPaths,
   onJournaled: (result) => { if (result.agentId) recentMemory.regenerate(result.agentId, 'journaled'); },
 });
 journalEngine.addTicker(() => recentMemory.tick());
@@ -237,6 +242,7 @@ commandRegistry.register(createRcCommand({ poolManagers }));
 commandRegistry.register(createFeedbackCommand({ db, engine: journalEngine }));
 commandRegistry.register(createJournalCommand({
   db, engine: journalEngine, resolver: runtimeResolver, advisories, gate: journalGate, memorySetup, consolidation: consolidationScheduler,
+  protectedPaths: (agentId) => protectedPaths.paths(agentId).entries.map((e) => e.spec),
 }));
 
 const pipeline = new PipelineEngine();

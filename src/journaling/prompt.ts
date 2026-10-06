@@ -68,6 +68,7 @@ export function jobContextLines(job: JournalJob): string[] {
   }
   if (job.harnessTranscriptPath) lines.push(`Full harness transcript: ${job.harnessTranscriptPath}`);
   lines.push(...feedbackLines(job.feedback));
+  lines.push(...protectedLines(job));
   lines.push(recentNotice(job));
   return lines;
 }
@@ -99,6 +100,24 @@ export const DEFAULT_CONSOLIDATION_PROMPT = [
     'the rationale and the evidence: dates and conversations). Propose at most what matters; proposals are rate limited.',
 ].join('\n');
 
+/**
+ * E68 S68.4 — the agent's protected files: never edited by a journal run;
+ * changes go through `propose_change` and an owner's approval.
+ */
+export function protectedLines(job: Pick<JournalJob, 'protectedPaths' | 'workingDir'>): string[] {
+  const paths = job.protectedPaths ?? [];
+  if (paths.length === 0) return [];
+  const shown = paths.map((p) => {
+    if (!job.workingDir) return p;
+    const rel = relative(job.workingDir, p);
+    return rel && !rel.startsWith('..') ? `${rel}${p.endsWith('/') ? '/' : ''}` : p;
+  });
+  return [
+    `Protected (do not edit; propose a change with the propose_change tool and an owner approves it): ${shown.join(', ')}. ` +
+      'Memory files are yours to edit.',
+  ];
+}
+
 /** Lines describing a consolidation job, appended to the consolidation prompt. */
 export function consolidationContextLines(job: JournalJob): string[] {
   const c = job.consolidation;
@@ -114,6 +133,7 @@ export function consolidationContextLines(job: JournalJob): string[] {
       ? `Last consolidation: ${c.lastPassAt}. Session journal runs since then: ${c.sessionRunsSince}. Focus on what was journaled since.`
       : `This is the first consolidation. Session journal runs on record: ${c.sessionRunsSince}.`,
     ...feedbackSummaryLines(c.feedback),
+    ...protectedLines(job),
     `Do not edit ${rel(job.memoryDir ? join(job.memoryDir, RECENT_FILE) : null)}: AgentBus regenerates it after this pass.`,
   ];
   return lines;

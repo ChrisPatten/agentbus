@@ -21,6 +21,8 @@ export interface JournalCommandDeps extends JournalStatusDeps {
   nowWaitMs?: number;
   /** E68 — the consolidation timer, for the next pass in `/journal`. */
   consolidation?: { nextRunAt(agentId: string): Date | null };
+  /** E68 — the agent's protected paths (display form), for `/journal`. */
+  protectedPaths?: (agentId: string) => string[];
 }
 
 /** "3m ago", "2h ago", "4d ago". */
@@ -85,6 +87,8 @@ function statusBody(deps: JournalCommandDeps, conversationId: string): string {
   } else if (settings) {
     lines.push('  consolidation: off');
   }
+  const protectedList = deps.protectedPaths?.(agent.agentId) ?? [];
+  if (protectedList.length > 0) lines.push(`  protected: ${protectedList.join(', ')}`);
   for (const a of agent.advisories) lines.push(`  [${a.severity}] ${a.title} (${a.state})`);
   const memory = deps.memorySetup?.(agent.agentId);
   if (memory) lines.push('', ...memoryLines(memory));

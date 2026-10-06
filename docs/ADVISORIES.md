@@ -123,7 +123,8 @@ The block format is shared: `src/core/system-block.ts` (`renderSystemBlock`, `ne
 
 | Producer | Condition keys | See |
 |---|---|---|
-| Journaling (E66) | `journaling:chain-can-exhaust` (info, startup), `journaling:chain-exhausted` (warning → critical), `journaling:hook-stopped:turn-ended` (warning) | [JOURNALING.md](JOURNALING.md#advisories) |
+| Journaling (E66, E68) | `journaling:chain-can-exhaust` (info, startup), `journaling:chain-exhausted` (warning → critical), `journaling:hook-stopped:turn-ended` (warning), `journaling:consolidation-exhausted` (warning) | [JOURNALING.md](JOURNALING.md#advisories) |
+| Agent learning (E68) | `protected-paths:unapproved-change` (warning; stays until acknowledged) | [AGENT_LEARNING.md](AGENT_LEARNING.md#protected-paths) |
 
 ## Adding a producer
 

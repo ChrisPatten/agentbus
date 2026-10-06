@@ -66,10 +66,21 @@ export interface ChainRunSummary {
   advisory: 'warning' | 'critical' | null;
 }
 
+/**
+ * E68 S68.4 — wraps every run, whatever the journaler: `begin` before the
+ * first attempt, `end` after the outcome is known (the protected-path
+ * monitor hashes protected files around the run). Errors are logged.
+ */
+export interface RunGuard<T = unknown> {
+  begin(job: JournalJob): T;
+  end(job: JournalJob, token: T, summary: ChainRunSummary): unknown;
+}
+
 export interface ChainRunnerDeps {
   store: JournalStore;
   registry: JournalerRegistry;
   advisories?: JournalAdvisories;
+  guard?: RunGuard<any>;
   now?: () => Date;
   log?: (line: string) => void;
 }
@@ -117,6 +128,16 @@ export async function runChain(job: JournalJob, ctx: ChainRunContext, deps: Chai
   const now = deps.now ?? (() => new Date());
   const log = deps.log ?? ((line: string) => console.log(line));
   const runStarted = now();
+  let guardToken: unknown = null;
+  let guarded = false;
+  if (deps.guard) {
+    try {
+      guardToken = deps.guard.begin(job);
+      guarded = true;
+    } catch (err) {
+      log(`[journaling] run guard failed before run ${job.runId.slice(0, 8)}: ${errText(err)}`);
+    }
+  }
   const attempts: ChainAttempt[] = [];
   let winner: ChainAttempt | null = null;
   let previous: JournalerId | null = null;
@@ -232,6 +253,14 @@ export async function runChain(job: JournalJob, ctx: ChainRunContext, deps: Chai
       attempts: attempts.map((a) => ({ journaler: a.journaler, outcome: a.outcome, error: a.error })),
     });
     summary = { runId: job.runId, outcome: 'exhausted', journaler: null, attempts, cursorAdvanced: false, advisory: severity };
+  }
+
+  if (guarded) {
+    try {
+      deps.guard!.end(job, guardToken, summary);
+    } catch (err) {
+      log(`[journaling] run guard failed after run ${job.runId.slice(0, 8)}: ${errText(err)}`);
+    }
   }
 
   // One structured line per run (S66.10 reads the same fields from journal_runs).
