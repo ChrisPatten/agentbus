@@ -31,6 +31,8 @@ Set `bus.host: 0.0.0.0` to accept connections from other hosts, for example a re
 | GET | `/api/v1/approvals` | List approval requests, optionally by status |
 | GET | `/api/v1/approvals/:id` | Fetch one approval request |
 | POST | `/api/v1/approvals/:id/resolve` | Answer an approval request |
+| GET | `/api/v1/advisories` | List bus advisories, by agent and state |
+| GET | `/api/v1/advisories/:id` | Fetch one advisory |
 | POST | `/api/v1/advisories/:id/ack` | Acknowledge a bus advisory (the `advisory_ack` tool) |
 | POST | `/api/v1/inbound` | Submit an inbound message to the pipeline |
 | POST | `/api/v1/webhooks/pebble` | Pebble Ring voice-memo ingress (when configured) |
@@ -188,6 +190,14 @@ Body: `{ "decision": "approve" | "deny", "resolvedBy": "<who>" }`. Sends the key
 ## Advisories
 
 Bus advisories for agent owners. See [ADVISORIES.md](ADVISORIES.md). There is no route to raise one: advisory text becomes a bus-originated system block, so only in-process bus code produces advisories.
+
+### `GET /api/v1/advisories`
+
+`?agent=<id>` (bare or prefixed; a pool pane maps to its pool) and `?state=` one of `active` (default: everything not resolved), `all`, `open`, `delivered`, `acknowledged`, `resolved`. Returns `{ ok, count, advisories }`, most severe first, then newest. Each row has `id`, `agent_id`, `condition_key`, `severity`, `title`, `body`, `remediation`, `source`, `state`, timestamps, `raise_count`, `delivered_via`, `delivery_attempts` and `last_error`. `400` for an unknown state.
+
+### `GET /api/v1/advisories/:id`
+
+Returns `{ ok, advisory }`, or `404`.
 
 ### `POST /api/v1/advisories/:id/ack`
 

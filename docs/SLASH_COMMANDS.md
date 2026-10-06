@@ -46,6 +46,8 @@ The `Headless:` section shows each `cc-headless` agent's running user and system
 
 The `Runtimes:` section lists each configured agent with its runtime and static capabilities, for example `agent:baxter: cc-headless (systemMessages, schedules, sessionResume, sessionFork, exclusiveSession, nativeMemory, contextInjection; hooks: pre-compact)`. It is omitted when no agent resolves. See [RUNTIME_CAPABILITIES.md](RUNTIME_CAPABILITIES.md).
 
+The `Advisories:` section lists every active (not resolved) bus advisory, most severe first, for example `agent:baxter [warning] Journaling chain exhausted (delivered, raised 2h ago) id:3f9c2a4e`. It is omitted when there are none. See [ADVISORIES.md](ADVISORIES.md).
+
 ### `/help [command]`
 
 Without arguments, lists all available commands with one-line descriptions. With a command name, shows the full usage string.

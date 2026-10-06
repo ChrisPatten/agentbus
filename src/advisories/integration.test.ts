@@ -218,6 +218,33 @@ describe('advisories — pipeline integration (E65)', () => {
     expect(store.get(result.advisory.id)).toMatchObject({ state: 'open', last_error: expect.stringMatching(/no adapter for channel "telegram"/) });
   });
 
+  describe('GET /api/v1/advisories', () => {
+    it('lists active advisories by default, filtered by agent (pane ids map to pools)', async () => {
+      service.raise(input());
+      service.raise(input({ conditionKey: 'other', severity: 'critical' }));
+      service.raise(input({ agentId: 'ghost', conditionKey: 'x' }));
+      service.raise(input({ conditionKey: 'gone' }));
+      service.resolve('baxter', 'gone');
+
+      const all = (await server.inject({ method: 'GET', url: '/api/v1/advisories' })).json();
+      expect(all.count).toBe(3);
+      const baxter = (await server.inject({ method: 'GET', url: '/api/v1/advisories?agent=baxter' })).json();
+      expect(baxter.advisories.map((a: { condition_key: string }) => a.condition_key)).toEqual(['other', 'test:condition']);
+      const resolved = (await server.inject({ method: 'GET', url: '/api/v1/advisories?agent=agent:baxter&state=resolved' })).json();
+      expect(resolved.advisories).toHaveLength(1);
+      expect(resolved.advisories[0]).toMatchObject({ condition_key: 'gone', state: 'resolved', remediation: 'Do the thing.' });
+      expect((await server.inject({ method: 'GET', url: '/api/v1/advisories?state=all' })).json().count).toBe(4);
+      expect((await server.inject({ method: 'GET', url: '/api/v1/advisories?state=bogus' })).statusCode).toBe(400);
+    });
+
+    it('fetches one advisory by id', async () => {
+      const { advisory } = service.raise(input());
+      const res = await server.inject({ method: 'GET', url: `/api/v1/advisories/${advisory.id}` });
+      expect(res.json()).toMatchObject({ ok: true, advisory: { id: advisory.id, severity: 'warning' } });
+      expect((await server.inject({ method: 'GET', url: '/api/v1/advisories/nope' })).statusCode).toBe(404);
+    });
+  });
+
   describe('POST /api/v1/advisories/:id/ack', () => {
     const ack = (id: string, body: unknown) =>
       server.inject({ method: 'POST', url: `/api/v1/advisories/${id}/ack`, payload: body as Record<string, unknown> });

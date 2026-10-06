@@ -113,3 +113,36 @@ message to the owner rather than replying to anything.
 ```
 
 The block format is shared: `src/core/system-block.ts` (`renderSystemBlock`, `neutralizeSystemMarkers`, `attachSystemBlock`, `stripSystemMetadata`) is the helper the System Message journaler (E66) uses for its own `kind`.
+
+## Visibility
+
+- `/status` has an `Advisories:` section listing every active advisory, most severe first ([SLASH_COMMANDS.md](SLASH_COMMANDS.md)).
+- `GET /api/v1/advisories?agent=<id>&state=<active|all|open|delivered|acknowledged|resolved>` and `GET /api/v1/advisories/:id` ([HTTP_API.md](HTTP_API.md#advisories)).
+
+## Adding a producer
+
+Producers are in-process bus code. There is deliberately no HTTP route to raise an advisory, because its text is rendered into a bus-originated block.
+
+```ts
+import { advisories } from './index.js'; // or receive the AdvisoryService as a dependency
+
+// When the condition is detected (safe to call on every check):
+advisories.raise({
+  agentId: 'agent:baxter',                       // bare, prefixed, or a pool pane id
+  conditionKey: 'journaling:chain-exhausted',    // stable per condition
+  severity: 'warning',                           // 'info' | 'warning' | 'critical'
+  title: 'Journaling chain exhausted',
+  body: 'Every journaler failed for the last run.',
+  remediation: 'Check the journaler logs with /journal runs.',
+  source: 'journaling',
+});
+
+// When it clears:
+advisories.resolve('agent:baxter', 'journaling:chain-exhausted');
+```
+
+- Pick one `conditionKey` per condition and reuse it. Raising again is cheap and never re-delivers unless the severity goes up.
+- Escalate by raising the same key with a higher severity (for example `warning` after one exhausted chain, `critical` after three).
+- Always resolve when the condition clears, so a later recurrence is reported as new.
+- `raiseAndDeliver()` does the same as `raise()` but waits for proactive delivery (useful in tests).
+- Other bus-originated turn content (for example E66 journaling instructions) should use `renderSystemBlock(kind, body)` and `attachSystemBlock()` from `src/core/system-block.ts` rather than a new format.

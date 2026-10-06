@@ -14,6 +14,7 @@ import { computeConversationId } from '../pipeline/conversation-id.js';
 import type { HeadlessCapacitySnapshot } from '../adapters/cc-headless.js';
 import type { RuntimeResolver } from '../core/runtime-resolver.js';
 import { formatCapabilities } from '../core/runtime-capabilities.js';
+import type { AdvisoryService } from '../advisories/service.js';
 
 /**
  * Mutable holder for the headless adapter's control hooks. Populated by
@@ -55,6 +56,17 @@ export interface HandlerDeps {
   poolManagers?: Map<string, import('../pool/pool-manager.js').PoolManager>;
   /** E64 — agent runtime lookup for the /status Runtimes section. Omitted → section omitted. */
   runtimeResolver?: Pick<RuntimeResolver, 'list'>;
+  /** E65 — active advisories for the /status Advisories section. Omitted or none → section omitted. */
+  advisories?: Pick<AdvisoryService, 'listActive'>;
+}
+
+/** "3m", "2h", "4d" since `iso`. */
+function ago(iso: string, now = Date.now()): string {
+  const s = Math.max(0, Math.round((now - new Date(iso).getTime()) / 1000));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.round(s / 60)}m`;
+  if (s < 86_400) return `${Math.round(s / 3600)}h`;
+  return `${Math.round(s / 86_400)}d`;
 }
 
 function commandConversationId(ctx: SlashCommandContext, db: Database.Database, contactId: string): string {
@@ -116,6 +128,11 @@ async function statusHandler(
       const runtimes = deps.runtimeResolver?.list() ?? [];
       return runtimes.length > 0 ? ['', 'Runtimes:', ...runtimes.map((r) =>
         `  ${r.agentId}: ${r.kind} (${formatCapabilities(r.capabilities)})`)] : [];
+    })(),
+    ...(() => {
+      const active = deps.advisories?.listActive() ?? [];
+      return active.length > 0 ? ['', 'Advisories:', ...active.map((a) =>
+        `  ${a.agent_id} [${a.severity}] ${a.title} (${a.state}, raised ${ago(a.raised_at)} ago) id:${a.id.slice(0, 8)}`)] : [];
     })(),
     ...(() => {
       const snapshots = [...(deps.headlessControl?.snapshots?.values() ?? [])].map((read) => read());

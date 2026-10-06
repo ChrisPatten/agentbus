@@ -990,13 +990,18 @@ epics:
       S64.2: complete  # Runtime resolution and live checks (src/core/runtime-resolver.ts; resume + session tracker use it)
       S64.3: complete  # Requirement validation in loadConfig, /status + health, docs/RUNTIME_CAPABILITIES.md
   E65:
-    status: in-progress
-    notes: Owner contacts and bus advisories (owner-only, spoof-proof system block, direct channel for critical). Depends on E64.
+    status: complete
+    completed: 2026-10-06
+    notes: >
+      Owner contacts and bus advisories. Implemented on feat/e64-e68-journaling, not yet merged.
+      agents.<id>.owners, advisories table (migration 025), AdvisoryService (raise/resolve/ack), advisory-inject
+      stage, system-only turns, direct fallback, advisory_ack, /status + GET /api/v1/advisories. Reusable
+      system block helper in src/core/system-block.ts for E66. Decisions in the epic's Implementation Notes.
     stories:
       S65.1: complete  # Owner contacts config (agents.<id>.owners, src/core/owners.ts)
       S65.2: complete  # Advisory store and lifecycle (migration 025, src/advisories/store.ts)
       S65.3: complete  # Delivery paths and advisory_ack (src/advisories/service.ts, transport.ts, advisory-inject stage, src/core/system-block.ts)
-      S65.4: pending  # Visibility and docs
+      S65.4: complete  # Visibility and docs (/status Advisories:, GET /api/v1/advisories, docs/ADVISORIES.md)
   E66:
     status: pending
     notes: Pluggable journaling core (triggers + journaler chain; system-message, cc-headless, script journalers); retires the Anthropic-API summarizer. Depends on E64, E65.

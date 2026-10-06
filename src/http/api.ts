@@ -86,6 +86,7 @@ import { dispatchApproval } from '../approvals/dispatch.js';
 import { resolveApproval } from '../approvals/resolve.js';
 import { APPROVAL_TIMEOUT_MS, type ApprovalStatus } from '../approvals/types.js';
 import type { AdvisoryService } from '../advisories/service.js';
+import type { AdvisoryState } from '../advisories/types.js';
 import { writeKnowledge, getKnowledge, forgetKnowledge, searchKnowledge } from '../knowledge/store.js';
 
 export interface HttpServerDeps {
@@ -766,6 +767,27 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
   // bus code only (see docs/ADVISORIES.md).
   const advisories = deps.advisories;
   if (advisories) {
+    // GET /api/v1/advisories?agent=<id>&state=<active|all|open|delivered|acknowledged|resolved>
+    // Default state: active (everything not resolved). Most severe first.
+    server.get<{ Querystring: { agent?: string; state?: string } }>('/api/v1/advisories', async (req, reply) => {
+      const state = req.query.state ?? 'active';
+      const states: Record<string, AdvisoryState[] | undefined> = {
+        active: ['open', 'delivered', 'acknowledged'], all: undefined,
+        open: ['open'], delivered: ['delivered'], acknowledged: ['acknowledged'], resolved: ['resolved'],
+      };
+      if (!(state in states)) {
+        return reply.status(400).send({ ok: false, error: `state must be one of ${Object.keys(states).join(', ')}` });
+      }
+      const list = advisories.list({ ...(req.query.agent ? { agentId: req.query.agent } : {}), states: states[state] });
+      return { ok: true, count: list.length, advisories: list };
+    });
+
+    server.get<{ Params: { id: string } }>('/api/v1/advisories/:id', async (req, reply) => {
+      const advisory = advisories.get(req.params.id);
+      if (!advisory) return reply.status(404).send({ ok: false, error: 'not_found' });
+      return { ok: true, advisory };
+    });
+
     server.post<{ Params: { id: string }; Body: { agent_id?: unknown } }>(
       '/api/v1/advisories/:id/ack',
       async (req, reply) => {

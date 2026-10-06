@@ -191,6 +191,30 @@ describe('command handlers', () => {
       );
     });
 
+    // E65 S65.4 — Advisories: section.
+    it('lists active advisories, most severe first, when there are any', async () => {
+      const raisedAt = new Date(Date.now() - 2 * 3_600_000).toISOString();
+      const advisory = (severity: string, title: string, state: string) => ({
+        id: `${severity}-0000-1111`, agent_id: 'agent:baxter', severity, title, state, raised_at: raisedAt,
+      });
+      const deps = {
+        ...makeDeps({ adapters: [{ id: 'telegram', status: 'healthy' }] }),
+        advisories: { listActive: () => [advisory('critical', 'Nothing journaled for 24 h', 'open'), advisory('info', 'Hook quiet', 'delivered')] },
+      } as unknown as Parameters<typeof createBuiltinCommands>[0];
+      const status = createBuiltinCommands(deps).find((c) => c.name === 'status')!;
+      const body = (await status.handler([], makeCtx(deps.db))).body!;
+      expect(body).toContain(
+        'Advisories:\n  agent:baxter [critical] Nothing journaled for 24 h (open, raised 2h ago) id:critical\n' +
+          '  agent:baxter [info] Hook quiet (delivered, raised 2h ago) id:info-000',
+      );
+    });
+
+    it('has no Advisories: section when none are active', async () => {
+      const deps = { ...makeDeps({ adapters: [] }), advisories: { listActive: () => [] } } as unknown as Parameters<typeof createBuiltinCommands>[0];
+      const status = createBuiltinCommands(deps).find((c) => c.name === 'status')!;
+      expect((await status.handler([], makeCtx(deps.db))).body).not.toContain('Advisories:');
+    });
+
     it('has no Runtimes: section without a resolver', async () => {
       const deps = makeDeps({ adapters: [{ id: 'telegram', status: 'healthy' }] });
       const status = createBuiltinCommands(deps).find((c) => c.name === 'status')!;

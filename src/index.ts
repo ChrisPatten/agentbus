@@ -123,6 +123,7 @@ const { registry: commandRegistry, pauseSet, headlessControl } = createCommandSy
   config,
   poolManagers,
   runtimeResolver,
+  advisories,
 });
 
 // ── Custom commands ───────────────────────────────────────────────────────────

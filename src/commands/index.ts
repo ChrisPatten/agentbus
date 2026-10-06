@@ -47,6 +47,8 @@ export interface CommandSystemDeps {
   poolManagers?: Map<string, import('../pool/pool-manager.js').PoolManager>;
   /** E64 — agent runtime lookup, shown in /status. */
   runtimeResolver?: import('../core/runtime-resolver.js').RuntimeResolver;
+  /** E65 — active advisories, shown in /status. */
+  advisories?: Pick<import('../advisories/service.js').AdvisoryService, 'listActive'>;
 }
 
 export interface CommandSystem {
@@ -93,6 +95,7 @@ export function createCommandSystem(deps: CommandSystemDeps): CommandSystem {
     headlessControl,
     poolManagers: deps.poolManagers,
     runtimeResolver: deps.runtimeResolver,
+    advisories: deps.advisories,
   });
 
   for (const cmd of builtins) {
