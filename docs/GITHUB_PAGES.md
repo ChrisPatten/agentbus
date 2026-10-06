@@ -1,6 +1,6 @@
 # GitHub Pages site
 
-The public site has two parts, published together to GitHub Pages by `.github/workflows/pages.yml`:
+The public site is served at https://chrispatten.github.io/agentbus/ (no custom domain). It has two parts, published together to GitHub Pages by `.github/workflows/pages.yml`:
 
 | URL | Source | Build |
 |---|---|---|
@@ -13,10 +13,10 @@ The public site has two parts, published together to GitHub Pages by `.github/wo
 
 ```
 site/
-  index.html        # landing page: hero, architecture, features, quick start
+  index.html    # the whole page — hero, what you can do, channels, control,
+                #   how it works, getting started
   styles.css
   favicon.svg
-  CNAME             # custom domain; replace the placeholder with the real one
 site-docs/
   .vitepress/
     config.mts      # title, base path, nav, sidebar, local search
@@ -43,11 +43,13 @@ Markdown in `site-docs/` is compiled as Vue templates, so a literal `{{placehold
 
 ### Base path
 
-The docs are built for `/docs/`. Set `DOCS_BASE` to build for another path, for example a GitHub project page without a custom domain:
+The docs build for `/docs/` by default, which is what `docs:dev` and `docs:preview` use locally. The site has no custom domain, so GitHub serves it under `/agentbus/`, and the workflow sets `DOCS_BASE=/agentbus/docs/`. To check a production build locally:
 
 ```bash
 DOCS_BASE=/agentbus/docs/ npm run docs:build
 ```
+
+The landing page links to the docs with relative paths (`docs/`, `docs/getting-started`), so it works at any base without changes.
 
 The VitePress logo links back to the landing page one level above the base.
 
@@ -65,10 +67,13 @@ The deploy job only runs for `main`.
 One-time manual setup (repo Settings, not code):
 
 1. Settings → Pages → Source: **GitHub Actions**.
-2. Once DNS for the custom domain in `site/CNAME` is configured, enter that domain in Settings → Pages → Custom domain, then enable **Enforce HTTPS**.
+
+To move to a custom domain later, configure it in Settings → Pages → Custom domain, then change `DOCS_BASE` in the workflow to `/docs/`.
 
 ## Keeping content current
 
 The landing page's version, license and last-commit badges are shields.io badges and update themselves. Everything else in `site/index.html` is hand-written copy.
 
-When a change alters what users see or configure, update the matching page in `site-docs/` alongside `docs/`. The release checklist in [VERSIONING.md](VERSIONING.md) includes reviewing `site/index.html` when a release changes the pitch, feature list or quick start.
+When a change alters what users see or configure, update the matching page in `site-docs/` alongside `docs/`.
+
+The landing page copy is aimed at users, not contributors: plain language, no terminal commands, and only shipped features (label early or extra-setup channels as such). Setup steps live in the documentation site. The release checklist in [VERSIONING.md](VERSIONING.md) includes reviewing `site/index.html` when a release changes user-facing behavior.

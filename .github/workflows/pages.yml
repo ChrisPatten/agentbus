@@ -37,6 +37,9 @@ jobs:
       - run: npm ci
       - name: Build the documentation
         run: npm run docs:build
+        env:
+          # Project page without a custom domain: https://chrispatten.github.io/agentbus/
+          DOCS_BASE: /agentbus/docs/
       - name: Assemble the site
         run: |
           mkdir -p _site/docs
