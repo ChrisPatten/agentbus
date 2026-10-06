@@ -96,7 +96,7 @@ Always returns `200`. `status` is `healthy` when every adapter reports `online` 
 
 `runtimes` lists each configured agent's runtime and static capabilities, keyed by agent id, for example `"agent:baxter": { "runtime": "cc-headless", "capabilities": { "systemMessages": true, …, "hookEvents": ["pre-compact"] } }`. See [RUNTIME_CAPABILITIES.md](RUNTIME_CAPABILITIES.md).
 
-`journaling` (E66) summarizes journaling per agent: `status` is `critical` when an enabled agent has 3 or more consecutive exhausted runs or a backlog at least 24 h old, `warning` when one has an exhausted run, else `ok`. Each entry under `agents` has `enabled`, `chain`, `backlog_age_ms` (age of the oldest unjournaled eligible content, or null), `backlog_sessions`, `consecutive_exhaustions`, `last_success_at`, `last_failure_at`, `last_failure` and `in_flight`. The top-level `status` is unchanged by it. See [JOURNALING.md](JOURNALING.md#observability).
+`journaling` (E66) summarizes journaling per agent: `status` is `critical` when an enabled agent has 3 or more consecutive exhausted runs or a backlog at least 24 h old, `warning` when one has an exhausted run, else `ok`. Each entry under `agents` has `enabled`, `chain`, `backlog_age_ms` (age of the oldest unjournaled eligible content, or null), `backlog_sessions`, `consecutive_exhaustions`, `last_success_at`, `last_failure_at`, `last_failure` and `in_flight`. A `critical` journaling status makes the top-level `status` `degraded`. See [JOURNALING.md](JOURNALING.md#observability).
 
 `queue` counts rows in `message_queue` by status. Dead-lettered messages are moved to a separate `dead_letter` table, so `dead_letter` is always `0` here; query the table directly to inspect them.
 
