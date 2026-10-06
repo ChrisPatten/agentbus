@@ -139,6 +139,11 @@ function loadMigrations(): Migration[] {
       description: 'Bus advisories (E65)',
       sql: readFileSync(join(migrationsDir, '025_advisories.sql'), 'utf-8'),
     },
+    {
+      version: 26,
+      description: 'Pluggable journaling: cursor, state, snapshots, runs (E66)',
+      sql: readFileSync(join(migrationsDir, '026_journaling.sql'), 'utf-8'),
+    },
   ];
 }
 
