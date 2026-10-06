@@ -65,7 +65,7 @@ Every option is in the [configuration reference](/reference/configuration#journa
 A `system-message` journal run has the agent to itself for up to five minutes (`timeout_ms`). It only starts when the agent isn't in the middle of answering someone.
 - **Messages that arrive in the meantime wait** and are delivered as soon as the run finishes. The sender sees that the agent is busy: a "queued" state in the Mac app, a status line in Telegram, or a short notice elsewhere. Email is just delivered a little later.
 - **The agent can't message anyone during the run.** A journal run never produces a stray reply.
-- **Pool panes wait for journaling before they're released**, so a conversation's context is never cleared before it's been journaled. A message for a new conversation waits for the pane meanwhile.
+- **A pool pane that's released for being idle waits for journaling first**, so its context isn't cleared before it's been journaled. When a busy pool hands a pane to another conversation, the new conversation gets it right away and the old one is journaled in the background from its saved transcript.
 
 If the agent doesn't confirm in time, the run moves on to the next journaler.
 

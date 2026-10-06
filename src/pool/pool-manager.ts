@@ -88,8 +88,6 @@ const PERMISSION_DIALOG_PATTERN = /esc to cancel/i;
  */
 /** Default interval (ms) for start()'s recurring sweepHardIdle()+drainParked() tick. */
 const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
-/** E66 — see `PoolManagerDeps.evictJournalGraceMs`. */
-const EVICT_JOURNAL_GRACE_MS = 2_000;
 /** Max parked messages processed per drainParked() call, to bound one tick's work. */
 const PARK_DRAIN_BATCH_SIZE = 20;
 /** Tail length (lines) captured from a dead pane for reconcileLiveness()'s restart notice. */
@@ -183,12 +181,6 @@ export interface PoolManagerDeps {
    * inject a stub.
    */
   transcriptExists?: (sessionId: string, cwd: string) => boolean;
-  /**
-   * E66 — how long an eviction may wait on the release hook (the displaced
-   * conversation's journal run) before the incoming message is parked
-   * instead of holding up the inbound pipeline. Default 2 s.
-   */
-  evictJournalGraceMs?: number;
 }
 
 /**
@@ -214,10 +206,12 @@ export interface PoolPromptContext {
 /**
  * E66 — called before a leased pane is released from its conversation, so
  * journaling can evaluate the conversation (`evict` / `release` triggers).
- * Awaited: the bus's hook waits for the journal run (bounded by the
- * journaling timeout) before the pane is cleared or killed. On eviction an
- * incoming message is parked meanwhile (see `evictJournalGraceMs`). Must
- * not throw; a rejection is logged and the release proceeds.
+ * Hard-idle release (`release`) awaits it: the bus's hook waits for the
+ * journal run (bounded by the journaling timeout) before the pane is
+ * cleared or killed. LRU eviction (`evict`) does not wait (post-E66
+ * decision): the hook is called and the pane is released at once; the
+ * journal runs in the background from the transcript on disk. Must not
+ * throw; a rejection is logged and the release proceeds.
  */
 export type PoolReleaseHook = (event: {
   reason: 'evict' | 'release';
@@ -254,8 +248,6 @@ export class PoolManager {
    */
   readonly resolveModelFn: (scheduleModel: string | null) => PoolResolvedModel;
   private readonly transcriptExistsFn: (sessionId: string, cwd: string) => boolean;
-  /** E66 — see `PoolManagerDeps.evictJournalGraceMs`. */
-  private readonly evictJournalGraceMs: number;
   /**
    * E53 (follow-up fix, round 2) — the in-flight release-then-launch
    * operation per pane, keyed by `pane_id`. Set by `trackPaneOperation()`
@@ -293,7 +285,6 @@ export class PoolManager {
     this.sweepIntervalMs = deps.sweepIntervalMs ?? DEFAULT_SWEEP_INTERVAL_MS;
     this.resolveModelFn = deps.resolveModel ?? defaultResolveModel(deps.cfg.model);
     this.transcriptExistsFn = deps.transcriptExists ?? defaultTranscriptExists;
-    this.evictJournalGraceMs = deps.evictJournalGraceMs ?? EVICT_JOURNAL_GRACE_MS;
 
     // E53 S53.4 — startup warning: no pane launch should silently depend on
     // ~/.claude/settings.json for its model. Logged once, at construction,
@@ -475,23 +466,19 @@ export class PoolManager {
       // release below (or the launch after it) ever runs — see that
       // method's doc comment for why the entry must cover release too, not
       // just the launch call `runTrackedLaunch()` makes.
-      // E66 S66.9 — on eviction the release hook waits for the displaced
-      // conversation's journal run (bounded by the journaling timeout). So
-      // that wait never stalls the inbound pipeline, a hook still running
-      // after EVICT_JOURNAL_GRACE_MS parks this message; the operation
-      // carries on in the background and drainParked() delivers it once
-      // the pane is up (acquire()'s reuse branch waits on the launch).
-      let hookSettled: () => void = () => {};
-      const hookDone = new Promise<void>((resolve) => { hookSettled = resolve; });
-      if (result.kind !== 'evict') hookSettled();
+      // Post-E66 decision — eviction does not wait for the displaced
+      // conversation's journal run: acquire() has already moved the lease,
+      // so the live agent can't journal it anyway. The release hook fires
+      // the `evict` trigger and the journal runs in the background from the
+      // transcript on disk (cc-headless --fork-session, script), while the
+      // pane is released and relaunched right away.
       const operation = this.trackPaneOperation(lease.pane_id, async () => {
         if (result.kind === 'evict') {
-          await this.beforeRelease({
+          void this.beforeRelease({
             reason: 'evict', poolAgentId: toPrefixedAgentId(this.cfg.agent_id), paneId: lease.pane_id,
             paneAgentId: lease.agent_id, conversationId: result.evicted.conversationId,
             claudeSessionId: result.evicted.claudeSessionId,
           });
-          hookSettled();
           // A failed /clear or kill on the displaced occupant must not block
           // seating the new conversation.
           try {
@@ -520,25 +507,7 @@ export class PoolManager {
           },
           resolved,
         );
-      }).finally(() => hookSettled());
-
-      if (result.kind === 'evict' && this.releaseHook) {
-        const waited = await Promise.race([
-          hookDone.then(() => 'hook' as const),
-          new Promise<'grace'>((resolve) => { const t = setTimeout(() => resolve('grace'), this.evictJournalGraceMs); t.unref?.(); }),
-        ]);
-        if (waited === 'grace') {
-          console.log(
-            `[pool:${this.poolId}] ${lease.pane_id}: waiting for the evicted conversation's journal run; ` +
-              `parking ${conversationId.slice(0, 8)} until the pane is ready`,
-          );
-          void operation.then((ok) => {
-            if (ok) this.persistSessionId(conversationId, priorRow, sessionId);
-            else console.error(`[pool:${this.poolId}] Pane launch failed for ${lease.pane_id} after eviction`);
-          }, (err: unknown) => console.error(`[pool:${this.poolId}] eviction of ${lease.pane_id} failed:`, err));
-          return this.parkedRecipientId();
-        }
-      }
+      });
 
       const launched = await operation;
       if (!launched) {

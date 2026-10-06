@@ -177,15 +177,18 @@ journalEngine.addTicker(createHookHealthTicker({
   agents: () => journalEngine.allSettings().map((s) => ({ agentId: s.agentId, runtime: runtimeResolver.resolve(s.agentId) })),
 }));
 for (const [poolAgentId, pool] of poolManagers) {
-  // E66 S66.9 — pool release (LRU eviction and hard-idle) waits for the
-  // conversation's journal run, bounded by the journaling timeout, before
-  // the pane is cleared or killed.
+  // E66 S66.9 — hard-idle release waits for the conversation's journal
+  // run, bounded by the journaling timeout, before the pane is cleared or
+  // killed. LRU eviction only fires the trigger (post-E66 decision): the
+  // lease has already moved, so the journal runs in the background from the
+  // transcript on disk while the pane is reused.
   pool.setReleaseHook(async ({ reason, conversationId }) => {
     const handle = journalEngine.trigger({ reason, conversationId });
     if (handle.status === 'unknown-session') {
       console.warn(`[journaling] ${poolAgentId}: no session for released conversation ${conversationId.slice(0, 8)}`);
       return;
     }
+    if (reason === 'evict') return;
     if (handle.status !== 'queued' && handle.status !== 'merged') return;
     const settings = journalEngine.settingsFor(poolAgentId);
     const bound = Math.max(settings?.timeoutMs ?? 0, settings?.journalers['system-message'].timeoutMs ?? 0) || 300_000;

@@ -10,7 +10,7 @@ The pool is a number of **panes**: tmux windows, each able to run one Claude Cod
 
 1. **A message arrives** for a conversation that has no pane. The bus takes a free pane, starts Claude Code in it, and resumes the conversation's Claude session if it has one. Telegram shows "One moment…" while it starts.
 2. **The conversation keeps its pane.** Later messages go straight to the same pane, with no start-up delay.
-3. **When every pane is busy**, the bus takes the pane that's been idle longest, if it's been idle for at least `lease.idle_evict_ms` (30 minutes by default). That conversation gives up its pane, and resumes its session in a pane later.
+3. **When every pane is busy**, the bus takes the pane that's been idle longest, if it's been idle for at least `lease.idle_evict_ms` (30 minutes by default). That conversation gives up its pane right away (it's journaled in the background from its saved transcript), and resumes its session in a pane later.
 4. **If no pane can be freed**, the message waits ("parks"). Parked messages are retried every minute. A message that's still waiting after `lease.park_timeout_ms` (5 minutes by default) gives up: it moves to the bus's dead-letter list, and the bus posts a notice on its `system` channel. Route `channel: system` to an agent if you want to hear about these.
 5. **Long-idle conversations** give up their pane after `lease.hard_idle_ms` (6 hours by default) without activity, even when nobody else needs it.
 

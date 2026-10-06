@@ -146,6 +146,10 @@ Decisions marked 2026-10-02 are confirmed by the user.
 
 - The consolidation prompt flags corrections that recur after a rule was added and may turn them into a `propose_change` to strengthen the rule. No new mechanism.
 
+## Post-E66 decisions (2026-10-06)
+
+1. **Pool eviction no longer waits for the journal.** On LRU eviction the pane is released and reused right away; the evicted conversation's journal runs in the background from the on-disk transcript (cc-headless `--fork-session`, script journalers). Hard-idle release keeps the bounded wait (the pane is still leased, so `system-message` can run).
+
 ## Epics
 
 - E64 Runtime capability taxonomy → E65 Owner contacts and bus advisories → E66 Pluggable journaling core; E67 Native memory layout and read side (parallel to E66); E68 Agent learning (after E66, E67).
