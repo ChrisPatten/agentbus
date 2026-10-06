@@ -24,7 +24,7 @@ Set `bus.host: 0.0.0.0` to accept connections from other hosts, for example a re
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/v1/health` | Liveness, adapter health, queue counts |
+| GET | `/api/v1/health` | Liveness, adapter health, agent runtimes, queue counts |
 | GET | `/api/v1/pool` | cc-pool pane leases and parked-queue depth (when configured) |
 | POST | `/api/v1/pool/:agentId/turn-ended` | Real-time pane activity signal, fed by a `Stop` hook |
 | POST | `/api/v1/approvals` | Raise an interactive-approval request for a blocked pane |
@@ -86,6 +86,8 @@ Always returns `200`. `status` is `healthy` when every adapter reports `online`,
   "queue": { "pending": 0, "processing": 1, "delivered": 142, "dead_letter": 0 }
 }
 ```
+
+`runtimes` lists each configured agent's runtime and static capabilities, keyed by agent id, for example `"agent:baxter": { "runtime": "cc-headless", "capabilities": { "systemMessages": true, …, "hookEvents": ["pre-compact"] } }`. See [RUNTIME_CAPABILITIES.md](RUNTIME_CAPABILITIES.md).
 
 `queue` counts rows in `message_queue` by status. Dead-lettered messages are moved to a separate `dead_letter` table, so `dead_letter` is always `0` here; query the table directly to inspect them.
 

@@ -12,6 +12,8 @@ import type { AdapterRegistry } from '../core/registry.js';
 import type { MessageQueue } from '../core/queue.js';
 import { computeConversationId } from '../pipeline/conversation-id.js';
 import type { HeadlessCapacitySnapshot } from '../adapters/cc-headless.js';
+import type { RuntimeResolver } from '../core/runtime-resolver.js';
+import { formatCapabilities } from '../core/runtime-capabilities.js';
 
 /**
  * Mutable holder for the headless adapter's control hooks. Populated by
@@ -51,6 +53,8 @@ export interface HandlerDeps {
    * adapters are configured.
    */
   poolManagers?: Map<string, import('../pool/pool-manager.js').PoolManager>;
+  /** E64 — agent runtime lookup for the /status Runtimes section. Omitted → section omitted. */
+  runtimeResolver?: Pick<RuntimeResolver, 'list'>;
 }
 
 function commandConversationId(ctx: SlashCommandContext, db: Database.Database, contactId: string): string {
@@ -108,6 +112,11 @@ async function statusHandler(
     `  delivered:  ${counts['delivered'] ?? 0}`,
     `  dead_letter: ${counts['dead_letter'] ?? 0}`,
     ...(poolLines.length > 0 ? ['', 'Pool:', ...poolLines] : []),
+    ...(() => {
+      const runtimes = deps.runtimeResolver?.list() ?? [];
+      return runtimes.length > 0 ? ['', 'Runtimes:', ...runtimes.map((r) =>
+        `  ${r.agentId}: ${r.kind} (${formatCapabilities(r.capabilities)})`)] : [];
+    })(),
     ...(() => {
       const snapshots = [...(deps.headlessControl?.snapshots?.values() ?? [])].map((read) => read());
       return snapshots.length > 0 ? ['', 'Headless:', ...snapshots.map((s) =>

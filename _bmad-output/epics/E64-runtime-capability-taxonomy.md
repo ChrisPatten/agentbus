@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Epic ID | E64 |
-| Status | Planned |
+| Status | Complete |
 | Dependencies | None |
 | Story Count | 3 |
 | Estimated Complexity | S |
@@ -44,3 +44,19 @@ A helper for features to declare required capabilities and validate config at lo
 
 - Changing channel adapter capabilities.
 - Consumers of the taxonomy (E65–E68).
+
+## Implementation Notes
+
+Implemented 2026-10-05 on `feat/e64-e68-journaling`. Code: `src/core/runtime-capabilities.ts`, `src/core/runtime-resolver.ts`. Docs: `docs/RUNTIME_CAPABILITIES.md`.
+
+Where the code disagreed with the epic text, the code won:
+
+- **`cc-headless` does not pass `--fork-session`.** `sessionFork` is still `true`, because the Mac app's Earlier resume (`src/app/resume.ts`) branches a new bus session from a resumable transcript. That path only resolves `cc-headless` instances, so `cc-pool` has `sessionFork: false`.
+- **`claude-code` does receive scheduled messages.** The scheduler fires through the normal pipeline, so a job routed to a `claude-code` agent is delivered. `schedules` is therefore defined as "scheduler jobs run as their own background turn, isolated and honoring `schedule_model`", which holds for `cc-headless` (system turn class, reserved slots) and `cc-pool` (own `sched:` topic and pane) but not for the shared `claude-code` session. Under that definition the epic's "no schedules" stands.
+- **`claude-code` system messages:** the delivery path (cc.ts channel notifications) is the same one `cc-pool` uses, but the session is shared by every conversation, so a bus-originated turn can't be scoped to one. Declared `false`, matching E65.
+- **`liveAgent` is `false` for `cc-headless`** (no process between turns). The System Message journaler (E66) requires `liveAgent`, so on `cc-headless` it reports unavailable and the chain falls through to the cc-headless journaler. That matches the decisions doc ("on cc-headless it reduces to the cc-headless journaler"), but the draft feature overview lists `cc-headless` under `system-message`; adjust that table when E66 lands.
+- **`nativeMemory` is `true` for `cc-headless`** as a harness property, although the bus currently sets `CLAUDE_CODE_DISABLE_AUTO_MEMORY` and injects memory itself. E67 flips that.
+- **`hookEvents` for `cc-headless` is only `pre-compact`.** The bus observes turn end and process exit directly, and `/clear` is a bus command. Declaring the other events would make E66 hook health report hooks that are never expected to fire.
+- **Agents reached only through the implicit default route don't resolve.** The bus can't tell them from a typo; an explicit `claude-code` route is required.
+- **Resolution replaced** the ad hoc lookups in `sessionCanResume` (now the `sessionFork` live check) and `SessionTracker.dispatchJournaling`. `/clear` and `/stop` still pick runners from `headlessControl` maps (they resolve to a callable, not a config); E66 can move them.
+- **No feature declares requirements yet.** `collectRuntimeRequirements()` returns `[]`; `loadConfig()` validates only when it is non-empty. E65/E66 add entries there.

@@ -978,12 +978,17 @@ epics:
       S63.3: pending  # App /clear successor session
       S63.4: pending  # Lifecycle verification and docs
   E64:
-    status: pending
-    notes: Runtime capability taxonomy (agent-side capabilities, static vs live). Prerequisite for E65-E68. Design in planning-artifacts/journaling/decisions.md.
+    status: complete
+    completed: 2026-10-05
+    notes: >
+      Runtime capability taxonomy (agent-side capabilities, static vs live). Prerequisite for E65-E68.
+      Implemented on feat/e64-e68-journaling, not yet merged. src/core/runtime-capabilities.ts (matrix),
+      src/core/runtime-resolver.ts (RuntimeResolver, checkLive, validateRuntimeRequirements). Matrix
+      deviations from the epic text recorded in the epic's Implementation Notes.
     stories:
-      S64.1: pending  # Capability model and per-runtime declarations
-      S64.2: pending  # Runtime resolution and live checks
-      S64.3: pending  # Requirement validation, surfacing, docs
+      S64.1: complete  # Capability model and per-runtime declarations (src/core/runtime-capabilities.ts)
+      S64.2: complete  # Runtime resolution and live checks (src/core/runtime-resolver.ts; resume + session tracker use it)
+      S64.3: complete  # Requirement validation in loadConfig, /status + health, docs/RUNTIME_CAPABILITIES.md
   E65:
     status: pending
     notes: Owner contacts and bus advisories (owner-only, spoof-proof system block, direct channel for critical). Depends on E64.

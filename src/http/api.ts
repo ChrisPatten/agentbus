@@ -74,6 +74,7 @@ import type { HeadlessCapacitySnapshot } from '../adapters/cc-headless.js';
 import { registerAppRoutes } from './app-routes.js';
 import { VERSION } from '../version.js';
 import { recordAgentPoll, getLastPollAt } from './agent-liveness.js';
+import type { RuntimeResolver } from '../core/runtime-resolver.js';
 import { toBareAgentId, toPrefixedAgentId } from '../pool/types.js';
 import { LeaseStore } from '../pool/lease-store.js';
 import type { PoolManager } from '../pool/pool-manager.js';
@@ -109,6 +110,8 @@ export interface HttpServerDeps {
    * `GET /api/v1/pool` observability route.
    */
   poolManagers?: Map<string, PoolManager>;
+  /** E64 — when present, /api/v1/health lists each agent's runtime and capabilities. */
+  runtimeResolver?: Pick<RuntimeResolver, 'list'>;
 }
 
 const MessagePayloadSchema = z.discriminatedUnion('type', [
@@ -620,6 +623,10 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       status: allHealthy ? 'healthy' : 'degraded',
       version: VERSION,
       adapters,
+      ...(deps.runtimeResolver
+        ? { runtimes: Object.fromEntries(deps.runtimeResolver.list().map((r) =>
+            [r.agentId, { runtime: r.kind, capabilities: r.capabilities }])) }
+        : {}),
       queue: {
         pending: counts['pending'] ?? 0,
         processing: counts['processing'] ?? 0,

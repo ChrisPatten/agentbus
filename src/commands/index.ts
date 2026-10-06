@@ -45,6 +45,8 @@ export interface CommandSystemDeps {
    * `createBuiltinCommands` rather than exposed as a mutable holder.
    */
   poolManagers?: Map<string, import('../pool/pool-manager.js').PoolManager>;
+  /** E64 — agent runtime lookup, shown in /status. */
+  runtimeResolver?: import('../core/runtime-resolver.js').RuntimeResolver;
 }
 
 export interface CommandSystem {
@@ -90,6 +92,7 @@ export function createCommandSystem(deps: CommandSystemDeps): CommandSystem {
     db: deps.db,
     headlessControl,
     poolManagers: deps.poolManagers,
+    runtimeResolver: deps.runtimeResolver,
   });
 
   for (const cmd of builtins) {

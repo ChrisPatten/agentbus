@@ -44,6 +44,8 @@ The `Pool:` section is one line per configured `cc-pool` instance — `<leased p
 
 The `Headless:` section shows each `cc-headless` agent's running user and system turns, waiting turns, total process limit, and reserved system slots.
 
+The `Runtimes:` section lists each configured agent with its runtime and static capabilities, for example `agent:baxter: cc-headless (systemMessages, schedules, sessionResume, sessionFork, exclusiveSession, nativeMemory, contextInjection; hooks: pre-compact)`. It is omitted when no agent resolves. See [RUNTIME_CAPABILITIES.md](RUNTIME_CAPABILITIES.md).
+
 ### `/help [command]`
 
 Without arguments, lists all available commands with one-line descriptions. With a command name, shows the full usage string.

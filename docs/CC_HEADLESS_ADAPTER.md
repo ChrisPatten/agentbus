@@ -17,6 +17,8 @@ bus-core
 
 Compared with a persistent session, headless gives per-contact isolation (each contact has its own Claude conversation), no session to keep alive by hand, and memory injection that the bus controls. The trade-off is that the agent cannot see another contact's conversation. See [Cross-contact isolation](#cross-contact-isolation).
 
+For what the bus can do with a headless agent compared with the other runtimes (system turns, resume, fork, hooks), see [RUNTIME_CAPABILITIES.md](RUNTIME_CAPABILITIES.md).
+
 ## Session continuity (long-lived sessions)
 
 `sessions.claude_session_id` (migration 008) stores the session ID that `claude -p` reports in its stream-json events. Later turns pass `--resume <id>`.

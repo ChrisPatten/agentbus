@@ -12,6 +12,8 @@ import type { AppConfig, CcPoolInstanceConfig } from '../config/schema.js';
 import { LeaseStore } from '../pool/lease-store.js';
 import type { AcquireResult } from '../pool/types.js';
 import { PoolManager } from '../pool/pool-manager.js';
+import { runtimeCapabilities } from '../core/runtime-capabilities.js';
+import type { RuntimeResolver } from '../core/runtime-resolver.js';
 import type { MessageEnvelope } from '../types/envelope.js';
 
 function makeDb(): Database.Database {
@@ -108,6 +110,30 @@ async function makeSecureServer(): Promise<{ server: FastifyInstance; queue: Mes
   const server = await createHttpServer({ queue, registry, config, pipeline, db });
   return { server, queue };
 }
+
+describe('GET /api/v1/health — runtimes (E64 S64.3)', () => {
+  it('lists each agent runtime and its capabilities when a resolver is wired', async () => {
+    const db = makeDb();
+    const config = { ...stubConfig } as unknown as AppConfig;
+    const runtimeResolver = {
+      list: () => [{ agentId: 'agent:claude', kind: 'claude-code' as const, capabilities: runtimeCapabilities('claude-code') }],
+    } as unknown as Pick<RuntimeResolver, 'list'>;
+    const server = await createHttpServer({
+      queue: new MessageQueue(db), registry: new AdapterRegistry(), config, pipeline: new PipelineEngine(), db, runtimeResolver,
+    });
+    const body = (await server.inject({ method: 'GET', url: '/api/v1/health' })).json();
+    expect(body.runtimes).toEqual({
+      'agent:claude': { runtime: 'claude-code', capabilities: { ...runtimeCapabilities('claude-code') } },
+    });
+    await server.close();
+  });
+
+  it('omits runtimes without a resolver', async () => {
+    const { server } = await makeSecureServer();
+    expect((await server.inject({ method: 'GET', url: '/api/v1/health' })).json()).not.toHaveProperty('runtimes');
+    await server.close();
+  });
+});
 
 describe('HTTP API — auth middleware', () => {
   let server: FastifyInstance;

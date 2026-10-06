@@ -43,6 +43,7 @@ import { AppAdapter } from './adapters/app.js';
 import { routedAgent } from './app/store.js';
 import { startHeadless, stopHeadless, getHeadlessSnapshots } from './adapters/cc-headless.js';
 import { createPoolManagers } from './pool/pool-manager.js';
+import { RuntimeResolver } from './core/runtime-resolver.js';
 import { createPoolRouteResolve } from './pipeline/stages/pool-route-resolve.js';
 import { DeliveryWorker } from './core/delivery.js';
 import { createCommandSystem } from './commands/index.js';
@@ -94,12 +95,17 @@ const registry = new AdapterRegistry();
 const busBaseUrl = `http://127.0.0.1:${config.bus.http_port}`;
 const poolManagers = createPoolManagers(config, db, busBaseUrl, queue);
 
+// E64 — one agent_id → runtime lookup (cc-headless, cc-pool, claude-code,
+// mcp-polled) with live capability checks. Shown in /status and health.
+const runtimeResolver = new RuntimeResolver(config, { poolManagers, db });
+
 const { registry: commandRegistry, pauseSet, headlessControl } = createCommandSystem({
   adapterRegistry: registry,
   queue,
   db,
   config,
   poolManagers,
+  runtimeResolver,
 });
 
 // ── Custom commands ───────────────────────────────────────────────────────────
@@ -138,7 +144,7 @@ const app = config.adapters.app?.enabled
   ? new AppAdapter(db, (contactId) => routedAgent(config, contactId), getHeadlessSnapshots) : undefined;
 if (app) registry.register(app);
 
-const httpServer = await createHttpServer({ queue, registry, config, pipeline, db, commandRegistry, pauseSet, siri, app, poolManagers, getHeadlessSnapshots });
+const httpServer = await createHttpServer({ queue, registry, config, pipeline, db, commandRegistry, pauseSet, siri, app, poolManagers, getHeadlessSnapshots, runtimeResolver });
 
 // ── Platform adapter registration ────────────────────────────────────────────
 // Platform adapters run in-process. They are instantiated from config,

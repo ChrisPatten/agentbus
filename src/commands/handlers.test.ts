@@ -10,6 +10,8 @@ import type { MessageEnvelope } from '../types/envelope.js';
 import { createSafeDatabase } from '../db/safe-database.js';
 import { MessageQueue } from '../core/queue.js';
 import { PoolManager } from '../pool/pool-manager.js';
+import { runtimeCapabilities } from '../core/runtime-capabilities.js';
+import type { RuntimeResolver } from '../core/runtime-resolver.js';
 import { computeConversationId } from '../pipeline/conversation-id.js';
 
 function makeDb() {
@@ -171,6 +173,28 @@ describe('command handlers', () => {
       const status = commands.find((c) => c.name === 'status')!;
       const result = await status.handler([], makeCtx(deps.db));
       expect(result.body).toContain('[PAUSED]');
+    });
+
+    // E64 S64.3 — Runtimes: section.
+    it('lists each agent runtime with its capabilities when a resolver is wired', async () => {
+      const deps = {
+        ...makeDeps({ adapters: [{ id: 'telegram', status: 'healthy' }] }),
+        runtimeResolver: {
+          list: () => [{ agentId: 'agent:baxter', kind: 'cc-headless' as const, capabilities: runtimeCapabilities('cc-headless') }],
+        } as unknown as Pick<RuntimeResolver, 'list'>,
+      };
+      const status = createBuiltinCommands(deps).find((c) => c.name === 'status')!;
+      const result = await status.handler([], makeCtx(deps.db));
+      expect(result.body).toContain(
+        'Runtimes:\n  agent:baxter: cc-headless (systemMessages, schedules, sessionResume, sessionFork, ' +
+          'exclusiveSession, nativeMemory, contextInjection; hooks: pre-compact)',
+      );
+    });
+
+    it('has no Runtimes: section without a resolver', async () => {
+      const deps = makeDeps({ adapters: [{ id: 'telegram', status: 'healthy' }] });
+      const status = createBuiltinCommands(deps).find((c) => c.name === 'status')!;
+      expect((await status.handler([], makeCtx(deps.db))).body).not.toContain('Runtimes:');
     });
 
     // E48 S48.8 — Pool: section.

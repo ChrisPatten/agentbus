@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { load as parseYaml } from 'js-yaml';
 import dotenv from 'dotenv';
 import { AppConfigSchema, type AppConfig } from './schema.js';
+import { RuntimeResolver, collectRuntimeRequirements, validateRuntimeRequirements } from '../core/runtime-resolver.js';
 
 /**
  * Walk an unknown object tree and replace all `${VAR_NAME}` tokens in string
@@ -49,7 +50,8 @@ function substituteEnvVars(obj: unknown): unknown {
  *  3. Parse YAML → raw JS object
  *  4. Substitute `${VAR_NAME}` tokens with env values
  *  5. Validate against Zod schema
- *  6. Return typed `AppConfig`
+ *  6. Check feature requirements against agent runtime capabilities (E64)
+ *  7. Return typed `AppConfig`
  *
  * Throws on any validation or substitution failure; process should exit non-zero.
  */
@@ -74,6 +76,13 @@ export function loadConfig(path: string, envPath?: string): AppConfig {
       .map((issue) => `  ${issue.path.join('.')}: ${issue.message}`)
       .join('\n');
     throw new Error(`Config validation failed:\n${formatted}`);
+  }
+
+  // E64 — reject configs that ask a runtime for a capability it lacks, naming
+  // the feature, agent, runtime and missing capability.
+  const requirements = collectRuntimeRequirements(result.data);
+  if (requirements.length > 0) {
+    validateRuntimeRequirements(new RuntimeResolver(result.data), requirements);
   }
 
   // Ensure the db directory exists so better-sqlite3 can create the file

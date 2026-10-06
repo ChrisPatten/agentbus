@@ -16,6 +16,7 @@ Technical reference for operators and contributors. The public landing page live
 |---|---|
 | [CC_HEADLESS_ADAPTER.md](CC_HEADLESS_ADAPTER.md) | `claude -p` per batch, session resume, system prompt, memory files, journaling, multi-instance |
 | [CC_ADAPTER.md](CC_ADAPTER.md) | The MCP server process: tools-only mode for headless turns, polling mode for a persistent session |
+| [RUNTIME_CAPABILITIES.md](RUNTIME_CAPABILITIES.md) | What each runtime supports (system messages, resume, fork, live agent, hooks), static versus live checks, declaring feature requirements |
 | [CC_POOL_ADAPTER.md](CC_POOL_ADAPTER.md) | Pool of tmux panes, each an interactive session leased per conversation: lease lifecycle, allocation and eviction, observability, attaching by hand |
 | [APPROVALS.md](APPROVALS.md) | Answering a blocked pane's permission prompt from Telegram: request lifecycle, staleness rules, setup, adding a backend |
 | [MEMORY_MODEL.md](MEMORY_MODEL.md) | Why the agent's own files are the memory system |
