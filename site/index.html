@@ -3,165 +3,249 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>AgentBus — a message bus for AI agents</title>
-  <meta name="description" content="AgentBus unifies Claude Code, Telegram, email, and voice-memo webhooks into a single ambient inbox/outbox for an AI agent." />
+  <title>AgentBus: reach your Claude agent from anywhere</title>
+  <meta name="description" content="AgentBus lets you message the Claude Code agent on your computer from Telegram or email. It answers in the same place, keeps conversations separate, runs on your schedule, and asks before risky steps." />
   <link rel="icon" type="image/svg+xml" href="favicon.svg" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
   <header class="site-header">
     <div class="wrap header-inner">
       <a class="brand" href="#top">
         <img src="favicon.svg" alt="" class="brand-mark" width="24" height="24" />
         AgentBus
       </a>
-      <nav class="nav">
-        <a href="#features">Features</a>
-        <a href="#architecture">Architecture</a>
-        <a href="#quick-start">Quick start</a>
-        <a href="https://github.com/ChrisPatten/agentbus/tree/main/docs">Docs</a>
-        <a href="https://github.com/ChrisPatten/agentbus" class="nav-cta">GitHub</a>
+      <nav class="nav" aria-label="Main">
+        <a href="#what-you-can-do">What you can do</a>
+        <a href="#channels">Where</a>
+        <a href="#control">Control</a>
+        <a href="#get-started">Get started</a>
+        <a href="docs/" class="nav-cta">Docs</a>
       </nav>
     </div>
   </header>
 
-  <main id="top">
-    <section class="hero">
+  <main id="main">
+    <section class="hero" id="top" aria-labelledby="hero-title">
       <div class="wrap">
-        <h1>One ambient inbox for your AI agent.</h1>
+        <h1 id="hero-title">Talk to your Claude agent from wherever you are.</h1>
         <p class="lede">
-          AgentBus is a TypeScript message bus that unifies Claude Code,
-          Telegram, email, and voice-memo webhooks into a single
-          inbox/outbox — so an AI agent can hear from, and reply to, any of
-          them without knowing which one it's talking to.
+          AgentBus connects the Claude Code agent on your computer to Telegram
+          and email. Send it a message from your phone, and the answer comes
+          back in the same chat.
         </p>
         <div class="cta-row">
-          <a class="btn btn-primary" href="#quick-start">Quick start</a>
-          <a class="btn" href="https://github.com/ChrisPatten/agentbus">View on GitHub</a>
+          <a class="btn btn-primary" href="docs/getting-started">Get started</a>
+          <a class="btn" href="docs/">Documentation</a>
         </div>
-        <p class="badges">
-          <img alt="latest tag" src="https://img.shields.io/github/v/tag/ChrisPatten/agentbus?label=version&sort=semver" />
-          <img alt="license" src="https://img.shields.io/github/license/ChrisPatten/agentbus" />
-          <img alt="last commit" src="https://img.shields.io/github/last-commit/ChrisPatten/agentbus" />
-        </p>
       </div>
     </section>
 
-    <section id="architecture" class="architecture">
+    <section id="what-you-can-do" aria-labelledby="what-title">
       <div class="wrap">
-        <h2>One process, one HTTP boundary</h2>
+        <h2 id="what-title">What you can do</h2>
         <p class="section-lede">
-          Platform adapters run inside bus-core. The agent side stays on the
-          other side of a <code>localhost</code> HTTP API — the only separate
-          process is the MCP server Claude Code spawns — so channels stay
-          pluggable and the agent runtime stays swappable.
+          Your agent keeps running on your computer while you're away from it.
+          Here's what that looks like in a normal day.
         </p>
-        <div class="diagram">
-          <div class="node node-core">
-            <strong>bus-core</strong>
-            <span>SQLite · message queue · inbound pipeline</span>
-          </div>
-          <div class="diagram-links" aria-hidden="true">
-            <span></span><span></span><span></span><span></span>
-          </div>
-          <div class="node-row">
-            <div class="node">
-              <strong>cc-headless adapter</strong>
-              <span>claude -p per batch, session resume</span>
-            </div>
-            <div class="node">
-              <strong>telegram adapter</strong>
-              <span>Bot API, long-poll, forum topics</span>
-            </div>
-            <div class="node">
-              <strong>email &amp; pebble adapters</strong>
-              <span>IMAP · voice-memo webhook</span>
-            </div>
-            <div class="node">
-              <strong>claude-code MCP server</strong>
-              <span>separate process over stdio</span>
-            </div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <section id="features" class="features">
-      <div class="wrap">
-        <h2>What it does</h2>
         <div class="grid">
-          <div class="card">
-            <h3>Multi-channel by design</h3>
-            <p>Claude Code (MCP), Telegram, email, and Pebble Ring
-            voice-memo webhooks all feed the same inbox; iMessage/BlueBubbles
-            support is planned.</p>
-          </div>
-          <div class="card">
-            <h3>Telegram group topics</h3>
-            <p>A topic-enabled Telegram group becomes its own channel, and
-            each forum topic gets its own long-lived session — the agent can
-            even spin up a new topic on its own initiative and pick up right
-            where a reply-quoted message left off.</p>
-          </div>
-          <div class="card">
-            <h3>Threaded, persistent memory</h3>
-            <p>A generic per-thread session store (shared by email and
-            Telegram) plus file-based memory: the agent's own MEMORY.md and
-            daily journals load into every turn and are updated by a silent
-            journaling sweep, so context survives across sessions and
-            channels.</p>
-          </div>
-          <div class="card">
-            <h3>Slash commands</h3>
-            <p>A command registry lets any channel trigger the same
-            structured actions, no matter where the message came from.</p>
-          </div>
-          <div class="card">
-            <h3>Scheduling</h3>
-            <p>Cron-like scheduled sends and reminders, built on the same
-            pipeline as every other inbound/outbound message.</p>
-          </div>
-          <div class="card">
-            <h3>Channel relay &amp; routing</h3>
-            <p>Rewrite and re-submit a message from one channel to another
-            with templated bodies — bounded hop count, full pipeline re-run.</p>
-          </div>
-          <div class="card">
-            <h3>Write your own adapter</h3>
-            <p>Adapters only need to speak HTTP to bus-core. See the plugin
-            authoring guide to add a new channel.</p>
-          </div>
+          <article class="card">
+            <h3>Text it from the train</h3>
+            <p>Send a Telegram message from your phone. Your agent works on it
+            at home, and the answer is waiting in the chat when you sit down.</p>
+          </article>
+          <article class="card">
+            <h3>Get a morning briefing</h3>
+            <p>Set a schedule, such as 8:00 on weekdays, and your agent messages
+            you first with whatever you asked for: the weather, your agenda,
+            a summary of yesterday.</p>
+          </article>
+          <article class="card">
+            <h3>Ask for a reminder in plain words</h3>
+            <p>"Remind me Thursday at 3 to call the dentist." The agent sets
+            the reminder itself and messages you when it's time.</p>
+          </article>
+          <article class="card">
+            <h3>Keep topics apart</h3>
+            <p>In a Telegram group with topics, each topic is its own
+            conversation. Trip planning stays out of your work notes. Email
+            works the same way: one conversation per thread.</p>
+          </article>
+          <article class="card">
+            <h3>Pick up where you left off</h3>
+            <p>Come back to a conversation the next day and the agent still has
+            the context. When a conversation goes quiet, it writes down what's
+            worth keeping in its own notes, and reads them again later.</p>
+          </article>
+          <article class="card">
+            <h3>Send it a photo or a file</h3>
+            <p>Share a photo of a receipt or a whiteboard, or a document, in
+            Telegram. The agent gets the file and can work with it.</p>
+          </article>
         </div>
       </div>
     </section>
 
-    <section id="quick-start" class="quick-start">
+    <section id="channels" aria-labelledby="channels-title">
       <div class="wrap">
-        <h2>Quick start</h2>
-        <pre><code>npm install
-
-cp config.yaml.example config.yaml
-cp .env.example .env
-# edit config.yaml and .env with your credentials
-
-npx tsx src/index.ts        # run bus-core in the foreground
-make start                  # or run it under pm2</code></pre>
+        <h2 id="channels-title">Where you can reach your agent</h2>
         <p class="section-lede">
-          See the <a href="https://github.com/ChrisPatten/agentbus#readme">README</a>
-          for full configuration details, and
-          <a href="https://github.com/ChrisPatten/agentbus/tree/main/docs">docs/</a>
-          for each adapter, the HTTP API, and the memory model.
+          Use the ones that fit your day. Your agent replies in the place you
+          wrote from.
         </p>
+        <ul class="channel-list">
+          <li>
+            <h3>Telegram</h3>
+            <p>Chat one-on-one, or use a group with topics to run several
+            conversations side by side. You see what the agent is doing while
+            it works.</p>
+          </li>
+          <li>
+            <h3>Email</h3>
+            <p>Write to your agent's address and it answers in the same thread.
+            Only people you list can reach it, and forged senders are
+            dropped.</p>
+          </li>
+          <li>
+            <h3>Siri on iPhone <span class="tag">Early preview</span></h3>
+            <p>Ask Siri a question for your agent and hear the answer read
+            aloud. For now, this needs a companion iPhone app that you build
+            and install yourself.</p>
+          </li>
+          <li>
+            <h3>Pebble Ring <span class="tag">Extra setup</span></h3>
+            <p>Speak a quick voice note into the ring. It reaches your agent,
+            which can pick it up in your Telegram chat.</p>
+          </li>
+        </ul>
+        <p class="note">A native Mac app is in development.</p>
+      </div>
+    </section>
+
+    <section id="control" aria-labelledby="control-title">
+      <div class="wrap">
+        <h2 id="control-title">Stay in control</h2>
+        <p class="section-lede">
+          The agent works on its own, but you decide what it does and when it
+          stops.
+        </p>
+        <div class="grid grid-2">
+          <article class="card">
+            <h3>See it working</h3>
+            <p>In Telegram, a status message lists each step as it happens,
+            such as reading a file or searching the web. When the answer is
+            ready, it replaces the status message.</p>
+          </article>
+          <article class="card">
+            <h3>Stop it at any time</h3>
+            <p>Send <kbd>/stop</kbd> and the task it's working on ends right
+            away. No half-finished answer arrives afterward.</p>
+          </article>
+          <article class="card">
+            <h3>Approve risky steps</h3>
+            <p>When the agent needs permission for something, you get a
+            Telegram message with Approve and Deny buttons. If no one answers
+            within 15 minutes, the request expires. Available when your agent
+            runs in full Claude Code sessions; the docs explain the setup.</p>
+          </article>
+          <article class="card">
+            <h3>Start fresh, and check the cost</h3>
+            <p>Send <kbd>/clear</kbd> to start a new conversation. The agent
+            saves notes from the old one first. Send <kbd>/cost</kbd> to see
+            what it has spent today, this week and this month.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="how-it-works" aria-labelledby="how-title">
+      <div class="wrap">
+        <h2 id="how-title">How it works</h2>
+        <ol class="steps">
+          <li>
+            <h3>AgentBus runs on your computer</h3>
+            <p>It sits next to Claude Code on a Mac or other computer that
+            stays on. Your agent is Claude Code, with its own folder,
+            instructions and skills.</p>
+          </li>
+          <li>
+            <h3>You connect the apps you want</h3>
+            <p>Add a Telegram bot, an email account, or both. You list the
+            people who are allowed to talk to your agent.</p>
+          </li>
+          <li>
+            <h3>Messages go in, answers come back</h3>
+            <p>When you write, AgentBus hands the message to your agent along
+            with the right conversation. The reply goes back to the chat or
+            thread you wrote from.</p>
+          </li>
+        </ol>
+
+        <figure class="flow" aria-labelledby="flow-caption">
+          <div class="flow-row" role="list">
+            <div class="flow-node" role="listitem">
+              <strong>You</strong>
+              <span>Telegram, email, Siri</span>
+            </div>
+            <div class="flow-arrow" aria-hidden="true">&rarr;</div>
+            <div class="flow-node flow-node-main" role="listitem">
+              <strong>AgentBus</strong>
+              <span>on your computer</span>
+            </div>
+            <div class="flow-arrow" aria-hidden="true">&rarr;</div>
+            <div class="flow-node" role="listitem">
+              <strong>Your Claude agent</strong>
+              <span>Claude Code</span>
+            </div>
+          </div>
+          <figcaption id="flow-caption">
+            Your message travels from your phone to AgentBus on your computer,
+            then to your Claude agent. The reply takes the same path back.
+          </figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section id="get-started" aria-labelledby="start-title">
+      <div class="wrap">
+        <h2 id="start-title">Getting started</h2>
+        <p class="section-lede">
+          Setup takes some time in the terminal and a configuration file. The
+          guide walks you through it one step at a time. You'll need:
+        </p>
+        <ul class="requirements">
+          <li><strong>Claude Code</strong>, installed and signed in.</li>
+          <li><strong>A Mac or other computer that stays on</strong>, so your
+          agent can answer while you're away.</li>
+          <li><strong>Node.js 20 or later.</strong> The guide shows you how to
+          check.</li>
+          <li><strong>A Telegram bot or an email account</strong> for your
+          agent, depending on how you want to reach it.</li>
+        </ul>
+        <div class="cta-row cta-row-left">
+          <a class="btn btn-primary" href="docs/getting-started">Read the getting started guide</a>
+          <a class="btn" href="docs/">Browse the documentation</a>
+        </div>
       </div>
     </section>
   </main>
 
   <footer class="site-footer">
     <div class="wrap footer-inner">
-      <span>MIT licensed.</span>
-      <a href="https://github.com/ChrisPatten/agentbus/blob/main/CHANGELOG.md">Changelog</a>
-      <a href="https://github.com/ChrisPatten/agentbus/issues">Issues</a>
-      <a href="https://github.com/ChrisPatten/agentbus">GitHub</a>
+      <nav class="footer-links" aria-label="Footer">
+        <a href="docs/">Documentation</a>
+        <a href="https://github.com/ChrisPatten/agentbus">GitHub</a>
+        <a href="https://github.com/ChrisPatten/agentbus/blob/main/CHANGELOG.md">Changelog</a>
+        <a href="https://github.com/ChrisPatten/agentbus/issues">Issues</a>
+        <a href="https://github.com/ChrisPatten/agentbus/blob/main/LICENSE">MIT license</a>
+      </nav>
+      <p class="badges">
+        <img alt="Latest version" src="https://img.shields.io/github/v/tag/ChrisPatten/agentbus?label=version&amp;sort=semver" height="20" />
+        <img alt="License" src="https://img.shields.io/github/license/ChrisPatten/agentbus" height="20" />
+        <img alt="Last commit" src="https://img.shields.io/github/last-commit/ChrisPatten/agentbus" height="20" />
+      </p>
     </div>
   </footer>
 </body>

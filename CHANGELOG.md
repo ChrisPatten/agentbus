@@ -11,6 +11,7 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 ## [Unreleased]
 
 ### Added
+- **Documentation site.** User documentation built with VitePress from `site-docs/` and published at `/docs/` alongside the landing page: getting started, concepts, every shipped channel and runtime, features, configuration/HTTP API/MCP tool/slash command reference, and operations. `npm run docs:dev` previews it and `npm run docs:build` builds it; the Pages workflow now builds the docs and deploys them with the landing page.
 - **Native AgentBus macOS client (E62, in progress).** SwiftUI/XcodeGen source adds Keychain setup, resilient app protocol, SwiftData cache, conversations, files, notifications, and Dock unread state. Xcode and live work-laptop acceptance remain pending.
 - **Cross-channel app continuation (E60).** App messages can continue a listed Telegram, email, or Siri session with replies returned to the app. Resumable Earlier sessions fork into a new app topic while preserving the original history and active session.
 - **Proactive app delivery (E61).** Scheduled work can notify Main or an existing named app topic while the client is offline. Agent session tools expose app titles, and missed cron and one-off work follows documented wake behavior.
@@ -18,6 +19,7 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 - **Parallel `cc-headless` conversations (E58).** One agent can run turns in separate conversations concurrently. Each instance defaults to five live children, with one slot reserved from user turns for scheduled and journaling work. `/status` and health report running and waiting counts; activity subscriptions expose queued, running, and idle states.
 
 ### Changed
+- **Landing page rewritten for users.** `site/index.html` now leads with what you can do with your agent (reach it from Telegram and email, schedules and reminders, separate conversations, approvals, `/stop`, live progress) in plain language, and links to the documentation site at `/docs/` instead of listing terminal commands.
 - **Mac client UI matches the approved design (E62).** Sidebar rows with channel symbols and working/queued/unread/read-only state, slot-usage footer, toolbar Stop/inspector/More with an offline retry pill, block Markdown with copyable code, send-state and arrival labels, live tool trails that collapse into the reply, a floating glass composer with attachment tokens and slash-command popover, inspector with agent slots, tabbed Settings, per-session windows, and Session menu shortcuts. ⌘N creates an empty conversation directly; there is no title sheet. Activity frames' `tool_lines` and slot counts are now decoded.
 - **Mac client compatibility (E62).** The native app now targets macOS 26.5 with Xcode 26.6, matching the work laptop.
 - **`/stop` is scoped to its conversation.** In Telegram, stopping one topic no longer interrupts another topic for the same contact. A waiting turn can also be cancelled. Journaling turns share an agent-wide lane, and turns in one conversation never overlap after early delivery.

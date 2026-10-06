@@ -1,14 +1,23 @@
 name: Deploy Pages
 
+# Publishes one GitHub Pages artifact:
+#   /       the hand-written landing page in site/ (copied as-is)
+#   /docs/  the VitePress documentation built from site-docs/
+# See docs/GITHUB_PAGES.md.
+
 on:
   push:
     branches: [main]
     paths:
       - "site/**"
+      - "site-docs/**"
       - ".github/workflows/pages.yml"
+      - "package.json"
+      - "package-lock.json"
   workflow_dispatch: {}
 
 permissions:
+  contents: read
   pages: write
   id-token: write
 
@@ -17,16 +26,37 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Build the documentation
+        run: npm run docs:build
+        env:
+          # Project page without a custom domain: https://chrispatten.github.io/agentbus/
+          DOCS_BASE: /agentbus/docs/
+      - name: Assemble the site
+        run: |
+          mkdir -p _site/docs
+          cp -R site/. _site/
+          cp -R site-docs/.vitepress/dist/. _site/docs/
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./_site
+
   deploy:
+    needs: build
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: ./site
       - id: deployment
         uses: actions/deploy-pages@v4
