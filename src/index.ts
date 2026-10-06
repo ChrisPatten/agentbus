@@ -60,6 +60,11 @@ import { ApprovalStore } from './approvals/store.js';
 import { resolveApproval } from './approvals/resolve.js';
 import { sweepApprovals } from './approvals/sweep.js';
 import type { ApprovalDecision } from './approvals/types.js';
+import { OwnerDirectory } from './core/owners.js';
+import { AdvisoryStore } from './advisories/store.js';
+import { AdvisoryService } from './advisories/service.js';
+import { createBusAdvisoryTransport } from './advisories/transport.js';
+import { createAdvisoryInject } from './pipeline/stages/advisory-inject.js';
 
 const configPath = process.env['AGENTBUS_CONFIG'] ?? resolve(process.cwd(), 'config.yaml');
 
@@ -99,6 +104,18 @@ const poolManagers = createPoolManagers(config, db, busBaseUrl, queue);
 // mcp-polled) with live capability checks. Shown in /status and health.
 const runtimeResolver = new RuntimeResolver(config, { poolManagers, db });
 
+// E65 — owner contacts and bus advisories. Producers (E66 journaling, E68
+// protected files, …) call advisories.raise()/resolve(). The transport
+// needs the pipeline and adapters, so it is bound further down.
+const ownerDirectory = new OwnerDirectory(config);
+const advisoryStore = new AdvisoryStore(db);
+const advisories = new AdvisoryService({ store: advisoryStore, owners: ownerDirectory, resolver: runtimeResolver });
+for (const agentId of ownerDirectory.agentsWithOwners()) {
+  if (!runtimeResolver.resolve(agentId)) {
+    console.warn(`[agentbus] agents.${agentId}.owners: ${agentId} has no runtime; its advisories go directly to owners`);
+  }
+}
+
 const { registry: commandRegistry, pauseSet, headlessControl } = createCommandSystem({
   adapterRegistry: registry,
   queue,
@@ -133,6 +150,9 @@ pipeline.use({ slot: 70, name: 'route-resolve',    stage: createRouteResolve(con
 pipeline.use({ slot: 72, name: 'pool-route-resolve', stage: createPoolRouteResolve(poolManagers), critical: false });
 pipeline.use({ slot: 80, name: 'transcript-log',   stage: createTranscriptLog(db, config), critical: false });
 pipeline.use({ slot: 85, name: 'memory-inject',    stage: createMemoryInject(db, config),  critical: false });
+// E65 — open advisories ride along with an owner's next message, as a
+// bus-originated system block for the owned agent's route only.
+pipeline.use({ slot: 86, name: 'advisory-inject',  stage: createAdvisoryInject(advisories), critical: false });
 
 // ── Siri channel (E42) ───────────────────────────────────────────────────────
 // Registered before the HTTP server is built because the /api/v1/siri routes
@@ -144,7 +164,7 @@ const app = config.adapters.app?.enabled
   ? new AppAdapter(db, (contactId) => routedAgent(config, contactId), getHeadlessSnapshots) : undefined;
 if (app) registry.register(app);
 
-const httpServer = await createHttpServer({ queue, registry, config, pipeline, db, commandRegistry, pauseSet, siri, app, poolManagers, getHeadlessSnapshots, runtimeResolver });
+const httpServer = await createHttpServer({ queue, registry, config, pipeline, db, commandRegistry, pauseSet, siri, app, poolManagers, getHeadlessSnapshots, runtimeResolver, advisories });
 
 // ── Platform adapter registration ────────────────────────────────────────────
 // Platform adapters run in-process. They are instantiated from config,
@@ -185,6 +205,12 @@ for (const inst of getEmailInstances(config)) {
 // Agent-bound messages (agent:*) stay in the queue for CC adapter to poll.
 
 const deliveryWorker = new DeliveryWorker({ queue, registry, db });
+
+// E65 — proactive advisory delivery: system-only turns through the pipeline,
+// or direct messages to owners through the delivery worker above.
+advisories.setTransport(createBusAdvisoryTransport({
+  queue, registry, owners: ownerDirectory, pipeline, config, db, commandRegistry, pauseSet,
+}));
 
 // ── Memory system ─────────────────────────────────────────────────────────────
 // Summarizer calls the Claude API to extract memories from completed sessions.
@@ -227,6 +253,9 @@ const maintenanceTimer = setInterval(() => {
   if (swept > 0) console.log(`[agentbus] Swept ${swept} expired message(s)`);
   sweepApprovals({ registry, store: approvalStore }).catch((err) =>
     console.error(`[agentbus] Approval sweep failed: ${String(err)}`),
+  );
+  advisories.retryPending().catch((err) =>
+    console.error(`[agentbus] Advisory retry failed: ${String(err)}`),
   );
 }, SWEEP_INTERVAL_MS);
 
@@ -310,4 +339,4 @@ for (const adapter of registry.list()) {
   }
 }
 
-export { config, queue, registry };
+export { config, queue, registry, advisories };

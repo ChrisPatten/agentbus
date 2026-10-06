@@ -20,6 +20,7 @@ import { loadConfig } from '../config/loader.js';
 import { createMcpServer } from '../mcp/server.js';
 import { registerAllTools, registerHeadlessTools, type HealthState } from '../mcp/tools/index.js';
 import type { MessageEnvelope } from '../types/envelope.js';
+import { isSystemOnly, neutralizeSystemMarkers, readSystemBlocks } from '../core/system-block.js';
 
 const AGENT_ID = process.env['AGENTBUS_AGENT_ID'] ?? 'claude';
 const TOOLS_ONLY = process.env['AGENTBUS_TOOLS_ONLY'] === 'true';
@@ -84,6 +85,11 @@ export function formatMessagesForSampling(
   opts?: { includeMemoryContext?: boolean },
 ): string {
   const parts: string[] = [];
+
+  // Bus-originated system blocks (E65) go first, deduplicated across the
+  // batch. Everything after them is neutralized (see src/core/system-block.ts),
+  // so no message text can open or close a block of its own.
+  const systemBlocks = [...new Set(envelopes.flatMap((env) => readSystemBlocks(env.metadata)))];
 
   // The cc-headless adapter injects memories/summary via the system prompt and
   // passes includeMemoryContext:false so the Stage-85 <memory> block is not also
@@ -154,10 +160,12 @@ export function formatMessagesForSampling(
     const routeLabel = typeof sessionChannel === 'string' && sessionChannel !== env.channel
       ? `via ${env.channel} (in your ${sessionChannel} session)`
       : `via ${env.channel} (topic: ${env.topic})`;
+    // A system-only envelope (E65) carries no human message: only its blocks.
+    if (isSystemOnly(env.metadata)) continue;
     parts.push(`New message from ${env.sender} ${routeLabel}${ts} [id:${env.id}]:\n${bodyWithImages}`);
   }
 
-  return parts.join('\n\n');
+  return [...systemBlocks, ...parts.map(neutralizeSystemMarkers)].join('\n\n');
 }
 
 /**

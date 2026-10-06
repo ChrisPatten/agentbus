@@ -11,6 +11,7 @@
  *   - react_to_message (S7.5)
  *   - schedule_message, list_schedules, cancel_schedule (E18)
  *   - set_headless_model, get_headless_model, list_headless_model, delete_headless_model (model overrides)
+ *   - advisory_ack (E65)
  */
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -27,6 +28,7 @@ import { registerScheduleTools } from './scheduling.js';
 import { registerAttachmentTools } from './attachments.js';
 import { registerTelegramTools } from './telegram.js';
 import { registerModelOverrideTools } from './model-overrides.js';
+import { registerAdvisoryTools } from './advisories.js';
 import { getTelegramInstances } from '../../config/schema.js';
 
 export { toolError, toolSuccess };
@@ -71,6 +73,7 @@ export function registerAllTools(
   registerScheduleTools(server, busBaseUrl);
   registerAttachmentTools(server, busBaseUrl);
   registerModelOverrideTools(server, busBaseUrl);
+  registerAdvisoryTools(server, busBaseUrl, agentId);
   maybeRegisterEmailTool(server, busBaseUrl, agentId, config);
   maybeRegisterTelegramTools(server, busBaseUrl, config);
 }
@@ -125,6 +128,7 @@ export function registerHeadlessTools(
   registerScheduleTools(server, busBaseUrl);
   registerAttachmentTools(server, busBaseUrl);
   registerModelOverrideTools(server, busBaseUrl);
+  registerAdvisoryTools(server, busBaseUrl, agentId);
   maybeRegisterEmailTool(server, busBaseUrl, agentId, config);
   maybeRegisterTelegramTools(server, busBaseUrl, config);
 }

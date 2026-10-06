@@ -39,6 +39,7 @@ import { renderSystemPrompt, expandFileReferences, type PromptContext } from './
 import { assembleMemoryContext, assembleMemoryBlocks, formatLocalDate } from './memory-context.js';
 import type { MessageEnvelope } from '../types/envelope.js';
 import { formatMessagesForSampling } from './cc.js';
+import { isSystemOnly } from '../core/system-block.js';
 import { formatToolCallSummary } from './tool-call-summary.js';
 import { resolveModel } from './model-override-loader.js';
 import { hashBlock, shouldSendBlock, markBlockSent, clearLedger, detectCompaction } from './context-ledger.js';
@@ -1042,7 +1043,9 @@ class HeadlessInstance {
       for (const [conversationId, batch] of byConversation) {
         const batchCopy = [...batch];
         const session = getActiveSession(db, conversationId);
-        const system = batchCopy.every((env) => env.metadata?.['scheduled'] === true || env.sender.startsWith('system:'));
+        // Scheduled, `system:` and E65 system-only (advisory) batches run in the system turn class.
+        const system = batchCopy.every((env) => env.metadata?.['scheduled'] === true || env.sender.startsWith('system:')
+          || isSystemOnly(env.metadata));
         void this.enqueue(conversationId, session?.id, system ? 'system' : 'user', false,
           () => this.processBatch(batchCopy, db, conversationId), session?.claude_session_id);
       }

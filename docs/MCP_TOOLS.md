@@ -22,6 +22,7 @@ Errors come back as `{ "content": [{ "type": "text", "text": "Error: ..." }], "i
 | `set_model_override`, `get_model_override`, `list_model_overrides`, `delete_model_override` | Runtime model overrides (agent or global) | Always |
 | `recall_memory`, `log_memory` | Legacy structured memory store | Always; dormant unless `memory.structured_extraction` |
 | `write_knowledge`, `get_knowledge`, `forget_knowledge`, `search_knowledge` | Agent-managed structured knowledge store (Phase 1) | Always |
+| `advisory_ack` | Acknowledge a bus advisory after relaying it to the owner | Always |
 | `get_adapter_status` | Health of the polling MCP adapter | Polling mode only |
 
 ## Messaging
@@ -211,6 +212,15 @@ Output: `{ "ok": true }`.
 
 Input: `{ "agent_id", "q"?, "kind"?, "tags"?, "facets"?, "event_from"?, "event_to"?, "limit"?: 10 }`. `limit` max 50. Omit `q` to filter/browse, newest-updated first. Always excludes superseded and expired rows.
 Output: `{ "results": [...], "count": n }`.
+
+## Advisories
+
+### `advisory_ack`
+
+Acknowledges a bus advisory once the agent has told its owner about it. Advisories arrive in an `<agentbus-system kind="advisories">` block at the start of a turn, each with an `id:` line. See [ADVISORIES.md](ADVISORIES.md).
+
+Input: `{ "id": "<advisory id>" }`. The calling agent's id is sent with it; a pool pane is mapped to its pool, and an agent can only acknowledge its own advisories.
+Output: `{ "success": true, "id", "state": "acknowledged", "already_acknowledged": false }`. Acknowledging twice is not an error (`already_acknowledged: true`). An unknown id, another agent's advisory, or a resolved one returns `isError`.
 
 ## Polling adapter only
 

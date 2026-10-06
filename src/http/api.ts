@@ -58,7 +58,8 @@ import type { AdapterRegistry } from '../core/registry.js';
 import type { AppConfig } from '../config/schema.js';
 import type { MessageEnvelope } from '../types/envelope.js';
 import type { PipelineEngine } from '../pipeline/engine.js';
-import type { PipelineContext } from '../pipeline/types.js';
+import type { PipelineContext, RouteTarget } from '../pipeline/types.js';
+import { SYSTEM_BLOCKS_KEY, SYSTEM_ONLY_KEY, stripSystemMetadata, systemBlocksFor } from '../core/system-block.js';
 import type Database from 'better-sqlite3';
 import type { CommandImage, CommandRegistry, SlashCommandContext } from '../commands/registry.js';
 import { createSafeDatabase } from '../db/safe-database.js';
@@ -84,6 +85,7 @@ import { resolveApprovalTarget } from '../approvals/resolve-target.js';
 import { dispatchApproval } from '../approvals/dispatch.js';
 import { resolveApproval } from '../approvals/resolve.js';
 import { APPROVAL_TIMEOUT_MS, type ApprovalStatus } from '../approvals/types.js';
+import type { AdvisoryService } from '../advisories/service.js';
 import { writeKnowledge, getKnowledge, forgetKnowledge, searchKnowledge } from '../knowledge/store.js';
 
 export interface HttpServerDeps {
@@ -112,6 +114,8 @@ export interface HttpServerDeps {
   poolManagers?: Map<string, PoolManager>;
   /** E64 — when present, /api/v1/health lists each agent's runtime and capabilities. */
   runtimeResolver?: Pick<RuntimeResolver, 'list'>;
+  /** E65 — when present, the /api/v1/advisories routes are mounted. */
+  advisories?: AdvisoryService;
 }
 
 const MessagePayloadSchema = z.discriminatedUnion('type', [
@@ -238,6 +242,22 @@ export interface InboundResult {
   enqueued_count: number;
 }
 
+/**
+ * Options only in-process bus code can pass to `processInbound` (E65). An
+ * HTTP or adapter caller can't reach these: they are not part of
+ * `InboundMessage`, and the matching metadata keys are stripped from it.
+ */
+export interface InboundSystemOptions {
+  /**
+   * A bus-originated turn with no human message (`metadata.system_only`).
+   * The body is logged but not shown to the agent; only the system blocks
+   * added by pipeline stages are. Skips follow-up capture.
+   */
+  systemOnly?: boolean;
+  /** Keep only the fan-out targets this returns true for (e.g. the one agent a system turn is for). */
+  routeFilter?: (route: RouteTarget) => boolean;
+}
+
 export interface InboundAbort {
   ok: true;
   queued: false;
@@ -362,6 +382,7 @@ export async function processInbound(
     commandRegistry?: CommandRegistry;
     pauseSet?: Set<string>;
   },
+  system: InboundSystemOptions = {},
 ): Promise<InboundResult | InboundAbort> {
   // Validate payload for in-process callers that bypass Zod (e.g. TelegramAdapter).
   // The HTTP route validates via InboundSchema, but processInbound is also called
@@ -379,7 +400,10 @@ export async function processInbound(
   // Attachments travel through the envelope inside `metadata.attachments` so
   // they survive enqueue/dequeue (metadata is persisted as JSON on the queue
   // row; the envelope itself is rehydrated from that row).
-  const metadata: Record<string, unknown> = { ...(message.metadata ?? {}) };
+  // E65 — system blocks and the system-only flag are bus-originated: a caller
+  // can't supply them, only pipeline stages and `system` (below) add them.
+  const metadata: Record<string, unknown> = stripSystemMetadata(message.metadata);
+  if (system.systemOnly) metadata[SYSTEM_ONLY_KEY] = true;
   if (message.attachments && message.attachments.length > 0) {
     metadata['attachments'] = message.attachments;
   }
@@ -427,7 +451,7 @@ export async function processInbound(
   // before agent fan-out — exactly like a normal bus-command invocation.
   // consumeFollowUp always deletes on read (single-shot), so whether or not
   // it matches, the capture is gone after this check either way.
-  if (!result.isSlashCommand && result.envelope.payload.type === 'text' && deps.commandRegistry) {
+  if (!system.systemOnly && !result.isSlashCommand && result.envelope.payload.type === 'text' && deps.commandRegistry) {
     const followUp = deps.commandRegistry.consumeFollowUp(result.envelope.channel, result.envelope.sender);
     if (followUp) {
       const body = result.envelope.payload.body;
@@ -540,15 +564,24 @@ export async function processInbound(
       ? { type: 'text', body: result.envelope.payload.body }
       : { ...result.envelope.payload };
 
-  for (let i = 0; i < result.routes.length; i++) {
-    const route = result.routes[i]!;
+  const routes = system.routeFilter ? result.routes.filter(system.routeFilter) : result.routes;
+  if (routes.length === 0 && result.routes.length > 0) {
+    return { ok: true, queued: false, reason: 'no_matching_route' };
+  }
+  for (let i = 0; i < routes.length; i++) {
+    const route = routes[i]!;
+    // E65 — each fan-out copy carries only the system blocks meant for its
+    // recipient (an advisory for agent A must not reach also_notify agent B).
+    const blocks = systemBlocksFor(result.envelope.metadata, route.recipientId);
+    const { [SYSTEM_BLOCKS_KEY]: _pending, ...baseMetadata } = result.envelope.metadata;
     const fanEnvelope: MessageEnvelope = {
       ...result.envelope,
       payload: outboundPayload,
       id: i === 0 ? primaryId : randomUUID(),
       recipient: route.recipientId,
       metadata: {
-        ...result.envelope.metadata,
+        ...baseMetadata,
+        ...(blocks.length > 0 ? { [SYSTEM_BLOCKS_KEY]: blocks } : {}),
         adapter_id: route.adapterId,
         conversation_id: result.conversationId ?? undefined,
         ...(result.isSlashCommand && result.slashCommand
@@ -722,6 +755,38 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     })
     .refine((b) => b.agentId || b.sessionId, { message: 'agentId or sessionId is required' });
 
+  // ── Advisories (E65) ─────────────────────────────────────────────────────
+  //
+  // POST /api/v1/advisories/:id/ack — the advisory_ack MCP tool. `agent_id`
+  //   is the caller (bare or prefixed; a pool pane maps to its pool); an
+  //   agent can only acknowledge its own advisories.
+  //
+  // There is deliberately no HTTP route to raise an advisory: its text is
+  // rendered into a bus-originated system block, so producers are in-process
+  // bus code only (see docs/ADVISORIES.md).
+  const advisories = deps.advisories;
+  if (advisories) {
+    server.post<{ Params: { id: string }; Body: { agent_id?: unknown } }>(
+      '/api/v1/advisories/:id/ack',
+      async (req, reply) => {
+        const agentId = req.body?.agent_id;
+        if (typeof agentId !== 'string' || agentId.length === 0) {
+          return reply.status(400).send({ ok: false, error: 'agent_id is required' });
+        }
+        const result = advisories.ack(req.params.id, agentId);
+        if (!result.ok) {
+          const status = result.reason === 'not_found' ? 404 : result.reason === 'wrong_agent' ? 403 : 409;
+          return reply.status(status).send({ ok: false, error: result.reason });
+        }
+        return {
+          ok: true,
+          already_acknowledged: result.alreadyAcknowledged,
+          advisory: { id: result.advisory.id, state: result.advisory.state, condition_key: result.advisory.condition_key },
+        };
+      },
+    );
+  }
+
   server.post<{ Body: unknown }>('/api/v1/approvals', async (req, reply) => {
     const parsed = ApprovalRequestSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -878,7 +943,8 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     // message in its conversation, the quote would be visually redundant — it's
     // already obvious what a reply is responding to — so it's sent as a plain
     // message instead of a native reply in that case.
-    const metadata: Record<string, unknown> = { ...data.metadata };
+    // E65 — only the bus adds system blocks; an agent or HTTP caller can't.
+    const metadata: Record<string, unknown> = stripSystemMetadata(data.metadata);
     // Captured alongside the reply_to lookup below so the E48 (S48.6)
     // stale-pane guard further down can reuse this same query result instead
     // of re-running it.

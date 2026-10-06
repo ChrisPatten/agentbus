@@ -31,6 +31,7 @@ Set `bus.host: 0.0.0.0` to accept connections from other hosts, for example a re
 | GET | `/api/v1/approvals` | List approval requests, optionally by status |
 | GET | `/api/v1/approvals/:id` | Fetch one approval request |
 | POST | `/api/v1/approvals/:id/resolve` | Answer an approval request |
+| POST | `/api/v1/advisories/:id/ack` | Acknowledge a bus advisory (the `advisory_ack` tool) |
 | POST | `/api/v1/inbound` | Submit an inbound message to the pipeline |
 | POST | `/api/v1/webhooks/pebble` | Pebble Ring voice-memo ingress (when configured) |
 | POST | `/api/v1/siri/ask` | Siri ask: submit a question and wait for the agent's reply (when configured) |
@@ -184,6 +185,14 @@ Returns `{ ok, approval }`, or `404`.
 
 Body: `{ "decision": "approve" | "deny", "resolvedBy": "<who>" }`. Sends the key into the pane if the request is still answerable. Returns `{ ok, outcome, approval }` where `outcome` is `approved`, `denied`, `stale`, `expired`, or `already_resolved`. `404` for an unknown id, `400` for a bad `decision`.
 
+## Advisories
+
+Bus advisories for agent owners. See [ADVISORIES.md](ADVISORIES.md). There is no route to raise one: advisory text becomes a bus-originated system block, so only in-process bus code produces advisories.
+
+### `POST /api/v1/advisories/:id/ack`
+
+Body: `{ "agent_id": "<calling agent, bare or prefixed>" }`. A pool pane id maps to its pool. Returns `200 { ok, already_acknowledged, advisory: { id, state, condition_key } }`; `400` without `agent_id`, `404` for an unknown id, `403` when the advisory belongs to another agent, `409` when it is already resolved.
+
 ## Inbound
 
 ### `POST /api/v1/inbound`
@@ -210,7 +219,9 @@ Responses (both `200`):
 { "ok": true, "queued": false, "reason": "command_handled" }
 ```
 
-`reason` is one of `invalid_payload`, `command_handled`, `adapter_paused`, `Aborted at stage "<name>"` (for example `dedup`), or `Stage "<name>" error: ...`. A body that fails validation returns `400`.
+`reason` is one of `invalid_payload`, `command_handled`, `adapter_paused`, `no_matching_route` (an in-process system turn whose route filter matched nothing), `Aborted at stage "<name>"` (for example `dedup`), or `Stage "<name>" error: ...`. A body that fails validation returns `400`.
+
+`metadata.system_blocks` and `metadata.system_only` are reserved for the bus and are dropped from the request (E65, see [ADVISORIES.md](ADVISORIES.md)). The same applies to `POST /api/v1/messages`.
 
 ### `POST /api/v1/webhooks/pebble`
 
@@ -249,7 +260,7 @@ Enqueues an outbound message for the delivery worker. The `reply`, `send_message
 | `topic` | no | Default `general`. Use a `thread:<hash>` value to target a thread |
 | `reply_to` | no | Bus message ID. Resolved to the platform message ID so Telegram can quote it, unless it is the latest inbound message in the conversation |
 | `priority` | no | `normal` (default), `high`, or `urgent` |
-| `metadata` | no | Free-form object |
+| `metadata` | no | Free-form object. The reserved keys `system_blocks` and `system_only` are dropped |
 | `expires_at` | no | ISO 8601, in the future. Expired pending messages are dead-lettered by the sweep |
 
 Returns `201 { "ok": true, "id": "<uuid>", "queued": true }`.

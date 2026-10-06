@@ -995,7 +995,7 @@ epics:
     stories:
       S65.1: complete  # Owner contacts config (agents.<id>.owners, src/core/owners.ts)
       S65.2: complete  # Advisory store and lifecycle (migration 025, src/advisories/store.ts)
-      S65.3: pending  # Delivery paths and advisory_ack
+      S65.3: complete  # Delivery paths and advisory_ack (src/advisories/service.ts, transport.ts, advisory-inject stage, src/core/system-block.ts)
       S65.4: pending  # Visibility and docs
   E66:
     status: pending

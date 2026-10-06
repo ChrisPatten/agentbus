@@ -79,10 +79,10 @@ A feature lists what it needs from an agent's runtime as `RuntimeRequirement` en
 ```
 Runtime capability check failed:
   journaling chain: system-message: agent agent:claude runs on claude-code, which lacks systemMessages, exclusiveSession
-  advisories: agent agent:ghost has no runtime (no cc-headless/cc-pool instance or agent route)
+  journaling chain: script: agent agent:ghost has no runtime (no cc-headless/cc-pool instance or agent route)
 ```
 
-No feature declares requirements yet. Advisories (E65) and journaling chains (E66) are the first.
+No feature declares requirements yet; journaling chains (E66) are the first. Advisories (E65) use `systemMessages` but don't require it: a runtime without it gets advisories directly on the owner's channel (see [ADVISORIES.md](ADVISORIES.md#delivery-paths)). Owners configured for an agent that resolves to no runtime only log a startup warning.
 
 ## Where it shows
 

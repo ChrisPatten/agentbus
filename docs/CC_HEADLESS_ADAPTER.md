@@ -199,7 +199,7 @@ State this directly in the `system_prompt`. See the example in [Configuration sc
 
 An in-memory queue chains each batch after the previous one for its `conversation_id`. Different topics or threads for one contact can run together; turns in one conversation run in arrival order. Delivery may happen before process exit, but the next child for that conversation waits until the prior child exits and fallback delivery settles.
 
-Each instance permits up to `max_concurrent_turns` live children (default 5). User turns may use at most `max_concurrent_turns - reserved_system_slots` (default 4); scheduled and journaling turns may use any free slot. A wholly scheduled/system batch is a system turn; a mixed batch is a user turn. The oldest eligible waiter starts when capacity frees. `/stop` can remove a waiting turn or kill the running child in its conversation.
+Each instance permits up to `max_concurrent_turns` live children (default 5). User turns may use at most `max_concurrent_turns - reserved_system_slots` (default 4); scheduled and journaling turns may use any free slot. A wholly scheduled/system batch is a system turn (this includes `system:` senders and bus advisory turns flagged `system_only`, see [ADVISORIES.md](ADVISORIES.md)); a mixed batch is a user turn. The oldest eligible waiter starts when capacity frees. `/stop` can remove a waiting turn or kill the running child in its conversation.
 
 Journaling turns also share an agent-wide lane, so two journals never write the same memory files at once. An immediate high-stakes memory write made inside a user turn can still race with another turn; that exception remains accepted.
 
