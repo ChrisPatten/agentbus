@@ -70,6 +70,7 @@ import { reviewChains } from './journaling/advisories.js';
 import { JournalEngine } from './journaling/engine.js';
 import { JournalerRegistry } from './journaling/registry.js';
 import { CcHeadlessJournaler } from './journaling/journalers/cc-headless.js';
+import { ScriptJournaler } from './journaling/journalers/script.js';
 import { HarnessEvents, createHookHealthTicker } from './journaling/events.js';
 
 const configPath = process.env['AGENTBUS_CONFIG'] ?? resolve(process.cwd(), 'config.yaml');
@@ -135,6 +136,7 @@ reviewChains(journalingSettings.values(), runtimeResolver, advisories);
 const journalers = new JournalerRegistry();
 const headlessJournaler = new CcHeadlessJournaler({ resolver: runtimeResolver });
 journalers.register(headlessJournaler);
+journalers.register(new ScriptJournaler({ busUrl: busBaseUrl }));
 const journalEngine = new JournalEngine({
   db, config, resolver: runtimeResolver, registry: journalers, advisories, owners: ownerDirectory, settings: journalingSettings,
 });

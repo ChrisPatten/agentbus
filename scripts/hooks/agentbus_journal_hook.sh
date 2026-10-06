@@ -16,8 +16,10 @@
 #
 # Environment (all optional):
 #   AGENTBUS_URL            bus base URL (default http://127.0.0.1:3000)
-#   AGENTBUS_TOKEN          sent as X-Bus-Token when bus.auth_token is set
-#   AGENTBUS_TOKEN_FILE     file holding the token, used when AGENTBUS_TOKEN is unset
+#   AGENTBUS_BUS_TOKEN      sent as X-Bus-Token when bus.auth_token is set (cc-pool
+#                           exports it into every pane; the same variable the other hooks use)
+#   AGENTBUS_TOKEN          older name for the same, used when AGENTBUS_BUS_TOKEN is unset
+#   AGENTBUS_TOKEN_FILE     file holding the token, used when neither is set
 #   AGENTBUS_SNAPSHOT_DIR   where snapshots go (default ~/.agentbus/journal-snapshots).
 #                           The bus only accepts snapshots under that default
 #                           directory or the agent's working directory.
@@ -29,10 +31,10 @@
 set -uo pipefail
 
 AGENTBUS_URL="${AGENTBUS_URL:-http://127.0.0.1:3000}"
-SNAPSHOT_DIR="${AGENTBUS_SNAPSHOT_DIR:-$HOME/.agentbus/journal-snapshots}"
+SNAPSHOT_DIR="${AGENTBUS_SNAPSHOT_DIR:-${HOME:-/tmp}/.agentbus/journal-snapshots}"
 SNAPSHOT_LINES="${AGENTBUS_SNAPSHOT_LINES:-2000}"
 
-TOKEN="${AGENTBUS_TOKEN:-}"
+TOKEN="${AGENTBUS_BUS_TOKEN:-${AGENTBUS_TOKEN:-}}"
 if [[ -z "$TOKEN" && -n "${AGENTBUS_TOKEN_FILE:-}" && -r "${AGENTBUS_TOKEN_FILE}" ]]; then
   TOKEN="$(head -n 1 "$AGENTBUS_TOKEN_FILE" 2>/dev/null | tr -d '[:space:]')"
 fi
@@ -75,15 +77,26 @@ BODY="$(jq -nc \
    + (if $snap != "" then {snapshot_path: $snap} else {} end)
    + (if $tp != "" then {transcript_path: $tp} else {} end)')"
 
-HEADERS=(-H 'Content-Type: application/json')
-[[ -n "$TOKEN" ]] && HEADERS+=(-H "X-Bus-Token: $TOKEN")
+# The token goes to curl on stdin (-K -) so it never shows up in the process
+# list. With no token, the request carries no auth header.
+bus_post() {
+  local max="$1"
+  if [[ -n "$TOKEN" ]]; then
+    local t="${TOKEN//\\/\\\\}"
+    t="${t//\"/\\\"}"
+    printf 'header = "X-Bus-Token: %s"\n' "$t" \
+      | curl -s --max-time "$max" -K - -X POST "$AGENTBUS_URL/api/v1/journal/events" -H 'Content-Type: application/json' -d "$BODY"
+  else
+    curl -s --max-time "$max" -X POST "$AGENTBUS_URL/api/v1/journal/events" -H 'Content-Type: application/json' -d "$BODY" </dev/null
+  fi
+}
 
 # Snapshot events wait briefly so the registration lands before the context
 # is gone; turn-ended is fire-and-forget.
 if [[ "$EVENT" == "turn-ended" ]]; then
-  ( curl -s --max-time 3 -X POST "$AGENTBUS_URL/api/v1/journal/events" "${HEADERS[@]}" -d "$BODY" >/dev/null 2>&1 & )
+  ( bus_post 3 >/dev/null 2>&1 & )
 else
-  curl -s --max-time 5 -X POST "$AGENTBUS_URL/api/v1/journal/events" "${HEADERS[@]}" -d "$BODY" >/dev/null 2>&1
+  bus_post 5 >/dev/null 2>&1
 fi
 
 exit 0

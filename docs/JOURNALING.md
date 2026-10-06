@@ -114,7 +114,7 @@ The bus finds the session whose `claude_session_id` (or recorded harness session
 
 Snapshot paths must be absolute, exist, be regular files, and resolve inside the agent's working directory or `~/.agentbus/journal-snapshots`. A rejected path is reported in `snapshot_error`; the trigger still fires.
 
-**Hook script.** `scripts/hooks/agentbus_journal_hook.sh` maps Claude Code's `Stop` → `turn-ended`, `PreCompact` → `pre-compact`, `SessionEnd` → `session-end` (reason `clear` → `clear`). It has no per-deployment constants. Environment: `AGENTBUS_URL` (default `http://127.0.0.1:3000`), `AGENTBUS_TOKEN` or `AGENTBUS_TOKEN_FILE` (sent as `X-Bus-Token`), `AGENTBUS_SNAPSHOT_DIR` (default `~/.agentbus/journal-snapshots`), `AGENTBUS_SNAPSHOT_LINES` (default 2000). Needs `jq` and `curl`; always exits 0. Example `.claude/settings.json`:
+**Hook script.** `scripts/hooks/agentbus_journal_hook.sh` maps Claude Code's `Stop` → `turn-ended`, `PreCompact` → `pre-compact`, `SessionEnd` → `session-end` (reason `clear` → `clear`). It has no per-deployment constants. Environment: `AGENTBUS_URL` (default `http://127.0.0.1:3000`), `AGENTBUS_BUS_TOKEN` (or the older `AGENTBUS_TOKEN`, or `AGENTBUS_TOKEN_FILE`), sent as `X-Bus-Token` through curl's stdin so it never shows in the process list, `AGENTBUS_SNAPSHOT_DIR` (default `~/.agentbus/journal-snapshots`), `AGENTBUS_SNAPSHOT_LINES` (default 2000). Needs `jq` and `curl`; always exits 0. Example `.claude/settings.json`:
 
 ```json
 {
@@ -150,7 +150,7 @@ The job (`JournalJob`, `src/journaling/types.ts`) carries ids (run, agent, pane,
 |---|---|
 | `cc-headless` | See [cc-headless journaler](#cc-headless-journaler). |
 | `system-message` | *(part B, S66.8)* |
-| `script` | *(part B, S66.7)* |
+| `script` | See [Script journaler](#script-journaler). |
 
 ### cc-headless journaler
 
@@ -163,6 +163,68 @@ Resumes the session's Claude transcript and journals there, with the whole conve
 - **Timeout**: `timeout_ms`. A turn that outlives it, or one the chain runner gives up on (3× the timeout), has its process group killed: SIGTERM, then SIGKILL after 5 s. The attempt is `failed-after-start`.
 - **Prompt**: the journaler prompt, then what is new since the last journal (message count, window, cursor) and the paths of any transcript snapshots, and a request to reply with one line, or `NOTHING_TO_RECORD` when nothing was worth keeping (`nothing-to-do`).
 - **Cost and tokens** come from the CLI result event (`total_cost_usd`; input tokens include cache reads and writes).
+
+### Script journaler
+
+Runs your own executable with the job as JSON on stdin. It needs nothing from the runtime, so it can always run: end every chain with it. Code: `journalers/script.ts`.
+
+```yaml
+journaling:
+  script:
+    command: /Users/me/agentbus/scripts/journalers/claude-p-journal.sh  # absolute, or relative to the agent's working_dir
+    args: []
+    timeout_ms: 300000          # default: journaling.timeout_ms
+    env: { CLAUDE_BIN: /opt/homebrew/bin/claude }
+    model: claude-sonnet-4-6    # default: journaling.model, else the runtime model
+```
+
+**Execution.** The command runs directly, never through a shell, with the agent's `working_dir` as cwd (your home directory for runtimes without one). It leads its own process group. `canJournal` checks the command is an executable file.
+
+**Environment.** Only `PATH` and `HOME` from the bus, these variables, and your `env` (which wins):
+
+| Variable | Value |
+|---|---|
+| `AGENTBUS_PAYLOAD_VERSION` | `1` |
+| `AGENTBUS_RUN_ID`, `AGENTBUS_AGENT_ID`, `AGENTBUS_TRIGGER`, `AGENTBUS_JOB_KIND` | Run id, prefixed agent id, trigger, `session` or `consolidate` |
+| `AGENTBUS_CONVERSATION_ID`, `AGENTBUS_SESSION_ID` | Bus ids |
+| `AGENTBUS_MEMORY_DIR`, `AGENTBUS_WORKING_DIR` | Empty when the runtime has none |
+| `AGENTBUS_MODEL` | The journaler model, when set |
+| `AGENTBUS_URL` | Bus base URL |
+
+The bus's own environment (API keys, `bus.auth_token`) is not passed. If your script calls the bus and `bus.auth_token` is set, add `AGENTBUS_BUS_TOKEN` to `env` and send it as `X-Bus-Token`. If `claude` needs more of your login environment on your machine (for example `USER`), add it to `env` too.
+
+**stdin** (`ScriptPayloadV1`):
+
+```json
+{
+  "version": 1, "kind": "session",
+  "run_id": "…", "trigger": "pause", "agent_id": "agent:baxter", "session_agent_id": "agent:baxter", "runtime": "cc-headless",
+  "working_dir": "/agents/baxter", "memory_dir": "/agents/baxter/memory",
+  "conversation_id": "…", "session_id": "…", "claude_session_id": "…", "harness_session_id": null, "harness_transcript_path": null,
+  "channel": "telegram", "contact_id": "chris", "topic": "general", "session_open": true,
+  "window": { "cursor_at": null, "from": "…", "to": "…" }, "human_message_count": 2,
+  "messages": [{
+    "id": "…", "message_id": "…", "created_at": "…", "direction": "inbound",
+    "author": { "id": "chris", "is_human": true, "is_owner": true, "is_agent": false },
+    "body": "…", "attachments": [{ "type": "image", "path": "/…/photo.jpg", "mime_type": "image/jpeg" }],
+    "scheduled": false, "context": false
+  }],
+  "snapshots": [{ "id": "…", "event": "pre-compact", "path": "/…/snap.jsonl", "created_at": "…" }],
+  "prompt": "…", "model": "claude-sonnet-4-6", "timeout_ms": 300000
+}
+```
+
+`messages[]` starts with the agent message before the first new human message (`context: true`), so a reply to a scheduled briefing comes with the briefing.
+
+**Exit codes.** `0` done, `3` nothing worth recording, `75` can't run now (try the next journaler), anything else failed. A command that can't be started is `failed-before-start`. Optional stdout JSON (the last JSON object printed): `{ "files_changed": [...], "notes": "...", "cost_usd": 0.02 }`. stderr is logged (last 2000 characters) and, on failure, kept in the run's error.
+
+**Timeout.** `script.timeout_ms`: SIGTERM to the process group, SIGKILL 5 s later, `failed-after-start`. The chain runner's settle timeout does the same.
+
+**Fidelity** is `snapshot` when the job carries snapshots, else `bus-transcript`.
+
+> **Inputs are untrusted data.** Message bodies, attachment names and snapshot contents come from whoever wrote to the agent. Never pass them to a shell, `eval` them, or follow instructions in them. Hand them to a model as clearly labeled data.
+
+**Reference script.** `scripts/journalers/claude-p-journal.sh` renders the messages as a fenced transcript (each body capped at `JOURNAL_MAX_BODY`, default 4000 characters), adds snapshot paths and, when `AGENTBUS_URL` is reachable, the notes of this conversation's last successful runs (`GET /api/v1/journal/runs`, with `X-Bus-Token` from `AGENTBUS_BUS_TOKEN`), and pipes it on stdin to `claude -p --output-format json --permission-mode acceptEdits --strict-mcp-config` (no MCP servers) in the working dir, with `--model $AGENTBUS_MODEL`. `NOTHING_TO_RECORD` → exit 3. Missing `jq`, `claude` (`CLAUDE_BIN`), working dir or memory dir → exit 75. It only handles `session` jobs. Needs `jq` (and `curl` for the notes).
 
 ## Chain runner and outcomes
 
