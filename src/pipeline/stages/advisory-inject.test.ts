@@ -45,4 +45,10 @@ describe('advisory-inject stage (E65)', () => {
     await createAdvisoryInject({ takeInjection })(ctx({ contact: null }));
     expect(takeInjection).not.toHaveBeenCalled();
   });
+
+  it('skips journaling instructions, which cannot relay advisories (E66)', async () => {
+    const takeInjection = vi.fn(() => null);
+    await createAdvisoryInject({ takeInjection })(ctx({}, { [SYSTEM_ONLY_KEY]: true, journal_run_id: 'run-1' }));
+    expect(takeInjection).not.toHaveBeenCalled();
+  });
 });

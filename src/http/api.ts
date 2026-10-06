@@ -59,7 +59,7 @@ import type { AppConfig } from '../config/schema.js';
 import type { MessageEnvelope } from '../types/envelope.js';
 import type { PipelineEngine } from '../pipeline/engine.js';
 import type { PipelineContext, RouteTarget } from '../pipeline/types.js';
-import { SYSTEM_BLOCKS_KEY, SYSTEM_ONLY_KEY, stripSystemMetadata, systemBlocksFor } from '../core/system-block.js';
+import { SYSTEM_BLOCKS_KEY, SYSTEM_ONLY_KEY, attachSystemBlock, stripSystemMetadata, systemBlocksFor } from '../core/system-block.js';
 import type Database from 'better-sqlite3';
 import type { CommandImage, CommandRegistry, SlashCommandContext } from '../commands/registry.js';
 import { createSafeDatabase } from '../db/safe-database.js';
@@ -120,6 +120,12 @@ export interface HttpServerDeps {
   advisories?: AdvisoryService;
   /** E66 — when present, POST /api/v1/journal/events is mounted (harness hook events). */
   journalEvents?: Pick<HarnessEvents, 'handle'>;
+  /**
+   * E66 — System Message journal runs: held messages are skipped by the
+   * pending poll, the agent's outbound sends get 409, and
+   * POST /api/v1/journal/complete is mounted.
+   */
+  journalGate?: JournalGateLike;
 }
 
 const MessagePayloadSchema = z.discriminatedUnion('type', [
@@ -260,6 +266,23 @@ export interface InboundSystemOptions {
   systemOnly?: boolean;
   /** Keep only the fan-out targets this returns true for (e.g. the one agent a system turn is for). */
   routeFilter?: (route: RouteTarget) => boolean;
+  /**
+   * E66 — system blocks to attach after the pipeline (so they are never
+   * stored in the transcript), for every fan-out copy that survives
+   * `routeFilter`. Used for journaling instructions.
+   */
+  blocks?: string[];
+  /** E66 — reserved metadata to set after ingress stripping (e.g. `journal_run_id`). */
+  metadata?: Record<string, unknown>;
+}
+
+/** E66 — the System Message journaler's state, as the HTTP layer uses it. */
+export interface JournalGateLike {
+  isHeld(envelope: Pick<MessageEnvelope, 'recipient' | 'metadata'>): boolean;
+  blockedSend(sender: string): { runId: string } | null;
+  complete(input: { runId: string; agentId: string; filesChanged?: string[]; notes?: string; nothingNew?: boolean }):
+    | { ok: true; runId: string }
+    | { ok: false; reason: 'unknown_run' | 'stale_run' | 'wrong_agent' | 'already_completed' };
 }
 
 export interface InboundAbort {
@@ -408,6 +431,7 @@ export async function processInbound(
   // can't supply them, only pipeline stages and `system` (below) add them.
   const metadata: Record<string, unknown> = stripSystemMetadata(message.metadata);
   if (system.systemOnly) metadata[SYSTEM_ONLY_KEY] = true;
+  if (system.metadata) Object.assign(metadata, system.metadata);
   if (message.attachments && message.attachments.length > 0) {
     metadata['attachments'] = message.attachments;
   }
@@ -446,6 +470,7 @@ export async function processInbound(
   if (!result) {
     return { ok: true, queued: false, reason: ctx.abortReason ?? 'pipeline_abort' };
   }
+  for (const block of system.blocks ?? []) attachSystemBlock(result.envelope.metadata, block);
 
   // ── Follow-up capture check (post-pipeline, pre slash-command dispatch) ──
   // A plain-text, non-slash-command message is checked against any pending
@@ -760,6 +785,37 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     });
   }
 
+  // POST /api/v1/journal/complete — the journal_complete MCP tool (E66 S66.8).
+  // Body: { run_id, agent_id, files_changed?, notes?, nothing_new? }. 404 for an
+  // unknown run, 409 for a stale one (already ended) or a repeat, 403 when the
+  // caller is not the run's agent.
+  if (deps.journalGate) {
+    const gate = deps.journalGate;
+    const CompleteSchema = z.object({
+      run_id: z.string().min(1),
+      agent_id: z.string().min(1),
+      files_changed: z.array(z.string()).max(500).optional(),
+      notes: z.string().max(10_000).optional(),
+      nothing_new: z.boolean().optional(),
+    });
+    server.post<{ Body: unknown }>('/api/v1/journal/complete', async (req, reply) => {
+      const parsed = CompleteSchema.safeParse(req.body);
+      if (!parsed.success) return reply.status(400).send({ ok: false, error: parsed.error.message });
+      const b = parsed.data;
+      const result = gate.complete({
+        runId: b.run_id, agentId: b.agent_id,
+        ...(b.files_changed ? { filesChanged: b.files_changed } : {}),
+        ...(b.notes !== undefined ? { notes: b.notes } : {}),
+        ...(b.nothing_new !== undefined ? { nothingNew: b.nothing_new } : {}),
+      });
+      if (!result.ok) {
+        const status = result.reason === 'unknown_run' ? 404 : result.reason === 'wrong_agent' ? 403 : 409;
+        return reply.status(status).send({ ok: false, error: result.reason });
+      }
+      return { ok: true, run_id: result.runId };
+    });
+  }
+
   // ── Approval requests (E51) ────────────────────────────────────────────────
   // See docs/APPROVALS.md. Reception (POST), observability (GET), resolution
   // (POST :id/resolve). The Telegram callback_query handler resolves through
@@ -930,7 +986,10 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     // E48 (S48.4) — record this poll so cc-pool's pane-launch readiness gate
     // can tell a pane's cc.ts has come up (see src/http/agent-liveness.ts).
     recordAgentPoll(agent ?? toBareAgentId(recipient!));
-    const messages = queue.dequeue(recipientId, topic, parsedLimit);
+    // E66 — messages for a conversation with an open System Message journal
+    // run wait in the queue until the run ends.
+    const gate = deps.journalGate;
+    const messages = queue.dequeue(recipientId, topic, parsedLimit, gate ? (env) => gate.isHeld(env) : undefined);
     return {
       ok: true,
       messages: messages.map((m) => m.envelope),
@@ -976,6 +1035,17 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       return reply.status(400).send({ ok: false, error: parsed.error.message });
     }
     const data = parsed.data;
+
+    // E66 — during a System Message journal run the agent may not message
+    // anyone. journal_complete and advisory_ack use their own endpoints.
+    const blockedBy = deps.journalGate?.blockedSend(data.sender);
+    if (blockedBy) {
+      return reply.status(409).send({
+        ok: false,
+        error: 'journal_run_in_progress',
+        reason: `Outbound messages are blocked while journal run ${blockedBy.runId} is open. Finish journaling and call journal_complete; do not reply during the run.`,
+      });
+    }
 
     // reply_to (bus message ID) resolves to the referenced transcript's
     // platform_message_id (E28) — the same lookup react_to_message already

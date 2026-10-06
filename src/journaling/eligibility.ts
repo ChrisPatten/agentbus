@@ -10,8 +10,8 @@
  *
  * The window starts at the last agent message before the first eligible
  * human message, so a reply to a scheduled-job message is journaled with
- * that message as context. Slash commands and their replies are left out of
- * the window entirely.
+ * that message as context. Slash commands and their replies, and bus
+ * system-only turns, are left out of the window entirely.
  *
  * Thresholds: a non-final trigger needs `min_human_messages`; below that the
  * content is "pending". Final triggers (close, clear, evict, release,
@@ -140,6 +140,8 @@ export function loadWindow(
   for (let i = startIdx; i < parsed.length; i++) {
     const { row, meta } = parsed[i]!;
     if (isCommandRow(row, meta)) continue;
+    // Bus system-only turns (advisory turns, journal instructions) are bus internals, not conversation.
+    if (meta['system_only'] === true) continue;
     const inbound = row.direction === 'inbound';
     const human = inbound && isEligibleHuman(row, meta);
     messages.push({

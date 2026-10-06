@@ -28,6 +28,7 @@ Set `bus.host: 0.0.0.0` to accept connections from other hosts, for example a re
 | GET | `/api/v1/pool` | cc-pool pane leases and parked-queue depth (when configured) |
 | POST | `/api/v1/pool/:agentId/turn-ended` | Real-time pane activity signal, fed by a `Stop` hook (superseded by `/api/v1/journal/events`) |
 | POST | `/api/v1/journal/events` | Harness hook events for journaling (`turn-ended`, `pre-compact`, `session-end`, `clear`) |
+| POST | `/api/v1/journal/complete` | Finish a System Message journal run (the `journal_complete` tool) |
 | POST | `/api/v1/approvals` | Raise an interactive-approval request for a blocked pane |
 | GET | `/api/v1/approvals` | List approval requests, optionally by status |
 | GET | `/api/v1/approvals/:id` | Fetch one approval request |
@@ -175,6 +176,10 @@ Posted by `scripts/hooks/agentbus_journal_hook.sh` (and the cc-pool `Stop` hook)
 
 Returns `200 { ok: true, session_id, agent_id, action: "turn-ended" | "triggered", trigger?, snapshot_id?, snapshot_error? }`. `trigger` is the engine's answer (`queued`, `merged`, `not-configured`, `disabled`). A rejected snapshot path is reported in `snapshot_error` while the event still counts. `400` for a malformed body, `404` when no bus session matches the harness session id. Subject to `bus.auth_token` (`X-Bus-Token`) like every route.
 
+### `POST /api/v1/journal/complete`
+
+The `journal_complete` MCP tool. Body `{ "run_id", "agent_id", "files_changed"?, "notes"?, "nothing_new"? }`; `agent_id` is the caller, bare or prefixed (a pool pane id). Returns `200 { ok: true, run_id }`. `400` for a malformed body, `404` (`unknown_run`) when the bus has no record of the run, `409` (`stale_run`) when the run already ended (timed out, or the bus restarted) and `409` (`already_completed`) for a repeat, `403` (`wrong_agent`) when the caller is not the run's agent.
+
 ## Approvals
 
 Human-in-the-loop answers for blocked agents. See [APPROVALS.md](APPROVALS.md) for the flow.
@@ -275,6 +280,8 @@ Dequeues up to `limit` pending messages for one recipient and marks them `proces
 
 Returns `{ "ok": true, "messages": [<MessageEnvelope>], "count": n }`, ordered urgent, high, normal, then oldest first.
 
+While a System Message journal run is open for a conversation (E66), messages for it addressed to the journaled agent stay `pending` and are skipped, except the run's own instruction. They are returned once the run ends.
+
 ### `POST /api/v1/messages/:id/ack`
 
 Body `{ "status": "delivered" }` marks the message delivered. Body `{ "status": "failed", "error": "..." }` moves it to the dead-letter table. Returns `404` if the message is not in `processing` state (for `delivered`) or does not exist (for `failed`).
@@ -290,10 +297,10 @@ Enqueues an outbound message for the delivery worker. The `reply`, `send_message
 | `topic` | no | Default `general`. Use a `thread:<hash>` value to target a thread |
 | `reply_to` | no | Bus message ID. Resolved to the platform message ID so Telegram can quote it, unless it is the latest inbound message in the conversation |
 | `priority` | no | `normal` (default), `high`, or `urgent` |
-| `metadata` | no | Free-form object. The reserved keys `system_blocks` and `system_only` are dropped |
+| `metadata` | no | Free-form object. The reserved keys `system_blocks`, `system_only` and `journal_run_id` are dropped |
 | `expires_at` | no | ISO 8601, in the future. Expired pending messages are dead-lettered by the sweep |
 
-Returns `201 { "ok": true, "id": "<uuid>", "queued": true }`.
+Returns `201 { "ok": true, "id": "<uuid>", "queued": true }`. While a System Message journal run is open for the sending agent (E66), returns `409 { ok: false, error: "journal_run_in_progress", reason }` and enqueues nothing.
 
 ### `GET /api/v1/messages/:id`
 

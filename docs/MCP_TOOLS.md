@@ -23,6 +23,7 @@ Errors come back as `{ "content": [{ "type": "text", "text": "Error: ..." }], "i
 | `recall_memory`, `log_memory` | Legacy structured memory store | Always; dormant unless `memory.structured_extraction` |
 | `write_knowledge`, `get_knowledge`, `forget_knowledge`, `search_knowledge` | Agent-managed structured knowledge store (Phase 1) | Always |
 | `advisory_ack` | Acknowledge a bus advisory after relaying it to the owner | Always |
+| `journal_complete` | Finish a System Message journal run | Polling adapter and cc-pool panes (not cc-headless) |
 | `get_adapter_status` | Health of the polling MCP adapter | Polling mode only |
 
 ## Messaging
@@ -221,6 +222,15 @@ Acknowledges a bus advisory once the agent has told its owner about it. Advisori
 
 Input: `{ "id": "<advisory id>" }`. The calling agent's id is sent with it; a pool pane is mapped to its pool, and an agent can only acknowledge its own advisories.
 Output: `{ "success": true, "id", "state": "acknowledged", "already_acknowledged": false }`. Acknowledging twice is not an error (`already_acknowledged: true`). An unknown id, another agent's advisory, or a resolved one returns `isError`.
+
+## Journaling
+
+### `journal_complete`
+
+Finishes a System Message journal run (E66). The run arrives in an `<agentbus-system kind="journal" run_id="…">` block at the start of a turn. While it is open, new messages to the agent are held and its outbound sends (`reply`, `send_message`, `send_email`) fail with `journal_run_in_progress`; only this tool and `advisory_ack` work. See [JOURNALING.md](JOURNALING.md#system-message-journaler).
+
+Input: `{ "run_id", "files_changed"?: string[], "notes"?: string, "nothing_new"?: boolean }`. The calling agent's id is sent with it.
+Output: `{ "success": true, "run_id" }`. A run that already ended (timed out) or was already completed, an unknown run id, or another agent's run returns `isError`.
 
 ## Polling adapter only
 

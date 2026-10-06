@@ -12,6 +12,7 @@
  *   - schedule_message, list_schedules, cancel_schedule (E18)
  *   - set_headless_model, get_headless_model, list_headless_model, delete_headless_model (model overrides)
  *   - advisory_ack (E65)
+ *   - journal_complete (E66; live agents only — not registered for cc-headless)
  */
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -29,6 +30,7 @@ import { registerAttachmentTools } from './attachments.js';
 import { registerTelegramTools } from './telegram.js';
 import { registerModelOverrideTools } from './model-overrides.js';
 import { registerAdvisoryTools } from './advisories.js';
+import { registerJournalTools } from './journal.js';
 import { getTelegramInstances } from '../../config/schema.js';
 
 export { toolError, toolSuccess };
@@ -74,6 +76,7 @@ export function registerAllTools(
   registerAttachmentTools(server, busBaseUrl);
   registerModelOverrideTools(server, busBaseUrl);
   registerAdvisoryTools(server, busBaseUrl, agentId);
+  registerJournalTools(server, busBaseUrl, agentId);
   maybeRegisterEmailTool(server, busBaseUrl, agentId, config);
   maybeRegisterTelegramTools(server, busBaseUrl, config);
 }

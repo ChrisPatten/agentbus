@@ -149,8 +149,40 @@ The job (`JournalJob`, `src/journaling/types.ts`) carries ids (run, agent, pane,
 | Journaler | Status |
 |---|---|
 | `cc-headless` | See [cc-headless journaler](#cc-headless-journaler). |
-| `system-message` | *(part B, S66.8)* |
+| `system-message` | See [System Message journaler](#system-message-journaler). |
 | `script` | See [Script journaler](#script-journaler). |
+
+### System Message journaler
+
+Asks the live agent to journal in its own session, with full context (`fidelity: full-session`). Code: `journalers/system-message.ts`, `delivery.ts`, `pipeline/stages/journal-hold.ts`.
+
+**Instruction.** A system-only turn in the conversation, through the normal pipeline (so a cc-pool conversation reaches its leased pane), fanned out only to the journaled agent, carrying an E65 system block:
+
+```
+<agentbus-system kind="journal" run_id="…">
+AgentBus journal run … (trigger: pause).
+<journaling prompt>
+New since the last journal: 3 message(s) from people (…).
+Until this run ends, new messages to you are held and your outbound messages are blocked, so do not reply to anyone.
+When you are done, call the journal_complete tool with run_id "…", the files you changed and a one-line note. If nothing was worth recording, call it with nothing_new: true.
+The run times out after 5 minutes.
+</agentbus-system>
+```
+
+The turn's body (`[AgentBus journal run …]`) is logged to the transcript with `system_only` and `journal_run_id` and hidden from user-facing views. Advisories are not injected into it (the agent couldn't relay them). Agent jobs with no conversation (E68 consolidation) go to the agent's default conversation, its first owner's `general` conversation.
+
+**`canJournal`.** `systemMessages` (static), `liveAgent` and `exclusiveSession` checked live for the conversation (on cc-pool: a pane is leased to it), an open session (after `/clear` or close the live context is gone, so the chain moves on), no other System Message run for the agent, and an **idle** agent: nothing queued or in progress for it, and its last turn finished. "Finished" means a `turn-ended` hook event after the last human message when the hook has reported for the conversation, else the agent's last message coming after it.
+
+**While the run is open:**
+- **New messages for the conversation are held.** They stay `pending` in the queue and the pending poll skips them; they are delivered as soon as the run ends (completion, timeout or abort).
+- **Busy notice, once per hold.** The first held message gets a notice in the channel's native form: a `queued` activity state in the Mac app, the status line in Telegram (as a placeholder the agent's next activity replaces), a short text elsewhere ("Busy for a moment. Your message is queued and will be answered shortly."), nothing on email or Siri. The wording never mentions journaling.
+- **Outbound sends are blocked.** `POST /api/v1/messages` (the `reply`, `send_message` and `send_email` tools) from the agent returns `409 journal_run_in_progress` with a reason. `journal_complete` and `advisory_ack` use their own endpoints and work. Reactions carry no sender and are not blocked.
+
+**Completion.** `journal_complete({ run_id, files_changed, notes, nothing_new })` (MCP, `POST /api/v1/journal/complete`) ends the run: `done`, or `nothing-to-do` when `nothing_new` is set and no file changed. A `run_id` that is not open is rejected (`stale_run` when it already ended, `unknown_run` otherwise), as is another agent's run. The bus also snapshots the memory dir before and after and merges the files that changed into `files_changed`, whatever the agent reports.
+
+**Timeout.** `system-message.timeout_ms` (default `timeout_ms`, 5 min): `failed-after-start`, and an instruction still waiting in the queue is dead-lettered so it never arrives after the run. The chain moves on (usually to `cc-headless`, which resumes the same transcript).
+
+**Not persisted.** Holds and open runs live in memory. After a restart nothing is held, a late `journal_complete` is rejected as unknown, and the attempt is retried by the persisted trigger.
 
 ### cc-headless journaler
 

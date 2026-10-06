@@ -40,7 +40,14 @@ export const SYSTEM_BLOCKS_KEY = 'system_blocks';
  */
 export const SYSTEM_ONLY_KEY = 'system_only';
 
-const RESERVED_KEYS = [SYSTEM_BLOCKS_KEY, SYSTEM_ONLY_KEY] as const;
+/**
+ * E66 — envelope metadata key naming the System Message journal run an
+ * instruction belongs to. The journal hold lets only that envelope through.
+ * Reserved: stripped at ingress.
+ */
+export const JOURNAL_RUN_KEY = 'journal_run_id';
+
+const RESERVED_KEYS = [SYSTEM_BLOCKS_KEY, SYSTEM_ONLY_KEY, JOURNAL_RUN_KEY] as const;
 
 /**
  * A block attached during the pipeline. `recipient`, when set, limits it to

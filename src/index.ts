@@ -17,6 +17,7 @@
  *   8. Register SIGTERM/SIGINT handlers for graceful shutdown
  */
 import { mkdirSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { loadConfig } from './config/loader.js';
 import { getTelegramInstances, getEmailInstances } from './config/schema.js';
@@ -71,6 +72,9 @@ import { JournalEngine } from './journaling/engine.js';
 import { JournalerRegistry } from './journaling/registry.js';
 import { CcHeadlessJournaler } from './journaling/journalers/cc-headless.js';
 import { ScriptJournaler } from './journaling/journalers/script.js';
+import { JournalRunGate, SystemMessageJournaler, BUSY_NOTICE_TEXT, type ActiveSystemRun } from './journaling/journalers/system-message.js';
+import { createJournalInstructionDelivery } from './journaling/delivery.js';
+import { createJournalHoldNotice } from './pipeline/stages/journal-hold.js';
 import { HarnessEvents, createHookHealthTicker } from './journaling/events.js';
 
 const configPath = process.env['AGENTBUS_CONFIG'] ?? resolve(process.cwd(), 'config.yaml');
@@ -137,6 +141,22 @@ const journalers = new JournalerRegistry();
 const headlessJournaler = new CcHeadlessJournaler({ resolver: runtimeResolver });
 journalers.register(headlessJournaler);
 journalers.register(new ScriptJournaler({ busUrl: busBaseUrl }));
+// E66 S66.8 — System Message journaler: the live agent journals in its own
+// session. The gate holds the conversation's new messages, blocks the
+// agent's outbound sends and takes journal_complete. Delivery needs the
+// pipeline, built further down, so it is late-bound.
+const journalGate = new JournalRunGate();
+let deliverJournalInstruction: ReturnType<typeof createJournalInstructionDelivery> | null = null;
+journalers.register(new SystemMessageJournaler({
+  db, resolver: runtimeResolver, gate: journalGate, owners: ownerDirectory, poolManagers,
+  deliver: (req) => deliverJournalInstruction
+    ? deliverJournalInstruction(req)
+    : Promise.resolve({ queued: false, reason: 'bus is still starting' }),
+  withdraw: (messageId, reason) => {
+    const row = db.prepare('SELECT status FROM message_queue WHERE id = ?').get(messageId) as { status: string } | undefined;
+    if (row?.status === 'pending') queue.deadLetter(messageId, reason);
+  },
+}));
 const journalEngine = new JournalEngine({
   db, config, resolver: runtimeResolver, registry: journalers, advisories, owners: ownerDirectory, settings: journalingSettings,
 });
@@ -195,6 +215,9 @@ pipeline.use({ slot: 85, name: 'memory-inject',    stage: createMemoryInject(db,
 // E65 — open advisories ride along with an owner's next message, as a
 // bus-originated system block for the owned agent's route only.
 pipeline.use({ slot: 86, name: 'advisory-inject',  stage: createAdvisoryInject(advisories), critical: false });
+// E66 — a message held by a System Message journal run tells its sender,
+// once per hold, that the agent is busy.
+pipeline.use({ slot: 87, name: 'journal-hold',     stage: createJournalHoldNotice(journalGate, (run, target) => notifyBusy(run, target)), critical: false });
 
 // ── Siri channel (E42) ───────────────────────────────────────────────────────
 // Registered before the HTTP server is built because the /api/v1/siri routes
@@ -206,7 +229,50 @@ const app = config.adapters.app?.enabled
   ? new AppAdapter(db, (contactId) => routedAgent(config, contactId), getHeadlessSnapshots) : undefined;
 if (app) registry.register(app);
 
-const httpServer = await createHttpServer({ queue, registry, config, pipeline, db, commandRegistry, pauseSet, siri, app, poolManagers, getHeadlessSnapshots, runtimeResolver, advisories, journalEvents });
+const httpServer = await createHttpServer({ queue, registry, config, pipeline, db, commandRegistry, pauseSet, siri, app, poolManagers, getHeadlessSnapshots, runtimeResolver, advisories, journalEvents, journalGate });
+
+// E66 — busy notice for a held message: the channel's native queued/status
+// signal where it has one, a short text elsewhere, nothing on email.
+const appNoticeRuns = new Map<string, { agentId: string; conversationId: string }>();
+function notifyBusy(run: ActiveSystemRun, target: { contactId: string; channel: string; topic: string; conversationId: string }): void {
+  const { contactId, channel, topic, conversationId } = target;
+  // Email waits silently. Siri answers each ask once, so a notice would take the reply's place.
+  if (channel === 'email' || channel.startsWith('email:') || channel === 'siri') return;
+  const adapter = registry.lookupPrimaryByChannel(channel);
+  if (!adapter) return;
+  try {
+    if (app && adapter.id === 'app') {
+      const agentId = routedAgent(config, contactId) ?? run.agentId;
+      appNoticeRuns.set(run.runId, { agentId, conversationId });
+      app.publishActivity({
+        agent_id: agentId, conversation_id: conversationId, state: 'queued', turn_class: 'user',
+        running_user: 0, running_system: 1, waiting: 1, limit: 0, reserved_system_slots: 0,
+      });
+      return;
+    }
+    if (adapter.capabilities.toolStatus && adapter.reportToolCall) {
+      adapter.reportToolCall(contactId, BUSY_NOTICE_TEXT, channel, topic, true, conversationId);
+      return;
+    }
+    void adapter.send({
+      id: randomUUID(), timestamp: new Date().toISOString(), channel, topic, sender: 'system:bus',
+      recipient: `contact:${contactId}`, reply_to: null, priority: 'normal',
+      payload: { type: 'text', body: BUSY_NOTICE_TEXT }, metadata: { adapter_id: adapter.id, bus_notice: true },
+    }).catch((err: unknown) => console.warn(`[journaling] busy notice on ${channel} failed: ${String(err)}`));
+  } catch (err) {
+    console.warn(`[journaling] busy notice on ${channel} failed: ${String(err)}`);
+  }
+}
+journalGate.onChange((run, event) => {
+  if (event !== 'end' || !app) return;
+  const notice = appNoticeRuns.get(run.runId);
+  if (!notice) return;
+  appNoticeRuns.delete(run.runId);
+  app.publishActivity({
+    agent_id: notice.agentId, conversation_id: notice.conversationId, state: 'idle', turn_class: 'user',
+    running_user: 0, running_system: 0, waiting: 0, limit: 0, reserved_system_slots: 0,
+  });
+});
 
 // ── Platform adapter registration ────────────────────────────────────────────
 // Platform adapters run in-process. They are instantiated from config,
@@ -253,6 +319,10 @@ const deliveryWorker = new DeliveryWorker({ queue, registry, db });
 advisories.setTransport(createBusAdvisoryTransport({
   queue, registry, owners: ownerDirectory, pipeline, config, db, commandRegistry, pauseSet,
 }));
+// E66 — journaling instructions use the same system-only turn path.
+deliverJournalInstruction = createJournalInstructionDelivery({
+  queue, registry, owners: ownerDirectory, pipeline, config, db, commandRegistry, pauseSet,
+});
 
 // ── Memory system ─────────────────────────────────────────────────────────────
 // Summarizer calls the Claude API to extract memories from completed sessions.
