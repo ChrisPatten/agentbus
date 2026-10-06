@@ -137,3 +137,34 @@ describe('session transcript hides bus-originated turns', () => {
     expect(res.json().transcript.map((m: { message_id: string }) => m.message_id)).toEqual(["visible"]);
   });
 });
+
+describe('GET /api/v1/journal/runs and the health summary (S66.10)', () => {
+  it('lists runs by agent (pane ids map to the pool) and adds journaling to /api/v1/health', async () => {
+    const { AppConfigSchema } = await import('../config/schema.js');
+    const { RuntimeResolver } = await import('../core/runtime-resolver.js');
+    const { JournalEngine } = await import('../journaling/engine.js');
+    const { JournalerRegistry } = await import('../journaling/registry.js');
+    const cfg = AppConfigSchema.parse({
+      bus: { db_path: ':memory:' }, memory: {},
+      adapters: { 'cc-pool': { agent_id: 'peggy', tmux_session: 'peggy-pool', claude_bin: '/usr/local/bin/claude' } },
+      agents: { 'agent:peggy': { journaling: { chain: ['cc-headless'] } } },
+    });
+    const resolver = new RuntimeResolver(cfg);
+    const engine = new JournalEngine({ db, config: cfg, resolver, registry: new JournalerRegistry(), log: () => {} });
+    engine.store.insertRun({
+      runId: 'r1', agentId: 'agent:peggy', sessionId: 's1', conversationId: 'conv-1', kind: 'session', trigger: 'pause',
+      journaler: 'cc-headless', chainPosition: 0, fallbackFrom: null, outcome: 'done', messageCount: 3,
+      startedAt: '2026-10-06T10:00:00.000Z', filesChanged: ['memory/MEMORY.md'], costUsd: 0.02,
+    });
+    const app = await createHttpServer({ queue, registry: new AdapterRegistry(), config, pipeline, db, journalStatus: { db, engine, resolver } });
+    try {
+      const res = await app.inject({ method: 'GET', url: '/api/v1/journal/runs?agent=peggy-pool-3&limit=10' });
+      expect(res.json()).toMatchObject({ ok: true, count: 1, runs: [{ run_id: 'r1', journaler: 'cc-headless', files_changed: ['memory/MEMORY.md'], cost_usd: 0.02 }] });
+      expect((await app.inject({ method: 'GET', url: '/api/v1/journal/runs?conversation=other' })).json().count).toBe(0);
+      const health = (await app.inject({ method: 'GET', url: '/api/v1/health' })).json();
+      expect(health.journaling).toMatchObject({ status: 'ok', agents: { 'agent:peggy': { chain: ['cc-headless'], consecutive_exhaustions: 0 } } });
+    } finally {
+      await app.close();
+    }
+  });
+});

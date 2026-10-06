@@ -67,6 +67,7 @@ import { logOutboundTranscript } from '../pipeline/outbound-transcript.js';
 import { validateAppDestination } from '../app/outbound.js';
 import { boundAppReply } from '../app/binding.js';
 import { routedAgent, VISIBLE_TRANSCRIPT } from '../app/store.js';
+import { journalingHealth, runForApi, type JournalStatusDeps } from '../journaling/status.js';
 import { logWebhookRequest } from './webhook-log.js';
 import { registerSiriRoutes } from './siri-routes.js';
 import type { SiriAdapter } from '../adapters/siri.js';
@@ -126,6 +127,8 @@ export interface HttpServerDeps {
    * POST /api/v1/journal/complete is mounted.
    */
   journalGate?: JournalGateLike;
+  /** E66 — when present, GET /api/v1/journal/runs is mounted and /api/v1/health includes a journaling summary. */
+  journalStatus?: JournalStatusDeps;
 }
 
 const MessagePayloadSchema = z.discriminatedUnion('type', [
@@ -629,6 +632,15 @@ export async function processInbound(
   return { ok: true, id: primaryId, queued: true, enqueued_count: enqueuedCount };
 }
 
+/** Health must answer even if the journaling summary can't be computed. */
+function safeJournalingHealth(deps: JournalStatusDeps): ReturnType<typeof journalingHealth> | { status: 'unknown'; error: string } {
+  try {
+    return journalingHealth(deps);
+  } catch (err) {
+    return { status: 'unknown', error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 // ── HTTP server ──────────────────────────────────────────────────────────────
 
 export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyInstance> {
@@ -695,6 +707,7 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
         delivered: counts['delivered'] ?? 0,
         dead_letter: counts['dead_letter'] ?? 0,
       },
+      ...(deps.journalStatus ? { journaling: safeJournalingHealth(deps.journalStatus) } : {}),
     };
   });
 
@@ -783,6 +796,33 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       if (!result.ok) return reply.status(result.status).send({ ok: false, error: result.error });
       return result;
     });
+  }
+
+  // GET /api/v1/journal/runs?agent=&conversation=&session=&limit= — journal_runs
+  // rows, newest first (E66 S66.10). `agent` accepts a bare or prefixed id; a
+  // pool pane id maps to its pool. limit: 1–500, default 50.
+  if (deps.journalStatus) {
+    const status = deps.journalStatus;
+    server.get<{ Querystring: { agent?: string; conversation?: string; session?: string; limit?: string } }>(
+      '/api/v1/journal/runs',
+      async (req) => {
+        const { agent, conversation, session } = req.query;
+        const limit = Math.max(1, Math.min(Number.parseInt(req.query.limit ?? '50', 10) || 50, 500));
+        let agentId: string | undefined;
+        if (agent) {
+          const prefixed = agent.startsWith('agent:') ? agent : `agent:${agent}`;
+          const runtime = status.resolver.resolve(prefixed);
+          agentId = runtime?.kind === 'cc-pool' ? runtime.poolAgentId : prefixed;
+        }
+        const runs = status.engine.store.listRuns({
+          ...(agentId ? { agentId } : {}),
+          ...(conversation ? { conversationId: conversation } : {}),
+          ...(session ? { sessionId: session } : {}),
+          limit,
+        });
+        return { ok: true, count: runs.length, runs: runs.map(runForApi) };
+      },
+    );
   }
 
   // POST /api/v1/journal/complete — the journal_complete MCP tool (E66 S66.8).

@@ -194,6 +194,50 @@ export class JournalEngine {
     return { agentId, runtime };
   }
 
+  /** The conversation's newest session (open first), or null. */
+  sessionForConversation(conversationId: string): SessionRow | null {
+    return this.findSession({ conversationId });
+  }
+
+  /**
+   * Unjournaled content per agent, for `/journal` and the health summary:
+   * sessions with eligible human content past their cursor (open ones, and
+   * closed ones with a pending final trigger), and when the oldest of it
+   * became eligible (backlog age; below-threshold content counts only once
+   * it is 24 h old or a final trigger fired). Looks at sessions active in
+   * the last 30 days, at most `limit` of them.
+   */
+  backlog(opts: { agentId?: string; limit?: number } = {}): Map<string, { since: string | null; sessions: number; humanMessages: number }> {
+    const now = this.now();
+    const cutoff = new Date(now.getTime() - 30 * 86_400_000).toISOString();
+    const rows = this.deps.db
+      .prepare(
+        `SELECT s.*, js.pending_since AS js_pending_since FROM sessions s LEFT JOIN journal_state js ON js.session_id = s.id
+         WHERE (s.journal_cursor_at IS NULL OR s.journal_cursor_at < s.last_activity)
+           AND s.last_activity > ?
+           AND (s.ended_at IS NULL OR js.pending_trigger IS NOT NULL)
+         ORDER BY s.last_activity DESC LIMIT ?`,
+      )
+      .all(cutoff, opts.limit ?? 200) as Array<SessionRow & { js_pending_since: string | null }>;
+    const out = new Map<string, { since: string | null; sessions: number; humanMessages: number }>();
+    for (const s of rows) {
+      const agent = this.agentForSession(s);
+      if (!agent?.runtime) continue;
+      if (opts.agentId && agent.agentId !== toPrefixed(opts.agentId)) continue;
+      const settings = this.settings.get(agent.agentId);
+      if (!settings?.enabled) continue;
+      const window = loadWindow(this.deps.db, { sessionId: s.id, cursorAt: s.journal_cursor_at ?? null, agentId: agent.agentId });
+      if (window.humanTimes.length === 0) continue;
+      const since = eligibleSince(window, { minHumanMessages: settings.minHumanMessages, pendingSince: s.js_pending_since, now });
+      const entry = out.get(agent.agentId) ?? { since: null, sessions: 0, humanMessages: 0 };
+      entry.sessions += 1;
+      entry.humanMessages += window.humanTimes.length;
+      if (since && (!entry.since || since < entry.since)) entry.since = since;
+      out.set(agent.agentId, entry);
+    }
+    return out;
+  }
+
   /** True while an evaluation for the session is queued or running. */
   isInFlight(sessionId: string): boolean {
     return this.slots.has(sessionId);

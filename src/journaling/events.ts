@@ -287,7 +287,7 @@ export function createHookHealthTicker(deps: {
           body: `The agent keeps answering, but its turn-ended hook has not reported since ${entry.lastSeenAt}. ` +
             'Journaling still works from bus-side tracking, but pause timing is less precise.',
           remediation: 'Check that scripts/hooks/agentbus_journal_hook.sh is still installed as the Stop hook in the agent\'s ' +
-            '.claude/settings.json, that jq and curl are on its PATH, and that it can reach the bus (AGENTBUS_URL, AGENTBUS_TOKEN).',
+            '.claude/settings.json, that jq and curl are on its PATH, and that it can reach the bus (AGENTBUS_URL, and AGENTBUS_BUS_TOKEN when bus.auth_token is set).',
           source: 'journaling',
         });
       } else if (entry.status === 'ok') {

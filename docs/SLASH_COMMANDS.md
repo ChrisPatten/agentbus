@@ -13,6 +13,7 @@ Slash commands let you operate AgentBus from any connected channel without SSH a
 | `/sessions [channel] [--limit N]` | List recent sessions | `/sessions telegram --limit 5` |
 | `/clear` | Start a fresh session; journal the previous one in the background | `/clear` |
 | `/stop` | Cancel the current in-flight turn | `/stop` |
+| `/journal [runs [n] \| now]` | Journaling status, recent journal runs, or journal this conversation now | `/journal runs 10` |
 | `/cost` | Show day/week/month API cost for this agent | `/cost` |
 | `/pool [pool-agent-id]` | Show cc-pool pane leases and parked-queue depth | `/pool peggy` |
 | `/pane [n\|all]` | Send a PNG snapshot of the cc-pool tmux pane(s) | `/pane 2` |
@@ -94,9 +95,9 @@ Lists recent sessions (default: 10, max: 50). Optionally filter by channel name 
 
 ### `/clear`
 
-The `/clear` equivalent for headless (`cc-headless`) agents: start a fresh context window. It closes the current selected session, so your next message in that conversation spawns a brand-new `claude -p` with no `--resume`. The close is immediate — there is no window where a follow-up re-attaches to the old session. From the Mac app, `/clear` targets the selected foreign or app session.
+Start a fresh context window. It closes the current selected session, so your next message in that conversation spawns a brand-new `claude -p` with no `--resume` (`cc-headless`), or a fresh Claude session in a pool pane (`cc-pool`: the conversation's pane is detached at once, then cleared or killed per `on_evict` in the background). The close is immediate — there is no window where a follow-up re-attaches to the old session. From the Mac app, `/clear` targets the selected foreign or app session.
 
-The previous session is **not discarded**: after closing it, the bus fires the journaling `clear` trigger for it (E66, [JOURNALING.md](JOURNALING.md)). The trigger is persisted (it survives a restart), bypasses `min_human_messages`, and runs the agent's journaler chain in the background; on `cc-headless` that resumes the old `claude_session_id` so the agent reviews the conversation one last time and updates its memory files. Nothing is delivered to the user from that run. It works even though the DB session row is already closed.
+The previous session is **not discarded**: after closing it, the bus fires the journaling `clear` trigger for it (E66, [JOURNALING.md](JOURNALING.md)). The trigger is persisted (it survives a restart), bypasses `min_human_messages`, and runs the agent's journaler chain in the background; the `cc-headless` journaler resumes the old `claude_session_id` (forking it, on cc-pool) so the agent reviews the conversation one last time and updates its memory files. The `system-message` journaler doesn't run for a cleared session: its live context is gone. Nothing is delivered to the user from that run. It works even though the DB session row is already closed.
 
 ```
 /clear
@@ -109,7 +110,20 @@ Scope and edge cases:
 - **Nothing to clear.** If you have no active session with a live `claude_session_id` on that channel, it replies `No active session to clear` and does nothing.
 - **Journaling not set up.** When the session's agent has no journaling settings (or they're disabled), the session is still closed, but there is no memory pass (the reply says so).
 
-This command is most useful for headless agents (see [CC_HEADLESS_ADAPTER.md](./CC_HEADLESS_ADAPTER.md)).
+See [CC_HEADLESS_ADAPTER.md](./CC_HEADLESS_ADAPTER.md) and [CC_POOL_ADAPTER.md](./CC_POOL_ADAPTER.md#session-tracker-interaction).
+
+### `/journal [runs [n] | now]`
+
+Journaling status and control for the conversation you send it from (E66, [JOURNALING.md](JOURNALING.md#observability)).
+
+- **`/journal`**: for this conversation, when it was last journaled, how many messages from people are waiting (and whether that is below `min_human_messages`), a pending final trigger, and a run in progress. For its agent: the chain (and entries the runtime can't run), last success, failed runs in a row, the last failure, the backlog, hook health and open journaling advisories.
+- **`/journal runs [n]`**: the agent's last `n` journal attempts (default 5, at most 20): when, trigger, journaler (and which one it fell back from), outcome, what it could see (`bus-transcript`, `snapshot`, `full-session`), cost, and the error or note.
+- **`/journal now`**: journal this conversation now (trigger `manual`). Bypasses the pause threshold, `min_human_messages` and the attempt cap, but respects the cursor: with nothing new since the last run, it says so. The reply comes when the run finishes within about 1.5 s, otherwise it says the run started.
+
+```
+/journal now
+-> Journaled with cc-headless.
+```
 
 ### `/stop`
 

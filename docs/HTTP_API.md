@@ -29,6 +29,7 @@ Set `bus.host: 0.0.0.0` to accept connections from other hosts, for example a re
 | POST | `/api/v1/pool/:agentId/turn-ended` | Real-time pane activity signal, fed by a `Stop` hook (superseded by `/api/v1/journal/events`) |
 | POST | `/api/v1/journal/events` | Harness hook events for journaling (`turn-ended`, `pre-compact`, `session-end`, `clear`) |
 | POST | `/api/v1/journal/complete` | Finish a System Message journal run (the `journal_complete` tool) |
+| GET | `/api/v1/journal/runs` | Journal run attempts, by agent, conversation or session |
 | POST | `/api/v1/approvals` | Raise an interactive-approval request for a blocked pane |
 | GET | `/api/v1/approvals` | List approval requests, optionally by status |
 | GET | `/api/v1/approvals/:id` | Fetch one approval request |
@@ -93,6 +94,8 @@ Always returns `200`. `status` is `healthy` when every adapter reports `online`,
 ```
 
 `runtimes` lists each configured agent's runtime and static capabilities, keyed by agent id, for example `"agent:baxter": { "runtime": "cc-headless", "capabilities": { "systemMessages": true, …, "hookEvents": ["pre-compact"] } }`. See [RUNTIME_CAPABILITIES.md](RUNTIME_CAPABILITIES.md).
+
+`journaling` (E66) summarizes journaling per agent: `status` is `critical` when an enabled agent has 3 or more consecutive exhausted runs or a backlog at least 24 h old, `warning` when one has an exhausted run, else `ok`. Each entry under `agents` has `enabled`, `chain`, `backlog_age_ms` (age of the oldest unjournaled eligible content, or null), `backlog_sessions`, `consecutive_exhaustions`, `last_success_at`, `last_failure_at`, `last_failure` and `in_flight`. The top-level `status` is unchanged by it. See [JOURNALING.md](JOURNALING.md#observability).
 
 `queue` counts rows in `message_queue` by status. Dead-lettered messages are moved to a separate `dead_letter` table, so `dead_letter` is always `0` here; query the table directly to inspect them.
 
@@ -175,6 +178,10 @@ Posted by `scripts/hooks/agentbus_journal_hook.sh` (and the cc-pool `Stop` hook)
 `turn-ended` re-anchors the journaling pause timer (and marks a cc-pool pane's turn ended) and never journals. The other events register the snapshot, if any, and fire the journaling trigger of the same name, which bypasses `min_human_messages`.
 
 Returns `200 { ok: true, session_id, agent_id, action: "turn-ended" | "triggered", trigger?, snapshot_id?, snapshot_error? }`. `trigger` is the engine's answer (`queued`, `merged`, `not-configured`, `disabled`). A rejected snapshot path is reported in `snapshot_error` while the event still counts. `400` for a malformed body, `404` when no bus session matches the harness session id. Subject to `bus.auth_token` (`X-Bus-Token`) like every route.
+
+### `GET /api/v1/journal/runs`
+
+`?agent=<id>` (bare or prefixed; a pool pane maps to its pool), `?conversation=<conversation id>`, `?session=<session id>`, `?limit=` (1 to 500, default 50). Returns `{ ok, count, runs }`, newest first, one row per journaler attempt: `run_id`, `agent_id`, `session_id`, `conversation_id`, `kind`, `trigger`, `journaler`, `chain_position`, `fallback_from`, `outcome`, `error`, `fidelity`, `window_from`, `window_to`, `message_count`, `started_at`, `duration_ms`, `files_changed` (array), `notes`, `cost_usd`, `input_tokens`, `output_tokens`. Rows are kept 90 days.
 
 ### `POST /api/v1/journal/complete`
 

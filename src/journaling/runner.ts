@@ -229,6 +229,9 @@ export async function runChain(job: JournalJob, ctx: ChainRunContext, deps: Chai
     human: job.humanMessageCount,
     snapshots: job.snapshots.length,
     duration_ms: now().getTime() - runStarted.getTime(),
+    fidelity: winner?.result?.fidelity ?? null,
+    files_changed: winner?.result?.filesChanged?.length ?? 0,
+    cost_usd: attempts.reduce<number | null>((sum, a) => (a.result?.costUsd == null ? sum : (sum ?? 0) + a.result.costUsd), null),
     ...(summary.advisory ? { advisory: summary.advisory } : {}),
   })}`);
 

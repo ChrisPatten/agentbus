@@ -186,3 +186,16 @@ describe('JournalRunGate', () => {
     expect(gate.complete({ runId: 'r', agentId: 'peggy-pool-1' })).toEqual({ ok: false, reason: 'already_completed' });
   });
 });
+
+describe('idle check ignores bus commands (S66.8/S66.10)', () => {
+  it('a /journal now command and its response do not count as an unanswered or answered message', () => {
+    const { j } = make(okDeliver);
+    transcript('t1', 'inbound', '2026-10-06T10:00:00.000Z');
+    transcript('t2', 'outbound', '2026-10-06T10:01:00.000Z');
+    db.prepare(`INSERT INTO transcripts (id, message_id, conversation_id, session_id, created_at, channel, contact_id, direction, body, metadata)
+      VALUES ('t3','m3','conv-1','s1','2026-10-06T10:02:00.000Z','telegram','chris','inbound','/journal now','{}')`).run();
+    db.prepare(`INSERT INTO transcripts (id, message_id, conversation_id, session_id, created_at, channel, contact_id, direction, body, metadata)
+      VALUES ('t4','m4','conv-1','s1','2026-10-06T10:02:01.000Z','telegram','chris','outbound','Journaling…','{"command_response":true}')`).run();
+    expect(j.canJournal(job())).toEqual({ ok: true });
+  });
+});

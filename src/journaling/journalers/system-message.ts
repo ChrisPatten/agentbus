@@ -278,6 +278,7 @@ export class SystemMessageJournaler implements Journaler {
         `SELECT MAX(created_at) AS at FROM transcripts
          WHERE conversation_id = ? AND direction = 'inbound'
            AND contact_id NOT LIKE 'agent:%' AND contact_id NOT LIKE 'system:%'
+           AND body NOT LIKE '/%' AND body NOT LIKE '[reaction:%'
            AND COALESCE(json_extract(metadata, '$.system_only'), 0) = 0`,
       )
       .get(target.conversationId) as { at: string | null }).at;
@@ -288,7 +289,8 @@ export class SystemMessageJournaler implements Journaler {
       return turnEnded >= lastHuman ? null : 'agent is still answering (no turn-ended since the last message)';
     }
     const lastOut = (this.deps.db
-      .prepare(`SELECT MAX(created_at) AS at FROM transcripts WHERE conversation_id = ? AND direction = 'outbound'`)
+      .prepare(`SELECT MAX(created_at) AS at FROM transcripts WHERE conversation_id = ? AND direction = 'outbound'
+        AND json_extract(metadata, '$.command_response') IS NOT 1`)
       .get(target.conversationId) as { at: string | null }).at;
     return lastOut && lastOut >= lastHuman ? null : 'agent has not answered the last message yet';
   }

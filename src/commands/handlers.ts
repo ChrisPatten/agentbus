@@ -64,7 +64,7 @@ function ago(iso: string, now = Date.now()): string {
   return `${Math.round(s / 86_400)}d`;
 }
 
-function commandConversationId(ctx: SlashCommandContext, db: Database.Database, contactId: string): string {
+export function commandConversationId(ctx: SlashCommandContext, db: Database.Database, contactId: string): string {
   const boundId = ctx.channel === 'app' ? ctx.envelope.metadata?.['bound_session_id'] : undefined;
   if (typeof boundId === 'string') {
     const row = db.prepare(`SELECT conversation_id FROM sessions

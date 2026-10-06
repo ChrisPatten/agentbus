@@ -86,7 +86,7 @@ A trigger means "evaluate", never "journal now". `JournalEngine.trigger({ reason
 | `evict`, `release` | `PoolManager` LRU eviction and hard-idle release, through `setReleaseHook`. The pane is cleared only after the run (bounded by the journaling timeout); see [CC_POOL_ADAPTER.md](CC_POOL_ADAPTER.md#session-tracker-interaction) |
 | `pre-compact`, `session-end` | Harness hook events |
 | `shutdown` | Bus shutdown (see below) |
-| `manual` | `/journal now` *(part B)* |
+| `manual` | `/journal now` |
 | `turn-ended` | Harness hook; only re-anchors the pause clock |
 
 - **Final triggers are persisted** in `journal_state.pending_trigger` when they fire, and the tick re-evaluates pending rows, so a restart doesn't lose a `/clear` or an eviction.
@@ -128,7 +128,7 @@ Snapshot paths must be absolute, exist, be regular files, and resolve inside the
 
 `agentbus_stop_hook.sh` (cc-pool) now posts `turn-ended` here instead of using a hardcoded `POOL_AGENT_ID`. `agentbus_precompact_snapshot.sh` is superseded by the generic hook.
 
-**Hook health** (`hookHealth()`): for each event the runtime declares in `hookEvents`, `ok`, `never-seen`, `stopped`, `unverifiable` (rare events not seen yet) or `idle`. Only `turn-ended` can be judged by its absence. A `turn-ended` hook that used to report and has been quiet for 10 min while the agent keeps answering raises `journaling:hook-stopped:turn-ended` (`warning`); it resolves when the hook reports again. A hook that was never seen raises nothing, because hooks are optional. `/journal` shows hook health *(part B)*.
+**Hook health** (`hookHealth()`): for each event the runtime declares in `hookEvents`, `ok`, `never-seen`, `stopped`, `unverifiable` (rare events not seen yet) or `idle`. Only `turn-ended` can be judged by its absence. A `turn-ended` hook that used to report and has been quiet for 10 min while the agent keeps answering raises `journaling:hook-stopped:turn-ended` (`warning`); it resolves when the hook reports again. A hook that was never seen raises nothing, because hooks are optional. `/journal` shows hook health.
 
 ## Journalers
 
@@ -269,9 +269,13 @@ The bus's own environment (API keys, `bus.auth_token`) is not passed. If your sc
 
 ## Observability
 
-- One structured log line per run: `[journaling] {"run_id":…,"agent":…,"trigger":…,"outcome":…,"journaler":…,"attempts":[…],…}`.
-- `journal_runs` columns: `run_id`, `agent_id`, `session_id`, `conversation_id`, `kind`, `trigger`, `journaler`, `chain_position`, `fallback_from`, `outcome`, `error` (truncated to 500 chars), `fidelity` (`bus-transcript | snapshot | full-session`), `window_from`, `window_to`, `message_count`, `started_at`, `duration_ms`, `files_changed`, `notes`, `cost_usd`, `input_tokens`, `output_tokens`.
-- `/journal`, `/journal runs [n]`, `/journal now`, `GET /api/v1/journal/runs` and the health summary *(part B, S66.10)*.
+- **`/journal`** shows, for the conversation it is sent from: last journaled, messages from people waiting (and whether that is below `min_human_messages`), a pending final trigger, a run in progress or holding the conversation. For its agent: the chain (and entries its runtime can't run), last success, failed runs in a row, last failure, backlog, hook health (`ok`, `never-seen`, `stopped`, `unverifiable`, `idle`) and open journaling advisories.
+- **`/journal runs [n]`**: the agent's last `n` attempts (default 5, max 20), with trigger, journaler, `fallback_from`, outcome, fidelity, cost and the error or note.
+- **`/journal now`**: trigger `manual` for the conversation's session. Bypasses the pause threshold, `min_human_messages` and the attempt cap; respects the cursor (nothing new → "Nothing new to journal").
+- **`GET /api/v1/journal/runs?agent=…&conversation=…&session=…&limit=…`** returns `journal_runs` rows (see [HTTP_API.md](HTTP_API.md#get-apiv1journalruns)).
+- **`/api/v1/health`** has a `journaling` object: per agent backlog age (oldest unjournaled eligible content), backlog sessions, consecutive exhaustions, last success and failure, in-flight; overall `status` `ok`, `warning` (an exhausted run) or `critical` (3 in a row, or 24 h of backlog). The top-level health `status` is not affected.
+- **One structured log line per run**: `[journaling] {"run_id":…,"agent":…,"session":…,"conversation":…,"trigger":…,"outcome":"done|nothing-to-do|exhausted","journaler":…,"attempts":["system-message:unavailable","cc-headless:done"],"window":[…],"messages":…,"human":…,"snapshots":…,"duration_ms":…,"fidelity":…,"files_changed":…,"cost_usd":…}`. Script stderr is logged on its own line.
+- **`journal_runs`** columns: `run_id`, `agent_id`, `session_id`, `conversation_id`, `kind`, `trigger`, `journaler`, `chain_position`, `fallback_from`, `outcome`, `error` (truncated to 500 chars), `fidelity` (`bus-transcript | snapshot | full-session`), `window_from`, `window_to`, `message_count`, `started_at`, `duration_ms`, `files_changed`, `notes`, `cost_usd`, `input_tokens`, `output_tokens`. Swept after 90 days.
 
 ## Advisories
 

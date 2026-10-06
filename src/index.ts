@@ -53,6 +53,7 @@ import { createCostCommand } from './commands/cost.js';
 import { createPoolCommand } from './commands/pool.js';
 import { createPaneCommand } from './commands/pane.js';
 import { createRcCommand } from './commands/rc.js';
+import { createJournalCommand } from './commands/journal.js';
 import { Summarizer } from './memory/summarizer.js';
 import { SessionTracker } from './memory/session-tracker.js';
 import { Scheduler } from './scheduler/scheduler.js';
@@ -207,6 +208,7 @@ commandRegistry.register(createCostCommand({ db, headlessControl }));
 commandRegistry.register(createPoolCommand({ poolManagers }));
 commandRegistry.register(createPaneCommand({ poolManagers }));
 commandRegistry.register(createRcCommand({ poolManagers }));
+commandRegistry.register(createJournalCommand({ db, engine: journalEngine, resolver: runtimeResolver, advisories, gate: journalGate }));
 
 const pipeline = new PipelineEngine();
 pipeline.use({ slot: 10, name: 'normalize',        stage: normalize });
@@ -242,7 +244,8 @@ const app = config.adapters.app?.enabled
   ? new AppAdapter(db, (contactId) => routedAgent(config, contactId), getHeadlessSnapshots) : undefined;
 if (app) registry.register(app);
 
-const httpServer = await createHttpServer({ queue, registry, config, pipeline, db, commandRegistry, pauseSet, siri, app, poolManagers, getHeadlessSnapshots, runtimeResolver, advisories, journalEvents, journalGate });
+const journalStatus = { db, engine: journalEngine, resolver: runtimeResolver, advisories, gate: journalGate };
+const httpServer = await createHttpServer({ queue, registry, config, pipeline, db, commandRegistry, pauseSet, siri, app, poolManagers, getHeadlessSnapshots, runtimeResolver, advisories, journalEvents, journalGate, journalStatus });
 
 // E66 — busy notice for a held message: the channel's native queued/status
 // signal where it has one, a short text elsewhere, nothing on email.
