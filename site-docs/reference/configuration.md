@@ -21,11 +21,15 @@ A complete file needs `bus`, `adapters` and `memory` (which may be empty, `memor
 | `db_path` | required | Where the database is kept, for example `~/.agentbus/agentbus.db`. The folder is created if needed. |
 | `http_port` | `3000` | The port the bus listens on |
 | `host` | `127.0.0.1` | Which network the bus listens on. `127.0.0.1` means this computer only. `0.0.0.0` opens it to your local network; see [Running AgentBus](/operations/deployment#reaching-the-bus-from-other-devices). |
-| `auth_token` | none | A shared password every request must send as `X-Bus-Token`. **Don't set this yet**; see below. |
+| `auth_token` | none | A shared password every request (except the health check) must send as `X-Bus-Token`. See below. |
 | `log_level` | `info` | Accepted, but not applied yet |
 
-::: danger Leave `auth_token` unset
-AgentBus's own agent connections and hooks don't send `X-Bus-Token` yet. With `auth_token` set, your agents can't receive messages or reply. Keep `host` at `127.0.0.1` and use a narrowly scoped proxy (such as `tailscale serve --set-path`) to expose only what you need.
+::: tip Setting `auth_token`
+Put the token in `.env` (for example `BUS_TOKEN=...`) and reference it as `auth_token: ${BUS_TOKEN}`. AgentBus's own agents pick it up automatically: claude-code, cc-headless and cc-pool all send it, and cc-pool passes it to each pane as `AGENTBUS_BUS_TOKEN` so the pool hook scripts send it too.
+
+If you use the hook scripts with a plain `claude-code` session (not cc-pool), export `AGENTBUS_BUS_TOKEN` in the shell that starts `claude`. Your own scripts and clients, such as the Mac app or `make` targets, need to send `X-Bus-Token` themselves.
+
+Even with a token, keep `host` at `127.0.0.1` unless you need the LAN, and expose only the paths you need through a narrowly scoped proxy (such as `tailscale serve --set-path`).
 :::
 
 ## adapters

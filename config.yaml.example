@@ -6,7 +6,9 @@ bus:
   http_port: 3000
   # host: 127.0.0.1           # default: loopback only. 0.0.0.0 exposes every route to the LAN;
   #                           # set auth_token if you do that. See docs/DEPLOYMENT.md.
-  # auth_token: ${BUS_TOKEN}  # if set, every request except /api/v1/health needs X-Bus-Token
+  # auth_token: ${BUS_TOKEN}  # if set, every request except /api/v1/health needs X-Bus-Token.
+  #                           # AgentBus's own agents/pool panes/hooks send it automatically
+  #                           # (child processes get it as AGENTBUS_BUS_TOKEN).
   db_path: ~/.agentbus/agentbus.db
   log_level: info             # accepted, but not yet applied to log output
 
@@ -131,8 +133,8 @@ adapters:
   #   claude_bin: /Users/chrispatten/.local/bin/claude   # must be absolute (a bare "claude" hits your shell function/alias, not the CLI)
   #   model: sonnet
   #   working_dir: /Users/chrispatten/workspace/peggy-claude-code
-  #   launch_args:                   # appended verbatim to every launch/resume invocation
-  #     - --dangerously-load-development-channels
+  #   launch_args: []                # extra args appended to every launch/resume (the bus already
+  #                                  # adds --dangerously-load-development-channels server:agentbus)
   #   poll_interval_ms: 1000         # passed through to each pane's cc.ts
   #   launch_ack_delay_ms: 5000       # how long to poll for the "loading development channels" prompt before sending Enter to dismiss it
   #   launch_ack_max_attempts: 3     # re-send Enter if capture-pane still shows the prompt after a dismiss attempt

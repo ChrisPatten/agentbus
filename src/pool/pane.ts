@@ -36,6 +36,7 @@ import type { TmuxController } from './tmux.js';
 import type { CcPoolInstanceConfig } from '../config/schema.js';
 import { writePaneMcpConfig, cleanupPaneMcpConfig } from './mcp-config.js';
 import { renderSystemPrompt, expandFileReferences, type PromptContext } from '../adapters/prompt-renderer.js';
+import { busTokenEnv, withBusToken } from '../core/bus-auth.js';
 
 /**
  * Overall bound (ms) on one `launch()` call, measured from `launchStartedAt`
@@ -75,6 +76,12 @@ export interface PaneLifecycleDeps {
   scratchDir: string;
   /** Injectable fetch for tests — defaults to global fetch. */
   fetchFn?: typeof fetch;
+  /**
+   * `bus.auth_token`, when set. Added as `X-Bus-Token` to the readiness poll,
+   * and exported into each new pane window as `AGENTBUS_BUS_TOKEN` so the
+   * pane's `claude`, its cc.ts MCP server and its hook scripts all inherit it.
+   */
+  busToken?: string;
   /**
    * Injectable delay for tests (ack-handshake waits, the readiness poll
    * interval, and the kill-release pause in `release()`) — defaults to a
@@ -187,6 +194,42 @@ function shellQuoteArg(s: string): string {
   return `'${s.split("'").join("'\\''")}'`;
 }
 
+/** Foreground commands that mean "the pane is at a shell prompt", per tmux's `pane_current_command`. */
+const SHELL_COMMANDS = new Set(['bash', 'zsh', 'sh', 'fish', 'dash', 'ksh', 'tcsh', 'csh', 'nu']);
+
+export function isShellCommand(command: string): boolean {
+  const name = command.trim().replace(/^-/, '').split('/').pop() ?? '';
+  return SHELL_COMMANDS.has(name);
+}
+
+const DEV_CHANNELS_FLAG = '--dangerously-load-development-channels';
+const AGENTBUS_CHANNEL = 'server:agentbus';
+
+/**
+ * Drop `--dangerously-load-development-channels` (and a following
+ * `server:agentbus`, or the `=server:agentbus` form) from operator
+ * `launch_args`: `buildLaunchLine` always adds that pair itself, and older
+ * example configs told operators to add the flag too. The flag followed by a
+ * different channel value (e.g. `server:other`) is left alone.
+ */
+export function dedupeDevChannelsArgs(launchArgs: readonly string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < launchArgs.length; i++) {
+    const arg = launchArgs[i]!;
+    if (arg === `${DEV_CHANNELS_FLAG}=${AGENTBUS_CHANNEL}`) continue;
+    if (arg === DEV_CHANNELS_FLAG) {
+      const next = launchArgs[i + 1];
+      if (next === AGENTBUS_CHANNEL) {
+        i++;
+        continue;
+      }
+      if (next === undefined || next.startsWith('-')) continue;
+    }
+    out.push(arg);
+  }
+  return out;
+}
+
 /** "session:window" -> ["session", "window"]. */
 function splitPaneTarget(paneId: string): [session: string, window: string] {
   const idx = paneId.indexOf(':');
@@ -202,6 +245,7 @@ export class PaneLifecycle {
   private readonly cfg: CcPoolInstanceConfig;
   private readonly scratchDir: string;
   private readonly fetchFn: typeof fetch;
+  private readonly busToken: string | undefined;
   private readonly sleepFn: (ms: number) => Promise<void>;
   /** Resolved once, mirroring cc-headless.ts's module-level `configPath`: same env var, same fallback. */
   private readonly agentbusConfigPath: string;
@@ -211,7 +255,8 @@ export class PaneLifecycle {
     this.busBaseUrl = deps.busBaseUrl;
     this.cfg = deps.cfg;
     this.scratchDir = deps.scratchDir;
-    this.fetchFn = deps.fetchFn ?? fetch;
+    this.busToken = deps.busToken || undefined;
+    this.fetchFn = withBusToken(deps.busBaseUrl, this.busToken, deps.fetchFn);
     this.sleepFn = deps.sleepFn ?? defaultSleep;
     this.agentbusConfigPath = process.env['AGENTBUS_CONFIG'] ?? resolve(process.cwd(), 'config.yaml');
   }
@@ -241,6 +286,7 @@ export class PaneLifecycle {
         agentbusConfigPath: this.agentbusConfigPath,
         workingDir: params.ensureWindow.cwd,
         outDir: this.scratchDir,
+        pollIntervalMs: this.cfg.poll_interval_ms,
       });
 
       if (this.cfg.system_prompt) {
@@ -278,9 +324,33 @@ export class PaneLifecycle {
 
   // ── Launch steps ──────────────────────────────────────────────────────────
 
+  /**
+   * Make sure the target window exists AND is sitting at a shell prompt, so
+   * the launch line about to be typed into it reaches the shell.
+   *
+   * A pane released with `on_evict: 'clear'` (eviction or the hard-idle
+   * sweep) still has its old `claude` running in the foreground — `/clear`
+   * only resets that session's context. Typing the launch line into it would
+   * send it to the old session as a prompt, and since that session's cc.ts
+   * still polls under the same pane agent id, the readiness poll would pass
+   * and the new conversation would be served by the wrong session. So when
+   * the foreground process isn't a shell, stop it the same way a `kill`
+   * release does and recreate the window. (An unknown foreground command,
+   * `null`, is left alone.)
+   */
   private async ensureWindowExists(params: LaunchParams): Promise<void> {
     const alreadyAlive = await this.tmux.paneAlive(params.paneId);
-    if (alreadyAlive) return;
+    if (alreadyAlive) {
+      const foreground = await this.tmux.paneCommand(params.paneId);
+      if (foreground === null || isShellCommand(foreground)) return;
+      console.warn(
+        `[pool] Pane ${params.paneId} is still running "${foreground}" — stopping it before launching ` +
+          `session ${params.sessionId}`,
+      );
+      await this.tmux.sendKeys(params.paneId, 'C-c');
+      await this.sleepFn(RELEASE_KILL_PAUSE_MS);
+      await this.tmux.killWindow(params.paneId);
+    }
 
     const [session, windowName] = splitPaneTarget(params.paneId);
     const env = this.buildWindowEnv(params.ensureWindow.env);
@@ -292,8 +362,9 @@ export class PaneLifecycle {
   }
 
   /**
-   * Merge order: `cfg.pane_env` (operator config) < the caller's own
-   * `ensureWindow.env` < TERM/COLORTERM, which win unconditionally. Per
+   * Merge order: `AGENTBUS_BUS_TOKEN` (when `bus.auth_token` is set) <
+   * `cfg.pane_env` (operator config) < the caller's own `ensureWindow.env` <
+   * TERM/COLORTERM, which win unconditionally. Per
    * `CcPoolAdapterSchema.pane_env`'s own doc comment ("TERM/COLORTERM are
    * added unconditionally by later launch code, not defaulted here") — this
    * is that later code. E48's "Prior Art" gotcha 2: these are load-bearing
@@ -303,6 +374,7 @@ export class PaneLifecycle {
    */
   private buildWindowEnv(callerEnv?: Record<string, string>): Record<string, string> {
     return {
+      ...busTokenEnv(this.busToken),
       ...this.cfg.pane_env,
       ...callerEnv,
       TERM: 'xterm-256color',
@@ -362,7 +434,7 @@ export class PaneLifecycle {
 
     args.push('--dangerously-load-development-channels', 'server:agentbus');
 
-    for (const extra of this.cfg.launch_args) {
+    for (const extra of dedupeDevChannelsArgs(this.cfg.launch_args)) {
       args.push(extra);
     }
 

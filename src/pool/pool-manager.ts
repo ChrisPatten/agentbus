@@ -44,6 +44,7 @@ import {
 import { getUnhandledSince } from './unhandled-work.js';
 import { resolveModel as resolveModelFromStore, type ModelSource, type ResolvedModel } from '../adapters/model-override-loader.js';
 import type { MessageQueue } from '../core/queue.js';
+import { resolveBusToken, withBusToken } from '../core/bus-auth.js';
 
 /**
  * E53 — where a pane launch's `--model` came from. Re-exported aliases of
@@ -137,6 +138,12 @@ export interface PoolManagerDeps {
    *  to `busBaseUrl + '/api/v1/inbound'`. Mirrors pane.ts's
    *  `PaneLifecycleDeps.fetchFn` convention. */
   fetchFn?: typeof fetch;
+  /**
+   * `bus.auth_token`, when set. Every bus request this manager (and the
+   * `PaneLifecycle` it builds) makes carries it as `X-Bus-Token`, and new pane
+   * windows get it as `AGENTBUS_BUS_TOKEN`.
+   */
+  busToken?: string;
   /** Override for the recurring `sweepHardIdle()`+`drainParked()` interval
    *  `start()` schedules. Defaults to `DEFAULT_SWEEP_INTERVAL_MS` (60s). */
   sweepIntervalMs?: number;
@@ -274,7 +281,7 @@ export class PoolManager {
     this.leaseStore = new LeaseStore(deps.db);
     this.busBaseUrl = deps.busBaseUrl;
     this.queue = deps.queue;
-    this.fetchFn = deps.fetchFn ?? fetch;
+    this.fetchFn = withBusToken(deps.busBaseUrl, deps.busToken || undefined, deps.fetchFn);
     this.sweepIntervalMs = deps.sweepIntervalMs ?? DEFAULT_SWEEP_INTERVAL_MS;
     this.resolveModelFn = deps.resolveModel ?? defaultResolveModel(deps.cfg.model);
     this.transcriptExistsFn = deps.transcriptExists ?? defaultTranscriptExists;
@@ -309,6 +316,7 @@ export class PoolManager {
         tmux: this.tmux,
         busBaseUrl: deps.busBaseUrl,
         cfg: deps.cfg,
+        ...(deps.busToken ? { busToken: deps.busToken } : {}),
         scratchDir: deps.scratchDir ?? join(tmpdir(), 'agentbus-pool-scratch'),
       });
     }
@@ -1369,7 +1377,8 @@ export function createPoolManagers(
     // `defaultResolveModel`'s narrower schedule/config-only behavior.
     const resolveModel = (scheduleModel: string | null): PoolResolvedModel =>
       resolveModelFromStore({ scheduleModel, db, agentId, configModel: cfg.model });
-    managers.set(agentId, new PoolManager({ cfg, db, busBaseUrl, queue, resolveModel }));
+    const busToken = resolveBusToken(config);
+    managers.set(agentId, new PoolManager({ cfg, db, busBaseUrl, queue, resolveModel, ...(busToken ? { busToken } : {}) }));
   }
   return managers;
 }

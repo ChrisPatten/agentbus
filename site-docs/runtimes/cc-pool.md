@@ -69,16 +69,17 @@ Routes reach the pool with `adapterId: cc-pool` and `recipientId: agent:<agent_i
 | `model` | Claude Code's default | The model for new sessions. See [Choosing models](/features/models). The bus warns at startup if this isn't set. |
 | `system_prompt` | none | Extra instructions **appended** to Claude Code's own prompt. Panes rely on the folder's `CLAUDE.md` first. |
 | `launch_args` | `[]` | Extra command-line options for every `claude` launch. |
+| `poll_interval_ms` | `1000` | How often each pane checks for new messages, in milliseconds. Applies to panes started after you change it. |
 | `pane_env` | `{}` | Extra environment variables for every pane, for example `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: "50"`. |
 | `lease.idle_evict_ms` | `1800000` (30 min) | How long a conversation must be idle before another conversation can take its pane. |
 | `lease.hard_idle_ms` | `21600000` (6 h) | How long a conversation can be idle before its pane is released anyway. |
 | `lease.park_timeout_ms` | `300000` (5 min) | How long a message waits for a pane before giving up. |
-| `on_evict` | `clear` | What happens to a released pane: `clear` sends `/clear` to the session; `kill` closes the window. |
+| `on_evict` | `clear` | What happens to a released pane: `clear` sends `/clear` to the session; `kill` closes the window. Either way, when the pane is next given to a conversation, the bus starts a fresh Claude session in it for that conversation. |
 | `launch_ack_delay_ms` | `5000` | How long to watch for Claude Code's "Loading development channels" warning at start-up, which the bus confirms for you. |
 | `launch_ack_max_attempts` | `3` | How many times to try confirming that warning. |
 | `launch_ack_pattern` | `loading development channels` | The text that identifies the warning, in case Claude Code rewords it. |
 
-**Don't add `--dangerously-load-development-channels` to `launch_args`.** The bus already starts every pane with the options it needs to connect.
+You don't need `--dangerously-load-development-channels` in `launch_args`: the bus already starts every pane with the options it needs to connect. If your `launch_args` has it anyway (older example configs added it), the bus leaves out the copy, so it's only passed once.
 
 The pool starts every session with `--permission-mode auto`. Tool permissions otherwise follow your working folder's `.claude/settings.json`.
 
@@ -126,7 +127,7 @@ Claude Code hooks in `scripts/hooks/` in the AgentBus folder make a pool work be
 | `agentbus_journal_hook.sh` | `Stop`, `PreCompact` and `SessionEnd` | Tells the bus each time a turn finishes, so a long-running turn isn't mistaken for an idle conversation. Before the conversation's context is compacted or cleared, it saves a copy of the transcript for journaling. |
 | `agentbus_stop_hook.sh` | `Stop` | The older turn-finished hook. Keep it if you already have it, or use `agentbus_journal_hook.sh` instead. |
 
-The scripts talk to the bus at `http://127.0.0.1:3000`. The approval and tool-status hooks have this address at the top of the file; the journal and stop hooks read `AGENTBUS_URL` from the environment instead and need no editing. If your bus has an `auth_token`, the journal and stop hooks send it from `AGENTBUS_BUS_TOKEN`, which the pool sets in every pane. The scripts need `jq` and `curl`; the tool-status hook also needs `python3`.
+All four scripts read the bus address from `AGENTBUS_URL` (default `http://127.0.0.1:3000`), so there's nothing to edit unless your bus uses another address. If you set [`bus.auth_token`](/reference/configuration#bus), the pool gives each pane the token as `AGENTBUS_BUS_TOKEN`, and every hook sends it. The scripts need `jq` and `curl`; the tool-status hook also needs `python3`.
 
 Panes only pick up new hook settings when they next start.
 

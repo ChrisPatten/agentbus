@@ -41,7 +41,7 @@ See [Journaling and memory](/features/journaling-and-memory).
 
 | Command | What it does |
 |---|---|
-| `/schedule` or `/schedule list` | Lists active scheduled messages for this channel, with their next run time |
+| `/schedule` or `/schedule list` | Lists active scheduled messages for this channel, with their next run time in the schedule's own time zone |
 | `/schedule cancel <id>` | Cancels a schedule. The first few characters of the ID are enough. |
 
 See [Scheduling](/features/scheduling).
