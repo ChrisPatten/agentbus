@@ -66,6 +66,7 @@ Each problem is raised once. If it keeps happening, the same advisory is updated
 | The agent's journal hook stopped reporting | warning |
 | A consolidation pass failed with every journaler | warning |
 | A protected file (such as `CLAUDE.md`) changed during a journal run without an approved proposal | warning, until you acknowledge it |
+| The agent's `CLAUDE.md` doesn't import `@memory/recent.md`, so it can't see its recent journals ([Agent memory](/features/agent-memory)) | warning; clears by itself once the line is added |
 
 See [Journaling and memory](/features/journaling-and-memory).
 

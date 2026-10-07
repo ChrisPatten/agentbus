@@ -84,6 +84,7 @@ import { recordApprovalOutcome, recordDeliveryFailure, recordToolError, type Fee
 import { createFeedbackCommand } from './commands/feedback.js';
 import { RecentFreshness } from './memory/recent-freshness.js';
 import { checkMemorySetup } from './memory/setup-check.js';
+import { MEMORY_SETUP_RECHECK_MS, syncMemorySetupAdvisory } from './memory/setup-advisory.js';
 
 const configPath = process.env['AGENTBUS_CONFIG'] ?? resolve(process.cwd(), 'config.yaml');
 
@@ -182,7 +183,11 @@ const journalEngine = new JournalEngine({
   db, config, resolver: runtimeResolver, registry: journalers, advisories, owners: ownerDirectory, settings: journalingSettings,
   protectedPaths,
   proposals: proposalService,
-  onJournaled: (result) => { if (result.agentId) recentMemory.regenerate(result.agentId, 'journaled'); },
+  onJournaled: (result) => {
+    if (!result.agentId) return;
+    recentMemory.regenerate(result.agentId, 'journaled');
+    memorySetup(result.agentId);
+  },
 });
 journalEngine.addTicker(() => recentMemory.tick());
 // E68 S68.1 — nightly (per-agent cron) consolidation, on the engine tick.
@@ -199,7 +204,24 @@ const approvalHooks: ApprovalResolveHooks = {
   backends: { [SELF_EDIT_ADAPTER]: (request, decision) => proposalService.decide(request, decision) },
 };
 // E67 S67.5 — memory setup checks: /journal shows them; startup logs them.
-const memorySetup = (agentId: string) => checkMemorySetup(recentMemory.layoutFor(agentId), runtimeResolver.resolve(recentMemory.layoutFor(agentId).agentId));
+// Every check also raises/resolves the memory:recent-not-imported advisory
+// (src/memory/setup-advisory.ts), so it clears on its own once fixed.
+function memorySetup(agentId: string) {
+  const layout = recentMemory.layoutFor(agentId);
+  const status = checkMemorySetup(layout, runtimeResolver.resolve(layout.agentId));
+  try {
+    syncMemorySetupAdvisory(advisories, status, layout);
+  } catch (err) {
+    console.error(`[memory] ${layout.agentId}: setup advisory failed: ${String(err)}`);
+  }
+  return status;
+}
+let lastMemorySetupCheck = Date.now();
+journalEngine.addTicker(() => {
+  if (Date.now() - lastMemorySetupCheck < MEMORY_SETUP_RECHECK_MS) return;
+  lastMemorySetupCheck = Date.now();
+  for (const layout of recentMemory.layouts()) memorySetup(layout.agentId);
+});
 // Harness hook events (POST /api/v1/journal/events) and hook health.
 const journalEvents = new HarnessEvents({ db, engine: journalEngine, store: journalEngine.store, poolManagers });
 journalEngine.addTicker(createHookHealthTicker({

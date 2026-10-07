@@ -24,7 +24,7 @@ During a conversation, the agent saves things right away when you ask it to reme
    @memory/recent.md
    ```
 
-   Without the `recent.md` line, the agent doesn't see its recent journals. `/journal` warns you when it's missing.
+   Without the `recent.md` line, the agent doesn't see its recent journals. `/journal` warns you when it's missing, and the agent's owners get a warning advisory that clears by itself within about 15 minutes of adding the line.
 3. **Write topic files in Claude Code's format**, one memory per file, with a short header:
 
    ```markdown

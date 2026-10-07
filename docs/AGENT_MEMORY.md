@@ -138,3 +138,5 @@ Injected content is never subtracted: a session that received a new `recent.md` 
 - Settings files that set it uselessly: project `.claude/settings.json` (ignored by Claude Code), a `.claude/settings.local.json` value the bus's `--settings` overrides.
 - Whether `CLAUDE.md`, `.claude/CLAUDE.md` or `CLAUDE.local.md` in the working dir import `recent.md`, following `@` imports (outside code) up to 4 hops (`importClosure`). Native without the import warns ("add that line so the agent sees its recent journals"); injection with the import warns (loaded twice). Without a working dir it can't check and says so.
 - A memory dir that is unresolved or missing.
+
+**Advisory.** Native loading without the `recent.md` import also raises the `memory:recent-not-imported` advisory (`warning`, one per agent, to its owners; `src/memory/setup-advisory.ts`). Every setup check raises or resolves it: at startup, on `/journal`, after each successful journal run, and every 15 minutes on the journaling engine's tick. Once the import is there, the next check resolves it. An agent without a working dir (`importsRecent: null`) and bus injection never get it.

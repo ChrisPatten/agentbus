@@ -125,6 +125,7 @@ The block format is shared: `src/core/system-block.ts` (`renderSystemBlock`, `ne
 |---|---|---|
 | Journaling (E66, E68) | `journaling:chain-can-exhaust` (info, startup), `journaling:chain-exhausted` (warning → critical), `journaling:hook-stopped:turn-ended` (warning), `journaling:consolidation-exhausted` (warning) | [JOURNALING.md](JOURNALING.md#advisories) |
 | Agent learning (E68) | `protected-paths:unapproved-change` (warning; stays until acknowledged) | [AGENT_LEARNING.md](AGENT_LEARNING.md#protected-paths) |
+| Memory setup (E67, E68) | `memory:recent-not-imported` (warning; resolves itself once `CLAUDE.md` imports `recent.md`) | [AGENT_MEMORY.md](AGENT_MEMORY.md#setup-checks) |
 
 ## Adding a producer
 
