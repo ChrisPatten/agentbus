@@ -12,7 +12,7 @@ import { resolveApproval } from '../approvals/resolve.js';
 import { renderApprovalPending } from '../approvals/render.js';
 import type { ApprovalRequest } from '../approvals/types.js';
 import { FeedbackStore } from '../journaling/feedback.js';
-import { recordApprovalOutcome } from '../journaling/feedback-producers.js';
+import { recordApprovalOutcome, recordLapsedProposal } from '../journaling/feedback-producers.js';
 import { parseScriptOutput } from '../journaling/journalers/script.js';
 import { ProtectedPathMonitor } from './monitor.js';
 import { MAX_PROPOSALS_PER_DAY, PROPOSAL_TTL_MS, ProposalService, SELF_EDIT_ADAPTER } from './proposals.js';
@@ -45,8 +45,12 @@ function setup(opts: { notify?: boolean; owners?: Parameters<typeof makeConfig>[
     if (opts.notify === false) approvals.markStale(request.id, `no adapter for ${channel}`);
     else approvals.updateNotify(request.id, channel, `${request.contact_id}:100`);
   });
-  const service = new ProposalService({ db, owners, protectedPaths: monitor, approvals, dispatch, now: () => new Date(clock), log: () => {} });
   const feedback = new FeedbackStore(db, () => new Date(clock));
+  const producers = { db, feedback, logicalAgentId: (id: string) => owners.logicalAgentId(id) };
+  const service = new ProposalService({
+    db, owners, protectedPaths: monitor, approvals, dispatch, now: () => new Date(clock), log: () => {},
+    onLapsed: (row, reason, conversationId) => recordLapsedProposal(producers, row, reason, conversationId),
+  });
   const resolveDeps = {
     store: approvals, poolManagers: new Map(),
     backends: { [SELF_EDIT_ADAPTER]: (r: ApprovalRequest, d: 'approve' | 'deny') => service.decide(r, d) },
@@ -159,7 +163,7 @@ describe('resolving a proposal through the approval path (S68.3)', () => {
   });
 
   it('approve after the file changed: the proposal is stale and nothing is written', async () => {
-    const { service, approvals, resolveDeps } = setup();
+    const { service, approvals, resolveDeps, feedback } = setup();
     const r = await service.submit({ ...proposal, newContent: 'proposed\n' });
     if (!r.ok) throw new Error('submit failed');
     writeFileSync(join(dir, 'CLAUDE.md'), 'edited by the owner meanwhile\n');
@@ -169,6 +173,13 @@ describe('resolving a proposal through the approval path (S68.3)', () => {
     expect(readFileSync(join(dir, 'CLAUDE.md'), 'utf-8')).toBe('edited by the owner meanwhile\n');
     expect(service.get(r.proposal.id)).toMatchObject({ status: 'stale', status_reason: expect.stringContaining('changed since') });
     expect(approvals.list('pending')).toHaveLength(0);
+    // The agent learns it should re-propose against the current file.
+    const events = feedback.list();
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ kind: 'lapsed-proposal', agent_id: 'agent:baxter', conversation_id: q.conversation_id });
+    expect(events[0]!.text).toContain('CLAUDE.md went stale');
+    expect(events[0]!.text).toContain('Propose it again');
+    expect(JSON.parse(events[0]!.detail!)).toMatchObject({ proposal_id: r.proposal.id, path: 'CLAUDE.md', reason: 'stale' });
   });
 
   it('approve creates a new file in a protected directory', async () => {
@@ -195,8 +206,8 @@ describe('resolving a proposal through the approval path (S68.3)', () => {
     expect(events[0]!.text).toMatch(/^Denied propose_change: CLAUDE\.md: Chris corrected/);
   });
 
-  it('expires after 7 days', async () => {
-    const { service, approvals, resolveDeps } = setup();
+  it('expires after 7 days, recording one lapsed-proposal feedback event', async () => {
+    const { service, approvals, resolveDeps, feedback } = setup();
     const r = await service.submit({ ...proposal, newContent: 'proposed\n' });
     if (!r.ok) throw new Error('submit failed');
     clock += PROPOSAL_TTL_MS + 1000;
@@ -204,6 +215,24 @@ describe('resolving a proposal through the approval path (S68.3)', () => {
     expect((await resolveApproval(resolveDeps, q.id, 'approve', `contact:${q.contact_id}`, new Date(clock), q.contact_id)).outcome).toBe('expired');
     expect(service.sweep()).toBe(1);
     expect(service.get(r.proposal.id)!.status).toBe('expired');
+    const events = feedback.list({ kind: 'lapsed-proposal' });
+    expect(events).toHaveLength(1);
+    expect(events[0]!.text).toContain('CLAUDE.md expired');
+    expect(JSON.parse(events[0]!.detail!)).toMatchObject({ proposal_id: r.proposal.id, path: 'CLAUDE.md', reason: 'expired' });
+    // Expired by the sweep: the conversation of the proposal's first request.
+    const ids = JSON.parse(service.get(r.proposal.id)!.approval_ids!) as string[];
+    expect(events[0]!.conversation_id).toBe(approvals.getById(ids[0]!)!.conversation_id);
+  });
+
+  it('the sweep expires an unanswered proposal and records feedback once', async () => {
+    const { service, feedback } = setup();
+    const r = await service.submit({ ...proposal, newContent: 'proposed\n' });
+    if (!r.ok) throw new Error('submit failed');
+    clock += PROPOSAL_TTL_MS + 1000;
+    expect(service.sweep()).toBe(1);
+    expect(service.sweep()).toBe(0);
+    expect(service.get(r.proposal.id)!.status).toBe('expired');
+    expect(feedback.list({ kind: 'lapsed-proposal' })).toHaveLength(1);
   });
 
   it('ignores an approval request that was not raised for the proposal', async () => {

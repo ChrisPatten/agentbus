@@ -190,7 +190,7 @@ Evidence:
 Agent: agent:assistant · answer by 2026-10-13 03:04 UTC
 ```
 
-Approve it and the bus applies the change, as long as the file hasn't changed since the proposal (if it has, nothing is written and the agent can propose again). Deny it and the agent learns not to propose that again. If an agent has several owners, each gets the request and the first answer counts. Proposals expire after seven days, and an agent can make at most three a day.
+Approve it and the bus applies the change, as long as the file hasn't changed since the proposal (if it has, nothing is written, and the agent is told so it can propose again). Deny it and the agent learns not to propose that again. If an agent has several owners, each gets the request and the first answer counts. Proposals expire after seven days (the agent is told, so it can propose again if the change still matters), and an agent can make at most three a day.
 
 To protect other files, or fewer, list them yourself (this replaces the defaults; folders end in `/`):
 

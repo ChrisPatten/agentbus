@@ -8,6 +8,8 @@
  *                    to the agent as a message, journaled with the next run
  *   tool-error       a tool call failed in a cc-headless turn, or a message
  *                    the agent sent could not be delivered
+ *   lapsed-proposal  a self-edit proposal went stale (the file changed) or
+ *                    expired unanswered; the agent may re-propose (migration 034)
  *
  * Session journal runs get the unconsumed events of their conversation and
  * consume them on success. `denied-approval` and `user-feedback` make the
@@ -18,7 +20,7 @@
 import { randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 
-export const FEEDBACK_KINDS = ['denied-approval', 'user-feedback', 'tool-error'] as const;
+export const FEEDBACK_KINDS = ['denied-approval', 'user-feedback', 'tool-error', 'lapsed-proposal'] as const;
 export type FeedbackKind = (typeof FEEDBACK_KINDS)[number];
 
 /** Kinds that make a session eligible to journal immediately (bypassing min_human_messages). */
@@ -180,7 +182,7 @@ export class FeedbackStore {
         `SELECT * FROM feedback_events WHERE agent_id = ? AND (? IS NULL OR created_at > ?) ORDER BY created_at ASC`,
       )
       .all(toPrefixed(agentId), since, since) as FeedbackEventRow[];
-    const counts: Record<FeedbackKind, number> = { 'denied-approval': 0, 'user-feedback': 0, 'tool-error': 0 };
+    const counts: Record<FeedbackKind, number> = { 'denied-approval': 0, 'user-feedback': 0, 'tool-error': 0, 'lapsed-proposal': 0 };
     const groups = new Map<string, { kind: FeedbackKind; text: string; count: number; conversations: Set<string>; first_at: string; last_at: string }>();
     for (const r of rows) {
       counts[r.kind] += 1;

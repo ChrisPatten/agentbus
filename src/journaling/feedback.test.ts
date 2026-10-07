@@ -92,7 +92,7 @@ describe('FeedbackStore (S68.2)', () => {
     expect(store.latestBypass(conv)).toBeNull();
 
     const summary = store.summary('baxter', null);
-    expect(summary.counts).toEqual({ 'user-feedback': 2, 'denied-approval': 0, 'tool-error': 1 });
+    expect(summary.counts).toEqual({ 'user-feedback': 2, 'denied-approval': 0, 'tool-error': 1, 'lapsed-proposal': 0 });
     expect(summary.recurring[0]).toMatchObject({ kind: 'user-feedback', count: 2, conversations: 2 });
     expect(store.summary('baxter', new Date(clock - 30_000).toISOString()).counts['tool-error']).toBe(1);
     expect(store.summary('baxter', new Date(clock).toISOString()).counts['tool-error']).toBe(0);
@@ -240,7 +240,7 @@ describe('feedback in eligibility and journal runs (S68.2)', () => {
   it('feeds prompts and the script payload; consolidation gets cross-conversation counts', async () => {
     const lines = feedbackLines([{ id: 'f1', kind: 'user-feedback', created_at: 't', text: 'Say "hi"', ref_message_id: 'm9', contact_id: 'chris', detail: null }]);
     expect(lines.join('\n')).toContain('feedback from a person (/feedback) from chris, about your message m9: "Say \\"hi\\""');
-    expect(feedbackSummaryLines({ since: null, counts: { 'user-feedback': 0, 'denied-approval': 0, 'tool-error': 0 }, recurring: [] })).toEqual(['Feedback signals since the last pass: none.']);
+    expect(feedbackSummaryLines({ since: null, counts: { 'user-feedback': 0, 'denied-approval': 0, 'tool-error': 0, 'lapsed-proposal': 0 }, recurring: [] })).toEqual(['Feedback signals since the last pass: none.']);
 
     const j = journaler();
     const engine = engineWith(j);

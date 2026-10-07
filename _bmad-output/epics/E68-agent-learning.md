@@ -116,6 +116,11 @@ Implemented 2026-10-06 on `feat/e64-e68-journaling`. Code: `src/journaling/conso
 
 `src/learning/e2e.test.ts` runs the loop on one agent with a fake LLM (a node script) behind the real `ScriptJournaler`: `/feedback` → journaled below `min_human_messages` → consolidated into a native `feedback` memory and the index → the correction recurs in another conversation → the next consolidation returns a `CLAUDE.md` proposal → the owner approves through `resolveApproval` → the bus applies it and the protected-path check stays quiet.
 
+### Pre-merge follow-ups (2026-10-06, operator-approved)
+
+- **`memory:recent-not-imported` advisory** (`src/memory/setup-advisory.ts`): native loading without the `recent.md` import raises a `warning` advisory per agent; every setup check (startup, `/journal`, after journal runs, every 15 min on the engine tick) raises or resolves it.
+- **Lapsed proposals become feedback**: a proposal that goes `stale` (hash mismatch on approve) or `expired` records a `lapsed-proposal` feedback event (new kind, migration **034** rebuilds `feedback_events` for the CHECK constraint) with the path and reason. Not a bypass kind. This answers the earlier open question.
+
 ### Pre-merge spike: protected-path deny rules (2026-10-06)
 
 Claude Code 2.1.287 (`~/.local/bin/claude`), a temp project with `CLAUDE.md`, `skills/x.md`, `memory/notes.md`, and exactly the cc-pool `runDirect` flags (`-p … --output-format json --permission-mode acceptEdits --mcp-config '{"mcpServers":{}}' --strict-mcp-config --disallowedTools <rules> --model haiku --max-turns 3`).
@@ -137,6 +142,5 @@ Only the first case ran live: after it, the session's auto-mode classifier refus
 
 ### Open questions
 
-- A proposal that goes `stale` (file changed) or `expired` is only visible in `GET /api/v1/proposals`; should it also become a feedback event so the agent knows to re-propose?
 - The daily limit is a rolling 24 h window, not a calendar day.
 - Tool errors from cc-pool panes and `claude-code` sessions aren't captured (no stream to watch); a PostToolUse hook could report them later.

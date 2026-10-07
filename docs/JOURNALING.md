@@ -261,7 +261,7 @@ The bus's own environment (API keys, `bus.auth_token`) is not passed. If your sc
 }
 ```
 
-`protected_paths` (E68) lists the agent's protected files and directories (absolute; directories end in `/`): don't edit them; the bus hashes them around the run and warns the owners about unapproved changes ([AGENT_LEARNING.md](AGENT_LEARNING.md#protected-paths)). `feedback[]` (E68) lists the conversation's feedback events not yet journaled: `/feedback`, denied approvals and tool errors ([AGENT_LEARNING.md](AGENT_LEARNING.md#feedback-events)). Consolidation payloads (`kind: "consolidate"`) carry a `consolidation` object instead of a conversation ([AGENT_LEARNING.md](AGENT_LEARNING.md#journalers)).
+`protected_paths` (E68) lists the agent's protected files and directories (absolute; directories end in `/`): don't edit them; the bus hashes them around the run and warns the owners about unapproved changes ([AGENT_LEARNING.md](AGENT_LEARNING.md#protected-paths)). `feedback[]` (E68) lists the conversation's feedback events not yet journaled: `/feedback`, denied approvals, tool errors and lapsed self-edit proposals ([AGENT_LEARNING.md](AGENT_LEARNING.md#feedback-events)). Consolidation payloads (`kind: "consolidate"`) carry a `consolidation` object instead of a conversation ([AGENT_LEARNING.md](AGENT_LEARNING.md#journalers)).
 
 `messages[]` starts with the agent message before the first new human message (`context: true`), so a reply to a scheduled briefing comes with the briefing.
 

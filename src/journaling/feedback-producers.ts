@@ -8,6 +8,7 @@ import type Database from 'better-sqlite3';
 import type { ApprovalRequest } from '../approvals/types.js';
 import type { HeadlessToolError } from '../adapters/cc-headless.js';
 import type { MessageEnvelope } from '../types/envelope.js';
+import type { ProposalRow } from '../learning/proposals.js';
 import { resolveConversationForOutbound } from '../pipeline/outbound-transcript.js';
 import { latestAgentMessageId, type FeedbackInput, type FeedbackStore } from './feedback.js';
 
@@ -38,6 +39,38 @@ export function deniedApprovalFeedback(deps: FeedbackProducerDeps, request: Appr
 export function recordApprovalOutcome(deps: FeedbackProducerDeps, request: ApprovalRequest, status: 'approved' | 'denied'): void {
   if (status !== 'denied') return;
   deps.feedback.record(deniedApprovalFeedback(deps, request));
+}
+
+/**
+ * A self-edit proposal that went stale (its file changed, so an approval
+ * couldn't apply it) or expired unanswered (E68): the agent may re-propose.
+ */
+export function lapsedProposalFeedback(
+  deps: Pick<FeedbackProducerDeps, 'logicalAgentId'>,
+  row: Pick<ProposalRow, 'id' | 'agent_id' | 'path' | 'status_reason'>,
+  reason: 'stale' | 'expired',
+  conversationId: string | null,
+): FeedbackInput {
+  const why = reason === 'stale'
+    ? `${row.path} changed after it was proposed, so the approved change was not applied`
+    : 'no owner answered within 7 days';
+  return {
+    agentId: deps.logicalAgentId(row.agent_id),
+    kind: 'lapsed-proposal',
+    text: `Self-edit proposal for ${row.path} ${reason === 'stale' ? 'went stale' : 'expired'}: ${why}. ` +
+      'Propose it again (against the current file) if it is still relevant.',
+    conversationId,
+    detail: { proposal_id: row.id, path: row.path, reason, ...(row.status_reason ? { status_reason: row.status_reason } : {}) },
+  };
+}
+
+export function recordLapsedProposal(
+  deps: FeedbackProducerDeps,
+  row: Pick<ProposalRow, 'id' | 'agent_id' | 'path' | 'status_reason'>,
+  reason: 'stale' | 'expired',
+  conversationId: string | null,
+): void {
+  deps.feedback.record(lapsedProposalFeedback(deps, row, reason, conversationId));
 }
 
 /** A failed tool call in a cc-headless turn. */

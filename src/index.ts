@@ -80,7 +80,7 @@ import { ConsolidationScheduler } from './journaling/consolidation.js';
 import { ProtectedPathMonitor } from './learning/monitor.js';
 import { ProposalService, SELF_EDIT_ADAPTER } from './learning/proposals.js';
 import { dispatchApproval } from './approvals/dispatch.js';
-import { recordApprovalOutcome, recordDeliveryFailure, recordToolError, type FeedbackProducerDeps } from './journaling/feedback-producers.js';
+import { recordApprovalOutcome, recordDeliveryFailure, recordLapsedProposal, recordToolError, type FeedbackProducerDeps } from './journaling/feedback-producers.js';
 import { createFeedbackCommand } from './commands/feedback.js';
 import { RecentFreshness } from './memory/recent-freshness.js';
 import { checkMemorySetup } from './memory/setup-check.js';
@@ -178,6 +178,8 @@ const proposalApprovals = new ApprovalStore(db);
 const proposalService = new ProposalService({
   db, owners: ownerDirectory, protectedPaths, approvals: proposalApprovals,
   dispatch: (request, channel) => dispatchApproval({ registry, store: proposalApprovals }, request, channel),
+  // A stale or expired proposal becomes a lapsed-proposal feedback event.
+  onLapsed: (row, reason, conversationId) => safeFeedback(() => recordLapsedProposal(feedbackProducers, row, reason, conversationId)),
 });
 const journalEngine = new JournalEngine({
   db, config, resolver: runtimeResolver, registry: journalers, advisories, owners: ownerDirectory, settings: journalingSettings,

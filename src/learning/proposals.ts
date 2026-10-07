@@ -94,6 +94,13 @@ export interface ProposalServiceDeps {
   dispatch: (request: ApprovalRequest, channel: string) => Promise<void>;
   now?: () => Date;
   log?: (line: string) => void;
+  /**
+   * A pending proposal went `stale` (the file changed since its base hash)
+   * or `expired` (no answer in time). `conversationId` is the conversation
+   * of its first approval request, when known. Wired to a `lapsed-proposal`
+   * feedback event so the agent learns to re-propose if still relevant.
+   */
+  onLapsed?: (row: ProposalRow, reason: 'stale' | 'expired', conversationId: string | null) => void;
 }
 
 /** sha256 of UTF-8 text: the same digest `hashFile` gives the written file. */
@@ -285,10 +292,26 @@ export class ProposalService {
     return { ok: true, proposal: this.get(row.id)!, notified };
   }
 
-  private setStatus(id: string, status: ProposalStatus, reason: string | null, by: string | null): void {
-    this.deps.db
+  private setStatus(id: string, status: ProposalStatus, reason: string | null, by: string | null): boolean {
+    return this.deps.db
       .prepare(`UPDATE self_edit_proposals SET status = ?, status_reason = ?, resolved_at = ?, resolved_by = ? WHERE id = ? AND status = 'pending'`)
-      .run(status, reason, this.now().toISOString(), by, id);
+      .run(status, reason, this.now().toISOString(), by, id).changes > 0;
+  }
+
+  /** Tell `onLapsed` (never throws). `request` is the answering request, when there is one. */
+  private lapsed(row: ProposalRow, reason: 'stale' | 'expired', request?: ApprovalRequest): void {
+    if (!this.deps.onLapsed) return;
+    try {
+      let conversationId = request?.conversation_id ?? null;
+      if (!conversationId) {
+        let ids: string[] = [];
+        try { ids = JSON.parse(row.approval_ids ?? '[]') as string[]; } catch { ids = []; }
+        conversationId = ids.length > 0 ? this.deps.approvals.getById(ids[0]!)?.conversation_id ?? null : null;
+      }
+      this.deps.onLapsed(this.get(row.id) ?? row, reason, conversationId);
+    } catch (err) {
+      this.log(`[learning] proposal ${row.id.slice(0, 8)}: lapsed hook failed: ${String(err)}`);
+    }
   }
 
   /** Mark the other owners' still-pending requests stale once one owner answered. */
@@ -315,7 +338,7 @@ export class ProposalService {
     if (row.status !== 'pending') return { result: 'stale', reason: `proposal already ${row.status}` };
     const by = request.contact_id;
     if (row.expires_at < this.now().toISOString()) {
-      this.setStatus(row.id, 'expired', 'no answer within 7 days', 'timeout');
+      if (this.setStatus(row.id, 'expired', 'no answer within 7 days', 'timeout')) this.lapsed(row, 'expired', request);
       return { result: 'stale', reason: 'proposal expired' };
     }
     if (decision === 'deny') {
@@ -326,8 +349,9 @@ export class ProposalService {
     }
     if (hashFile(row.abs_path) !== row.base_hash) {
       const reason = `${row.path} changed since the proposal was made; the agent may propose again`;
-      this.setStatus(row.id, 'stale', reason, by);
+      const changed = this.setStatus(row.id, 'stale', reason, by);
       this.closeSiblings(row, request.id, reason);
+      if (changed) this.lapsed(row, 'stale', request);
       return { result: 'stale', reason };
     }
     try {
@@ -351,9 +375,15 @@ export class ProposalService {
   /** Expire pending proposals past their deadline (the approval sweep expires their requests). Returns how many. */
   sweep(): number {
     const now = this.now().toISOString();
-    return this.deps.db
-      .prepare(`UPDATE self_edit_proposals SET status = 'expired', status_reason = 'no answer within 7 days', resolved_at = ?, resolved_by = 'timeout'
-        WHERE status = 'pending' AND expires_at < ?`)
-      .run(now, now).changes;
+    const due = this.deps.db
+      .prepare(`SELECT * FROM self_edit_proposals WHERE status = 'pending' AND expires_at < ?`)
+      .all(now) as ProposalRow[];
+    let expired = 0;
+    for (const row of due) {
+      if (!this.setStatus(row.id, 'expired', 'no answer within 7 days', 'timeout')) continue;
+      expired += 1;
+      this.lapsed(row, 'expired');
+    }
+    return expired;
   }
 }

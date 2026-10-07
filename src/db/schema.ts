@@ -169,6 +169,11 @@ function loadMigrations(): Migration[] {
       description: 'Self-edit proposals (E68)',
       sql: readFileSync(join(migrationsDir, '033_self_edit_proposals.sql'), 'utf-8'),
     },
+    {
+      version: 34,
+      description: 'Feedback kind lapsed-proposal (E68)',
+      sql: readFileSync(join(migrationsDir, '034_feedback_lapsed_proposal.sql'), 'utf-8'),
+    },
   ];
 }
 

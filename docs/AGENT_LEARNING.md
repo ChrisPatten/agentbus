@@ -80,13 +80,14 @@ Script payload additions (`ScriptPayloadV1`, still `version: 1`): session fields
 
 ## Feedback events
 
-Signals that the agent went wrong, recorded in `feedback_events` (migration 032) and handed to its journalers.
+Signals that the agent went wrong, recorded in `feedback_events` (migration 032; kind `lapsed-proposal` added by 034) and handed to its journalers.
 
 | Kind | Producer | Bypasses `min_human_messages` |
 |---|---|---|
 | `user-feedback` | `/feedback <text>` in a conversation | yes |
 | `denied-approval` | Any approval request answered **Deny** (the E51 resolution path: Telegram taps and `POST /api/v1/approvals/:id/resolve`, through `ResolveApprovalDeps.onResolved`), including denied self-edit proposals | yes |
 | `tool-error` | A `tool_result` with `is_error` in a normal cc-headless turn (`HeadlessHooks.onToolError`; journaling turns are excluded), and a message an agent sent that the delivery worker dead-lettered (`DeliveryWorkerDeps.onFailed`) | no (too frequent) |
+| `lapsed-proposal` | A self-edit proposal that went `stale` (approved, but the file changed since its base hash) or `expired` (unanswered for 7 days, by `decide` or the sweep), through `ProposalServiceDeps.onLapsed` → `recordLapsedProposal`. Text names the path and says to propose again against the current file if still relevant; `detail` has `proposal_id`, `path`, `reason` (`stale` / `expired`). Conversation: the answering request's, else the proposal's first request's (an owner's default conversation) | no |
 
 Not recorded: `/stop` (usually a change of mind), reactions, edits, quick follow-ups.
 
@@ -158,8 +159,8 @@ The proposal (`self_edit_proposals`, migration 033) stores the base hash of the 
 | `pending` | Waiting for an owner |
 | `applied` | Approved; the bus wrote the file (temp file + rename, directories created) and told the protected-path monitor its new hash, so the next run's check doesn't flag it |
 | `denied` | Denied; the approval path records a `denied-approval` feedback event in the owner's default conversation, so the agent learns from it at its next journal run |
-| `stale` | Approved, but the file's hash no longer matched the base (someone changed it), or the write failed: nothing written. The agent may propose again against the current file |
-| `expired` | No answer within 7 days (`ProposalService.sweep` on the 60 s maintenance tick; the approval sweep expires the requests) |
+| `stale` | Approved, but the file's hash no longer matched the base (someone changed it), or the write failed: nothing written. The agent may propose again against the current file; a hash mismatch records a `lapsed-proposal` feedback event |
+| `expired` | No answer within 7 days (`ProposalService.sweep` on the 60 s maintenance tick; the approval sweep expires the requests). Records a `lapsed-proposal` feedback event |
 | `failed` | No owner could be notified, or the write failed |
 
 The first owner to answer decides; the other owners' requests go `stale`.

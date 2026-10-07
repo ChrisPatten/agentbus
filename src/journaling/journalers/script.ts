@@ -93,7 +93,7 @@ export interface ScriptPayloadV1 {
   /** E68 — feedback events of the conversation since the last journal (session jobs; empty otherwise). */
   feedback: Array<{
     id: string;
-    kind: 'denied-approval' | 'user-feedback' | 'tool-error';
+    kind: 'denied-approval' | 'user-feedback' | 'tool-error' | 'lapsed-proposal';
     created_at: string;
     text: string;
     ref_message_id: string | null;
@@ -125,7 +125,7 @@ export interface ScriptPayloadV1 {
     /** Feedback across conversations since the last pass. */
     feedback: {
       since: string | null;
-      counts: { 'denied-approval': number; 'user-feedback': number; 'tool-error': number };
+      counts: { 'denied-approval': number; 'user-feedback': number; 'tool-error': number; 'lapsed-proposal': number };
       recurring: Array<{ kind: string; text: string; count: number; conversations: number; first_at: string; last_at: string }>;
     } | null;
   };
