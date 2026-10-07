@@ -163,8 +163,10 @@ const ClaudeCodeAdapterSchema = z.object({
 export const DEFAULT_JOURNALING_PROMPT =
   'Our conversation has paused. Review it and update your memory files ' +
   "(today's daily journal, MEMORY.md, and any relevant topic files) with " +
-  'anything durable worth remembering. Do NOT message the user — this is ' +
-  'an internal journaling turn, not a reply.';
+  'anything durable worth remembering. If something is already in memory ' +
+  '(you may have saved it during the conversation), do not record it again: ' +
+  'skip it, or correct or update the existing memory where needed. Do NOT ' +
+  'message the user — this is an internal journaling turn, not a reply.';
 
 /** E68 — default consolidation schedule: nightly at 03:00 (bus local time unless `timezone` is set). */
 export const DEFAULT_CONSOLIDATION_CRON = '0 3 * * *';

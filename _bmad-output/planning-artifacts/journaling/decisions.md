@@ -129,7 +129,7 @@ Decisions marked 2026-10-02 are confirmed by the user.
 ## Memory organization (decided 2026-10-02)
 
 - **Adopt Claude Code native auto memory** with `autoMemoryDirectory` pointing at the agent's own `memory/` dir (agent project `.claude/settings.json`). Native loads the first 200 lines / 25KB of `MEMORY.md` on every Claude Code runtime and enforces the size limit itself.
-- **In-turn writes accepted (option a):** native auto memory may write during turns for explicit "remember X" moments; `CLAUDE.md` steers everything else to the journaling sweep (soft rule).
+- **In-turn writes accepted (option a):** native auto memory may write during turns for explicit "remember X" moments; `CLAUDE.md` steers everything else to the journaling sweep (soft rule). *Refined 2026-10-06 (Post-E66 decision 4): in-turn capture is proactive and normal; journaling is the safety net plus reflection.*
 - Bus no longer injects `MEMORY.md` on Claude Code runtimes; `CLAUDE_CODE_DISABLE_AUTO_MEMORY` dropped for headless; agent SessionStart hook loading `MEMORY.md` becomes redundant. "Native memory" is a runtime capability in the taxonomy; runtimes without it keep bus injection.
 - Layers: `CLAUDE.md` + imports (protected) → **pinned memory** (`memory/vocabulary.md` glossary, imported from `CLAUDE.md`, not protected, outside the 200-line cap) → `MEMORY.md` (essentials + one-line index) → typed topic files (native frontmatter `user | feedback | project | reference`, on demand) → `memory/daily/` (not indexed) → `memory/archive/`.
 - **Migrate Baxter's topic files to native frontmatter**, splitting `feedback.md` into per-memory `feedback` files. Journaler and consolidation prompts write in the native format.
@@ -153,6 +153,8 @@ Decisions marked 2026-10-02 are confirmed by the user.
 2. **Remove the legacy structured memory feature entirely.** The operator is its only user and it is dead. Remove the `recall_memory`/`log_memory` tools, `/api/v1/memories` routes, the memory-inject stage and its config; retired keys warn and are ignored at load so an old `config.yaml` still starts. Migration 031 drops `memories` and `session_summaries`.
 
 3. **Critical journaling degrades health.** When the journaling summary's status is `critical`, `/api/v1/health` reports top-level status `degraded`.
+
+4. **In-turn capture vs journaling (refines option a).** In real time the agent acts as itself and proactively captures information to best support the user; high-stakes items are saved immediately. In-turn capture is the agent's normal behavior, not only for explicit "remember X" moments. Journaling is the safety net for that capture and the place for reflection and second-order insights. Journaling itself doesn't change: a run sees what the agent already captured and takes no action, or corrects/updates it where appropriate. The default journaling prompt gained one sentence saying so (don't record what's already in memory; skip it or correct/update it); no other prompt change. Steering lines in `docs/AGENT_MEMORY.md`, `site-docs/features/agent-memory.md` and the Baxter plan use this framing.
 
 ## Epics
 

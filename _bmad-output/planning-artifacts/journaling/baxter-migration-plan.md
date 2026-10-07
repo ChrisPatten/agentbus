@@ -1,6 +1,6 @@
 # Baxter migration plan (E67 S67.5)
 
-Status: **proposed, not executed.** Needs the operator's approval before anything in `~/workspace/baxter_agent` or the bus `config.yaml` is changed. Written 2026-10-06 from a read-only look at `~/workspace/baxter_agent` (git HEAD `6a33e13`, with uncommitted live changes to `memory/commitments.md`, `memory/daily/2026-10-06.md`, `memory/scan_state.md`) and `/Users/pattenchris/workspace/agentbus/config.yaml`.
+Status: **Ready to execute after the branch is merged and the bus restarted.** The operator answered Q1–Q4 on 2026-10-06 (see the end); nothing in `~/workspace/baxter_agent` or the bus `config.yaml` has been changed yet. Written 2026-10-06 from a read-only look at `~/workspace/baxter_agent` (git HEAD `6a33e13`, with uncommitted live changes to `memory/commitments.md`, `memory/daily/2026-10-06.md`, `memory/scan_state.md`) and `/Users/pattenchris/workspace/agentbus/config.yaml`.
 
 Goal: move Baxter to the E67 layout (`docs/AGENT_MEMORY.md`): native auto memory on `memory/`, pinned vocabulary, `@memory/recent.md`, native-frontmatter topic files, `MEMORY.md` reduced to essentials plus a one-line index, no SessionStart memory hook, the in-turn steering line and the E65 advisory snippet.
 
@@ -62,12 +62,23 @@ agents:
     memory:
       dir: memory                  # the bus passes --settings autoMemoryDirectory=<working_dir>/memory
       lookback_days: 3
-      recent_budget_chars: 40000   # matches the old hook's 40000-char cap; 3 dailies are ~42KB today
+      recent_budget_chars: 40000   # Q4: yes. Matches the old hook's 40000-char cap; 3 dailies are ~42KB today
+    # Q3: the operator owns Baxter (advisories, self-edit proposals).
+    owners:
+      - { channel: telegram, contact_id: chris }   # see the note below
+    # Q1: journaling on. cc-headless first (full transcript), script as the always-runnable fallback.
+    journaling:
+      chain: [cc-headless, script]
+      script:
+        command: /Users/pattenchris/workspace/agentbus/scripts/journalers/claude-p-journal.sh
+      # Defaults apply: min_human_messages 2, timeout 5 min, nightly consolidation at 03:00.
 
 memory: {}
 ```
 
-`structured_extraction` is retired (warns at startup); drop it. Journaling stays as configured; see open question Q1.
+`structured_extraction` is retired (warns at startup); drop it. Remove the old `journaling.enabled: false` (or `adapters.cc-headless.journaling` block) so `agents."agent:baxter".journaling` is the only journaling config for Baxter.
+
+**Owner contact.** The operator's Telegram contact is `contact_id: chris` (the principal in `memory/MEMORY.md` and Q3). The `channel` must be the channel string of the Telegram adapter instance Chris uses with Baxter: `telegram` for a single unnamed instance, `telegram:<instance>` for a named one (as in `pipeline.routes[].match.channel`). The bus refuses to start if the owner isn't a configured contact, so a wrong value shows up at once. (The pre-merge run that wrote this couldn't read `config.yaml`: its sandbox treats the file as credential-bearing. Check the channel string there before applying.) Telegram is required for self-edit proposals, which need a channel with interactive Approve/Deny; advisories also reach owners there.
 
 ## Step 3. Set the memory dir for interactive use
 
@@ -303,11 +314,11 @@ Also add a row after `reference/*.md`:
 - **The end-of-session journaler** (`scripts/hooks/session_end_journal.py`, fires on `/clear` when a pooled session is evicted) is a safety net, not the primary mechanism.
 ```
 
-After (the steering line first; Baxter's high-stakes rule stays, see Q2):
+After (the steering line first, in the operator's framing: in-turn capture is normal and proactive, journaling is the safety net plus reflection; Baxter's high-stakes rule stays, Q2):
 
 ```markdown
 **When to write**
-- **During a conversation, save a memory only when someone explicitly asks you to remember something, or when it is a high-stakes item** (below). Everything else is recorded by the AgentBus journaling sweep after the conversation pauses, so stay focused on the conversation.
+- **Capture important information as you go**, proactively, the way a good chief of staff would, to best support Chris. Don't wait to be asked and don't hold capture back for later. After a conversation pauses, the AgentBus journaling pass looks back over it as a safety net: it fills in anything you missed, corrects or updates what you saved, and records reflections and patterns.
 - **Immediately, in the same turn** — high-stakes items: commitments and deadlines, calendar changes, decisions, anything security- or confidentiality-relevant, and *ambient schedule signals* (a plan or promise mentioned in a thread that isn't on the calendar).
 - **Routines (scans, briefs, wraps) write as part of their checklist** — that is their job, not a conversation.
 - **Liberally, in the daily log** (routines and journaling) — observations, context, who said what, things that might matter later.
@@ -329,7 +340,7 @@ then call `advisory_ack` with its id. If the block says no one sent a message, s
 message to the owner rather than replying to anything.
 ```
 
-(This needs `agents."agent:baxter".owners` in the bus config for advisories to be delivered; see Q3.)
+(Delivered to the owner added in step 2, Q3.)
 
 ## Step 8. Skills and README that name `feedback.md`
 
@@ -351,7 +362,7 @@ git rm scripts/hooks/load_recent_memory.sh
 grep -rn "load_recent_memory" . --exclude-dir=.git   # expect no hits (the old worktree under .claude/worktrees aside)
 ```
 
-If a `SessionStart` entry for `load_recent_memory.sh` exists in any settings file on the machine that runs Baxter (none on this one), delete that entry. Keep `session_end_journal.*` until Q1 is decided.
+If a `SessionStart` entry for `load_recent_memory.sh` exists in any settings file on the machine that runs Baxter (none on this one), delete that entry. With journaling enabled (Q1) the bus journals on `/clear` and session end, so `session_end_journal.*` is redundant: `git rm scripts/hooks/session_end_journal.*` and drop any registration (none found on this machine).
 
 ## Step 10. Verify, then commit
 
@@ -361,7 +372,8 @@ cd /Users/pattenchris/workspace/agentbus && npm run build && pm2 start agentbus 
 
 1. Bus log: `[memory] agent:baxter: recent.md regenerated (startup; 3 day(s)…)` and **no** `[memory] agent:baxter:` warnings; no `adapters.cc-headless.memory is deprecated` warning.
 2. `head -3 ~/workspace/baxter_agent/memory/recent.md` starts with the "Generated by AgentBus" marker and `# Recent journal`.
-3. `/journal` in the app: `Memory (…/baxter_agent/memory)`, `loading: native (auto memory, set by the bus)`, `CLAUDE.md imports recent.md: yes`, no warnings.
+3. `/journal` in the app: `Memory (…/baxter_agent/memory)`, `loading: native (auto memory, set by the bus)`, `CLAUDE.md imports recent.md: yes`, no warnings; the journaling chain `cc-headless → script`; no `memory:recent-not-imported` advisory open for Baxter (`/status`).
+3b. Bus log at startup: no `owner … is not a configured contact` error, no `journaling:chain-can-exhaust` advisory (the chain ends with `script`).
 4. Ask Baxter in the app: "What's the first vocabulary term you know, what did the last scan in yesterday's daily log say, and what does feedback say about Trello labels?" It should answer from `vocabulary.md`, `recent.md` and the index/feedback file without being told where to look.
 5. Commit: `git add -A && git commit -m "feat(memory): E67 native memory layout"`.
 
@@ -374,9 +386,9 @@ cp /Users/pattenchris/workspace/agentbus/config.yaml.pre-e67 /Users/pattenchris/
 
 Then either run a pre-E67 bus build, or keep E67 with `agents."agent:baxter".memory.native: false` (bus injects `MEMORY.md` plus `recent.md`; note the old glossary-in-MEMORY.md layout still works that way). Reverting `.claude/settings.local.json` is covered by the tarball.
 
-## Open questions for the operator
+## Operator decisions (2026-10-06)
 
-- **Q1. Journaling is disabled for Baxter.** The steering line defers non-urgent memory to "the journaling sweep", which only exists if journaling runs. Enable it (`agents."agent:baxter".journaling: { chain: [cc-headless, script], script: { command: /Users/pattenchris/workspace/agentbus/scripts/journalers/claude-p-journal.sh } }`, plus `min_human_messages`/thresholds to taste), or keep the old "write liberally in-turn" rule until it is? Once enabled, `session_end_journal.*` is redundant (the bus journals on `/clear`).
-- **Q2. High-stakes in-turn writes.** The plan keeps Baxter's rule to log commitments/decisions immediately, alongside the "explicit remember" steering. Drop it for the pure steering line instead?
-- **Q3. Owners.** The advisory snippet only matters with `agents."agent:baxter".owners: [{ channel: app, contact_id: chris }]` in the bus config. Add it?
-- **Q4. Budget.** 40000 chars keeps today's three days whole. The E67 default 20000 would cut the oldest of them. Keep 40000?
+- **Q1. Enable journaling for Baxter: yes.** `chain: [cc-headless, script]` with the reference script (step 2). `session_end_journal.*` goes (step 9).
+- **Q2. Keep the high-stakes in-turn rule: yes.** The steering line follows the operator's framing, not "explicit remember only": in real time Baxter acts as itself and captures important information proactively; journaling is the safety net for that capture and the place for reflection and second-order insights (step 7c). See `decisions.md`, "Post-E66 decisions", item 4.
+- **Q3. Add the operator as Baxter's owner: yes** (step 2; confirm the Telegram channel string).
+- **Q4. `recent_budget_chars: 40000`: yes** (step 2).

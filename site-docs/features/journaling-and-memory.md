@@ -10,6 +10,8 @@ Where the memory files live and how your agent reads them is described in [How m
 
 When a conversation pauses, the bus starts a **journal run**: a short pass where the agent reviews what's new in the conversation and updates its memory.
 
+Journaling doesn't replace the agent saving things as it works. During a conversation the agent captures what matters on its own, and high-stakes things right away. The journal run is a safety net and a chance to reflect: it sees what the agent already saved, leaves it alone or corrects it, adds anything that was missed, and notes patterns and lessons. See [How memory is organized](/features/agent-memory#setting-up-an-agent) for the line to add to your agent's `CLAUDE.md`.
+
 A journal run can be triggered by:
 - **A pause.** No activity for the channel's `threshold_ms`.
 - **A ceiling.** Too long since the last journal (`ceiling_ms`), even if the conversation is still active.

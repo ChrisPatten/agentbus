@@ -2,6 +2,8 @@
 
 > **Status: E66 complete (S66.1–S66.11).** Consolidation, feedback signals and self-edit proposals are E68 ([AGENT_LEARNING.md](AGENT_LEARNING.md)); the native memory layout and `recent.md` are E67. User-facing guide: `site-docs/features/journaling-and-memory.md`.
 
+**Role.** In real time the agent acts as itself and captures important information proactively as it works (high-stakes items immediately); in-turn capture is not limited to explicit "remember X" requests. Journaling is the safety net for that capture and the place for reflection and second-order insights: a run sees what the agent already saved and leaves it alone, or corrects and updates it. The default prompt (`DEFAULT_JOURNALING_PROMPT`) says not to record what is already in memory. Steering line for `CLAUDE.md`: [AGENT_MEMORY.md](AGENT_MEMORY.md#agent-setup).
+
 Journaling has two parts. **Triggers** decide *when* the bus looks at a conversation. **Journalers** decide *who* updates the agent's memory. One engine serves every agent runtime (`cc-headless`, `cc-pool`, `claude-code`, polled harnesses).
 
 Code: `src/journaling/` (`config.ts`, `eligibility.ts`, `store.ts`, `engine.ts`, `runner.ts`, `registry.ts`, `events.ts`, `advisories.ts`, `types.ts`, `status.ts`, `process.ts`, `prompt.ts`, `memory-diff.ts`, `delivery.ts`, `journalers/{cc-headless,script,system-message}.ts`), `src/commands/journal.ts`, `src/pipeline/stages/journal-hold.ts`, `src/mcp/tools/journal.ts`, `scripts/journalers/claude-p-journal.sh`, `scripts/hooks/agentbus_journal_hook.sh`. Migration 026. Design record: `_bmad-output/planning-artifacts/journaling/decisions.md`.

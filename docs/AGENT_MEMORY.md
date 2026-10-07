@@ -36,12 +36,15 @@ AgentBus adopts Claude Code's native [auto memory](https://code.claude.com/docs/
 4. **Steering line in `CLAUDE.md`:**
 
    ```markdown
-   Save a memory during the conversation only when someone explicitly asks you to remember
-   something. Everything else is recorded by the journaling sweep after the conversation
-   pauses, so stay focused on the conversation.
+   Capture important information in memory as you go, the way a good assistant would,
+   to best support the person you work for. Save high-stakes items (commitments,
+   deadlines, decisions, corrections) immediately. After the conversation pauses, a
+   journaling pass looks back over it: it fills in anything you missed, corrects or
+   updates what you saved, and records reflections and patterns. Don't hold back
+   capture for it.
    ```
 
-   Agents with standing in-turn rules (for example "log commitments immediately") keep them; the line steers the rest.
+   In-turn capture is the agent's normal, proactive behavior, not only for explicit "remember X" requests. Journaling is the safety net for that capture and the place for reflection and second-order insights: it sees what the agent already saved and leaves it alone, or corrects and updates it (the default journaling prompt says so). Agents with standing in-turn rules (for example "log commitments immediately") keep them.
 5. **Freshness hook** for cc-pool agents ([below](#freshness-hook)).
 6. **Retire** any SessionStart hook that prints `MEMORY.md` or dailies: native loading and `recent.md` replace it, and it would load them twice.
 

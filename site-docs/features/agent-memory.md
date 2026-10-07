@@ -12,7 +12,7 @@ AgentBus uses Claude Code's built-in [auto memory](https://code.claude.com/docs/
 | `memory/recent.md` | The last three days of journals, maintained by the bus | Every session, kept up to date during long sessions |
 | `memory/archive/` | Retired content | Never |
 
-During a conversation, the agent saves things right away when you ask it to remember something. Everything else is handled by the journal sweep, so the agent stays focused on your conversation.
+During a conversation, the agent saves what matters as it goes, without waiting to be asked, and saves high-stakes things like commitments and deadlines right away. After the conversation pauses, journaling is a safety net: it catches anything the agent missed, corrects or updates what it saved, and reflects on what to do better.
 
 ## Setting up an agent
 
@@ -41,9 +41,12 @@ During a conversation, the agent saves things right away when you ask it to reme
 4. **Tell the agent when to save memories.** Add to its `CLAUDE.md`:
 
    ```markdown
-   Save a memory during the conversation only when someone explicitly asks you to remember
-   something. Everything else is recorded by the journaling sweep after the conversation
-   pauses, so stay focused on the conversation.
+   Capture important information in memory as you go, the way a good assistant would,
+   to best support the person you work for. Save high-stakes items (commitments,
+   deadlines, decisions, corrections) immediately. After the conversation pauses, a
+   journaling pass looks back over it: it fills in anything you missed, corrects or
+   updates what you saved, and records reflections and patterns. Don't hold back
+   capture for it.
    ```
 
 5. **Remove old start-of-session hooks** that print `MEMORY.md` or the daily journals into the session. They're no longer needed and would load everything twice.
