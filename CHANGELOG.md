@@ -10,6 +10,10 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-10-06
+
+Pre-1.0 minor release **with breaking changes**: the legacy structured memory store is removed (migration 031 drops its tables), the Anthropic-API summarizer and its config keys are retired, and the sessions API no longer returns a `summary` field. See Removed.
+
 ### Added
 - **Self-edit proposals (E68).** Agents can propose changes to their protected files with the new `propose_change` MCP tool (`POST /api/v1/proposals`; `GET /api/v1/proposals[/:id]`) or `proposals[]` in a script journaler's stdout. Each owner gets a new kind of approval request (`self-edit`) on Telegram with the rationale, evidence and a compact diff, Approve/Deny only, valid 7 days; the first answer wins. On approve the bus writes the file itself if it hasn't changed since the proposal (otherwise the proposal is stale and the agent may propose again); a denial becomes feedback for the agent. At most 3 proposals per agent per day. Migration 033 (`self_edit_proposals`).
 - **Protected paths (E68).** `agents.<id>.protected_paths` (default `CLAUDE.md`, the files the runtime's `system_prompt` imports with `@path`, `skills/` and `.claude/`; the memory dir is never protected) lists what an agent may not edit itself. cc-headless journaling and consolidation turns deny edits to them (`--disallowedTools Edit(//<abs path>)`, which Claude Code also applies to the Write tool and to Bash redirect, `tee` and `sed` targets), scripts get `protected_paths` (the reference script denies them too), and the bus hashes protected files before and after every journal run, raising a `protected-paths:unapproved-change` warning to the owners when one changed without an approved proposal. `/journal` lists them.
@@ -974,7 +978,8 @@ Baseline release. Core bus, pipeline, adapters, memory, scheduling.
 - Built-in slash commands + plugin command registry. (E6)
 - Scheduled messages (cron + one-shot) via background scheduler. (E18)
 
-[Unreleased]: https://github.com/ChrisPatten/agentbus/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/ChrisPatten/agentbus/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/ChrisPatten/agentbus/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/ChrisPatten/agentbus/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/ChrisPatten/agentbus/compare/v0.11.0...v0.13.0
 [0.11.0]: https://github.com/ChrisPatten/agentbus/compare/v0.10.0...v0.11.0
