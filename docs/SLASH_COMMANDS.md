@@ -17,6 +17,11 @@ Slash commands let you operate AgentBus from any connected channel without SSH a
 | `/pool [pool-agent-id]` | Show cc-pool pane leases and parked-queue depth | `/pool peggy` |
 | `/pane [n\|all]` | Send a PNG snapshot of the cc-pool tmux pane(s) | `/pane 2` |
 | `/rc [n]` | Type `/remote-control` into a cc-pool Claude pane | `/rc` |
+| `/keys [@n] <key> [key...]` | Send keystrokes to a cc-pool Claude pane | `/keys Escape` |
+| `/<name>` (anything else) | Forward the command to the agent's provider | `/compact` |
+| `//<name>` | Forward to the provider even if the bus defines `<name>` | `//clear` |
+
+A **provider** is the service that runs an agent's turns: `cc-pool` or `cc-headless`. See [Provider commands](#provider-commands).
 
 ### `/status`
 
@@ -215,6 +220,28 @@ Types `/remote-control` and Enter into a `cc-pool` Claude pane with tmux `send-k
 
 It only sends to a pane that is `leased` or `free`. A `launching`, `draining`, or `dead` pane, an unknown index, or an index shared by two pools gets a short text reply and no keys. The keys are typed literally, so if the pane is sitting at a confirmation prompt they land in that prompt; check with `/pane` first.
 
+### `/keys [@n] <key> [key...]`
+
+Sends keystrokes to a `cc-pool` pane with tmux `send-keys`, then replies with a snapshot of the pane about 1.5 s later. Use it to answer a dialog, interrupt a turn, or type text without attaching to tmux. It only works for a provider that runs in tmux (`cc-pool`). Registered in `src/index.ts` via `createKeysCommand` in `src/commands/keys.ts`.
+
+```
+/keys Escape
+-> [image] Sent Escape to peggy-pool:1
+
+/keys @2 Down Enter
+-> [image] Sent Down Enter to peggy-pool:2
+
+/keys "yes, go ahead" Enter
+-> [image] Sent yes, go ahead Enter to peggy-pool:1
+```
+
+- `/keys <key>...` targets the pane leased to the conversation you're typing in. With no such pane it replies `No pane is leased to this conversation. Use /keys @<n> <key> (see /pool).` and sends nothing.
+- `/keys @<n> <key>...` targets the pane with index `n` (the number after the `:` in `peggy-pool:2`).
+
+Each space-separated word is one key. tmux sends a name it recognizes as that key (`Enter`, `Escape`, `Tab`, `Up`, `Down`, `Space`, `BSpace`, `C-c`) and anything else as literal text, so `/keys 1` presses `1`. Wrap text that contains spaces in double quotes. One call sends at most 20 keys, and keys can't contain control characters.
+
+Unlike `/rc`, `/keys` also reaches a `launching` or `draining` pane, because a pane stuck at a prompt is the main reason to send keys. It refuses a `dead` pane, an unknown index, and an index shared by two pools. Check the pane with `/pane` first: the keys go to whatever the pane is showing.
+
 ### `/torrent [magnet-link]`
 
 An operator-specific custom command (registered in `src/index.ts` via
@@ -269,6 +296,63 @@ invocation. Any future command can call `registerFollowUp` for its own
 
 ---
 
+## Provider commands
+
+The bus forwards a slash command to the conversation's provider in two cases:
+
+- **`/name`** when the bus has no command called `name`.
+- **`//name`** always. Use it for names the bus also defines, such as `//clear` or `//status`.
+
+Bus commands win: `/clear` runs the bus command, and `//clear` runs the provider's.
+
+```
+/compact keep the migration plan
+-> [image] Sent /compact keep the migration plan to peggy-pool:1
+
+/context
+-> ## Context Usage
+   **Tokens:** 29k / 200k (15%)
+   ...
+```
+
+The provider is the first target of the route that matches the message. `also_notify` targets never receive a forwarded command.
+
+| Provider | How the command runs | Reply |
+|----------|----------------------|-------|
+| `cc-pool` | Typed into the pane leased to your conversation, followed by Enter. | A PNG of the pane about 1.5 s later. Channels without image support get the text capture. |
+| `cc-headless` | Run as its own turn: `claude -p "/name args"`, resuming your session. It waits its turn behind any in-flight message. | The command's output, or `Ran /name.` when it prints nothing. |
+| `claude-code` (MCP adapter) | Not supported. | `Unknown command`, or a reason for `//name`. |
+
+The command isn't forwarded, and you get a one-line reason, when:
+
+- The name isn't command-shaped. It must start with a letter and contain only letters, digits, `_`, `-`, or `:` (for `plugin:skill`). `/Users/me/file` gets `Unknown command`.
+- The originating adapter is paused.
+- **`cc-pool`:** no pane is leased to the conversation (the pool is full), the pane is showing a permission dialog, or the command spans several lines.
+- **`cc-headless`:** the CLI doesn't list the command for headless use. The list comes from the CLI's most recent `init` event, so it includes skills and plugin commands and excludes interactive-only commands such as `/remote-control`. Before the instance's first turn after a restart the list is unknown and every command is let through.
+
+Notes:
+
+- **A busy pane queues the command.** Claude Code runs input typed mid-turn when the turn ends, so the snapshot may show the turn still running. Send `/pane` to see the result later.
+- **Prefer `/clear` to `//clear`.** `//clear` resets Claude's session without closing the bus session, so no journaling turn runs and a `cc-pool` pane keeps its lease.
+- **Typos are forwarded.** `/stauts` goes to the provider, which reports it as unknown.
+- A scheduled message whose body is a slash command is forwarded the same way.
+
+### Adding a provider (for adapter authors)
+
+A provider accepts forwarded commands by registering a `ProviderCommandForwarder` (`src/commands/provider-forward.ts`) under its route `adapterId`:
+
+```typescript
+commandRegistry.registerProvider('my-provider', {
+  async forward({ route, command, argsRaw, line, ctx }) {
+    return { kind: 'unsupported', reason: 'my-provider has no slash commands.' };
+  },
+});
+```
+
+`forward` returns `reply` (send this response now), `enqueue` (queue the command for the provider), or `unsupported` (send this reason). An enqueued command reaches the provider as a text message whose body is `line` and whose `metadata.provider_command` is `{ command, args_raw }`.
+
+---
+
 ## How command dispatch works
 
 Commands are intercepted **after the full pipeline runs** (including transcript logging at Stage 80). This means:
@@ -277,7 +361,7 @@ Commands are intercepted **after the full pipeline runs** (including transcript 
 2. The bus looks up the command name in the `CommandRegistry`.
 3. For `scope: "bus"` commands, the handler runs and the response is sent directly via the originating adapter -- **bypassing the outbound queue entirely**.
 4. For `scope: "agent"` commands, the message is enqueued for fan-out to the agent. The agent receives it with `payload.type: "slash_command"` and should check `payload.command` + `payload.args_raw`.
-5. For unknown commands, a friendly error is returned the same way.
+5. A `//name` command, or a `/name` no command claims, is forwarded to the provider. See [Provider commands](#provider-commands). If the provider can't take it, a short error is returned the same way.
 6. Command responses are logged to transcripts with `metadata.command_response: true` so the memory system (E8/E9) can exclude them from summarization.
 
 ### Telegram group chats

@@ -61,6 +61,11 @@ import type { PipelineEngine } from '../pipeline/engine.js';
 import type { PipelineContext } from '../pipeline/types.js';
 import type Database from 'better-sqlite3';
 import type { CommandImage, CommandRegistry, SlashCommandContext } from '../commands/registry.js';
+import {
+  PROVIDER_COMMAND_NAME_RE,
+  providerCommandLine,
+  type ProviderForwardResult,
+} from '../commands/provider-forward.js';
 import { createSafeDatabase } from '../db/safe-database.js';
 import { logOutboundTranscript } from '../pipeline/outbound-transcript.js';
 import { logWebhookRequest } from './webhook-log.js';
@@ -458,8 +463,12 @@ export async function processInbound(
   //
   // Paused adapters can still send slash commands — the pause check below
   // only drops non-command messages, so /resume always works.
+  // Set when a provider forwarder asked for the command to be enqueued (E58).
+  let providerCommand: { command: string; args_raw: string } | null = null;
+
   if (result.isSlashCommand && result.slashCommand && deps.commandRegistry) {
     const commandName = result.slashCommand.name;
+    const forced = result.slashCommand.forceProvider === true;
     const cmd = deps.commandRegistry.lookup(commandName);
 
     // Determine originating adapter from the channel
@@ -479,7 +488,7 @@ export async function processInbound(
     let responseBody: string | undefined;
     let responseImages: CommandImage[] | undefined;
 
-    if (cmd && cmd.scope === 'bus') {
+    if (cmd && cmd.scope === 'bus' && !forced) {
       try {
         const response = await cmd.handler(result.slashCommand.args, cmdCtx);
         responseBody = response.body;
@@ -487,8 +496,49 @@ export async function processInbound(
       } catch (err) {
         responseBody = `Command error: ${String(err)}`;
       }
-    } else if (!cmd) {
-      responseBody = `Unknown command: /${commandName}\nType /help to see available commands.`;
+    } else if (!cmd || forced) {
+      // ── Provider forwarding (E58) ──────────────────────────────────────
+      // `//name`, or a `/name` no bus command claims, goes to the provider
+      // behind the primary route — if that provider registered a forwarder.
+      const unknown = `Unknown command: /${commandName}\nType /help to see available commands.`;
+      const route = result.routes[0];
+      const forwarder = route ? deps.commandRegistry.provider(route.adapterId) : undefined;
+      const line = providerCommandLine(commandName, result.slashCommand.argsRaw);
+
+      if (!PROVIDER_COMMAND_NAME_RE.test(commandName)) {
+        responseBody = unknown;
+      } else if (!route || !forwarder) {
+        responseBody = forced
+          ? `${line} was not forwarded: ${route ? `the ${route.adapterId} provider doesn't accept slash commands` : 'no route for this conversation'}.`
+          : unknown;
+      } else if (deps.pauseSet?.has(adapterId)) {
+        responseBody = `Adapter "${adapterId}" is paused; ${line} was not forwarded.`;
+      } else {
+        let forwarded: ProviderForwardResult;
+        try {
+          forwarded = await forwarder.forward({
+            route,
+            command: commandName,
+            argsRaw: result.slashCommand.argsRaw,
+            line,
+            ctx: cmdCtx,
+          });
+        } catch (err) {
+          forwarded = { kind: 'unsupported', reason: `Command error: ${String(err)}` };
+        }
+        if (forwarded.kind === 'reply') {
+          responseBody = forwarded.response.body;
+          responseImages = forwarded.response.images;
+          // Forwarded and nothing to say: still handled, never fanned out.
+          if (responseBody === undefined && !responseImages?.length) {
+            return { ok: true, queued: false, reason: 'command_handled' };
+          }
+        } else if (forwarded.kind === 'unsupported') {
+          responseBody = forwarded.reason;
+        } else {
+          providerCommand = { command: commandName, args_raw: result.slashCommand.argsRaw };
+        }
+      }
     }
     // scope: 'agent' falls through to normal fan-out enqueue below
 
@@ -517,13 +567,18 @@ export async function processInbound(
   // it to a plain text payload before enqueuing for agents. Agents should not
   // need to handle the slash_command payload type; the parsed command info is
   // available in metadata.slash_command instead.
-  const outboundPayload: MessageEnvelope['payload'] =
-    result.isSlashCommand && result.slashCommand && result.envelope.payload.type === 'slash_command'
+  // A provider command carries the exact line the provider should run
+  // ("//clear" → "/clear") and goes to the primary route only — also_notify
+  // targets never receive it.
+  const outboundPayload: MessageEnvelope['payload'] = providerCommand
+    ? { type: 'text', body: providerCommandLine(providerCommand.command, providerCommand.args_raw) }
+    : result.isSlashCommand && result.slashCommand && result.envelope.payload.type === 'slash_command'
       ? { type: 'text', body: result.envelope.payload.body }
       : { ...result.envelope.payload };
+  const fanOutRoutes = providerCommand ? result.routes.slice(0, 1) : result.routes;
 
-  for (let i = 0; i < result.routes.length; i++) {
-    const route = result.routes[i]!;
+  for (let i = 0; i < fanOutRoutes.length; i++) {
+    const route = fanOutRoutes[i]!;
     const fanEnvelope: MessageEnvelope = {
       ...result.envelope,
       payload: outboundPayload,
@@ -536,6 +591,7 @@ export async function processInbound(
         ...(result.isSlashCommand && result.slashCommand
           ? { slash_command: { command: result.slashCommand.name, args_raw: result.slashCommand.argsRaw } }
           : {}),
+        ...(providerCommand ? { provider_command: providerCommand } : {}),
       },
     };
     try {

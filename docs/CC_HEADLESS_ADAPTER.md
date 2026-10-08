@@ -91,6 +91,17 @@ If the turn ends and no delivery tool was called, the adapter posts the final `r
 
 Each turn's `total_cost_usd`, token usage, and turn count from the terminal `result` event are written to `turn_costs` for the `/cost` command.
 
+## Forwarded slash commands
+
+`//name`, or a `/name` the bus doesn't define, arrives as a message with `metadata.provider_command`. The instance runs it as its own turn on the per-contact queue:
+
+- The prompt is the bare `/name args` line, with no message formatting and no memory-block prefix. The CLI only treats a prompt as a command when it starts with `/`.
+- The turn resumes the conversation's session, so `/compact` and `/context` act on it.
+- The `result` text is delivered as the reply, or `Ran /name.` when it's empty. A failure delivers `/name failed: <detail>`.
+- `compact` and `clear` wipe the session's context-block ledger, so memory blocks are sent again on the next turn.
+
+The instance records `slash_commands` from each `init` event. The bus refuses to forward a command that isn't in the latest list. See [SLASH_COMMANDS.md#provider-commands](SLASH_COMMANDS.md#provider-commands).
+
 ## Typing indicator and tool-call status
 
 When a batch starts, the adapter calls `POST /api/v1/adapters/<channel>/typing` with the contact and topic, so the platform shows activity while `claude -p` starts. Each non-delivery tool call in the stream is summarized (`src/adapters/tool-call-summary.ts`) and sent to `POST /api/v1/adapters/<channel>/tool-status` until the first delivery call. Both are fire-and-forget, no-op on channels without the capability, and skipped for email. See [TELEGRAM_ADAPTER.md](TELEGRAM_ADAPTER.md#live-tool-call-status-stream).

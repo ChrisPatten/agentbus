@@ -80,7 +80,7 @@ function defaultResolveModel(cfgModel: string | undefined): (scheduleModel: stri
 }
 
 /** Footer line of Claude Code's interactive permission dialog ("Esc to cancel · Tab to amend"), observed in live captures — see the E51 epic. */
-const PERMISSION_DIALOG_PATTERN = /esc to cancel/i;
+export const PERMISSION_DIALOG_PATTERN = /esc to cancel/i;
 
 /**
  * S48.7 tuning constants — not exposed via config (mirrors LAUNCH_READY_TIMEOUT_MS

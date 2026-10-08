@@ -17,6 +17,7 @@ import { MessageQueue } from '../core/queue.js';
 import { AdapterRegistry, type AdapterInstance } from '../core/registry.js';
 import { createCommandSystem } from '../commands/index.js';
 import type { AppConfig } from '../config/schema.js';
+import type { ProviderCommandForwarder } from '../commands/provider-forward.js';
 
 function makeDb() {
   const db = new Database(':memory:');
@@ -485,5 +486,122 @@ describe('processInbound — command image replies', () => {
 
     const rows = db.prepare(`SELECT body FROM transcripts WHERE direction = 'outbound'`).all() as Array<{ body: string }>;
     expect(rows.map((r) => r.body).join('\n')).not.toContain('screen');
+  });
+});
+
+describe('processInbound — provider command forwarding (E58)', () => {
+  let db: Database.Database;
+  let queue: MessageQueue;
+  let adapterRegistry: AdapterRegistry;
+  let pipeline: PipelineEngine;
+  let telegramAdapter: AdapterInstance;
+
+  beforeEach(() => {
+    db = makeDb();
+    queue = new MessageQueue(db);
+    adapterRegistry = new AdapterRegistry();
+    telegramAdapter = makeStubAdapter('telegram', 'telegram');
+    adapterRegistry.register(telegramAdapter);
+
+    pipeline = new PipelineEngine();
+    pipeline.use({ slot: 10, name: 'normalize', stage: normalize });
+    pipeline.use({ slot: 40, name: 'slash-command', stage: slashCommandDetect });
+    pipeline.use({ slot: 70, name: 'route-resolve', stage: createRouteResolve(stubConfig, db) });
+    pipeline.use({ slot: 80, name: 'transcript-log', stage: createTranscriptLog(db, stubConfig), critical: false });
+  });
+
+  function run(body: string, forward?: ProviderCommandForwarder['forward'], paused = false) {
+    forwardMock = forward as ReturnType<typeof vi.fn> | undefined;
+    const { registry: commandRegistry, pauseSet } = createCommandSystem({
+      adapterRegistry, queue, db, config: stubConfig,
+    });
+    // stubConfig routes telegram to the "cc" provider.
+    if (forward) commandRegistry.registerProvider('cc', { forward });
+    if (paused) pauseSet.add('telegram');
+    return processInbound(
+      { channel: 'telegram', sender: 'contact:chris', payload: { type: 'text', body } },
+      { queue, pipeline, config: stubConfig, db, registry: adapterRegistry, commandRegistry, pauseSet },
+    );
+  }
+
+  let forwardMock: ReturnType<typeof vi.fn> | undefined;
+  const forwardedReq = () => forwardMock!.mock.calls[0]![0] as unknown;
+  const sent = () => (telegramAdapter.send as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0].payload.body as string);
+
+  it('forwards a command the bus does not define and sends the provider reply', async () => {
+    const forward = vi.fn(async () => ({ kind: 'reply' as const, response: { body: 'compacted' } }));
+    const result = await run('/compact keep the plan', forward);
+
+    expect('reason' in result && result.reason).toBe('command_handled');
+    expect(forward).toHaveBeenCalledTimes(1);
+    expect(forwardedReq()).toMatchObject({
+      route: { adapterId: 'cc', recipientId: 'agent:claude' },
+      command: 'compact',
+      argsRaw: 'keep the plan',
+      line: '/compact keep the plan',
+    });
+    expect(sent()).toEqual(['compacted']);
+    expect(queue.dequeue('agent:claude', undefined, 1)).toHaveLength(0);
+  });
+
+  it('runs the bus command for /name and forwards //name', async () => {
+    const forward = vi.fn(async () => ({ kind: 'reply' as const, response: { body: 'provider status' } }));
+
+    await run('/status', forward);
+    expect(forward).not.toHaveBeenCalled();
+    expect(sent()[0]).toContain('AgentBus status');
+
+    await run('//status', forward);
+    expect(forward).toHaveBeenCalledTimes(1);
+    expect(forwardedReq()).toMatchObject({ command: 'status', line: '/status' });
+    expect(sent()[1]).toBe('provider status');
+  });
+
+  it('enqueues a provider command for the primary route with the normalized line', async () => {
+    const result = await run('//clear', async () => ({ kind: 'enqueue' }));
+
+    expect(result).toMatchObject({ ok: true, queued: true, enqueued_count: 1 });
+    expect(telegramAdapter.send).not.toHaveBeenCalled();
+    const [pending] = queue.dequeue('agent:claude', undefined, 1);
+    expect(pending!.envelope.payload).toEqual({ type: 'text', body: '/clear' });
+    expect(pending!.envelope.metadata['provider_command']).toEqual({ command: 'clear', args_raw: '' });
+  });
+
+  it('sends the reason when the provider does not support the command', async () => {
+    await run('/compact', async () => ({ kind: 'unsupported', reason: 'not here' }));
+    expect(sent()).toEqual(['not here']);
+    expect(queue.dequeue('agent:claude', undefined, 1)).toHaveLength(0);
+  });
+
+  it('keeps the Unknown command reply when the provider has no forwarder', async () => {
+    await run('/compact');
+    expect(sent()[0]).toContain('Unknown command: /compact');
+  });
+
+  it('explains a forced command the provider cannot take', async () => {
+    await run('//compact');
+    expect(sent()[0]).toBe("/compact was not forwarded: the cc provider doesn't accept slash commands.");
+  });
+
+  it('never forwards a name that is not command-shaped', async () => {
+    const forward = vi.fn(async () => ({ kind: 'enqueue' as const }));
+    await run('/Users/chris/notes.md is broken', forward);
+    expect(forward).not.toHaveBeenCalled();
+    expect(sent()[0]).toContain('Unknown command: /Users/chris/notes.md');
+  });
+
+  it('refuses to forward from a paused adapter', async () => {
+    const forward = vi.fn(async () => ({ kind: 'enqueue' as const }));
+    const result = await run('/compact', forward, true);
+    expect(forward).not.toHaveBeenCalled();
+    expect('reason' in result && result.reason).toBe('command_handled');
+    expect(sent()[0]).toBe('Adapter "telegram" is paused; /compact was not forwarded.');
+  });
+
+  it('reports a forwarder that throws instead of dropping the command', async () => {
+    await run('/compact', async () => {
+      throw new Error('boom');
+    });
+    expect(sent()[0]).toContain('boom');
   });
 });

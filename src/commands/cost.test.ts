@@ -68,7 +68,7 @@ describe('resolveAgentId (/cost — same resolution shape as /stop)', () => {
     const db = makeDb();
     insertSession(db, { id: 'sess-legacy', agentId: null });
     const result = resolveAgentId(
-      { db, headlessControl: { journalResumeId: new Map(), stopTurn: new Map([['agent:peggy', () => true]]) } },
+      { db, headlessControl: { journalResumeId: new Map(), stopTurn: new Map([['agent:peggy', () => true]]), slashCommands: new Map() } },
       makeCtx(db),
     );
     expect(result).toBe('agent:peggy');
@@ -91,6 +91,7 @@ describe('resolveAgentId (/cost — same resolution shape as /stop)', () => {
             ['agent:peggy', () => true],
             ['agent:pokeclaude', () => true],
           ]),
+          slashCommands: new Map(),
         },
       },
       makeCtx(db),

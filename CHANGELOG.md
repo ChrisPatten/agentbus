@@ -10,6 +10,24 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+### Added
+- **Slash commands are forwarded to the provider.** A `/name` the bus doesn't
+  define now goes to the provider that runs the conversation (`cc-pool` or
+  `cc-headless`) instead of replying `Unknown command`. `//name` forwards a
+  name the bus also defines, such as `//clear`. A `cc-pool` pane gets the
+  command typed in and replies with a pane snapshot; `cc-headless` runs it as
+  its own `claude -p` turn and replies with the command's output. Conversations
+  on the `claude-code` MCP adapter keep the `Unknown command` reply.
+
+- **`/keys` command: send keystrokes to a pool pane from chat.** `/keys Escape`
+  sends to the pane leased to your conversation; `/keys @2 Down Enter` targets
+  pane 2. Key names such as `Enter` and `C-c` are sent as keys, other words as
+  text. The reply is a snapshot of the pane.
+
+### Changed
+- **Unknown slash commands on `cc-pool` and `cc-headless` reach the agent's
+  CLI.** A mistyped bus command is reported by the provider, not the bus.
+
 ### Fixed
 - **Pool panes no longer receive their own launch line as a chat message.** A
   pane claimed while a Claude session was still running in its window (left by

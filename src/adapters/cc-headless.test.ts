@@ -162,6 +162,34 @@ describe('extractToolCalls (E29)', () => {
   });
 });
 
+describe('splitProviderCommands (E58)', () => {
+  const env = (id: string, providerCommand?: string) =>
+    ({
+      id,
+      metadata: providerCommand ? { provider_command: { command: providerCommand, args_raw: '' } } : {},
+    }) as unknown as import('../types/envelope.js').MessageEnvelope;
+
+  it('keeps ordinary messages batched and gives each command its own turn, in order', async () => {
+    const { splitProviderCommands } = await import('./cc-headless.js');
+    const turns = splitProviderCommands([env('a'), env('b'), env('c', 'compact'), env('d', 'context'), env('e')]);
+    expect(turns.map((t) => t.map((e) => e.id))).toEqual([['a', 'b'], ['c'], ['d'], ['e']]);
+  });
+
+  it('returns one batch when there is no command', async () => {
+    const { splitProviderCommands } = await import('./cc-headless.js');
+    expect(splitProviderCommands([env('a'), env('b')])).toHaveLength(1);
+  });
+
+  it('reads the command from metadata and ignores a malformed marker', async () => {
+    const { providerCommandOf } = await import('./cc-headless.js');
+    expect(providerCommandOf(env('a', 'compact'))).toEqual({ command: 'compact', args_raw: '' });
+    expect(providerCommandOf(env('b'))).toBeNull();
+    expect(
+      providerCommandOf({ metadata: { provider_command: { command: 7 } } } as unknown as import('../types/envelope.js').MessageEnvelope),
+    ).toBeNull();
+  });
+});
+
 describe('normalizeContactId (/stop reaches a turn regardless of key format)', () => {
   it('strips the "contact:" prefix used by processBatch', async () => {
     const { normalizeContactId } = await import('./cc-headless.js');
@@ -460,6 +488,46 @@ describe('queue responsiveness — advance on delivery, not process exit (E30 / 
     // the per-contact queue advanced on delivery, not on process exit.
     expect(turn2Spawned!.t).toBeGreaterThanOrEqual(turn1Delivered!.t);
     expect(turn2Spawned!.t).toBeLessThan(turn1Closed!.t);
+  });
+  it('runs a forwarded provider command as a raw prompt and delivers its output (E58)', async () => {
+    const posted: Array<{ payload: { body: string } }> = [];
+    let pendingCall = 0;
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      const u = String(url);
+      if (u.includes('/messages/pending')) {
+        pendingCall += 1;
+        const env = {
+          ...makeEnvelope('m1', 'contact:alice'),
+          metadata: { provider_command: { command: 'context', args_raw: 'all' } },
+        };
+        return Promise.resolve(pendingResponse(pendingCall === 1 ? [env] : []));
+      }
+      if (u.endsWith('/api/v1/messages') && init?.method === 'POST') {
+        posted.push(JSON.parse(String(init.body)));
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) } as unknown as Response);
+    });
+
+    spawnMock.mockImplementation(() => {
+      const child = makeFakeChild();
+      setTimeout(() => {
+        writeEvent(child.stdout, { type: 'system', subtype: 'init', session_id: 's1', slash_commands: ['compact', '/context'] });
+        writeEvent(child.stdout, { type: 'result', session_id: 's1', result: '## Context Usage', total_cost_usd: 0 });
+        child.emit('close', 0);
+      }, 5);
+      return child as unknown as import('node:child_process').ChildProcess;
+    });
+
+    const { startHeadless } = await import('./cc-headless.js');
+    const handle = startHeadless(realDb).get('agent:peggy')!;
+    expect(handle.slashCommands()).toBeNull();
+
+    await vi.waitFor(() => expect(posted).toHaveLength(1));
+
+    const args = spawnMock.mock.calls[0]![1] as string[];
+    expect(args.slice(0, 2)).toEqual(['-p', '/context all']);
+    expect(posted[0]!.payload.body).toBe('## Context Usage');
+    expect(handle.slashCommands()).toEqual(['compact', 'context']);
   });
 });
 

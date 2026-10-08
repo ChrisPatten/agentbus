@@ -49,6 +49,8 @@ import { createCostCommand } from './commands/cost.js';
 import { createPoolCommand } from './commands/pool.js';
 import { createPaneCommand } from './commands/pane.js';
 import { createRcCommand } from './commands/rc.js';
+import { createKeysCommand } from './commands/keys.js';
+import { createHeadlessForwarder, createPoolForwarder } from './commands/provider-forward.js';
 import { Summarizer } from './memory/summarizer.js';
 import { SessionTracker } from './memory/session-tracker.js';
 import { Scheduler } from './scheduler/scheduler.js';
@@ -107,6 +109,14 @@ commandRegistry.register(createCostCommand({ db, headlessControl }));
 commandRegistry.register(createPoolCommand({ poolManagers }));
 commandRegistry.register(createPaneCommand({ poolManagers }));
 commandRegistry.register(createRcCommand({ poolManagers }));
+commandRegistry.register(createKeysCommand({ poolManagers }));
+
+// ── Provider command forwarding (E58) ─────────────────────────────────────────
+// `//name`, or a `/name` no bus command claims, is forwarded to the provider
+// behind the conversation's route. A provider with no forwarder here (the
+// plain claude-code MCP adapter) doesn't accept forwarded commands.
+commandRegistry.registerProvider('cc-pool', createPoolForwarder({ poolManagers }));
+commandRegistry.registerProvider('cc-headless', createHeadlessForwarder({ headlessControl }));
 
 const pipeline = new PipelineEngine();
 pipeline.use({ slot: 10, name: 'normalize',        stage: normalize });
@@ -263,6 +273,8 @@ for (const [agentId, headless] of startHeadless(db)) {
   headlessControl.journalResumeId.set(agentId, headless.journalResumeId);
   // Let /stop reach the owning instance's in-flight turn.
   headlessControl.stopTurn.set(agentId, headless.stopTurn);
+  // Let provider command forwarding check what the instance's CLI accepts.
+  headlessControl.slashCommands.set(agentId, headless.slashCommands);
 }
 
 // Start every configured cc-pool instance (E48): seed pane rows (idempotent

@@ -31,6 +31,12 @@ export interface HeadlessControl {
    * if a turn was found and killed.
    */
   stopTurn: Map<string, (contactId: string) => boolean>;
+  /**
+   * The slash commands a cc-headless instance's last `init` event listed
+   * (null before its first turn), keyed by agent_id. Used to decide whether
+   * a command can be forwarded to the provider (E58).
+   */
+  slashCommands: Map<string, () => string[] | null>;
 }
 
 export interface HandlerDeps {
@@ -124,6 +130,11 @@ export function createHelpHandler(registry: CommandRegistry): CommandHandler {
       lines.push(`  /${cmd.name} — ${cmd.description}`);
     }
     lines.push('', 'Type /help <command> for detailed usage.');
+    lines.push(
+      '',
+      "Any other /command is forwarded to the agent's provider, if it accepts commands.",
+      'Use //command to forward one the bus also defines, e.g. //clear.',
+    );
     return { body: lines.join('\n') };
   };
 }

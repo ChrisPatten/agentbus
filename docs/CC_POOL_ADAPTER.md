@@ -261,6 +261,14 @@ The renderer needs a monospace font. It looks for Menlo, DejaVu Sans Mono, Liber
 
 `/rc [n]` sends `/remote-control` plus Enter to a pane through the tmux controller (`sendCommand`), using the pane id from `pool_leases`. It targets the caller's leased pane, or pane index `n`, and refuses panes that aren't `leased` or `free`. See [SLASH_COMMANDS.md#rc-n](SLASH_COMMANDS.md#rc-n).
 
+### `/keys` command
+
+`/keys [@n] <key> [key...]` runs `tmux send-keys -t <pane> -- <keys>` against the caller's leased pane, or pane index `n`, and replies with a pane snapshot. It reaches any pane that isn't `dead`. See [SLASH_COMMANDS.md#keys-n-key-key](SLASH_COMMANDS.md#keys-n-key-key).
+
+### Forwarded slash commands
+
+A pane receives messages as MCP channel notifications, which Claude Code doesn't parse as slash commands. So `//name`, or a `/name` the bus doesn't define, is typed into the conversation's leased pane with `sendCommand`, and the reply is a snapshot of the pane taken 1.5 s later (`createPoolForwarder` in `src/commands/provider-forward.ts`). Nothing is typed when the conversation has no leased pane, when the pane shows a permission dialog, or when the command spans several lines. See [SLASH_COMMANDS.md#provider-commands](SLASH_COMMANDS.md#provider-commands).
+
 ### `GET /api/v1/pool`
 
 The same data as JSON, optionally filtered with `?pool=<agent id>`:

@@ -259,6 +259,39 @@ export interface HeadlessHandle {
    * none was running.
    */
   stopTurn(contactId: string): boolean;
+  /**
+   * The slash commands the CLI listed in its most recent `init` event, without
+   * the leading slash, or null before this instance's first turn (E58).
+   */
+  slashCommands(): string[] | null;
+}
+
+/** The forwarded provider command an envelope carries, if any (E58). */
+export function providerCommandOf(env: MessageEnvelope): { command: string; args_raw: string } | null {
+  const pc = env.metadata?.['provider_command'] as { command?: unknown; args_raw?: unknown } | undefined;
+  if (!pc || typeof pc.command !== 'string') return null;
+  return { command: pc.command, args_raw: typeof pc.args_raw === 'string' ? pc.args_raw : '' };
+}
+
+/**
+ * Pure. Splits one contact's polled envelopes into turns, in order: a
+ * forwarded provider command (E58) is always a turn of its own, and the
+ * ordinary messages between commands stay batched together.
+ */
+export function splitProviderCommands(batch: MessageEnvelope[]): MessageEnvelope[][] {
+  const turns: MessageEnvelope[][] = [];
+  let current: MessageEnvelope[] = [];
+  for (const env of batch) {
+    if (providerCommandOf(env)) {
+      if (current.length > 0) turns.push(current);
+      turns.push([env]);
+      current = [];
+    } else {
+      current.push(env);
+    }
+  }
+  if (current.length > 0) turns.push(current);
+  return turns;
 }
 
 /**
@@ -279,6 +312,8 @@ class HeadlessInstance {
   /** contactIds whose in-flight turn was killed via `/stop` — consulted once,
    * by that turn's own close handler, to skip the normal error-reply path. */
   private readonly stoppedByUser = new Set<string>();
+  /** Slash commands from the latest `init` event; null until the first turn (E58). */
+  private knownSlashCommands: string[] | null = null;
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
   private shuttingDown = false;
 
@@ -400,6 +435,8 @@ class HeadlessInstance {
             result?: string;
             is_error?: boolean;
             subtype?: string;
+            /** Only on the `system`/`init` event. */
+            slash_commands?: unknown;
             message?: { content?: Array<{ type?: string; name?: string; input?: unknown }> };
             /** E39 — only present on the terminal `result` event. */
             total_cost_usd?: number;
@@ -410,6 +447,14 @@ class HeadlessInstance {
           if (event.session_id && !claudeSessionId) {
             claudeSessionId = event.session_id;
             onSessionId?.(event.session_id);
+          }
+
+          // E58: remember which slash commands this CLI accepts headless, so
+          // the bus can refuse to forward one it doesn't.
+          if (event.type === 'system' && event.subtype === 'init' && Array.isArray(event.slash_commands)) {
+            this.knownSlashCommands = event.slash_commands
+              .filter((c): c is string => typeof c === 'string')
+              .map((c) => c.replace(/^\//, ''));
           }
 
           // Watch assistant turns for tool calls: reply/send_message means the
@@ -600,6 +645,11 @@ class HeadlessInstance {
      * model. See `resolveModel` in model-override-loader.ts.
      */
     scheduleModel?: string | null;
+    /**
+     * E58 — send `prompt` exactly as given, with no memory-block prefix. The
+     * CLI only treats a prompt as a slash command when it starts with "/".
+     */
+    rawPrompt?: boolean;
   }): Promise<SpawnResult> {
     const now = new Date();
 
@@ -612,7 +662,7 @@ class HeadlessInstance {
     let promptForClaude = opts.prompt;
     let blocksSentThisTurn: Array<{ key: string; hash: string }> = [];
 
-    if (opts.session) {
+    if (opts.session && !opts.rawPrompt) {
       // Sharp input-token drop since the last turn: Claude Code's own
       // auto-compaction likely summarized the resumed transcript, so the
       // ledger's record of "this session already has block X in context" no
@@ -842,6 +892,49 @@ class HeadlessInstance {
       });
   }
 
+  // ── Forwarded provider command (E58) ─────────────────────────────────────
+
+  /**
+   * Run a forwarded slash command as its own turn: the prompt is the bare
+   * "/name args" line (resuming the conversation's session), and the
+   * command's own output is delivered as the reply. Runs on the per-contact
+   * queue, so it never races a normal turn on the same session.
+   */
+  private async processProviderCommand(env: MessageEnvelope, db: Database.Database): Promise<void> {
+    const pc = providerCommandOf(env)!;
+    const line = pc.args_raw ? `/${pc.command} ${pc.args_raw}` : `/${pc.command}`;
+    const contactId = env.sender;
+
+    this.startTyping(env.channel, contactId, env.topic);
+
+    const session = getActiveSession(db, resolveConversationId(db, env));
+    const result = await this.runClaudeTurn({
+      db,
+      session,
+      contactId,
+      channel: env.channel,
+      prompt: line,
+      resumeId: session?.claude_session_id ?? null,
+      rawPrompt: true,
+    });
+
+    if (result.stoppedByUser) return;
+    if (result.error) {
+      console.error(`[${this.label}] ${line} failed for ${contactId}: ${result.error}`);
+      await this.deliverResponse(env, `${line} failed: ${result.error.slice(0, ERROR_DETAIL_MAX_LENGTH)}`);
+      return;
+    }
+
+    // These commands drop the memory blocks the ledger thinks the session
+    // still holds, so resend them on the next turn.
+    if (session && (pc.command === 'compact' || pc.command === 'clear')) {
+      clearLedger(db, session.id);
+    }
+
+    if (result.deliveredViaTool) return;
+    await this.deliverResponse(env, result.resultText?.trim() ? result.resultText : `Ran ${line}.`);
+  }
+
   // ── Silent journaling turn (E20) ─────────────────────────────────────────
 
   /**
@@ -957,8 +1050,11 @@ class HeadlessInstance {
       }
 
       for (const [contactId, batch] of bySender) {
-        const batchCopy = [...batch];
-        this.enqueue(contactId, () => this.processBatch(batchCopy, db));
+        for (const turn of splitProviderCommands(batch)) {
+          this.enqueue(contactId, () =>
+            providerCommandOf(turn[0]!) ? this.processProviderCommand(turn[0]!, db) : this.processBatch(turn, db),
+          );
+        }
       }
     } catch (err) {
       console.error(`[${this.label}] Poll error:`, err);
@@ -978,6 +1074,7 @@ class HeadlessInstance {
       runJournalingTurn: (conversationId: string) => this.runJournalingTurn(conversationId, db),
       journalResumeId: (opts) => this.journalResumeId(db, opts),
       stopTurn: (contactId: string) => this.stopTurn(contactId),
+      slashCommands: () => this.knownSlashCommands,
     };
   }
 

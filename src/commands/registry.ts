@@ -11,6 +11,7 @@
 import type { MessageEnvelope } from '../types/envelope.js';
 import type { AppConfig } from '../config/schema.js';
 import type { SafeDatabase } from '../db/safe-database.js';
+import type { ProviderCommandForwarder } from './provider-forward.js';
 
 /** Minimal command descriptor sent to adapters for autocomplete registration */
 export interface CommandManifest {
@@ -89,6 +90,25 @@ export class CommandRegistry {
     string,
     { command: string; validate: (body: string) => boolean; expiresAt: number }
   >();
+
+  /** Provider command forwarders, keyed by route `adapterId` (E58). */
+  private readonly providers = new Map<string, ProviderCommandForwarder>();
+
+  /**
+   * Register the forwarder for a provider (e.g. "cc-pool"). Throws if that
+   * provider already has one.
+   */
+  registerProvider(adapterId: string, forwarder: ProviderCommandForwarder): void {
+    if (this.providers.has(adapterId)) {
+      throw new Error(`Provider "${adapterId}" already has a command forwarder`);
+    }
+    this.providers.set(adapterId, forwarder);
+  }
+
+  /** The forwarder for a provider, or undefined if it doesn't accept commands. */
+  provider(adapterId: string): ProviderCommandForwarder | undefined {
+    return this.providers.get(adapterId);
+  }
 
   /**
    * Register a command.
