@@ -4,10 +4,10 @@ Slash commands let you control the bus from any chat. Type a message starting wi
 
 ## How they work
 
-- **The bus answers, not the agent.** A command never reaches your agent, and costs nothing. The response arrives in the same chat.
+- **The bus answers its own commands, not the agent.** A bus command (everything listed on this page) never reaches your agent, and costs nothing. The response arrives in the same chat.
 - **Commands work while a channel is paused**, so `/resume` always gets through.
 - **Commands are recorded** in the conversation's transcript like any other message.
-- **Unknown commands get a reply**: `Unknown command: /foo`, with a pointer to `/help`.
+- **Other commands go to your agent's Claude Code.** On `cc-pool` and `cc-headless`, a command the bus doesn't have, such as `/compact` or `/context`, is passed on to Claude Code. See [Claude Code commands](#claude-code-commands). On other runtimes you get `Unknown command: /foo`, with a pointer to `/help`.
 - **Telegram and the Mac app list the commands** as you type `/`. In Telegram groups, `/status@YourBot` works as well as `/status`.
 
 **Every contact can use every command.** There are no per-person permissions yet, so anyone listed under `contacts` can, for example, pause a channel.
@@ -65,8 +65,57 @@ The adapter names are the ones `/status` lists. A pause lasts across restarts un
 | `/pane` | A picture of this conversation's pane as it looks now |
 | `/pane <n>` or `/pane all` | A picture of pane `n`, or every pane (up to 8) |
 | `/rc` or `/rc <n>` | Sends `/remote-control` to this conversation's pane, or pane `n` |
+| `/keys <key>...` | Presses keys in this conversation's pane, then shows you a picture of it, for example `/keys Escape` or `/keys Down Enter` |
+| `/keys @<n> <key>...` | The same, for pane `n` |
 
 See [cc-pool](/runtimes/cc-pool#watching-your-agent).
+
+### Sending keys with `/keys`
+
+Use `/keys` to answer a prompt, interrupt a turn, or type into a pane without opening a terminal. Each word is one key. Key names such as `Enter`, `Escape`, `Tab`, `Up`, `Down`, `Space`, `BSpace` and `C-c` (Ctrl-C) are pressed as keys, and any other word is typed as text, so `/keys 1` types `1`. Put text with spaces in double quotes: `/keys "yes, go ahead" Enter`. One command sends up to 20 keys.
+
+The keys go to whatever the pane is showing, so check it with `/pane` first. `/keys` also reaches a pane that is still starting up or shutting down, but not one that has failed.
+
+## Claude Code commands
+
+On `cc-pool` and `cc-headless`, you can run Claude Code's own commands from chat, including skills and plugin commands:
+
+| You type | What happens |
+|---|---|
+| `/status`, `/clear`, `/journal`, … | A bus command: the bus answers it, as above. Bus commands always win. |
+| `/compact`, `/context`, `/model`, … | The bus has no such command, so it passes it on to Claude Code. |
+| `//clear`, `//status`, … | Two slashes pass the command on to Claude Code even though the bus has one with that name. |
+
+What you get back depends on the runtime:
+
+| Runtime | How the command runs | What you get back |
+|---|---|---|
+| `cc-pool` | Typed into your conversation's pane, followed by Enter | A picture of the pane about 1.5 seconds later |
+| `cc-headless` | Run as its own turn in your conversation's session, after any turn already running | The command's output, or `Ran /name.` when it prints nothing |
+| `claude-code` | Not supported | `Unknown command` |
+
+```text
+You:   /compact keep the migration plan
+Agent: [picture] Sent /compact keep the migration plan to peggy-pool:1
+
+You:   /context
+Agent: ## Context Usage
+       Tokens: 29k / 200k (15%)
+```
+
+The command isn't passed on, and you get a one-line reason, when:
+
+- The name isn't a command name. It must start with a letter and use only letters, digits, `_`, `-` or `:`. `/Users/me/file` gets `Unknown command`.
+- The channel you sent it from is paused.
+- **`cc-pool`:** no pane is leased to your conversation, the pane is showing a permission prompt, or the command spans more than one line.
+- **`cc-headless`:** Claude Code doesn't offer that command in headless mode, for example `/remote-control`.
+
+Things to know:
+
+- **A busy pane runs the command when its turn ends.** The picture may still show the turn running. Send `/pane` to see the result later.
+- **Use `/clear`, not `//clear`.** `//clear` resets Claude Code's session but keeps the bus session open, so the conversation isn't journaled.
+- **Typos are passed on.** `/stauts` goes to Claude Code, which reports it as unknown.
+- **Only your agent gets the command.** Other agents copied on the conversation (`also_notify`) never receive it.
 
 ## What `/clear` and `/stop` act on
 

@@ -101,12 +101,12 @@ Each turn's `total_cost_usd`, token usage, and turn count from the terminal `res
 
 ## Forwarded slash commands
 
-`//name`, or a `/name` the bus doesn't define, arrives as a message with `metadata.provider_command`. The instance runs it as its own turn on the per-contact queue:
+`//name`, or a `/name` the bus doesn't define, arrives as a message with `metadata.provider_command`. The instance runs it as its own turn on the conversation's queue, in the user turn class, so it waits behind any in-flight turn in that conversation and never overlaps one on the same Claude session:
 
 - The prompt is the bare `/name args` line, with no message formatting and no memory-block prefix. The CLI only treats a prompt as a command when it starts with `/`.
 - The turn resumes the conversation's session, so `/compact` and `/context` act on it.
 - The `result` text is delivered as the reply, or `Ran /name.` when it's empty. A failure delivers `/name failed: <detail>`.
-- `compact` and `clear` wipe the session's context-block ledger, so memory blocks are sent again on the next turn.
+- `compact` and `clear` wipe the session's context-block ledger, so memory blocks are sent again on the next turn. This only matters with `agents.<id>.memory.native: false`; with native memory (the default) there is no ledger.
 
 The instance records `slash_commands` from each `init` event. The bus refuses to forward a command that isn't in the latest list. See [SLASH_COMMANDS.md#provider-commands](SLASH_COMMANDS.md#provider-commands).
 

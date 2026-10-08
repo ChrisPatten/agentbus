@@ -94,7 +94,10 @@ Panes read their other MCP servers from the working folder's `.mcp.json`, so you
 | `/pane 2` or `/pane all` | A picture of pane 2, or of every pane (up to 8) |
 | `/rc` | Sends `/remote-control` to your conversation's pane, so you can take it over in the Claude app |
 | `/rc 2` | The same, for pane 2 |
+| `/keys Escape` | Presses keys in your conversation's pane (`/keys @2 …` for pane 2) and shows you a picture of it |
 | `/status` | Includes a line per pool: how many panes are leased and how many messages are parked |
+
+Claude Code's own commands, such as `/compact` or `/context`, are typed into your conversation's pane when you send them from chat. See [Claude Code commands](/features/slash-commands#claude-code-commands).
 
 From a terminal in the AgentBus folder, you can also attach to a pane directly. `POOL_SESSION` is your `tmux_session`:
 

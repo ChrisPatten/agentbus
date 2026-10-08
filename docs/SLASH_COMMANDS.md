@@ -336,7 +336,7 @@ The bus forwards a slash command to the conversation's provider in two cases:
 - **`/name`** when the bus has no command called `name`.
 - **`//name`** always. Use it for names the bus also defines, such as `//clear` or `//status`.
 
-Bus commands win: `/clear` runs the bus command, and `//clear` runs the provider's.
+Bus commands win: `/clear` runs the bus command, and `//clear` runs the provider's. Every command in the table above (including `/journal` and its subcommands, `/feedback`, `/cost`, `/schedule`, `/stop` and `/keys`) and any custom command registered on the bus is handled by the bus and never forwarded. Only `//name` sends one of those names to the provider. The check is a registry lookup on the command name in `processInbound` (`src/http/api.ts`), so a command registered later is covered automatically.
 
 ```
 /compact keep the migration plan
