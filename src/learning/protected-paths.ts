@@ -8,7 +8,9 @@
  *   - The agent's memory dir is never protected, including pinned memory
  *     imported from `CLAUDE.md`.
  *   - Enforcement: cc-headless journaling and consolidation turns deny
- *     edits to these paths (`JournalJob.protectedPaths` → `--disallowedTools`).
+ *     edits to these paths (`JournalJob.protectedPaths` → `--disallowedTools`)
+ *     and run without Bash (`JOURNAL_TURN_DISALLOWED_TOOLS`), since Claude
+ *     Code's `Edit(path)` denies don't cover shell redirects.
  *     For every journaler the chain runner hashes them before and after the
  *     run (`ProtectedPathMonitor`) and raises a `warning` advisory listing
  *     files that changed without an approved proposal (S68.3).
@@ -19,6 +21,16 @@ import { isAbsolute, join, relative, resolve as resolvePath, sep } from 'node:pa
 import { getCcHeadlessInstances, getCcPoolInstances, type AppConfig } from '../config/schema.js';
 import type { AgentRuntime } from '../core/runtime-resolver.js';
 import { logicalAgentId, memoryLayout, memorySettingsFor, runtimeWorkingDir } from '../memory/layout.js';
+
+/**
+ * Tools every bus-spawned journal and consolidation turn runs without. Bash
+ * is denied because `Edit(path)` rules block the Edit and Write tools but not
+ * a shell redirect (`echo x >> CLAUDE.md`), verified against the real CLI in
+ * the E68 pre-merge spike. These turns only need Read/Edit/Write on memory
+ * files. Applied even when the agent has no protected paths. Normal
+ * conversation turns keep Bash.
+ */
+export const JOURNAL_TURN_DISALLOWED_TOOLS: readonly string[] = ['Bash'];
 
 /** Default entries besides the system prompt's imports. */
 export const DEFAULT_PROTECTED_PATHS = ['CLAUDE.md', 'skills/', '.claude/'] as const;

@@ -555,6 +555,8 @@ describe('conversation serialization after early delivery (E58)', () => {
     const [, args, options] = spawnMock.mock.calls[0]!;
     expect(args).toEqual(expect.arrayContaining(['--model', 'claude-haiku-4-5', '--resume', 'old-a', '--disallowedTools']));
     expect(args).not.toContain('--allowedTools');
+    // E68: journal turns run without Bash (Edit denies don't cover redirects).
+    expect((args as string[])[(args as string[]).indexOf('--disallowedTools') + 1]!.split(',')).toContain('Bash');
     expect(options).toMatchObject({ detached: true });
     writeEvent(children[0]!.stdout, { type: 'result', session_id: 'old-a', result: 'Recorded.', total_cost_usd: 0.03, usage: { input_tokens: 9, output_tokens: 4 } });
     children[0]!.emit('close', 0);
@@ -880,6 +882,8 @@ describe('turn cost persistence (E39)', () => {
 
     const args = spawnMock.mock.calls[0]![1] as string[];
     expect(args[args.indexOf('--allowedTools') + 1]).toBe('mcp__agentbus__reply,mcp__agentbus__send_message');
+    // E68: normal conversation turns keep Bash; only journal turns deny it.
+    expect(args).not.toContain('--disallowedTools');
 
     writeEvent(child.stdout, {
       type: 'assistant',

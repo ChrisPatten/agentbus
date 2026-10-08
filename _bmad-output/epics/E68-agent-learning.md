@@ -108,7 +108,7 @@ Implemented 2026-10-06 on `feat/e64-e68-journaling`. Code: `src/journaling/conso
 
 - Config at the agent level, `agents.<id>.protected_paths`, not under `journaling`. Setting it replaces the default. `system_prompt` is inline template text in this codebase, so "the system-prompt file" means the files it imports with `@path` (cc-headless and cc-pool).
 - The memory dir is excluded everywhere (resolution, hashing, deny rules). A protected directory that contains the memory dir gets no deny rule (it would block memory writes); hashing still covers it.
-- Deny rules: `Edit(//abs)` (`/**` for directories) appended to `--disallowedTools` for cc-headless session turns (handle and pool fork) and consolidation turns. Originally `Write(//abs)` was emitted too; the pre-merge spike dropped it (see below). Subprocess writes (python, node, `cp`) aren't covered; hashing is the backstop.
+- Deny rules: `Edit(//abs)` (`/**` for directories) appended to `--disallowedTools` for cc-headless session turns (handle and pool fork) and consolidation turns. Originally `Write(//abs)` was emitted too; the pre-merge spike dropped it (see below). Bash is denied too for every bus-spawned journal and consolidation turn (`JOURNAL_TURN_DISALLOWED_TOOLS`; see the follow-up spike below). System Message runs can't be restricted; hashing is the backstop there.
 - Hashing is a generic `RunGuard` in `runChain` (`begin` before the first attempt, `end` after the outcome), implemented by `ProtectedPathMonitor` (sha256, ≤ 2000 files, files > 5 MB by size+mtime). The advisory `protected-paths:unapproved-change` (warning) lists files changed during the run window by anyone, minus hashes the bus wrote for approved proposals. It does not auto-resolve (owners acknowledge it).
 - `/journal` shows `protected: …`.
 
@@ -133,12 +133,28 @@ Claude Code 2.1.287 (`~/.local/bin/claude`), a temp project with `CLAUDE.md`, `s
 | Protected file, Write tool | blocked, by the `Edit` rule; the `Write` rule is ignored | blocked | docs |
 | File in a protected dir (`skills/**`) | blocked | blocked | docs |
 | Memory file (`memory/notes.md`) | allowed (no rule covers it) | allowed | docs + rule list |
-| Bash `echo … >> CLAUDE.md` | blocked (redirect target checked against `Edit` denies) | blocked | docs |
+| Bash `echo … >> CLAUDE.md` | blocked (redirect target checked against `Edit` denies) | blocked | docs (**wrong**: not blocked live, see the 2026-10-08 spike) |
 | Bash subprocess (`python3 -c "open(…,'a')"`) | **allowed** (bypass) | **allowed** (bypass); hashing advisory is the backstop | docs |
 
 Only the first case ran live: after it, the session's auto-mode classifier refused further runs of the CLI outside the Bash sandbox (needed because the sandbox's TLS-inspecting proxy breaks the CLI's API connection). The other rows are taken from the docs and still need a live check by the operator (see the report for the command).
 
-**Change**: `protectedPathDenyRules` and the reference script now emit `Edit(...)` only. The `//abs` syntax and `/**` directory globs were already correct. No Bash pattern rules were added: Bash rules match command text, are easy to get around, and a broad rule would break legitimate Bash use; redirects are already covered by the `Edit` denies.
+**Change**: `protectedPathDenyRules` and the reference script now emit `Edit(...)` only. The `//abs` syntax and `/**` directory globs were already correct. No Bash pattern rules were added: Bash rules match command text, are easy to get around, and a broad rule would break legitimate Bash use; redirects are already covered by the `Edit` denies. (Superseded 2026-10-08: redirects are not covered; journal turns now deny Bash outright, see below.)
+
+### Live spike: Bash is not covered by `Edit` denies (2026-10-08)
+
+A live check against the real Claude Code CLI, with the deny rules the bus builds, corrected the docs-based rows above:
+
+| Case | Result |
+|---|---|
+| Write tool → protected file | blocked |
+| Edit tool → protected dir | blocked |
+| Bash redirect → protected file | NOT blocked |
+| Edit-denied → model fell back to a Bash redirect | NOT blocked |
+| memory file | allowed |
+
+`echo x >> CLAUDE.md` succeeded with no denial, and when Edit was denied on `skills/x.md` the model fell back to `echo >> skills/x.md` and succeeded.
+
+**Fix**: every bus-spawned journal and consolidation turn now runs with `Bash` in `--disallowedTools` (`JOURNAL_TURN_DISALLOWED_TOOLS` in `src/learning/protected-paths.ts`), even when the agent has no protected paths: the cc-headless instance's journal branch (`journalSession` and `consolidate`), `CcHeadlessJournaler.runDirect` (the cc-pool `--fork-session` path and cc-pool consolidation) and the reference script. These turns only need Read/Edit/Write on memory files. Normal conversation turns keep Bash. The System Message journaler runs inside the live agent session and can't restrict tools; the before/after hashing advisory is the backstop there.
 
 ### Open questions
 

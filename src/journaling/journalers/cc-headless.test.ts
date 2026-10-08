@@ -191,6 +191,7 @@ describe('CcHeadlessJournaler consolidation (E68 S68.1)', () => {
     expect(JSON.parse(args[args.indexOf('--mcp-config') + 1]!)).toEqual({ mcpServers: { agentbus: { command: 'npx' } } });
     const deny = args[args.indexOf('--disallowedTools') + 1]!;
     expect(deny).toContain('mcp__agentbus__send_message');
+    expect(deny.split(',')).toContain('Bash');
     expect(deny).toContain('Edit(//agents/peggy/.claude/**)');
   });
 
@@ -200,7 +201,18 @@ describe('CcHeadlessJournaler consolidation (E68 S68.1)', () => {
     await j.run(job({ protectedPaths: ['/agents/peggy/CLAUDE.md'] }));
     const args = runProcess.mock.calls[0]![0].args;
     expect(args[args.indexOf('--mcp-config') + 1]).toBe('{"mcpServers":{}}');
-    expect(args[args.indexOf('--disallowedTools') + 1]).toBe('Edit(//agents/peggy/CLAUDE.md)');
+    expect(args[args.indexOf('--disallowedTools') + 1]).toBe('Bash,Edit(//agents/peggy/CLAUDE.md)');
+  });
+
+  it('cc-pool journal turns deny Bash even with no protected paths (E68)', async () => {
+    const runProcess = vi.fn(async (_o: RunProcessOptions) => proc({ stdout: resultJson() }));
+    const j = new CcHeadlessJournaler({ resolver: resolver(), runProcess, env: () => ({}) });
+    await j.run(job({ protectedPaths: [] }));
+    await j.run(cjob({ protectedPaths: [] }));
+    const session = runProcess.mock.calls[0]![0].args;
+    const consolidation = runProcess.mock.calls[1]![0].args;
+    expect(session[session.indexOf('--disallowedTools') + 1]).toBe('Bash');
+    expect(consolidation[consolidation.indexOf('--disallowedTools') + 1]!.split(',')).toContain('Bash');
   });
 
   it('protectedPathDenyRules handles relative paths and none', () => {

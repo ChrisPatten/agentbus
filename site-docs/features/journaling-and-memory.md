@@ -202,7 +202,7 @@ agents:
     protected_paths: [CLAUDE.md, prompts/assistant.md, skills/, .claude/, policies/]
 ```
 
-While a journal or consolidation run is going, `cc-headless` runs aren't allowed to edit protected files at all. For every run, the bus also compares protected files before and after, and warns the agent's owners if one changed without an approved proposal.
+While a journal or consolidation run is going, `cc-headless` runs aren't allowed to edit protected files at all, and they run without shell commands, so they can only change files through Claude's own editing tools. For every run, the bus also compares protected files before and after, and warns the agent's owners if one changed without an approved proposal.
 
 Add this to the agent's `CLAUDE.md` so it knows how this works:
 

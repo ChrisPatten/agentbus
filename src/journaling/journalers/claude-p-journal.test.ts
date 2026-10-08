@@ -93,7 +93,7 @@ describe.skipIf(!hasJq)('scripts/journalers/claude-p-journal.sh (S66.7)', { time
     await journaler().run(job({ CLAUDE_BIN: fakeClaude('ok') }, { protectedPaths: ['/agents/peggy/CLAUDE.md', '/agents/peggy/skills/'] }));
     const args = readFileSync(join(dir, 'args.txt'), 'utf-8').split('\n');
     expect(args[args.indexOf('--disallowedTools') + 1]).toBe(
-      'Edit(//agents/peggy/CLAUDE.md),Edit(//agents/peggy/skills/**)',
+      'Bash,Edit(//agents/peggy/CLAUDE.md),Edit(//agents/peggy/skills/**)',
     );
   });
 

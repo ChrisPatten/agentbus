@@ -27,11 +27,14 @@
  * in the agent's working dir: through the instance handle on cc-headless
  * (system prompt, MCP tools), directly on cc-pool (with the agentbus tools
  * server when `toolsMcpConfig` is wired, so `propose_change` works).
- * E68 S68.4 — every turn denies edits to the job's protected paths.
+ * E68 S68.4 — every turn denies edits to the job's protected paths and
+ * runs without Bash (`JOURNAL_TURN_DISALLOWED_TOOLS`): on cc-headless the
+ * instance adds it for every journal/consolidation turn, here for cc-pool.
  */
 import { DISABLE_AUTO_MEMORY_ENV, autoMemorySettings } from '../../memory/native.js';
 import type { ConsolidationTurnRequest, JournalSessionRequest, JournalSessionResult } from '../../adapters/cc-headless.js';
 import type { RuntimeResolver } from '../../core/runtime-resolver.js';
+import { JOURNAL_TURN_DISALLOWED_TOOLS } from '../../learning/protected-paths.js';
 import { INHERITED_CLAUDE_SESSION_VARS } from '../../pool/pane.js';
 import { runProcess as defaultRunProcess, tail, type RunProcessOptions, type RunProcessResult } from '../process.js';
 import { promptWithJobContext } from '../prompt.js';
@@ -73,9 +76,11 @@ export interface CcHeadlessJournalerDeps {
  * Absolute paths use Claude Code's `//` prefix; directories (ending in `/`)
  * get a `**` glob. Only `Edit(...)` is emitted: Claude Code checks file
  * permissions against `Edit`/`Read` path rules only, an `Edit` deny covers
- * the Write tool and Bash redirect/`tee`/`sed` targets, and a `Write(path)`
- * rule is accepted but never consulted (it only causes a startup warning).
- * Verified against the real CLI (v2.1.287) in the E68 pre-merge spike.
+ * the Edit and Write tools, and a `Write(path)` rule is accepted but never
+ * consulted (it only causes a startup warning). An `Edit` deny does NOT
+ * cover Bash redirects, so journal turns also deny Bash outright
+ * (`JOURNAL_TURN_DISALLOWED_TOOLS`). Verified against the real CLI in the
+ * E68 pre-merge spike.
  */
 export function protectedPathDenyRules(paths: readonly string[] | undefined): string[] {
   const rules: string[] = [];
@@ -226,7 +231,12 @@ export class CcHeadlessJournaler implements Journaler {
     const consolidate = job.kind === 'consolidate';
     const bareAgent = job.agentId.startsWith('agent:') ? job.agentId.slice('agent:'.length) : job.agentId;
     const mcpConfig = consolidate && this.deps.toolsMcpConfig ? JSON.stringify(this.deps.toolsMcpConfig(bareAgent)) : '{"mcpServers":{}}';
-    const deny = [...(consolidate ? [JOURNAL_DELIVERY_TOOLS] : []), ...protectedPathDenyRules(job.protectedPaths)];
+    // Always non-empty: journal turns never get Bash (E68).
+    const deny = [
+      ...(consolidate ? [JOURNAL_DELIVERY_TOOLS] : []),
+      ...JOURNAL_TURN_DISALLOWED_TOOLS,
+      ...protectedPathDenyRules(job.protectedPaths),
+    ];
     const args = [
       '-p', this.prompt(job),
       // Session jobs fork the pane's transcript; consolidation starts fresh.
@@ -235,7 +245,7 @@ export class CcHeadlessJournaler implements Journaler {
       '--permission-mode', 'acceptEdits',
       '--mcp-config', mcpConfig,
       '--strict-mcp-config',
-      ...(deny.length > 0 ? ['--disallowedTools', deny.join(',')] : []),
+      '--disallowedTools', deny.join(','),
       ...(model ? ['--model', model] : []),
       // E67 — the fork sees the pool's memory the way its panes do.
       ...(job.nativeMemory && job.memoryDir ? ['--settings', autoMemorySettings(job.memoryDir)] : []),

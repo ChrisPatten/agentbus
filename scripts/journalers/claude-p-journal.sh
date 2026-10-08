@@ -133,10 +133,11 @@ ARGS=(-p --output-format json --permission-mode acceptEdits --mcp-config '{"mcpS
 ARGS+=(--settings "$(jq -nc --arg d "$MEMORY_DIR" '{autoMemoryDirectory: $d}')")
 [[ -n "${AGENTBUS_MODEL:-}" ]] && ARGS+=(--model "$AGENTBUS_MODEL")
 # E68: deny edits to the agent's protected files (absolute paths; dirs end in /).
-# Edit rules only: they cover the Write tool and Bash redirects; Claude Code
-# never consults Write(path) rules.
+# Edit rules only: they cover the Edit and Write tools (Claude Code never
+# consults Write(path) rules). They do NOT cover Bash redirects, so the run
+# never gets Bash, even with no protected paths.
 DENY="$(jq -r '[.protected_paths[]? | (if endswith("/") then . + "**" else . end) | ("Edit(/" + . + ")")] | join(",")' <<<"$PAYLOAD")"
-[[ -n "$DENY" ]] && ARGS+=(--disallowedTools "$DENY")
+ARGS+=(--disallowedTools "Bash${DENY:+,$DENY}")
 
 # E68: self-edit proposals. Claude can't edit protected files; it may write
 # proposals to a file in a private temp dir, returned as `proposals[]`.

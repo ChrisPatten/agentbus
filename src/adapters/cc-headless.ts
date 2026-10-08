@@ -49,6 +49,7 @@ import { hashBlock, shouldSendBlock, markBlockSent, clearLedger, detectCompactio
 import { HeadlessLimiter, type TurnClass } from './headless-limiter.js';
 import { terminateProcessGroup } from '../journaling/process.js';
 import { busTokenEnv, resolveBusToken, withBusToken } from '../core/bus-auth.js';
+import { JOURNAL_TURN_DISALLOWED_TOOLS } from '../learning/protected-paths.js';
 
 const configPath = resolve(process.env['AGENTBUS_CONFIG'] ?? 'config.yaml');
 const config = loadConfig(configPath);
@@ -562,8 +563,9 @@ class HeadlessInstance {
       // "all" is treated as a tool name, not a wildcard. Delivery must be
       // explicitly allowed because this is a noninteractive Claude process.
       // E66: a journaling turn never delivers, so it gets the opposite.
+      // E68: journal and consolidation turns also run without Bash.
       ...(journal
-        ? ['--disallowedTools', [JOURNAL_DISALLOWED_TOOLS, ...(journal.denyTools ?? [])].join(',')]
+        ? ['--disallowedTools', [JOURNAL_DISALLOWED_TOOLS, ...JOURNAL_TURN_DISALLOWED_TOOLS, ...(journal.denyTools ?? [])].join(',')]
         : ['--allowedTools', 'mcp__agentbus__reply,mcp__agentbus__send_message']),
       '--mcp-config', mcpConfigPath,
       '--system-prompt-file', systemPromptPath,
