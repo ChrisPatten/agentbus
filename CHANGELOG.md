@@ -10,6 +10,13 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+### Fixed
+- **Pool panes no longer receive their own launch line as a chat message.** A
+  pane claimed while a Claude session was still running in its window (left by
+  `on_evict: clear` or a bus restart) had the `claude --resume …` line typed
+  into that session. A launch now reuses a live window only at a shell prompt
+  and otherwise recreates it.
+
 ## [0.14.0] - 2026-09-29
 
 ### Added
