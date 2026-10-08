@@ -66,6 +66,19 @@ const READINESS_POLL_INTERVAL_MS = 500;
 /** Pause between `C-c` and killing the window on a 'kill' release, so the interrupt has a moment to land. */
 const RELEASE_KILL_PAUSE_MS = 300;
 
+/**
+ * Foreground commands that mean a pane is sitting at a shell prompt, ready to
+ * take a launch line. Matched against tmux's `pane_current_command` with any
+ * login-shell `-` prefix stripped. An allowlist of shells, not a denylist of
+ * `claude`: the CLI's process name varies by install (`claude`, `node`, a
+ * bare version number).
+ */
+const SHELL_COMMANDS = new Set(['sh', 'bash', 'zsh', 'fish', 'dash', 'ksh', 'csh', 'tcsh', 'nu']);
+
+function isShellCommand(command: string | null): boolean {
+  return command !== null && SHELL_COMMANDS.has(command.replace(/^-/, ''));
+}
+
 export interface PaneLifecycleDeps {
   tmux: TmuxController;
   /** Base URL of bus-core's HTTP API, e.g. "http://127.0.0.1:3000" — used only for the readiness poll. */
@@ -119,9 +132,9 @@ export interface LaunchParams {
    * If the target window doesn't exist yet, create it with this cwd/env
    * before launching (covers both a pool's initial panes on first-ever
    * launch and a `growth: dynamic` pane that has no window at all). When the
-   * target window already exists (the common case — a pre-seeded pane being
-   * (re)launched), this is skipped automatically (checked via
-   * `tmux.paneAlive`).
+   * target window already exists at a shell prompt, this is skipped. A
+   * window with anything else in its foreground is killed and recreated
+   * with this cwd/env.
    */
   ensureWindow: { cwd: string; env?: Record<string, string> };
 }
@@ -217,7 +230,7 @@ export class PaneLifecycle {
   }
 
   /**
-   * Full sequence: ensure window exists -> write per-pane mcp config (+
+   * Full sequence: ensure window exists at a shell prompt -> write per-pane mcp config (+
    * optional rendered system-prompt file if `cfg.system_prompt` is set) ->
    * build and send the launch/resume command line -> ack handshake -> poll
    * readiness -> clean up temp files. Throws `PaneLaunchError` on any
@@ -278,9 +291,23 @@ export class PaneLifecycle {
 
   // ── Launch steps ──────────────────────────────────────────────────────────
 
+  /**
+   * Leaves the pane at a shell prompt in a live window. A live window is
+   * reused only when a shell is in its foreground. Anything else is a session
+   * left behind by `on_evict: 'clear'` or by a bus restart, and typing the
+   * launch line there would submit it to that session as a chat message — so
+   * the window is killed and recreated.
+   */
   private async ensureWindowExists(params: LaunchParams): Promise<void> {
     const alreadyAlive = await this.tmux.paneAlive(params.paneId);
-    if (alreadyAlive) return;
+    if (alreadyAlive) {
+      const command = await this.tmux.paneCommand(params.paneId);
+      if (isShellCommand(command)) return;
+      console.warn(
+        `[pane:${params.paneId}] Foreground command is "${command ?? 'unknown'}", not a shell — recreating the window before launch`,
+      );
+      await this.release(params.paneId, 'kill');
+    }
 
     const [session, windowName] = splitPaneTarget(params.paneId);
     const env = this.buildWindowEnv(params.ensureWindow.env);

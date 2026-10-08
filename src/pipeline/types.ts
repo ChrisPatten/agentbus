@@ -49,6 +49,8 @@ export interface SlashCommandInfo {
   name: string;
   args: string[];
   argsRaw: string;
+  /** True for `//name` — forward to the provider even if the bus defines `name` (E58). */
+  forceProvider?: boolean;
 }
 
 /** A resolved route target for enqueue */

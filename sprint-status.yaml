@@ -916,4 +916,21 @@ epics:
       S53.4: complete  # Per-launch resolution, pool_leases.model (023), startup warning
       S53.5: complete  # Relaunch between turns on mismatch; concurrency guard
       S53.6: complete  # /pool + GET /api/v1/pool show model; docs
-last_updated: 2026-09-25  # E53 (pool model selection) implemented on feat/e53-pool-model-selection, not yet merged. Prior note preserved: E52 (pool pane watchdog): S52.1 and S52.2 implemented on feat/e52-pool-watchdog, not yet merged; S52.3 waits on real captured stalls. Prior note preserved: E51 (approval requests) merged to dev and live, awaiting a real end-to-end check. Prior note preserved: E49 (context-block ledger) + E50 (agent-managed knowledge store, Phase 1) implemented end-to-end on claude/agent-knowledge-database-xiqn29, not yet merged, not yet pushed. Both from a design spike (_bmad-output/planning-artifacts/design-spike-agent-knowledge-store.md) worked out conversationally with the operator. Prior note preserved: 2026-09-17  # E48 (interactive Claude Code session pool over tmux) implemented end-to-end and marked complete — all 10 stories, on feat/e48-cc-session-pool, not yet merged to dev/main. current_epic stays E42/E44 (Siri Bridge) since that's the operator's ongoing focus; E48 was a self-contained side branch, now finished. Prior note preserved: Backfilled E36, E38, E39, E40 (complete, merged to dev 2026-08-31/09-01) and E37, E41 (pending, epic files only). Added the Siri Bridge package E42–E47 (renumbered from E36–E41 on arrival to avoid the collision): E42 complete, E44 in-progress (S44.5 on-device is the operator's), E43/E45/E46/E47 pending. E23's S23.5 still pending operator sign-off.
+  E58:
+    status: in-progress
+    notes: >
+      Forward slash commands to the provider (cc-pool, cc-headless): a /name
+      the bus doesn't define, or any //name, goes to the provider behind the
+      conversation's primary route. cc-pool types it into the leased pane and
+      replies with a snapshot; cc-headless runs it as its own claude -p turn.
+      All six stories implemented on feat/e58-provider-slash-commands, not
+      yet merged. Remaining: operator live check on a pool pane and a
+      headless agent.
+    stories:
+      S58.1: complete  # //name parsing, ProviderCommandForwarder seam
+      S58.2: complete  # Dispatch in processInbound, /help note
+      S58.3: complete  # cc-pool forwarder
+      S58.4: complete  # cc-headless forwarder and raw-prompt turn
+      S58.5: complete  # Wiring and docs
+      S58.6: complete  # /keys: send keystrokes to a pool pane
+last_updated: 2026-10-03  # E58 (provider slash commands) implemented on feat/e58-provider-slash-commands, not yet merged. Prior note preserved: E53 (pool model selection) implemented on feat/e53-pool-model-selection, not yet merged. Prior note preserved: E52 (pool pane watchdog): S52.1 and S52.2 implemented on feat/e52-pool-watchdog, not yet merged; S52.3 waits on real captured stalls. Prior note preserved: E51 (approval requests) merged to dev and live, awaiting a real end-to-end check. Prior note preserved: E49 (context-block ledger) + E50 (agent-managed knowledge store, Phase 1) implemented end-to-end on claude/agent-knowledge-database-xiqn29, not yet merged, not yet pushed. Both from a design spike (_bmad-output/planning-artifacts/design-spike-agent-knowledge-store.md) worked out conversationally with the operator. Prior note preserved: 2026-09-17  # E48 (interactive Claude Code session pool over tmux) implemented end-to-end and marked complete — all 10 stories, on feat/e48-cc-session-pool, not yet merged to dev/main. current_epic stays E42/E44 (Siri Bridge) since that's the operator's ongoing focus; E48 was a self-contained side branch, now finished. Prior note preserved: Backfilled E36, E38, E39, E40 (complete, merged to dev 2026-08-31/09-01) and E37, E41 (pending, epic files only). Added the Siri Bridge package E42–E47 (renumbered from E36–E41 on arrival to avoid the collision): E42 complete, E44 in-progress (S44.5 on-device is the operator's), E43/E45/E46/E47 pending. E23's S23.5 still pending operator sign-off.
