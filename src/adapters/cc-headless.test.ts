@@ -17,6 +17,8 @@ const stubConfig: AppConfig = {
       peggy: {
         agent_id: 'peggy',
         poll_interval_ms: 1000,
+        max_concurrent_turns: 5,
+        reserved_system_slots: 1,
         system_prompt: 'You are Peggy.',
         claude_bin: 'claude',
         error_reply: 'err',
@@ -27,6 +29,8 @@ const stubConfig: AppConfig = {
       pokeclaude: {
         agent_id: 'pokeclaude',
         poll_interval_ms: 1000,
+        max_concurrent_turns: 5,
+        reserved_system_slots: 1,
         system_prompt: 'You are pokeclaude.',
         claude_bin: 'claude',
         error_reply: 'err',
@@ -49,6 +53,8 @@ const legacySingleConfig: AppConfig = {
     'cc-headless': {
       agent_id: 'peggy',
       poll_interval_ms: 1000,
+      max_concurrent_turns: 5,
+      reserved_system_slots: 1,
       system_prompt: 'You are Peggy.',
       claude_bin: 'claude',
       error_reply: 'err',
@@ -162,7 +168,7 @@ describe('extractToolCalls (E29)', () => {
   });
 });
 
-describe('splitProviderCommands (E58)', () => {
+describe('splitProviderCommands (E71)', () => {
   const env = (id: string, providerCommand?: string) =>
     ({
       id,
@@ -341,13 +347,15 @@ describe('cc-headless multi-instance lifecycle (E23)', () => {
   });
 });
 
-describe('queue responsiveness — advance on delivery, not process exit (E30 / S30.4)', () => {
+describe('conversation serialization after early delivery (E58)', () => {
   const singleInstanceConfig: AppConfig = {
     ...stubConfig,
     adapters: {
       'cc-headless': {
         agent_id: 'peggy',
         poll_interval_ms: 15,
+        max_concurrent_turns: 5,
+        reserved_system_slots: 1,
         system_prompt: 'You are Peggy.',
         claude_bin: 'claude',
         error_reply: 'err',
@@ -382,8 +390,8 @@ describe('queue responsiveness — advance on delivery, not process exit (E30 / 
     return { ok: true, json: async () => ({ ok: true, messages }) } as unknown as Response;
   }
 
-  function makeEnvelope(id: string, sender: string) {
-    return { id, sender, channel: 'telegram', topic: undefined, body: `msg ${id}` };
+  function makeEnvelope(id: string, sender: string, topic = 'general') {
+    return { id, sender, channel: 'telegram', topic, body: `msg ${id}`, metadata: {} };
   }
 
   beforeEach(() => {
@@ -405,7 +413,7 @@ describe('queue responsiveness — advance on delivery, not process exit (E30 / 
     vi.restoreAllMocks();
   });
 
-  it('starts processing message 2 at message 1s delivery, not at message 1s process close', async () => {
+  it('does not overlap two children in one conversation after early delivery', async () => {
     const events: Array<{ label: string; t: number }> = [];
     const t0 = Date.now();
     const mark = (label: string) => events.push({ label, t: Date.now() - t0 });
@@ -438,7 +446,7 @@ describe('queue responsiveness — advance on delivery, not process exit (E30 / 
       if (index === 0) {
         // Turn 1: deliver quickly via the `reply` tool, but keep the process
         // itself alive for a while afterward (simulating trailing teardown /
-        // any lingering work) — the queue must not wait for this.
+        // any lingering work). The next child must wait for process exit.
         setTimeout(() => {
           mark('turn1 delivered');
           writeEvent(child.stdout, {
@@ -467,7 +475,13 @@ describe('queue responsiveness — advance on delivery, not process exit (E30 / 
       return child as unknown as import('node:child_process').ChildProcess;
     });
 
+    // make dev supplies a relative AGENTBUS_CONFIG; Claude runs from the
+    // agent's working directory, so its MCP child needs the absolute path.
+    const previousConfigPath = process.env['AGENTBUS_CONFIG'];
+    process.env['AGENTBUS_CONFIG'] = 'config.yaml';
     const { startHeadless } = await import('./cc-headless.js');
+    if (previousConfigPath === undefined) delete process.env['AGENTBUS_CONFIG'];
+    else process.env['AGENTBUS_CONFIG'] = previousConfigPath;
     startHeadless(realDb as unknown as Database.Database);
 
     // Give both polls, turn 1's delivery, and turn 2's spawn+delivery+close
@@ -479,17 +493,158 @@ describe('queue responsiveness — advance on delivery, not process exit (E30 / 
     const turn2Spawned = events.find((e) => e.label === 'turn2 spawned');
 
     expect(spawnMock).toHaveBeenCalledTimes(2);
+    const spawnEnv = spawnMock.mock.calls[0]![2].env as NodeJS.ProcessEnv;
+    expect(spawnEnv['AGENTBUS_CONFIG']).toBe(join(process.cwd(), 'config.yaml'));
+    expect(spawnEnv['AGENTBUS_AGENT_ID']).toBe('peggy');
+    expect(spawnEnv['AGENTBUS_TOOLS_ONLY']).toBe('true');
     expect(turn1Delivered).toBeDefined();
     expect(turn1Closed).toBeDefined();
     expect(turn2Spawned).toBeDefined();
 
-    // The core S30.4 assertion: turn 2 began (spawn #2) after turn 1
-    // delivered but well before turn 1's process actually closed — proving
-    // the per-contact queue advanced on delivery, not on process exit.
+    // Delivery can complete early, but resuming the same conversation before
+    // the prior process exits would race on the same Claude session.
     expect(turn2Spawned!.t).toBeGreaterThanOrEqual(turn1Delivered!.t);
-    expect(turn2Spawned!.t).toBeLessThan(turn1Closed!.t);
+    expect(turn2Spawned!.t).toBeGreaterThanOrEqual(turn1Closed!.t);
   });
-  it('runs a forwarded provider command as a raw prompt and delivers its output (E58)', async () => {
+
+  it('runs two topics for one contact together and stops only the targeted topic', async () => {
+    const messages = [makeEnvelope('a', 'contact:alice', 'topic-a'), makeEnvelope('b', 'contact:alice', 'topic-b')];
+    let pendingCall = 0;
+    fetchMock.mockImplementation((url: string) => {
+      if (String(url).includes('/messages/pending')) {
+        return Promise.resolve(pendingResponse(++pendingCall === 1 ? messages : []));
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) } as Response);
+    });
+    const children: ReturnType<typeof makeFakeChild>[] = [];
+    spawnMock.mockImplementation(() => {
+      const child = makeFakeChild();
+      children.push(child);
+      return child as unknown as import('node:child_process').ChildProcess;
+    });
+    const { startHeadless } = await import('./cc-headless.js');
+    const handle = startHeadless(realDb as unknown as Database.Database).get('agent:peggy')!;
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(children).toHaveLength(2);
+    expect(handle.snapshot()).toMatchObject({ running_user: 2, waiting: 0 });
+
+    const conversationA = createHash('sha256').update(['alice', 'telegram', 'topic-a'].sort().join(':')).digest('hex');
+    const conversationB = createHash('sha256').update(['alice', 'telegram', 'topic-b'].sort().join(':')).digest('hex');
+    expect(handle.stopTurn(conversationA)).toBe(true);
+    expect(children[0]!.kill).toHaveBeenCalledWith('SIGKILL');
+    expect(children[1]!.kill).not.toHaveBeenCalled();
+    expect(handle.stopTurn('unrelated-conversation')).toBe(false);
+    // The other topic still owns its child and can be stopped independently.
+    expect(handle.stopTurn(conversationB)).toBe(true);
+    children.forEach((child) => child.emit('close', null));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(handle.snapshot()).toMatchObject({ running_user: 0, waiting: 0 });
+  });
+
+  it('serializes journals for two conversations through one agent lane', async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(pendingResponse([])));
+    const children: ReturnType<typeof makeFakeChild>[] = [];
+    spawnMock.mockImplementation(() => {
+      const child = makeFakeChild();
+      children.push(child);
+      return child as unknown as import('node:child_process').ChildProcess;
+    });
+    const { startHeadless } = await import('./cc-headless.js');
+    const handle = startHeadless(realDb as unknown as Database.Database).get('agent:peggy')!;
+    void handle.journalSession({ claudeSessionId: 'old-a', contactId: 'alice', channel: 'telegram', conversationId: 'conv-a' });
+    void handle.journalSession({ claudeSessionId: 'old-b', contactId: 'alice', channel: 'telegram', conversationId: 'conv-b' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(children).toHaveLength(1);
+    expect(handle.snapshot()).toMatchObject({ running_system: 1, waiting: 1 });
+    writeEvent(children[0]!.stdout, { type: 'result', session_id: 'old-a', result: 'done' });
+    children[0]!.emit('close', 0);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(children).toHaveLength(2);
+    writeEvent(children[1]!.stdout, { type: 'result', session_id: 'old-b', result: 'done' });
+    children[1]!.emit('close', 0);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(handle.snapshot()).toMatchObject({ running_system: 0, waiting: 0 });
+  });
+
+  it('runs a journaling turn with the journaler model, no delivery tools, in its own process group (E66 S66.6)', async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(pendingResponse([])));
+    const children: ReturnType<typeof makeFakeChild>[] = [];
+    spawnMock.mockImplementation(() => {
+      const child = makeFakeChild();
+      children.push(child);
+      return child as unknown as import('node:child_process').ChildProcess;
+    });
+    const { startHeadless } = await import('./cc-headless.js');
+    const handle = startHeadless(realDb as unknown as Database.Database).get('agent:peggy')!;
+    const pending = handle.journalSession({
+      claudeSessionId: 'old-a', contactId: 'alice', channel: 'telegram', conversationId: 'conv-a', model: 'claude-haiku-4-5', prompt: 'Journal.',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const [, args, options] = spawnMock.mock.calls[0]!;
+    expect(args).toEqual(expect.arrayContaining(['--model', 'claude-haiku-4-5', '--resume', 'old-a', '--disallowedTools']));
+    expect(args).not.toContain('--allowedTools');
+    // E68: journal turns run without Bash (Edit denies don't cover redirects).
+    expect((args as string[])[(args as string[]).indexOf('--disallowedTools') + 1]!.split(',')).toContain('Bash');
+    expect(options).toMatchObject({ detached: true });
+    writeEvent(children[0]!.stdout, { type: 'result', session_id: 'old-a', result: 'Recorded.', total_cost_usd: 0.03, usage: { input_tokens: 9, output_tokens: 4 } });
+    children[0]!.emit('close', 0);
+    await expect(pending).resolves.toMatchObject({ error: null, costUsd: 0.03, inputTokens: 9, outputTokens: 4, resultText: 'Recorded.' });
+  });
+
+  it('kills a journaling turn that outlives its timeout (E66 S66.6)', async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(pendingResponse([])));
+    const children: ReturnType<typeof makeFakeChild>[] = [];
+    spawnMock.mockImplementation(() => {
+      const child = makeFakeChild();
+      child.kill.mockImplementation(() => { setImmediate(() => child.emit('close', null)); return true; });
+      children.push(child);
+      return child as unknown as import('node:child_process').ChildProcess;
+    });
+    const { startHeadless } = await import('./cc-headless.js');
+    const handle = startHeadless(realDb as unknown as Database.Database).get('agent:peggy')!;
+    const result = await handle.journalSession({ claudeSessionId: 'old-a', contactId: 'alice', channel: 'telegram', conversationId: 'conv-a', timeoutMs: 30 });
+    expect(children[0]!.kill).toHaveBeenCalledWith('SIGTERM');
+    expect(result).toMatchObject({ timedOut: true, error: expect.stringContaining('timed out') });
+  });
+
+  it('serializes an Earlier fork against journaling on the same Claude transcript without holding capacity', async () => {
+    const forkConversation = createHash('sha256').update(['alice', 'app', 'thread:fork'].sort().join(':')).digest('hex');
+    const now = new Date().toISOString();
+    realDb.prepare(`INSERT INTO conversation_registry(id,contact_id,channel,topic,first_seen,last_seen) VALUES (?,?,?,?,?,?)`)
+      .run(forkConversation, 'alice', 'app', 'thread:fork', now, now);
+    realDb.prepare(`INSERT INTO sessions(id,conversation_id,channel,contact_id,started_at,last_activity,agent_id,claude_session_id)
+      VALUES (?,?,?,?,?,?,?,?)`).run('fork-session', forkConversation, 'app', 'alice', now, now, 'agent:peggy', 'shared-claude-id');
+    let polls = 0;
+    fetchMock.mockImplementation((url: string) => {
+      if (String(url).includes('/messages/pending')) {
+        polls++;
+        return Promise.resolve(pendingResponse(polls === 2 ? [{ ...makeEnvelope('fork-message', 'contact:alice', 'thread:fork'), channel: 'app' }] : []));
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) } as Response);
+    });
+    const children: ReturnType<typeof makeFakeChild>[] = [];
+    spawnMock.mockImplementation(() => {
+      const child = makeFakeChild(); children.push(child);
+      return child as unknown as import('node:child_process').ChildProcess;
+    });
+    const { startHeadless } = await import('./cc-headless.js');
+    const handle = startHeadless(realDb as unknown as Database.Database).get('agent:peggy')!;
+    void handle.journalSession({ claudeSessionId: 'shared-claude-id', contactId: 'alice', channel: 'telegram', conversationId: 'old-conversation' });
+    await new Promise(resolve => setTimeout(resolve, 45));
+    expect(children).toHaveLength(1);
+    expect(handle.snapshot()).toMatchObject({ running_system: 1, running_user: 0, waiting: 1 });
+    writeEvent(children[0]!.stdout, { type: 'result', session_id: 'shared-claude-id', result: 'done' });
+    children[0]!.emit('close', 0);
+    await new Promise(resolve => setTimeout(resolve, 35));
+    expect(children).toHaveLength(2);
+    expect(spawnMock.mock.calls[1]![1]).toContain('shared-claude-id');
+    writeEvent(children[1]!.stdout, { type: 'result', session_id: 'new-claude-id', result: 'done' });
+    children[1]!.emit('close', 0);
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect(realDb.prepare('SELECT claude_session_id FROM sessions WHERE id = ?').get('fork-session'))
+      .toMatchObject({ claude_session_id: 'new-claude-id' });
+  });
+  it('runs a forwarded provider command as a raw prompt and delivers its output (E71)', async () => {
     const posted: Array<{ payload: { body: string } }> = [];
     let pendingCall = 0;
     fetchMock.mockImplementation((url: string, init?: RequestInit) => {
@@ -538,6 +693,8 @@ describe('model resolution (E53 S53.2)', () => {
       'cc-headless': {
         agent_id: 'peggy',
         poll_interval_ms: 15,
+        max_concurrent_turns: 5,
+        reserved_system_slots: 1,
         system_prompt: 'You are Peggy.',
         claude_bin: 'claude',
         error_reply: 'err',
@@ -692,6 +849,8 @@ describe('turn cost persistence (E39)', () => {
       'cc-headless': {
         agent_id: 'peggy',
         poll_interval_ms: 15,
+        max_concurrent_turns: 5,
+        reserved_system_slots: 1,
         system_prompt: 'You are Peggy.',
         claude_bin: 'claude',
         error_reply: 'err',
@@ -778,6 +937,75 @@ describe('turn cost persistence (E39)', () => {
     stopHeadless();
     realDb.close();
     vi.restoreAllMocks();
+  });
+
+  it('allows delivery tools and falls back to text when Claude denies one', async () => {
+    setupOneMessagePoll();
+    const child = makeFakeChild();
+    spawnMock.mockImplementation(() => child as unknown as import('node:child_process').ChildProcess);
+
+    const { startHeadless } = await import('./cc-headless.js');
+    startHeadless(realDb as unknown as Database.Database);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const args = spawnMock.mock.calls[0]![1] as string[];
+    expect(args[args.indexOf('--allowedTools') + 1]).toBe('mcp__agentbus__reply,mcp__agentbus__send_message');
+    // E68: normal conversation turns keep Bash; only journal turns deny it.
+    expect(args).not.toContain('--disallowedTools');
+
+    writeEvent(child.stdout, {
+      type: 'assistant',
+      message: { content: [{ type: 'tool_use', id: 'tool-1', name: 'mcp__agentbus__reply', input: {} }] },
+    });
+    writeEvent(child.stdout, {
+      type: 'user',
+      message: { content: [{ type: 'tool_result', tool_use_id: 'tool-1', is_error: true,
+        content: "Claude requested permissions to use mcp__agentbus__reply, but you haven't granted it yet." }] },
+    });
+    writeEvent(child.stdout, { type: 'result', result: 'I could not use the reply tool.' });
+    child.emit('close', 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const outbound = fetchMock.mock.calls.filter(([url, init]) =>
+      String(url).endsWith('/api/v1/messages') && (init as RequestInit | undefined)?.method === 'POST');
+    expect(outbound).toHaveLength(1);
+    expect(JSON.stringify(outbound[0]![1])).toContain('I could not use the reply tool.');
+  });
+
+  it('reports failed tool calls of a normal turn through onToolError (E68 S68.2)', async () => {
+    setupOneMessagePoll();
+    const child = makeFakeChild();
+    spawnMock.mockImplementation(() => child as unknown as import('node:child_process').ChildProcess);
+    const onToolError = vi.fn();
+
+    const { startHeadless } = await import('./cc-headless.js');
+    startHeadless(realDb as unknown as Database.Database, { onToolError });
+    await new Promise((r) => setTimeout(r, 30));
+
+    writeEvent(child.stdout, {
+      type: 'assistant',
+      message: { content: [
+        { type: 'tool_use', id: 'tool-1', name: 'Bash', input: { command: 'ls /nope' } },
+        { type: 'tool_use', id: 'tool-2', name: 'mcp__agentbus__reply', input: {} },
+        { type: 'tool_use', id: 'tool-3', name: 'Read', input: {} },
+      ] },
+    });
+    writeEvent(child.stdout, {
+      type: 'user',
+      message: { content: [
+        { type: 'tool_result', tool_use_id: 'tool-1', is_error: true, content: [{ type: 'text', text: 'ls: /nope: No such file' }] },
+        { type: 'tool_result', tool_use_id: 'tool-2', is_error: true, content: 'channel rejected the reply' },
+        { type: 'tool_result', tool_use_id: 'tool-3', content: 'ok' },
+      ] },
+    });
+    writeEvent(child.stdout, { type: 'result', result: 'done' });
+    child.emit('close', 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    expect(onToolError).toHaveBeenCalledTimes(2);
+    expect(onToolError.mock.calls[0]![0]).toMatchObject({ agentId: 'agent:peggy', toolName: 'Bash', error: 'ls: /nope: No such file', delivery: false });
+    expect(onToolError.mock.calls[1]![0]).toMatchObject({ toolName: 'mcp__agentbus__reply', error: 'channel rejected the reply', delivery: true });
+    expect(typeof onToolError.mock.calls[0]![0].conversationId).toBe('string');
   });
 
   it('persists cost/usage/turn count from a successful result event (S39.2/S39.3)', async () => {
@@ -906,6 +1134,8 @@ describe('context-block ledger (per-session memory dedup)', () => {
         'cc-headless': {
           agent_id: 'peggy',
           poll_interval_ms: 15,
+          max_concurrent_turns: 5,
+          reserved_system_slots: 1,
           system_prompt: 'You are Peggy.',
           claude_bin: 'claude',
           error_reply: 'err',
@@ -931,7 +1161,8 @@ describe('context-block ledger (per-session memory dedup)', () => {
     vi.restoreAllMocks();
   });
 
-  it('sends the memory block on a fresh session, then withholds it on the next turn of the same session', async () => {
+  /** Two turns of one open session; returns the spawn calls. */
+  async function runTwoTurns(): Promise<unknown[][]> {
     const conversationId = fallbackConversationId('contact:alice', 'telegram', undefined);
     const now = new Date().toISOString();
     // Pre-seed an open session for this conversation, matching what a real
@@ -995,16 +1226,42 @@ describe('context-block ledger (per-session memory dedup)', () => {
 
     expect(spawnMock).toHaveBeenCalledTimes(2);
 
+    return spawnMock.mock.calls as unknown[][];
+  }
+
+  it('memory.native: false — sends the memory block on a fresh session, then withholds it on the next turn of the same session', async () => {
+    currentConfig = { ...singleInstanceConfig, agents: { 'agent:peggy': { memory: { native: false } } } } as unknown as AppConfig;
+    const calls = await runTwoTurns();
     // spawn(claude_bin, args, opts) — args[1] is the `-p` prompt (args = ['-p', prompt, ...]).
-    const turn1Args = spawnMock.mock.calls[0]![1] as string[];
-    const turn2Args = spawnMock.mock.calls[1]![1] as string[];
+    const turn1Args = calls[0]![1] as string[];
+    const turn2Args = calls[1]![1] as string[];
     expect(turn1Args[1]).toContain('=== memory/MEMORY.md ===');
     expect(turn1Args[1]).toContain('# Peggy memory index');
     expect(turn2Args[1]).not.toContain('=== memory/MEMORY.md ===');
+    expect(turn1Args).not.toContain('--settings');
+    expect((calls[0]![2] as { env: NodeJS.ProcessEnv }).env['CLAUDE_CODE_DISABLE_AUTO_MEMORY']).toBe('1');
 
     const ledgerRows = realDb
       .prepare(`SELECT block_key FROM context_blocks WHERE session_id = 'sess-1'`)
       .all() as Array<{ block_key: string }>;
     expect(ledgerRows.map((r) => r.block_key)).toEqual(['memory:memory/MEMORY.md']);
+  });
+
+  it('native memory (E67 default) — injects nothing, points auto memory at the memory dir, leaves the ledger empty', async () => {
+    process.env['CLAUDE_CODE_DISABLE_AUTO_MEMORY'] = '1'; // inherited from the bus's environment
+    try {
+      const calls = await runTwoTurns();
+      for (const call of calls.slice(0, 2)) {
+        const args = call[1] as string[];
+        expect(args[1]).not.toContain('=== memory/');
+        const i = args.indexOf('--settings');
+        expect(i).toBeGreaterThan(0);
+        expect(JSON.parse(args[i + 1]!)).toEqual({ autoMemoryDirectory: join(workingDir, 'memory') });
+        expect((call[2] as { env: NodeJS.ProcessEnv }).env).not.toHaveProperty('CLAUDE_CODE_DISABLE_AUTO_MEMORY');
+      }
+      expect(realDb.prepare(`SELECT COUNT(*) AS n FROM context_blocks`).get()).toEqual({ n: 0 });
+    } finally {
+      delete process.env['CLAUDE_CODE_DISABLE_AUTO_MEMORY'];
+    }
   });
 });

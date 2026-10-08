@@ -1,6 +1,6 @@
 {
   "name": "agentbus",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,6 +8,9 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "test": "vitest run",
+    "docs:dev": "vitepress dev site-docs",
+    "docs:build": "vitepress build site-docs",
+    "docs:preview": "vitepress preview site-docs",
     "preversion": "vitest run",
     "release:patch": "npm version patch -m \"chore(release): v%s\"",
     "release:minor": "npm version minor -m \"chore(release): v%s\"",
@@ -22,14 +25,16 @@
     "@types/node": "^25.5.2",
     "@types/nodemailer": "^8.0.1",
     "@types/uuid": "^10.0.0",
+    "@types/ws": "^8.18.2",
     "pm2": "^6.0.14",
     "tsx": "^4.21.0",
     "typescript": "^6.0.2",
+    "vitepress": "^1.6.4",
     "vitest": "^4.1.4"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.88.0",
     "@fastify/multipart": "^10.1.0",
+    "@fastify/websocket": "^11.3.1",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@resvg/resvg-js": "^2.6.2",
     "better-sqlite3": "^12.8.0",
@@ -44,6 +49,7 @@
     "markdown-it": "^14.2.0",
     "nodemailer": "^9.0.1",
     "uuid": "^13.0.0",
+    "ws": "^8.22.0",
     "zod": "^4.3.6"
   }
 }

@@ -18,7 +18,7 @@ const stubConfig = {
   adapters: {},
   contacts: {},
   topics: ['general'],
-  memory: { summarizer_interval_ms: 60000, session_idle_threshold_ms: 1800000, context_window_hours: 48, claude_api_model: 'claude-opus-4-6' },
+  memory: { summarizer_interval_ms: 60000, session_idle_threshold_ms: 1800000, claude_api_model: 'claude-opus-4-6' },
   pipeline: { dedup_window_ms: 30000, drop_unrouted: false, topic_rules: [], priority_weights: { base_score: 0, topic_bonus: 40, vip_sender_bonus: 20, urgency_keyword_bonus: 15 }, urgency_keywords: [], vip_contacts: [], routes: [] },
 } as unknown as AppConfig;
 
@@ -124,6 +124,19 @@ describe('dedup stage', () => {
     expect(r1).not.toBeNull();
     expect(r2).not.toBeNull();
     expect(r1!.dedupKey).not.toBe(r2!.dedupKey);
+  });
+
+  it('same body in another topic or channel is not a duplicate', async () => {
+    const db = makeDb();
+    const stage = createDedup(db);
+    const first = await stage(makeCtx({ channel: 'app', topic: 'thread:a', payload: { type: 'text', body: 'count to ten' } }, db));
+    const otherTopic = await stage(makeCtx({ channel: 'app', topic: 'thread:b', payload: { type: 'text', body: 'count to ten' } }, db));
+    const otherChannel = await stage(makeCtx({ channel: 'telegram', topic: 'thread:a', payload: { type: 'text', body: 'count to ten' } }, db));
+    const repeat = await stage(makeCtx({ channel: 'app', topic: 'thread:a', payload: { type: 'text', body: 'count to ten' } }, db));
+    expect(first).not.toBeNull();
+    expect(otherTopic).not.toBeNull();
+    expect(otherChannel).not.toBeNull();
+    expect(repeat).toBeNull();
   });
 
   it('different sender produces different key', async () => {

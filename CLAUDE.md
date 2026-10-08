@@ -19,7 +19,7 @@ npm run build                   # Compile to dist/
 ## Testing policy
 
 Only run the full suite (`npx vitest run`) after changes to application code (anything under `src/` that isn't a `*.test.ts` file). Skip it for:
-- Documentation-only changes (`docs/`, `CLAUDE.md`, `README.md`, etc.)
+- Documentation-only changes (`docs/`, `site-docs/`, `CLAUDE.md`, `README.md`, etc.)
 - Changes that only add or modify test files, with no application code touched
 
 For those cases, `npx tsc --noEmit` (if `.ts` files changed) is sufficient — application behavior hasn't changed, so there's no need to re-run the full suite.
@@ -39,6 +39,11 @@ import { foo } from './foo';
 ## Documentation requirement
 
 **Every implementation change must include a corresponding update to `docs/`.** Create or update the relevant doc file(s) in the same change. Do not mark a task complete without updating docs.
+
+There are two sets of docs, and both must stay current:
+
+- **`docs/`**: internal technical docs for operators and contributors.
+- **`site-docs/`**: the user documentation published on GitHub Pages (VitePress). When a change alters what users can do, see, or configure, update the matching page here too. Follow the existing style: written for users rather than developers, present tense, second person, plain language, tables for options, one realistic config example. Document only shipped behavior. Run `npm run docs:build` after editing; it fails on broken links.
 
 ## Versioning
 

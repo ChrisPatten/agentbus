@@ -45,6 +45,12 @@ export interface CommandSystemDeps {
    * `createBuiltinCommands` rather than exposed as a mutable holder.
    */
   poolManagers?: Map<string, import('../pool/pool-manager.js').PoolManager>;
+  /** E64 — agent runtime lookup, shown in /status. */
+  runtimeResolver?: import('../core/runtime-resolver.js').RuntimeResolver;
+  /** E65 — active advisories, shown in /status. */
+  advisories?: Pick<import('../advisories/service.js').AdvisoryService, 'listActive'>;
+  /** E66 — journaling engine, for /clear's `clear` trigger. */
+  journal?: Pick<import('../journaling/engine.js').JournalEngine, 'trigger'>;
 }
 
 export interface CommandSystem {
@@ -78,8 +84,8 @@ export function createCommandSystem(deps: CommandSystemDeps): CommandSystem {
   }
 
   const headlessControl: import('./handlers.js').HeadlessControl = {
-    journalResumeId: new Map(),
     stopTurn: new Map(),
+    snapshots: new Map(),
     slashCommands: new Map(),
   };
 
@@ -90,6 +96,9 @@ export function createCommandSystem(deps: CommandSystemDeps): CommandSystem {
     db: deps.db,
     headlessControl,
     poolManagers: deps.poolManagers,
+    runtimeResolver: deps.runtimeResolver,
+    advisories: deps.advisories,
+    journal: deps.journal,
   });
 
   for (const cmd of builtins) {

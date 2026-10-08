@@ -34,6 +34,7 @@ agents:
   passed. Must be a positive integer.
 
 Multiple agents can each have their own download path and retention.
+The same `agents.<id>` block also holds `owners` (see [ADVISORIES.md](ADVISORIES.md)).
 
 ## Supported attachment types
 

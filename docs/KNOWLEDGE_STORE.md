@@ -1,6 +1,6 @@
 # Knowledge store (Phase 1)
 
-A structured, agent-managed knowledge store: an agent writes arbitrary JSON records under its own `kind`/schema, and can later search them by keyword, kind, tags, facets, or event time. Unlike the legacy `memories` / `session_summaries` tables ([MEMORY.md](MEMORY.md), [MEMORY_MODEL.md](MEMORY_MODEL.md)), this table is **new and always-on** — no config flag gates it, and it is not a revival of that dormant system. It has no fixed extraction pipeline: the bus never writes to it on its own, only the agent does, via the tools below.
+A structured, agent-managed knowledge store: an agent writes arbitrary JSON records under its own `kind`/schema, and can later search them by keyword, kind, tags, facets, or event time. Unlike the removed legacy `memories` / `session_summaries` tables ([MEMORY.md](MEMORY.md)), this table is **always-on** — no config flag gates it. It has no fixed extraction pipeline: the bus never writes to it on its own, only the agent does, via the tools below.
 
 ## Phase 1 scope
 

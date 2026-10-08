@@ -6,7 +6,9 @@ bus:
   http_port: 3000
   # host: 127.0.0.1           # default: loopback only. 0.0.0.0 exposes every route to the LAN;
   #                           # set auth_token if you do that. See docs/DEPLOYMENT.md.
-  # auth_token: ${BUS_TOKEN}  # if set, every request except /api/v1/health needs X-Bus-Token
+  # auth_token: ${BUS_TOKEN}  # if set, every request except /api/v1/health needs X-Bus-Token.
+  #                           # AgentBus's own agents/pool panes/hooks send it automatically
+  #                           # (child processes get it as AGENTBUS_BUS_TOKEN).
   db_path: ~/.agentbus/agentbus.db
   log_level: info             # accepted, but not yet applied to log output
 
@@ -59,6 +61,13 @@ adapters:
   #   reply_timeout_ms: 25000        # server-side cap on how long an ask waits (1000-60000)
   #   max_body_bytes: 8192
   #   debug_delay_ms: 0              # device testing only; refused when NODE_ENV=production
+  # app:                            # Mac app; local Fastify listener, no extra port
+  #   enabled: true
+  #   event_retention_days: 30
+  #   max_upload_bytes: 26214400
+  #   ping_interval_ms: 30000
+  #   # Scheduled work can notify this contact through send_message(channel: app).
+  #   # An omitted topic lands in Main and remains available while the client is offline.
 
   # ── Headless Claude Code (primary agent runtime) — docs/CC_HEADLESS_ADAPTER.md ─
   # Spawns `claude -p` per message batch and resumes the session on later turns.
@@ -81,12 +90,8 @@ adapters:
       memory files later. Exception: log financial decisions, health facts,
       scheduling commitments, and security-relevant account events immediately.
       {{memories}}
-    memory:                          # memory files, relative to working_dir
-      dir: memory
-      index_file: MEMORY.md
-      daily_subdir: daily
-      journal_lookback_days: 3       # today plus the previous 2 days (0 = index only)
-    journaling:                      # silent memory-update turn on pause or ceiling
+    # memory: { dir: memory, journal_lookback_days: 3 }   # DEPRECATED alias: use agents.<id>.memory (docs/AGENT_MEMORY.md)
+    journaling:                      # DEPRECATED alias: prefer agents.<id>.journaling (docs/JOURNALING.md)
       enabled: true
       threshold_ms:                  # idle debounce per channel; a number, or a map with `default`
         telegram: 300000             # 5 min
@@ -124,8 +129,8 @@ adapters:
   #   claude_bin: /Users/chrispatten/.local/bin/claude   # must be absolute (a bare "claude" hits your shell function/alias, not the CLI)
   #   model: sonnet
   #   working_dir: /Users/chrispatten/workspace/peggy-claude-code
-  #   launch_args:                   # appended verbatim to every launch/resume invocation
-  #     - --dangerously-load-development-channels
+  #   launch_args: []                # extra args appended to every launch/resume (the bus already
+  #                                  # adds --dangerously-load-development-channels server:agentbus)
   #   poll_interval_ms: 1000         # passed through to each pane's cc.ts
   #   launch_ack_delay_ms: 5000       # deprecated, ignored: the prompt is now polled for until the launch deadline
   #   launch_ack_max_attempts: 3     # re-send Enter if capture-pane still shows the prompt after a dismiss attempt
@@ -156,6 +161,8 @@ contacts:
       #   token: "long-random-bearer-token"   # identifies this contact on the Pebble webhook
       # siri:
       #   token: ${SIRI_TOKEN_ALICE}          # identifies this contact on /api/v1/siri; >= 16 chars, `openssl rand -hex 24`
+      # app:
+      #   token: ${APP_TOKEN_ALICE}           # identifies this contact on /api/v1/app; >= 16 chars
 
 topics:
   - general
@@ -164,18 +171,39 @@ topics:
   - personal
 
 memory:
-  structured_extraction: false       # legacy summarizer and memories store; see docs/MEMORY.md
-  summarizer_interval_ms: 60000
-  session_idle_threshold_ms: 1800000
-  context_window_hours: 48
-  claude_api_model: claude-sonnet-4-6
+  summarizer_interval_ms: 60000      # session-tracker and journaling-engine tick
+  session_idle_threshold_ms: 1800000 # idle gap that closes a polling-adapter session
+  # claude_api_model, summary_max_tokens, structured_extraction, context_window_hours and
+  # memory_inject_exclude are retired: ignored with a startup warning. See docs/MEMORY.md.
 
-# Per-agent settings keyed by recipient id — docs/ATTACHMENTS.md
+# Per-agent settings keyed by recipient id — docs/ATTACHMENTS.md, docs/ADVISORIES.md, docs/JOURNALING.md
 agents:
   "agent:claude":
     media:
       download_path: /tmp/agentbus/claude   # inbound images and files; created at startup
       ttl_seconds: 3600
+    owners:                          # who receives bus advisories about this agent
+      - channel: telegram            # exact channel of the owner's conversation
+        contact_id: alice            # a key under contacts
+    # memory:                        # E67 memory layout; replaces the cc-headless memory block (docs/AGENT_MEMORY.md)
+    #   dir: memory                  # relative to the runtime's working_dir, or absolute
+    #   index_file: MEMORY.md        # native auto memory loads its first 200 lines / 25KB
+    #   daily_subdir: daily          # daily journals YYYY-MM-DD.md, written by journalers
+    #   lookback_days: 3             # days of dailies in the bus-generated memory/recent.md (0 = none)
+    #   recent_budget_chars: 20000   # size cap for recent.md (newest days first)
+    #   native: true                 # false: the bus injects MEMORY.md + recent.md (cc-headless) instead
+    # journaling:                    # E66 per-agent journaling; replaces the cc-headless block above
+    #   chain: [system-message, cc-headless, script]   # tried in order; unsupported entries are skipped
+    #   threshold_ms: { default: 1800000, telegram: 300000 }
+    #   ceiling_ms: 14400000
+    #   min_human_messages: 2        # final triggers (/clear, close, shutdown) journal any human content
+    #   timeout_ms: 300000           # per run; system-message holds the conversation at most this long
+    #   model: claude-sonnet-4-6     # default: the runtime instance's model
+    #   system-message: { timeout_ms: 300000 }   # the live agent journals; finishes with journal_complete
+    #   cc-headless: { model: claude-haiku-4-5 } # claude -p --resume (forked on cc-pool)
+    #   script:                      # the always-available last resort: your executable, JSON on stdin
+    #     command: /path/to/agentbus/scripts/journalers/claude-p-journal.sh
+    #     env: { CLAUDE_BIN: /opt/homebrew/bin/claude }  # minimal env: PATH, HOME, AGENTBUS_* plus this
 
 pipeline:
   dedup_window_ms: 30000
@@ -196,6 +224,8 @@ pipeline:
     # - match: { channel: pebble }
     #   target: { adapterId: cc-headless, recipientId: agent:claude }
     # - match: { channel: siri }
+    #   target: { adapterId: cc-headless, recipientId: agent:claude }
+    # - match: { channel: app }
     #   target: { adapterId: cc-headless, recipientId: agent:claude }
   # relays:                          # re-submit on another channel — docs/CHANNEL_RELAY.md
   #   - match: { channel: pebble, sender: "contact:alice" }

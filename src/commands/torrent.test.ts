@@ -180,11 +180,12 @@ describe('/torrent command (E36)', () => {
     const rows = getOutboundRows(db);
     expect(rows).toHaveLength(1);
     expect(rows[0]!.body).toContain('Torrent download complete');
-    expect(JSON.parse(rows[0]!.metadata)).toEqual({
+    expect(JSON.parse(rows[0]!.metadata)).toEqual(expect.objectContaining({
       command_response: true,
       command: 'torrent',
       torrent_notification: true,
-    });
+      command_source_message_id: 'invocation-id',
+    }));
   });
 
   it('sends a distinct failure notification when the download exits non-zero', async () => {

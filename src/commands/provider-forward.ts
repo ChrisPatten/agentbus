@@ -1,5 +1,5 @@
 /**
- * Provider command forwarding (E58) — sends a slash command the bus doesn't
+ * Provider command forwarding (E71) — sends a slash command the bus doesn't
  * handle itself to the provider that serves the conversation.
  *
  * A provider is the service that runs an agent's turns (`cc-pool`,

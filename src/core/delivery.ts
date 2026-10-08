@@ -24,12 +24,18 @@ export interface DeliveryWorkerDeps {
   queue: MessageQueue;
   registry: AdapterRegistry;
   db: Database.Database;
+  /**
+   * E68 S68.2 — called when a message is dead-lettered (the bus records a
+   * `tool-error` feedback event when an agent sent it). Errors are logged.
+   */
+  onFailed?: (envelope: import('../types/envelope.js').MessageEnvelope, reason: string) => void;
 }
 
 export class DeliveryWorker {
   private readonly queue: MessageQueue;
   private readonly registry: AdapterRegistry;
   private readonly db: Database.Database;
+  private readonly onFailed: DeliveryWorkerDeps['onFailed'];
   private stopping = false;
   private timer: ReturnType<typeof setTimeout> | null = null;
 
@@ -37,6 +43,18 @@ export class DeliveryWorker {
     this.queue = deps.queue;
     this.registry = deps.registry;
     this.db = deps.db;
+    this.onFailed = deps.onFailed;
+  }
+
+  /** Dead-letter and report the failure. */
+  private fail(messageId: string, envelope: import('../types/envelope.js').MessageEnvelope, reason: string): void {
+    this.queue.deadLetter(messageId, reason);
+    if (!this.onFailed) return;
+    try {
+      this.onFailed(envelope, reason);
+    } catch (err) {
+      console.error(`[delivery] onFailed for ${messageId} failed: ${String(err)}`);
+    }
   }
 
   start(): void {
@@ -85,7 +103,7 @@ export class DeliveryWorker {
     if (!adapter) {
       const reason = `No adapter found for channel "${envelope.channel}" (adapter_id: ${String(envelope.metadata['adapter_id'] ?? 'none')})`;
       console.error(`[delivery] Dead-lettering ${messageId}: ${reason}`);
-      this.queue.deadLetter(messageId, reason);
+      this.fail(messageId, envelope, reason);
       return;
     }
 
@@ -94,20 +112,23 @@ export class DeliveryWorker {
 
       if (result.success) {
         this.queue.ack(messageId);
-        this.logOutboundTranscript(messageId, envelope);
+        // AppAdapter persists its transcript and replay event before reporting
+        // success, so a closed client cannot lose a message between queue ACK
+        // and this worker's best-effort transcript log.
+        if (adapter.id !== 'app') this.logOutboundTranscript(messageId, envelope);
       } else if (result.retryable && (envelope.metadata['retry_count'] as number ?? 0) < MAX_RETRIES) {
         // Put back in queue for retry — reset to pending
         console.warn(`[delivery] Retryable failure for ${messageId}: ${result.error}`);
         // For now, dead-letter on failure; retry logic can be added later
         // when we have retry-count tracking in the delivery path
-        this.queue.deadLetter(messageId, result.error ?? 'delivery failed (retryable)');
+        this.fail(messageId, envelope, result.error ?? 'delivery failed (retryable)');
       } else {
         console.error(`[delivery] Dead-lettering ${messageId}: ${result.error}`);
-        this.queue.deadLetter(messageId, result.error ?? 'delivery failed');
+        this.fail(messageId, envelope, result.error ?? 'delivery failed');
       }
     } catch (err) {
       console.error(`[delivery] Unexpected error delivering ${messageId}: ${String(err)}`);
-      this.queue.deadLetter(messageId, String(err));
+      this.fail(messageId, envelope, String(err));
     }
   }
 
@@ -150,6 +171,7 @@ export class DeliveryWorker {
         this.db,
         contactId,
         envelope.channel,
+        envelope.channel === 'app' ? envelope.topic || 'general' : undefined,
       );
       logOutboundTranscript(this.db, {
         messageId,

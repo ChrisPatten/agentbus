@@ -18,7 +18,7 @@ export const slashCommandDetect: PipelineStage = async (ctx) => {
 
   // Strip @botname suffix (Telegram sends "/status@MyBot" in group chats)
   let commandName = match[1]!.split('@')[0]!;
-  // "//name" forces forwarding to the provider (E58). A bare "//" or
+  // "//name" forces forwarding to the provider (E71). A bare "//" or
   // "// text" is not a command at all.
   const forceProvider = commandName.startsWith('/');
   if (forceProvider) commandName = commandName.slice(1);

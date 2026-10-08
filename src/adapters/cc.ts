@@ -10,8 +10,8 @@
  * IMPORTANT: All logging uses console.error() (stderr).
  * console.log() writes to stdout, which is reserved for the MCP protocol stream.
  *
- * AGENTBUS_TOOLS_ONLY=true — skip the polling loop and serve only the headless
- * tool subset (no reply/send_message/get_adapter_status). Used by cc-headless.ts
+ * AGENTBUS_TOOLS_ONLY=true — skip the polling loop and serve the headless
+ * tool subset (including reply/send_message, excluding get_adapter_status). Used by cc-headless.ts
  * to provide MCP tools to `claude -p` subprocesses via --mcp-config.
  */
 import { resolve } from 'node:path';
@@ -19,7 +19,9 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { loadConfig } from '../config/loader.js';
 import { createMcpServer } from '../mcp/server.js';
 import { registerAllTools, registerHeadlessTools, type HealthState } from '../mcp/tools/index.js';
+import { installBusTokenFetch, resolveBusToken } from '../core/bus-auth.js';
 import type { MessageEnvelope } from '../types/envelope.js';
+import { isSystemOnly, neutralizeSystemMarkers, readSystemBlocks } from '../core/system-block.js';
 
 const AGENT_ID = process.env['AGENTBUS_AGENT_ID'] ?? 'claude';
 const TOOLS_ONLY = process.env['AGENTBUS_TOOLS_ONLY'] === 'true';
@@ -29,10 +31,30 @@ const BACKOFF_INTERVAL_MS = 5000;
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-const configPath = process.env['AGENTBUS_CONFIG'] ?? resolve(process.cwd(), 'config.yaml');
+const configPath = resolve(process.env['AGENTBUS_CONFIG'] ?? 'config.yaml');
 const config = loadConfig(configPath);
-const pollIntervalMs = config.adapters['claude-code']?.poll_interval_ms ?? 1000;
+const pollIntervalMs = resolvePollIntervalMs(
+  process.env['AGENTBUS_POLL_INTERVAL_MS'],
+  config.adapters['claude-code']?.poll_interval_ms,
+);
 const busBaseUrl = `http://127.0.0.1:${config.bus.http_port}`;
+
+// When bus.auth_token is set (in this config, or passed down as
+// AGENTBUS_BUS_TOKEN), every request this process makes to the bus — the
+// polling loop and every MCP tool — must carry X-Bus-Token. Patch the global
+// fetch once, scoped to busBaseUrl, so no call site can forget it.
+installBusTokenFetch(busBaseUrl, resolveBusToken(config));
+
+/**
+ * Poll interval for this process: `AGENTBUS_POLL_INTERVAL_MS` (set by cc-pool
+ * from the pool's `poll_interval_ms`) wins, then the `claude-code` adapter's
+ * `poll_interval_ms`, then 1000ms. A non-positive or non-numeric env value is ignored.
+ */
+export function resolvePollIntervalMs(envValue: string | undefined, configValue: number | undefined): number {
+  const fromEnv = envValue !== undefined ? Number(envValue) : NaN;
+  if (Number.isInteger(fromEnv) && fromEnv > 0) return fromEnv;
+  return configValue ?? 1000;
+}
 
 // ── Shared mutable state ──────────────────────────────────────────────────────
 
@@ -60,10 +82,6 @@ if (TOOLS_ONLY) {
  * Format a batch of message envelopes into a single string for delivery.
  * Each message becomes one paragraph; multiple messages in a batch are
  * separated by a blank line.
- *
- * If the first envelope carries E9 memory context (metadata.memory_context),
- * it is prepended before the message text so Claude receives it as part of
- * the channel notification for that new session.
  */
 function fmtTs(iso: string, full: boolean): string {
   const d = new Date(iso);
@@ -79,29 +97,18 @@ function fmtTs(iso: string, full: boolean): string {
   return full ? `${get('year')}-${get('month')}-${get('day')}T${time}` : time;
 }
 
-export function formatMessagesForSampling(
-  envelopes: MessageEnvelope[],
-  opts?: { includeMemoryContext?: boolean },
-): string {
+export function formatMessagesForSampling(envelopes: MessageEnvelope[]): string {
   const parts: string[] = [];
 
-  // The cc-headless adapter injects memories/summary via the system prompt and
-  // passes includeMemoryContext:false so the Stage-85 <memory> block is not also
-  // prepended to the user message (which would be a double injection).
-  const includeMemoryContext = opts?.includeMemoryContext ?? true;
+  // Bus-originated system blocks (E65) go first, deduplicated across the
+  // batch. Everything after them is neutralized (see src/core/system-block.ts),
+  // so no message text can open or close a block of its own.
+  const systemBlocks = [...new Set(envelopes.flatMap((env) => readSystemBlocks(env.metadata)))];
+
   const firstMeta = envelopes[0]?.metadata;
-  const memoryContext = firstMeta?.memory_context;
-  if (includeMemoryContext && typeof memoryContext === 'string' && memoryContext.length > 0) {
-    parts.push(memoryContext);
-    // Clear after consuming so a retry call doesn't prepend the block twice.
-    delete firstMeta!['memory_context'];
-  }
 
   // One-shot context injected by create_telegram_topic (E28) for a brand-new
-  // topic's first turn — unlike memory_context, this always applies (not
-  // gated by includeMemoryContext): cc-headless suppresses memory_context
-  // because it injects memory via the system prompt instead, but has no
-  // equivalent alternate path for agent-supplied topic context.
+  // topic's first turn.
   const topicContext = firstMeta?.injected_topic_context;
   if (typeof topicContext === 'string' && topicContext.length > 0) {
     parts.push(`[Context for this new topic, provided when it was created]\n${topicContext}`);
@@ -150,12 +157,16 @@ export function formatMessagesForSampling(
       .join('\n');
     const extraLines = [attachmentLines, inlineLines].filter(Boolean).join('\n');
     const bodyWithImages = body && extraLines ? `${body}\n${extraLines}` : body || extraLines;
-    parts.push(
-      `New message from ${env.sender} via ${env.channel} (topic: ${env.topic})${ts} [id:${env.id}]:\n${bodyWithImages}`,
-    );
+    const sessionChannel = env.metadata?.['session_channel'];
+    const routeLabel = typeof sessionChannel === 'string' && sessionChannel !== env.channel
+      ? `via ${env.channel} (in your ${sessionChannel} session)`
+      : `via ${env.channel} (topic: ${env.topic})`;
+    // A system-only envelope (E65) carries no human message: only its blocks.
+    if (isSystemOnly(env.metadata)) continue;
+    parts.push(`New message from ${env.sender} ${routeLabel}${ts} [id:${env.id}]:\n${bodyWithImages}`);
   }
 
-  return parts.join('\n\n');
+  return [...systemBlocks, ...parts.map(neutralizeSystemMarkers)].join('\n\n');
 }
 
 /**

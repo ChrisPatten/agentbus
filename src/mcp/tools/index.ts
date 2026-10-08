@@ -5,12 +5,15 @@
  *   - reply, get_adapter_status (E2 core tools)
  *   - list_channels (S7.1)
  *   - send_message (S7.2)
- *   - recall_memory, log_memory, search_transcripts (S7.3)
+ *   - search_transcripts (S7.3; recall_memory/log_memory removed after E66)
  *   - write_knowledge, get_knowledge, forget_knowledge, search_knowledge (agent-managed knowledge store, Phase 1)
  *   - get_session, list_sessions (S7.4)
  *   - react_to_message (S7.5)
  *   - schedule_message, list_schedules, cancel_schedule (E18)
  *   - set_headless_model, get_headless_model, list_headless_model, delete_headless_model (model overrides)
+ *   - advisory_ack (E65)
+ *   - journal_complete (E66; live agents only — not registered for cc-headless)
+ *   - propose_change (E68)
  */
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -19,7 +22,7 @@ import { toolError, toolSuccess } from './helpers.js';
 import type { AppConfig } from '../../config/schema.js';
 import { registerChannelTools } from './channels.js';
 import { registerMessagingTools, registerEmailTool, buildEmailToolConfig } from './messaging.js';
-import { registerMemoryTools } from './memory.js';
+import { registerTranscriptTools } from './transcripts.js';
 import { registerKnowledgeTools } from './knowledge.js';
 import { registerSessionTools } from './sessions.js';
 import { registerReactionTools } from './reactions.js';
@@ -27,6 +30,9 @@ import { registerScheduleTools } from './scheduling.js';
 import { registerAttachmentTools } from './attachments.js';
 import { registerTelegramTools } from './telegram.js';
 import { registerModelOverrideTools } from './model-overrides.js';
+import { registerAdvisoryTools } from './advisories.js';
+import { registerJournalTools } from './journal.js';
+import { registerProposalTools } from './proposals.js';
 import { getTelegramInstances } from '../../config/schema.js';
 
 export { toolError, toolSuccess };
@@ -64,13 +70,16 @@ export function registerAllTools(
   // E7 tools
   registerChannelTools(server, busBaseUrl);
   registerMessagingTools(server, busBaseUrl, agentId);
-  registerMemoryTools(server, busBaseUrl);
+  registerTranscriptTools(server, busBaseUrl);
   registerKnowledgeTools(server, busBaseUrl);
   registerSessionTools(server, busBaseUrl);
   registerReactionTools(server, busBaseUrl);
   registerScheduleTools(server, busBaseUrl);
   registerAttachmentTools(server, busBaseUrl);
   registerModelOverrideTools(server, busBaseUrl);
+  registerAdvisoryTools(server, busBaseUrl, agentId);
+  registerJournalTools(server, busBaseUrl, agentId);
+  registerProposalTools(server, busBaseUrl, agentId);
   maybeRegisterEmailTool(server, busBaseUrl, agentId, config);
   maybeRegisterTelegramTools(server, busBaseUrl, config);
 }
@@ -118,13 +127,15 @@ export function registerHeadlessTools(
   registerReplyTool(server, busBaseUrl);
   registerChannelTools(server, busBaseUrl);
   registerMessagingTools(server, busBaseUrl, agentId);
-  registerMemoryTools(server, busBaseUrl);
+  registerTranscriptTools(server, busBaseUrl);
   registerKnowledgeTools(server, busBaseUrl);
   registerSessionTools(server, busBaseUrl);
   registerReactionTools(server, busBaseUrl);
   registerScheduleTools(server, busBaseUrl);
   registerAttachmentTools(server, busBaseUrl);
   registerModelOverrideTools(server, busBaseUrl);
+  registerAdvisoryTools(server, busBaseUrl, agentId);
+  registerProposalTools(server, busBaseUrl, agentId);
   maybeRegisterEmailTool(server, busBaseUrl, agentId, config);
   maybeRegisterTelegramTools(server, busBaseUrl, config);
 }

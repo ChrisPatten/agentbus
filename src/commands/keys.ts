@@ -1,6 +1,6 @@
 /**
  * `/keys` — send keystrokes to a cc-pool Claude pane, e.g. to answer a dialog
- * or interrupt a turn from chat (E58).
+ * or interrupt a turn from chat (E71).
  *
  * Same shape as `src/commands/rc.ts`: pane candidates come from the pools'
  * `LeaseStore`, keystrokes go through an injected `TmuxExec`. Unlike `/rc` it

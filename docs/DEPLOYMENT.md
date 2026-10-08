@@ -30,7 +30,6 @@ bus-core runs as one pm2-managed process. Platform adapters (Telegram, email, th
    ```
    TELEGRAM_BOT_TOKEN=...
    ICLOUD_APP_PW=...          # only if you enable the email adapter
-   ANTHROPIC_API_KEY=...      # only if memory.structured_extraction is true
    ```
 
    `config.yaml` references them as `${VAR_NAME}`. A minimal headless deployment:
@@ -227,13 +226,17 @@ Symptom: pm2 shows `errored` and keeps restarting.
 
 ### Journaling never runs
 
-Symptom: `last_journaled_at` on headless sessions stays stale while `last_activity` advances.
+Symptom: `journal_cursor_at` / `last_journaled_at` on sessions stays stale while `last_activity` advances.
 
-Look for `[session-tracker] Journaling sweep is a no-op bus-wide` in the logs. It means no `cc-headless` instance is configured or registered. See [MEMORY_MODEL.md](MEMORY_MODEL.md).
+- Check the agent has journaling settings: `agents.<id>.journaling`, or the deprecated `adapters.cc-headless.journaling` block (on by default for every `cc-headless` instance).
+- Look for `[journaling]` log lines. Each run logs one JSON line with its trigger, outcome and attempts. `exhausted` means every journaler in the chain was unavailable or failed; the `journaling:chain-exhausted` advisory says why.
+- With the default `min_human_messages: 2`, a conversation with a single message waits up to 24 h (or until `/clear`, a session end or a bus restart).
 
-### Summarizer not running
+See [JOURNALING.md](JOURNALING.md).
 
-Only relevant when `memory.structured_extraction: true`. Check for `[summarizer]` errors in the logs. The usual cause is a missing or invalid `ANTHROPIC_API_KEY`.
+### `memory.claude_api_model … are deprecated and ignored`
+
+E66 retired the Anthropic-API summarizer, and the legacy memory store was removed after it. `memory.claude_api_model`, `memory.summary_max_tokens`, `memory.structured_extraction`, `memory.context_window_hours` and `memory.memory_inject_exclude` still load, with this warning, and do nothing. Remove them from `config.yaml`; `ANTHROPIC_API_KEY` is no longer needed by the bus. Journaling replaces the summarizer ([JOURNALING.md](JOURNALING.md)).
 
 ### Claude Code MCP adapter not connecting
 

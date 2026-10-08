@@ -57,6 +57,12 @@ function makeCtx(db: Database.Database, overrides: Partial<SlashCommandContext> 
 }
 
 describe('resolveAgentId (/cost — same resolution shape as /stop)', () => {
+  it('uses the bound session owner for an app command', () => {
+    const db = makeDb();
+    insertSession(db, { id: 'bound-cost', channel: 'telegram', agentId: 'agent:peggy' });
+    const envelope = { ...makeEnvelope(), channel: 'app', metadata: { bound_session_id: 'bound-cost' } };
+    expect(resolveAgentId({ db }, makeCtx(db, { channel: 'app', envelope }))).toBe('agent:peggy');
+  });
   it('uses the active sessions agent_id when present', () => {
     const db = makeDb();
     insertSession(db, { id: 'sess-1', agentId: 'agent:peggy' });
@@ -68,7 +74,7 @@ describe('resolveAgentId (/cost — same resolution shape as /stop)', () => {
     const db = makeDb();
     insertSession(db, { id: 'sess-legacy', agentId: null });
     const result = resolveAgentId(
-      { db, headlessControl: { journalResumeId: new Map(), stopTurn: new Map([['agent:peggy', () => true]]), slashCommands: new Map() } },
+      { db, headlessControl: { stopTurn: new Map([['agent:peggy', () => true]]), slashCommands: new Map() } },
       makeCtx(db),
     );
     expect(result).toBe('agent:peggy');
@@ -86,7 +92,6 @@ describe('resolveAgentId (/cost — same resolution shape as /stop)', () => {
       {
         db,
         headlessControl: {
-          journalResumeId: new Map(),
           stopTurn: new Map([
             ['agent:peggy', () => true],
             ['agent:pokeclaude', () => true],

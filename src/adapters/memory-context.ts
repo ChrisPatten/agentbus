@@ -1,31 +1,22 @@
 /**
- * E20 — headless memory file assembly.
+ * Bus-side memory injection (E20; E67 S67.3).
  *
- * The agent's own files are the source of truth for memory. The bus front-loads
- * them into each turn's context: the MEMORY.md index plus the most recent daily
- * journal files. Pure (filesystem only) and side-effect-free so it can be unit
- * tested without loading config or spawning claude.
+ * Since E67, Claude Code runtimes with the `nativeMemory` capability load
+ * memory themselves: auto memory pointed at the agent's memory dir loads the
+ * index, `CLAUDE.md` imports `recent.md`. This module is the fallback for
+ * agents that keep bus injection (`agents.<id>.memory.native: false`): the
+ * index file plus the bus-generated `recent.md` (src/memory/recent.ts),
+ * which already carries the recent dailies within budget. It no longer
+ * reads the dailies itself.
  *
- * `assembleMemoryBlocks` exposes the same files as individually keyed blocks
- * so the context-block ledger (src/adapters/context-ledger.ts) can send only
- * the ones that are new or changed for a given session, instead of the
- * `assembleMemoryContext` string below, which stays for callers (and the
- * no-session fallback in cc-headless.ts) that still want the whole thing
- * joined.
+ * `assembleMemoryBlocks` exposes the files as individually keyed blocks so
+ * the context-block ledger (src/adapters/context-ledger.ts) can send only the
+ * ones that are new or changed for a session; `assembleMemoryContext` joins
+ * them for the no-session fallback. Pure (filesystem only).
  */
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-
-export interface MemoryConfig {
-  /** Memory directory, relative to working_dir. */
-  dir: string;
-  /** Index file always loaded (relative to `dir`). */
-  index_file: string;
-  /** Subdirectory holding daily journal files `YYYY-MM-DD.md` (relative to `dir`). */
-  daily_subdir: string;
-  /** Days of daily journal to load: today + previous N-1. 0 → index only. */
-  journal_lookback_days: number;
-}
+import type { MemoryLayout } from '../memory/layout.js';
+import { RECENT_FILE } from '../memory/layout.js';
 
 /** Format a Date as YYYY-MM-DD using local date components (matches journal file names). */
 export function formatLocalDate(d: Date): string {
@@ -35,58 +26,41 @@ export function formatLocalDate(d: Date): string {
   return `${y}-${m}-${day}`;
 }
 
-/** One memory file, read and labeled, ready to be individually tracked by the context-block ledger (src/adapters/context-ledger.ts). */
+/** One memory file, read and labeled, ready to be individually tracked by the context-block ledger. */
 export interface MemoryBlock {
-  /** Ledger key: `memory:${cfg.dir}/${cfg.index_file}` for the index, `memory:${cfg.dir}/${cfg.daily_subdir}/${filename}` for a daily file. */
+  /** Ledger key: `memory:<dir>/<index_file>` or `memory:<dir>/recent.md`. */
   key: string;
-  /** The `=== <label> ===` header content — the same string `assembleMemoryContext` used to bake into its joined output. */
+  /** The `=== <label> ===` header content. */
   label: string;
   content: string;
 }
 
-/**
- * Read the agent's memory files — the MEMORY.md index followed by the most
- * recent daily journal files, newest first — and return one `MemoryBlock`
- * per file found. Missing files (or a missing memory dir) are skipped
- * silently — an agent without a journal yet still works. Reads fresh on
- * every call so an in-session journaling update is reflected on the next
- * turn.
- */
-export function assembleMemoryBlocks(workingDir: string, cfg: MemoryConfig, now: Date): MemoryBlock[] {
-  const blocks: MemoryBlock[] = [];
+export type InjectLayout = Pick<MemoryLayout, 'dir' | 'indexFile' | 'indexPath' | 'recentPath'>;
 
-  const readBlock = (absPath: string, label: string, key: string): void => {
+/**
+ * Read the index and `recent.md`, one block per file found. Missing files
+ * (or no memory dir) are skipped silently. Reads fresh on every call.
+ */
+export function assembleMemoryBlocks(layout: InjectLayout): MemoryBlock[] {
+  const blocks: MemoryBlock[] = [];
+  const dir = layout.dir.replace(/\/+$/, '');
+  const readBlock = (absPath: string | null, label: string): void => {
+    if (!absPath) return;
     try {
       const content = readFileSync(absPath, 'utf-8').trim();
-      blocks.push({ key, label, content });
+      blocks.push({ key: `memory:${label}`, label, content });
     } catch {
       // Missing file — skip silently.
     }
   };
-
-  const indexLabel = `${cfg.dir}/${cfg.index_file}`;
-  readBlock(join(workingDir, cfg.dir, cfg.index_file), indexLabel, `memory:${indexLabel}`);
-
-  for (let i = 0; i < cfg.journal_lookback_days; i++) {
-    const d = new Date(now);
-    d.setDate(d.getDate() - i);
-    const name = `${formatLocalDate(d)}.md`;
-    const label = `${cfg.dir}/${cfg.daily_subdir}/${name}`;
-    readBlock(join(workingDir, cfg.dir, cfg.daily_subdir, name), label, `memory:${label}`);
-  }
-
+  readBlock(layout.indexPath, `${dir}/${layout.indexFile}`);
+  readBlock(layout.recentPath, `${dir}/${RECENT_FILE}`);
   return blocks;
 }
 
-/**
- * Assemble the agent's memory files into a single joined context block, in
- * the `=== <label> ===\n<content>` format the system prompt's {{memories}}
- * placeholder historically carried. Built from `assembleMemoryBlocks` so the
- * file-reading logic lives in one place; byte-identical to the pre-ledger
- * behavior.
- */
-export function assembleMemoryContext(workingDir: string, cfg: MemoryConfig, now: Date): string {
-  return assembleMemoryBlocks(workingDir, cfg, now)
+/** The blocks joined as `=== <label> ===\n<content>`, the format `{{memories}}` carries. */
+export function assembleMemoryContext(layout: InjectLayout): string {
+  return assembleMemoryBlocks(layout)
     .map((b) => `=== ${b.label} ===\n${b.content}`)
     .join('\n\n');
 }

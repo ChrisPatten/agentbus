@@ -12,6 +12,8 @@ import type { AppConfig, CcPoolInstanceConfig } from '../config/schema.js';
 import { LeaseStore } from '../pool/lease-store.js';
 import type { AcquireResult } from '../pool/types.js';
 import { PoolManager } from '../pool/pool-manager.js';
+import { runtimeCapabilities } from '../core/runtime-capabilities.js';
+import type { RuntimeResolver } from '../core/runtime-resolver.js';
 import type { MessageEnvelope } from '../types/envelope.js';
 
 function makeDb(): Database.Database {
@@ -29,7 +31,6 @@ const stubConfig = {
   memory: {
     summarizer_interval_ms: 60000,
     session_idle_threshold_ms: 1800000,
-    context_window_hours: 48,
     claude_api_model: 'claude-opus-4-6',
   },
   pipeline: { dedup_window_ms: 30000, drop_unrouted: false, topic_rules: [], priority_weights: { base_score: 0, topic_bonus: 40, vip_sender_bonus: 20, urgency_keyword_bonus: 15 }, urgency_keywords: [], vip_contacts: [], routes: [] },
@@ -108,6 +109,30 @@ async function makeSecureServer(): Promise<{ server: FastifyInstance; queue: Mes
   const server = await createHttpServer({ queue, registry, config, pipeline, db });
   return { server, queue };
 }
+
+describe('GET /api/v1/health — runtimes (E64 S64.3)', () => {
+  it('lists each agent runtime and its capabilities when a resolver is wired', async () => {
+    const db = makeDb();
+    const config = { ...stubConfig } as unknown as AppConfig;
+    const runtimeResolver = {
+      list: () => [{ agentId: 'agent:claude', kind: 'claude-code' as const, capabilities: runtimeCapabilities('claude-code') }],
+    } as unknown as Pick<RuntimeResolver, 'list'>;
+    const server = await createHttpServer({
+      queue: new MessageQueue(db), registry: new AdapterRegistry(), config, pipeline: new PipelineEngine(), db, runtimeResolver,
+    });
+    const body = (await server.inject({ method: 'GET', url: '/api/v1/health' })).json();
+    expect(body.runtimes).toEqual({
+      'agent:claude': { runtime: 'claude-code', capabilities: { ...runtimeCapabilities('claude-code') } },
+    });
+    await server.close();
+  });
+
+  it('omits runtimes without a resolver', async () => {
+    const { server } = await makeSecureServer();
+    expect((await server.inject({ method: 'GET', url: '/api/v1/health' })).json()).not.toHaveProperty('runtimes');
+    await server.close();
+  });
+});
 
 describe('HTTP API — auth middleware', () => {
   let server: FastifyInstance;
@@ -965,10 +990,10 @@ describe('GET /api/v1/sessions and GET /api/v1/sessions/:id', () => {
     const id = insertSession();
     const res = await server.inject({ method: 'GET', url: `/api/v1/sessions/${id}` });
     expect(res.statusCode).toBe(200);
-    const body = JSON.parse(res.body) as { ok: boolean; session: { id: string; summary: null } };
+    const body = JSON.parse(res.body) as { ok: boolean; session: { id: string } };
     expect(body.ok).toBe(true);
     expect(body.session.id).toBe(id);
-    expect(body.session.summary).toBeNull();
+    expect(body.session).not.toHaveProperty('summary');
   });
 
   it('exposes the session topic via conversation_registry on the default topic (E32)', async () => {
@@ -995,6 +1020,23 @@ describe('GET /api/v1/sessions and GET /api/v1/sessions/:id', () => {
     const getRes = await server.inject({ method: 'GET', url: `/api/v1/sessions/${id}` });
     const getBody = JSON.parse(getRes.body) as { session: { topic: string | null } };
     expect(getBody.session.topic).toBe('thread:abc123');
+  });
+
+  it('exposes app Main and named topic titles in list and get responses', async () => {
+    insertConversationRegistry({ id: 'app-main', contactId: 'alice', channel: 'app', topic: 'general' });
+    insertConversationRegistry({ id: 'app-thread', contactId: 'alice', channel: 'app', topic: 'thread:abcdef0123456789' });
+    const mainId = insertSession({ id: 'app-main-session', channel: 'app', conversationId: 'app-main' });
+    const topicId = insertSession({ id: 'app-topic-session', channel: 'app', conversationId: 'app-thread' });
+    db.prepare(`INSERT INTO threads(channel, topic, thread_key, metadata, updated_at)
+      VALUES ('app', 'thread:abcdef0123456789', 'key', ?, ?)`).run(JSON.stringify({ title: 'Travel' }), new Date().toISOString());
+
+    const list = await server.inject({ method: 'GET', url: '/api/v1/sessions?channel=app' });
+    const sessions = (JSON.parse(list.body) as { sessions: Array<{id:string;title:string}> }).sessions;
+    expect(sessions.find(s => s.id === mainId)?.title).toBe('Main');
+    expect(sessions.find(s => s.id === topicId)?.title).toBe('Travel');
+
+    const get = await server.inject({ method: 'GET', url: `/api/v1/sessions/${topicId}` });
+    expect((JSON.parse(get.body) as {session:{title:string}}).session.title).toBe('Travel');
   });
 
   it('returns topic: null when conversation_registry has no matching row', async () => {
@@ -1267,170 +1309,19 @@ describe('POST /api/v1/messages/:id/react', () => {
   });
 });
 
-// ── Memory API (E8) ───────────────────────────────────────────────────────────
+// ── Legacy memory API (removed after E66) ─────────────────────────────────────
 
-describe('POST /api/v1/memories', () => {
-  let server: FastifyInstance;
-  let db: Database.Database;
-
-  beforeEach(async () => {
-    ({ server, db } = await makeServer());
-  });
-
-  afterEach(async () => {
-    await server.close();
-  });
-
-  it('creates a memory and returns 201', async () => {
-    const res = await server.inject({
-      method: 'POST',
-      url: '/api/v1/memories',
-      payload: { contact_id: 'alice', content: 'Alice prefers morning meetings', category: 'preference' },
-    });
-    expect(res.statusCode).toBe(201);
-    const body = JSON.parse(res.body) as { ok: boolean; id: string; superseded: string | null };
-    expect(body.ok).toBe(true);
-    expect(typeof body.id).toBe('string');
-    expect(body.superseded).toBeNull();
-  });
-
-  it('supersedes the previous active memory for same contact+category', async () => {
-    const r1 = await server.inject({
-      method: 'POST',
-      url: '/api/v1/memories',
-      payload: { contact_id: 'alice', content: 'Alice likes tea', category: 'preference' },
-    });
-    const { id: firstId } = JSON.parse(r1.body) as { id: string };
-
-    const r2 = await server.inject({
-      method: 'POST',
-      url: '/api/v1/memories',
-      payload: { contact_id: 'alice', content: 'Alice now likes coffee', category: 'preference' },
-    });
-    expect(r2.statusCode).toBe(201);
-    const body2 = JSON.parse(r2.body) as { id: string; superseded: string };
-    expect(body2.superseded).toBe(firstId);
-
-    const first = db.prepare('SELECT superseded_by FROM memories WHERE id = ?').get(firstId) as { superseded_by: string };
-    expect(first.superseded_by).toBe(body2.id);
-  });
-
-  it('does not supersede memories of a different category', async () => {
-    await server.inject({
-      method: 'POST',
-      url: '/api/v1/memories',
-      payload: { contact_id: 'alice', content: 'Alice is a developer', category: 'fact' },
-    });
-    const res = await server.inject({
-      method: 'POST',
-      url: '/api/v1/memories',
-      payload: { contact_id: 'alice', content: 'Alice prefers mornings', category: 'preference' },
-    });
-    expect(JSON.parse(res.body).superseded).toBeNull();
-  });
-
-  it('rejects an invalid category with 400', async () => {
-    const res = await server.inject({
-      method: 'POST',
-      url: '/api/v1/memories',
-      payload: { contact_id: 'alice', content: 'foo', category: 'admin' },
-    });
-    expect(res.statusCode).toBe(400);
-  });
-
-  it('rejects missing contact_id with 400', async () => {
-    const res = await server.inject({
-      method: 'POST',
-      url: '/api/v1/memories',
-      payload: { content: 'foo', category: 'general' },
-    });
-    expect(res.statusCode).toBe(400);
-  });
-
-  it('rejects missing content with 400', async () => {
-    const res = await server.inject({
-      method: 'POST',
-      url: '/api/v1/memories',
-      payload: { contact_id: 'alice', category: 'general' },
-    });
-    expect(res.statusCode).toBe(400);
+describe('/api/v1/memories (removed)', () => {
+  it('is gone', async () => {
+    const { server } = await makeServer();
+    try {
+      expect((await server.inject({ method: 'POST', url: '/api/v1/memories', payload: {} })).statusCode).toBe(404);
+      expect((await server.inject({ method: 'GET', url: '/api/v1/memories/recall?q=x' })).statusCode).toBe(404);
+    } finally {
+      await server.close();
+    }
   });
 });
-
-describe('GET /api/v1/memories/recall', () => {
-  let server: FastifyInstance;
-
-  beforeEach(async () => {
-    ({ server } = await makeServer());
-    // Seed memories
-    await server.inject({
-      method: 'POST',
-      url: '/api/v1/memories',
-      payload: { contact_id: 'alice', content: 'Alice enjoys hiking on weekends', category: 'preference' },
-    });
-    await server.inject({
-      method: 'POST',
-      url: '/api/v1/memories',
-      payload: { contact_id: 'bob', content: 'Bob is a software engineer', category: 'work' },
-    });
-  });
-
-  afterEach(async () => {
-    await server.close();
-  });
-
-  it('returns 400 when q is missing', async () => {
-    const res = await server.inject({ method: 'GET', url: '/api/v1/memories/recall' });
-    expect(res.statusCode).toBe(400);
-  });
-
-  it('returns memories matching the query', async () => {
-    const res = await server.inject({ method: 'GET', url: '/api/v1/memories/recall?q=hiking' });
-    expect(res.statusCode).toBe(200);
-    const body = JSON.parse(res.body) as { ok: boolean; memories: { content: string }[]; count: number };
-    expect(body.ok).toBe(true);
-    expect(body.count).toBeGreaterThan(0);
-    expect(body.memories[0]!.content).toContain('hiking');
-  });
-
-  it('filters results by contact_id', async () => {
-    const res = await server.inject({ method: 'GET', url: '/api/v1/memories/recall?q=engineer&contact_id=bob' });
-    const body = JSON.parse(res.body) as { memories: { contact_id: string }[] };
-    expect(body.memories.every((m) => m.contact_id === 'bob')).toBe(true);
-  });
-
-  it('filters results by category', async () => {
-    const res = await server.inject({ method: 'GET', url: '/api/v1/memories/recall?q=hiking&category=preference' });
-    const body = JSON.parse(res.body) as { memories: { category: string }[] };
-    expect(body.memories.every((m) => m.category === 'preference')).toBe(true);
-  });
-
-  it('does not return superseded memories', async () => {
-    // Create a memory then supersede it
-    const r1 = await server.inject({
-      method: 'POST',
-      url: '/api/v1/memories',
-      payload: { contact_id: 'carol', content: 'Carol drives a sedan', category: 'fact' },
-    });
-    const { id: oldId } = JSON.parse(r1.body) as { id: string };
-    await server.inject({
-      method: 'POST',
-      url: '/api/v1/memories',
-      payload: { contact_id: 'carol', content: 'Carol now drives an EV', category: 'fact' },
-    });
-
-    const res = await server.inject({ method: 'GET', url: '/api/v1/memories/recall?q=sedan' });
-    const body = JSON.parse(res.body) as { memories: { id: string }[] };
-    expect(body.memories.find((m) => m.id === oldId)).toBeUndefined();
-  });
-
-  it('clamps limit to a maximum of 50', async () => {
-    const res = await server.inject({ method: 'GET', url: '/api/v1/memories/recall?q=hiking&limit=999' });
-    expect(res.statusCode).toBe(200);
-  });
-});
-
-// ── Schedule endpoints (E18) ──────────────────────────────────────────────────
 
 describe('Schedule CRUD endpoints', () => {
   let server: FastifyInstance;

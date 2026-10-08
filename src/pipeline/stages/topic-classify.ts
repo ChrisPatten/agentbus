@@ -26,6 +26,13 @@ export function createTopicClassify(config: AppConfig): PipelineStage {
   return async (ctx) => {
     const e = ctx.envelope;
 
+    // The app route already authorized this target. Its stored topic may be a
+    // foreign channel's ordinary topic, which app keyword rules must not alter.
+    if (e.channel === 'app' && typeof e.metadata?.['bound_session_id'] === 'string') {
+      ctx.topics = [e.topic];
+      return ctx;
+    }
+
     // Per-thread topic (thread:<hash>) — preserve so each thread keeps its own
     // conversation_id. These are set by adapters (e.g. email), not config.topics.
     if (e.topic && isThreadTopic(e.topic)) {

@@ -1,6 +1,6 @@
 # Memory model
 
-How AgentBus handles memory for a single-user, single-agent personal assistant, and why the bus's structured memory store is dormant.
+How AgentBus handles memory for a single-user, single-agent personal assistant, and why the bus keeps no structured memory store of its own.
 
 ## The layered model
 
@@ -10,38 +10,26 @@ For a personal assistant, **the agent's own files are the memory system**:
 - **Typed/topic files** — freeform notes the agent organizes however it likes.
 - **Daily journal** — `memory/daily/YYYY-MM-DD.md`, a liberal running log the agent appends to.
 
-These live in the agent's `working_dir`, are authored by the agent, and auto-load into every turn because every channel's `claude -p` runs in the same directory. This is richer than — and redundant with — the bus extracting structured `memories` / `session_summaries` rows.
+These live in the agent's `working_dir`, are authored by the agent, and load into every session because every channel's `claude` runs in the same directory. Since E67 Claude Code's native auto memory loads them, pointed at the agent's memory dir, with recent dailies in the bus-generated `memory/recent.md` ([AGENT_MEMORY.md](AGENT_MEMORY.md)). This is richer than the bus extracting structured rows, which is why the old `memories` / `session_summaries` store was removed.
 
 So E20 stops the bus from trying to **be** the memory store and makes it **orchestrate** the agent's own files instead. The bus's residual memory role is **telemetry, not content**: it tracks *which* conversations are due for journaling and *when* — it never holds what the agent knows.
 
 | Concern | Owner |
 |---|---|
 | Durable knowledge (facts, preferences, plans) | **The agent's files** (`MEMORY.md`, topic files, daily journal) |
-| Loading those files into each turn's context | **The bus** — `assembleMemoryContext` (front-loads `MEMORY.md` + recent dailies) |
+| Loading those files into each turn's context | **Claude Code** — native auto memory (`MEMORY.md`, topic files on demand) and `CLAUDE.md` imports (`recent.md`); the bus supplies `autoMemoryDirectory` and generates `recent.md` (E67) |
 | Recent conversation continuity | **Claude Code** — the resumed `claude_session_id`, bounded by auto-compaction |
 | Deciding when to capture durable knowledge | **The bus** — the journaling dispatcher fires on pause or on a hard ceiling (E30) |
 | Actually writing the knowledge | **The agent** — the silent journaling turn edits its own files; high-stakes content (E30) is written inline in the reply-producing turn instead of waiting on the sweep |
-| What's due for journaling and when | **The bus** — `sessions` telemetry (`last_activity`, `last_journaled_at`, `claude_session_id`) |
+| What's due for journaling and when | **The bus** — `sessions` telemetry (`last_activity`, `journal_cursor_at`, `last_journaled_at`, `claude_session_id`) and `journal_state` (E66) |
 
 ## The two pillars
 
-1. **Headless context assembly** — an ephemeral one-shot `claude -p` can't be relied on to go read yesterday's journal on its own, so the bus assembles `MEMORY.md` + the most recent daily journal files into each turn's context. See [CC_HEADLESS_ADAPTER.md → Context assembly](./CC_HEADLESS_ADAPTER.md#context-assembly-memory-files).
+1. **Context loading** — an ephemeral one-shot `claude -p` can't be relied on to go read yesterday's journal on its own, so recent journals must be in context from the start. Before E67 the bus assembled `MEMORY.md` + the most recent dailies into each turn; since E67 Claude Code loads them natively (auto memory, plus the `@memory/recent.md` import of the bus-generated digest), verified to reload from disk on every `--resume`. See [AGENT_MEMORY.md](./AGENT_MEMORY.md#loading).
 
 2. **Journaling on pause or ceiling** — the idle threshold is repurposed from a *teardown* signal into a *journaling* signal. When a conversation pauses, the bus fires a **silent** `--resume` journaling turn: the agent reviews the conversation and updates its files, sends the user nothing, and the session stays open. A hard ceiling alongside the idle debounce makes a long, continuously-active conversation flush periodically instead of only on pause. See [CC_HEADLESS_ADAPTER.md → Memory logging](./CC_HEADLESS_ADAPTER.md#memory-logging).
 
-   **All-or-nothing dependency on `cc-headless` (E33).** The dispatcher
-   (`SessionTracker.dispatchJournaling()`, `src/memory/session-tracker.ts`) is
-   gated entirely on at least one configured *and* registered `cc-headless`
-   instance — if the config block is absent, or no instance has registered a
-   journaling runner, the sweep no-ops for **every** headless session
-   bus-wide on every tick, not just sessions tied to the missing instance.
-   Removing the last `cc-headless` instance (e.g. an operator swap to a
-   different Claude Code adapter) silently pauses the sweep. This is now
-   surfaced via a one-time `console.warn` (edge-triggered, not per-tick) the
-   moment the condition is detected with at least one session actually
-   waiting on the sweep — look for `[session-tracker] Journaling sweep is a
-   no-op bus-wide` if `last_journaled_at` looks stuck while `last_activity`
-   keeps advancing.
+   **E66.** The dispatcher is now the journaling engine (`src/journaling/engine.ts`), shared by every runtime, with per-agent journaler chains, a per-session cursor (`sessions.journal_cursor_at`), eligibility rules (`min_human_messages`, default 2) and `journal_runs` records. The E33 "sweep is a no-op bus-wide" warning is gone: a session whose agent has no journaling settings is simply not journaled, and a chain that can't run raises an advisory. Three journalers carry out a run: `system-message` (the live agent journals in its own session, on cc-pool), `cc-headless` (`claude -p --resume`, forked on cc-pool) and `script` (your executable over the bus transcript; the shipped `claude-p-journal.sh` hands it to `claude -p`). See [JOURNALING.md](JOURNALING.md).
 
 3. **No memory work inside the reply-producing turn** — the turn that answers the user ends at `reply()`/`send_message()`; it does not keep running afterward to journal. That responsibility belongs entirely to the debounced sweep above, with one exception: financial, health, scheduling, or safety/security-relevant content is still captured immediately, inline, before the turn's process exits — see [CC_HEADLESS_ADAPTER.md → High-stakes immediate-logging exception](./CC_HEADLESS_ADAPTER.md#high-stakes-immediate-logging-exception).
 
@@ -59,22 +47,16 @@ This is scoped to headless sessions via the `claude_session_id IS NOT NULL` disc
 
 Because every channel's `claude -p` runs in the same `working_dir` and auto-loads the same files, a fact the agent journaled from a Telegram conversation is already in context for a later email turn. There is **no** "widen DB recall across channels" machinery — files are the source of truth, so cross-channel continuity falls out for free.
 
-## Why the structured store is dormant
+## The structured store was removed
 
-The E8/E9 `memories` and `session_summaries` tables (and the summarizer's Claude-API extraction) are **disabled by default** behind `memory.structured_extraction` (default `false`). When off, the bus writes neither table. The tables and migrations are **left in place** (dormant) — no destructive migration — and the `recall_memory` / `log_memory` MCP tools remain registered (marked legacy) so existing MCP-adapter deployments are unaffected.
+The E8/E9 `memories` and `session_summaries` tables were filled by an Anthropic-API summarizer behind `memory.structured_extraction`. E66 removed the summarizer (and `@anthropic-ai/sdk`): journaling, with the reference script journaler built on `claude -p`, covers "an LLM over the bus transcript". After E66 the rest went too: `recall_memory`, `log_memory`, `/api/v1/memories`, stage 85 (`memory-inject`) and the tables themselves (migration 031). The old config keys load with a deprecation warning. See [MEMORY.md](MEMORY.md).
 
-For the single-user / single-agent file-memory model the structured store is pure duplication. It would earn its keep again when:
-
-- **Multiple agents** need a shared, queryable knowledge base they don't all hold as files.
-- **Programmatic / dashboard queries** need structured rows (filter by contact, category, confidence) rather than freeform prose.
-- **Non-LLM consumers** need the data (analytics, exports) without reading Markdown.
-
-In those cases, set `memory.structured_extraction: true` to restore the legacy summarizer behavior.
-
-Separately, the `knowledge` table (see [KNOWLEDGE_STORE.md](KNOWLEDGE_STORE.md)) is a **new, always-on, agent-managed** store added alongside this one — it is not a revival of the dormant `memories` / `session_summaries` tables described above, does not sit behind `memory.structured_extraction`, and has its own arbitrary agent-defined schema rather than the fixed preference/fact/plan/etc. categories.
+For a shared, queryable store, use the `knowledge` table ([KNOWLEDGE_STORE.md](KNOWLEDGE_STORE.md)): always-on and agent-managed, with its own agent-defined schema.
 
 ## See also
 
 - [CC_HEADLESS_ADAPTER.md](./CC_HEADLESS_ADAPTER.md) — the headless adapter, long-lived sessions, context assembly, and journaling mechanics.
-- [MEMORY.md](./MEMORY.md) — the (now dormant) structured memory system: tables, summarizer, and config.
+- [MEMORY.md](./MEMORY.md) — session tracker settings and what the removed legacy store was.
+- [AGENT_MEMORY.md](./AGENT_MEMORY.md) — the agent memory layout and how it loads (E67).
+- [JOURNALING.md](./JOURNALING.md) — how memory files get updated: triggers, journalers, `/journal`.
 - [KNOWLEDGE_STORE.md](./KNOWLEDGE_STORE.md) — the new, always-on, agent-managed knowledge store (separate from both of the above).
