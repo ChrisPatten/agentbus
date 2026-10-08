@@ -10,7 +10,7 @@ The pool is a number of **panes**: tmux windows, each able to run one Claude Cod
 
 1. **A message arrives** for a conversation that has no pane. The bus takes a free pane, starts Claude Code in it, and resumes the conversation's Claude session if it has one. Telegram shows "One moment…" while it starts.
 2. **The conversation keeps its pane.** Later messages go straight to the same pane, with no start-up delay.
-3. **When every pane is busy**, the bus takes the pane that's been idle longest, if it's been idle for at least `lease.idle_evict_ms` (30 minutes by default). That conversation gives up its pane, and resumes its session in a pane later.
+3. **When every pane is busy**, the bus takes the pane that's been idle longest, if it's been idle for at least `lease.idle_evict_ms` (30 minutes by default). That conversation gives up its pane right away (it's journaled in the background from its saved transcript), and resumes its session in a pane later.
 4. **If no pane can be freed**, the message waits ("parks"). Parked messages are retried every minute. A message that's still waiting after `lease.park_timeout_ms` (5 minutes by default) gives up: it moves to the bus's dead-letter list, and the bus posts a notice on its `system` channel. Route `channel: system` to an agent if you want to hear about these.
 5. **Long-idle conversations** give up their pane after `lease.hard_idle_ms` (6 hours by default) without activity, even when nobody else needs it.
 
@@ -118,15 +118,17 @@ make pool
 
 ## Optional hooks
 
-Three Claude Code hooks, in `scripts/hooks/` in the AgentBus folder, make a pool work better. Install them in your agent's working folder:
+Claude Code hooks in `scripts/hooks/` in the AgentBus folder make a pool work better. Install them in your agent's working folder:
 
 | Hook | Claude Code event | What it adds |
 |---|---|---|
 | `agentbus_approval_hook.sh` | `PermissionRequest` | Lets you answer permission prompts from Telegram. See [Approvals](/features/approvals). |
 | `agentbus_tool_status_hook.sh` | `UserPromptSubmit` and `PostToolUse` | Telegram's "typing…" indicator and live tool list while the agent works. |
-| `agentbus_stop_hook.sh` | `Stop` | Tells the bus each time a turn finishes, so a long-running turn isn't mistaken for an idle conversation. |
+| `agentbus_journal_hook.sh` | `Stop`, `PreCompact` and `SessionEnd` | Tells the bus each time a turn finishes, so a long-running turn isn't mistaken for an idle conversation. Before the conversation's context is compacted or cleared, it saves a copy of the transcript for journaling. |
+| `agentbus_stop_hook.sh` | `Stop` | The older turn-finished hook. Keep it if you already have it, or use `agentbus_journal_hook.sh` instead. |
+| `agentbus_recent_memory_hook.sh` | `UserPromptSubmit` and `SessionStart` | Shows a long-running pane the agent's latest journals (`memory/recent.md`) when they change, instead of only when the pane starts. See [How memory is organized](/features/agent-memory#keeping-long-sessions-up-to-date). |
 
-Each script has a few settings at the top: the bus address (`http://127.0.0.1:3000`), and for the stop hook, the pool's `agent_id` (`POOL_AGENT_ID`). Edit them to match your setup. The scripts need `jq` and `curl`; the tool-status hook also needs `python3`. If you set [`bus.auth_token`](/reference/configuration#bus), there's nothing to edit: the pool gives each pane the token as `AGENTBUS_BUS_TOKEN`, and the hooks send it.
+All five scripts read the bus address from `AGENTBUS_URL` (default `http://127.0.0.1:3000`), so there's nothing to edit unless your bus uses another address. If you set [`bus.auth_token`](/reference/configuration#bus), the pool gives each pane the token as `AGENTBUS_BUS_TOKEN`, and every hook sends it. The scripts need `jq` and `curl`; the tool-status hook also needs `python3`.
 
 Panes only pick up new hook settings when they next start.
 
@@ -138,7 +140,7 @@ Parked messages and leases are stored in the bus database and survive a restart.
 
 ## Clearing a conversation
 
-`/clear` ends the conversation's session in the bus. While the conversation still holds its pane, that pane's Claude session keeps its context. The fresh session starts the next time the conversation is given a pane. To start fresh straight away, use the Claude Code session directly (attach to it and run `/clear` there).
+`/clear` ends the conversation's session and journals it. The conversation lets go of its pane straight away, and the pane is cleared (or closed, with `on_evict: kill`) in the background, so your next message starts a fresh Claude session.
 
 `/stop` doesn't apply to pool conversations. To interrupt a pane, attach to it and press Escape.
 

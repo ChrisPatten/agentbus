@@ -4,6 +4,8 @@ When your agent wants to do something that needs your permission, such as run a 
 
 Approvals work with the [`cc-pool`](/runtimes/cc-pool) runtime, for conversations that take place on Telegram.
 
+Agents also use approvals to [propose changes to their own instructions](/features/journaling-and-memory#approve-improvements-to-the-agent-s-instructions). Those requests go to the agent's owners, stay open for seven days, and the bus applies an approved change itself. When you deny any request, the agent hears about it the next time it journals, so it can learn from it.
+
 ## How it works
 
 1. A pane's Claude Code session shows a permission prompt.
@@ -68,7 +70,7 @@ Approvals use a Claude Code hook in your agent's working folder.
 
    The bus starts fresh panes as conversations need them, and each conversation resumes its Claude session.
 
-The hook needs `jq` and `curl`, and sends requests to `http://127.0.0.1:3000`. If your bus uses another port, edit `AGENTBUS_BASE` at the top of the script. If you set `bus.auth_token`, the hook sends it from `AGENTBUS_BUS_TOKEN`, which cc-pool sets in each pane for you.
+The hook needs `jq` and `curl`, and sends requests to `http://127.0.0.1:3000`. If your bus uses another address, set `AGENTBUS_URL`. If you set `bus.auth_token`, the hook sends it from `AGENTBUS_BUS_TOKEN`, which cc-pool sets in each pane for you.
 
 ## Checking requests
 

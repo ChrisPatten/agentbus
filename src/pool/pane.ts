@@ -29,6 +29,7 @@
  * for — rather than inventing an order `--help` never confirmed. See this
  * story's report for the full flag-by-flag verification.
  */
+import { DISABLE_AUTO_MEMORY_ENV, autoMemorySettings, hasSettingsArg } from '../memory/native.js';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -82,6 +83,13 @@ export interface PaneLifecycleDeps {
    * pane's `claude`, its cc.ts MCP server and its hook scripts all inherit it.
    */
   busToken?: string;
+  /**
+   * E67 — the pool's memory dir when it loads memory natively. The launch
+   * line adds `--settings '{"autoMemoryDirectory":…}'` (unless the
+   * operator's `launch_args` already pass `--settings`) and unsets an
+   * inherited `CLAUDE_CODE_DISABLE_AUTO_MEMORY`.
+   */
+  autoMemoryDir?: string;
   /**
    * Injectable delay for tests (ack-handshake waits, the readiness poll
    * interval, and the kill-release pause in `release()`) — defaults to a
@@ -246,6 +254,7 @@ export class PaneLifecycle {
   private readonly scratchDir: string;
   private readonly fetchFn: typeof fetch;
   private readonly busToken: string | undefined;
+  private readonly autoMemoryDir: string | undefined;
   private readonly sleepFn: (ms: number) => Promise<void>;
   /** Resolved once, mirroring cc-headless.ts's module-level `configPath`: same env var, same fallback. */
   private readonly agentbusConfigPath: string;
@@ -256,6 +265,7 @@ export class PaneLifecycle {
     this.cfg = deps.cfg;
     this.scratchDir = deps.scratchDir;
     this.busToken = deps.busToken || undefined;
+    this.autoMemoryDir = deps.autoMemoryDir || undefined;
     this.fetchFn = withBusToken(deps.busBaseUrl, this.busToken, deps.fetchFn);
     this.sleepFn = deps.sleepFn ?? defaultSleep;
     this.agentbusConfigPath = process.env['AGENTBUS_CONFIG'] ?? resolve(process.cwd(), 'config.yaml');
@@ -387,10 +397,9 @@ export class PaneLifecycle {
       contact_id: params.promptContext?.contact_id ?? '',
       channel: params.promptContext?.channel ?? '',
       date: new Date().toISOString().slice(0, 10),
-      // Pool sessions rely on native CLAUDE.md auto-loading, not per-turn
-      // injection — unlike cc-headless, which assembles {{memories}} /
-      // {{session_summary}} from the DB/agent files on every turn. Deliberate
-      // difference for interactive pool sessions, not an oversight.
+      // Pool sessions load memory natively (CLAUDE.md, its @memory/recent.md
+      // import, and auto memory pointed at the memory dir via --settings;
+      // E67), never through {{memories}}.
       memories: '',
       session_summary: '',
       agent_id: params.paneAgentId,
@@ -434,14 +443,20 @@ export class PaneLifecycle {
 
     args.push('--dangerously-load-development-channels', 'server:agentbus');
 
-    for (const extra of dedupeDevChannelsArgs(this.cfg.launch_args)) {
+    const extras = dedupeDevChannelsArgs(this.cfg.launch_args);
+    // E67 — native memory: auto memory loads the pool's memory dir.
+    if (this.autoMemoryDir && !hasSettingsArg(extras)) {
+      args.push('--settings', autoMemorySettings(this.autoMemoryDir));
+    }
+    for (const extra of extras) {
       args.push(extra);
     }
 
     const quoted = args.map(shellQuoteArg).join(' ');
     // Pool panes are resumed by session id, so the transcript must persist
     // even if some other inherited marker would turn saving off.
-    return `unset TMUX ${INHERITED_CLAUDE_SESSION_VARS.join(' ')}; export CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1; ${quoted}`;
+    const unset = [...INHERITED_CLAUDE_SESSION_VARS, ...(this.autoMemoryDir ? [DISABLE_AUTO_MEMORY_ENV] : [])];
+    return `unset TMUX ${unset.join(' ')}; export CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1; ${quoted}`;
   }
 
   /**

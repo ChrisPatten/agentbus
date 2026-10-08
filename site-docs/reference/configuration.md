@@ -107,6 +107,122 @@ agents:
 
 See [Attachments](/features/attachments).
 
+### owners
+
+Who hears about problems with this agent. See [Owners and advisories](/features/owners-and-advisories).
+
+```yaml
+agents:
+  "agent:assistant":
+    owners:
+      - channel: telegram
+        contact_id: me
+```
+
+| Option | What it does |
+|---|---|
+| `channel` | The exact channel of your conversation with the agent, for example `telegram`, `telegram:assistant` or `app` |
+| `contact_id` | A key under [`contacts`](#contacts), without `contact:` |
+
+For a `cc-pool` agent, list the owners on the pool's own name. The bus won't start if an owner isn't a configured contact.
+
+### journaling
+
+How and when the bus has this agent record what's worth remembering from its conversations. See [Journaling and memory](/features/journaling-and-memory).
+
+```yaml
+agents:
+  "agent:assistant":
+    journaling:
+      chain: [system-message, cc-headless, script]
+      threshold_ms: { default: 1800000, telegram: 300000 }
+      ceiling_ms: 14400000
+      min_human_messages: 2
+      script:
+        command: /Users/you/agentbus/scripts/journalers/claude-p-journal.sh
+```
+
+| Option | Default | What it does |
+|---|---|---|
+| `enabled` | `true` | Turn journaling on or off for this agent |
+| `chain` | `[system-message, cc-headless, script]`, with `script` only when `script.command` is set | The journalers to try, in order. If one can't run, the bus tries the next. Ones the agent's runtime can't use are skipped. |
+| `threshold_ms` | `1800000` (30 min) | How long a conversation must be quiet before it's journaled. A number, or one value per channel with a required `default`. |
+| `ceiling_ms` | none | Journal an ongoing conversation at least this often, even if it never goes quiet |
+| `min_human_messages` | `2` | How many new messages from a person a conversation needs before a pause journals it. `/clear`, the end of a session and a bus restart journal it with fewer. Content that waits more than a day is journaled anyway. |
+| `timeout_ms` | `300000` (5 min) | How long one journal run may take |
+| `model` | the agent's model | The model journal runs use (`cc-headless` and `script`) |
+| `prompt` | a built-in instruction | What the agent is asked to do when it journals |
+| `system-message.timeout_ms` | `timeout_ms` | How long the live agent has to finish; its conversation's new messages wait at most this long |
+| `system-message.prompt` | `prompt` | Instruction for the live agent |
+| `cc-headless.model`, `cc-headless.prompt` | `model`, `prompt` | Model and instruction for `claude -p --resume` runs |
+| `script.command` | required for `script` | Your script, as a full path or relative to the agent's working folder |
+| `script.args` | `[]` | Arguments passed to it |
+| `script.timeout_ms` | `timeout_ms` | How long it may run before it's stopped |
+| `script.env` | `{}` | Extra environment variables, on top of `PATH`, `HOME` and the `AGENTBUS_*` ones |
+| `script.model` | `model` | Passed to the script as `AGENTBUS_MODEL` |
+
+Scheduled jobs, slash commands and messages from other agents don't count toward `min_human_messages`.
+
+The bus checks the chain when it starts. It refuses to start if none of the journalers can work with the agent's runtime. If the chain could run out of options (it doesn't end with `script`), it logs a warning and tells the agent's [owners](#owners).
+
+For a `cc-headless` agent without this block, the older `journaling` options under `adapters.cc-headless` still apply. They're deprecated; move them here.
+
+#### consolidation
+
+The nightly pass that turns journals into lasting memory. See [Consolidation](/features/journaling-and-memory#consolidation).
+
+```yaml
+agents:
+  "agent:assistant":
+    journaling:
+      consolidation:
+        cron: "0 3 * * *"
+```
+
+| Option | Default | What it does |
+|---|---|---|
+| `consolidation.enabled` | `true` | Turn consolidation off for this agent |
+| `consolidation.cron` | `0 3 * * *` (03:00 every day) | When it runs. Skipped when nothing new was journaled. |
+| `consolidation.timezone` | the bus computer's time zone | Time zone for `cron`, for example `Europe/London` |
+| `consolidation.max_memory_lines` | `200` | How long `MEMORY.md` may get. Claude Code loads at most 200 lines, so that's the maximum. |
+| `consolidation.timeout_ms` | `timeout_ms` | How long one pass may take |
+| `consolidation.prompt` | a built-in instruction | What the agent is asked to do |
+
+### protected_paths
+
+Files and folders the agent may not edit itself; it proposes changes for its owners to approve. See [Approve improvements to the agent's instructions](/features/journaling-and-memory#approve-improvements-to-the-agent-s-instructions).
+
+```yaml
+agents:
+  "agent:assistant":
+    protected_paths: [CLAUDE.md, skills/, .claude/]
+```
+
+Paths are inside the agent's working folder (or full paths); folders end in `/`. The default is `CLAUDE.md`, the files the runtime's `system_prompt` pulls in with `@path`, `skills/` and `.claude/`. Setting the list replaces the default. The memory folder is never protected.
+
+### memory
+
+Where the agent's memory files are, and how much of its recent journals it sees. See [How memory is organized](/features/agent-memory).
+
+```yaml
+agents:
+  "agent:assistant":
+    memory:
+      dir: memory
+      lookback_days: 3
+```
+
+| Option | Default | What it does |
+|---|---|---|
+| `dir` | `memory` | The memory folder, inside the agent's working folder (or a full path) |
+| `index_file` | `MEMORY.md` | The memory index, loaded at the start of every session |
+| `daily_subdir` | `daily` | The folder inside `dir` with one journal file per day (`2026-10-06.md`) |
+| `lookback_days` | `3` | How many days of journals go into `recent.md`, counting today. `0` leaves it empty. |
+| `recent_budget_chars` | `20000` | The most characters `recent.md` may hold. The newest days are kept; older ones are cut. |
+| `native` | `true` | Let Claude Code load the memory folder itself. Set `false` to have the bus add `MEMORY.md` and `recent.md` to each turn instead (`cc-headless` only). |
+
+For a `cc-headless` agent, the older `memory` options under `adapters.cc-headless` still apply where this block doesn't set them (`journal_lookback_days` there is `lookback_days` here). They're deprecated; move them here.
+
 ## pipeline
 
 How messages are sorted and routed.
@@ -176,8 +292,9 @@ Required, but can be empty: `memory: {}`.
 | Option | Default | What it does |
 |---|---|---|
 | `session_idle_threshold_ms` | `1800000` (30 min) | For conversations without a resumable Claude session (such as those on `claude-code`), how long a conversation can be quiet before its session ends |
+| `summarizer_interval_ms` | `60000` | How often the bus checks for idle sessions and conversations due for journaling |
 
-The other options in this section, and the `memory` and `journaling` options under `cc-headless`, are part of journaling and memory, which is being rebuilt. See [Journaling and memory](/features/journaling-and-memory).
+`claude_api_model`, `summary_max_tokens`, `structured_extraction`, `context_window_hours` and `memory_inject_exclude` belonged to the old memory store, which has been removed. They're ignored, with a warning at startup; delete them. Journaling is configured per agent, under [`agents`](#journaling). See [Journaling and memory](/features/journaling-and-memory).
 
 ## Environment variables
 

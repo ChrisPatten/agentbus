@@ -253,6 +253,22 @@ export class LeaseStore {
     this.db.prepare(`UPDATE pool_leases SET state = 'draining' WHERE pool_id = ? AND pane_id = ?`).run(poolId, paneId);
   }
 
+  /**
+   * E66 — 'leased' -> 'draining' with the conversation detached,
+   * only while still held by `conversationId`. `acquire()` never selects a
+   * draining row, so the conversation's next message gets another pane while
+   * this one is cleared; `release()` frees it afterwards. Returns whether the
+   * row was detached.
+   */
+  detach(poolId: string, paneId: string, conversationId: string): boolean {
+    return this.db
+      .prepare(
+        `UPDATE pool_leases SET state = 'draining', conversation_id = NULL, claude_session_id = NULL, last_turn_ended_at = NULL
+         WHERE pool_id = ? AND pane_id = ? AND conversation_id = ? AND state = 'leased'`,
+      )
+      .run(poolId, paneId, conversationId).changes > 0;
+  }
+
   /** Bump last_activity_at to now (or `now` param if given, for tests). */
   touch(poolId: string, paneId: string, now?: Date): void {
     const nowIso = (now ?? new Date()).toISOString();

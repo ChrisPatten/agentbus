@@ -59,7 +59,7 @@ Routes reach this agent with `recipientId: agent:<agent_id>`.
 | `error_passthrough` | `false` | Add the technical error (up to 500 characters) to `error_reply`. Useful while setting up; turn it off afterwards, as errors can include file paths. |
 | `poll_interval_ms` | `1000` | How often the agent checks for new messages, in milliseconds. |
 
-This runtime also has `memory` and `journaling` settings. They're being redesigned; see [Journaling and memory](/features/journaling-and-memory).
+This runtime also has `memory` and `journaling` settings. The `journaling` settings here are deprecated: configure journaling under [`agents.<id>.journaling`](/reference/configuration#journaling) instead. The `memory` settings here are deprecated too: set them under [`agents.<id>.memory`](/reference/configuration#memory).
 
 ### The system prompt
 
@@ -121,4 +121,4 @@ If `claude -p` crashes, exits with an error or produces nothing, and the agent h
 - **The first reply in a conversation is slower.** Claude Code needs a few seconds to start.
 - **Conversations are isolated.** The agent can't see what was said in another conversation, unless it looks it up with `search_transcripts` or keeps notes in its files.
 - **Don't turn off auto-compaction.** Long sessions rely on Claude Code's automatic context compaction. Leave `DISABLE_AUTO_COMPACT` unset.
-- **Claude Code's own auto memory is off** for headless turns. AgentBus manages the agent's memory files itself.
+- **Claude Code's own auto memory is on and points at the agent's memory folder.** Each turn loads `CLAUDE.md` (with `recent.md`) and `MEMORY.md` fresh from disk, so changes the agent or a journal run made are seen on the next turn. See [How memory is organized](/features/agent-memory).

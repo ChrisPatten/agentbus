@@ -58,14 +58,16 @@ import type { AdapterRegistry } from '../core/registry.js';
 import type { AppConfig } from '../config/schema.js';
 import type { MessageEnvelope } from '../types/envelope.js';
 import type { PipelineEngine } from '../pipeline/engine.js';
-import type { PipelineContext } from '../pipeline/types.js';
+import type { PipelineContext, RouteTarget } from '../pipeline/types.js';
+import { SYSTEM_BLOCKS_KEY, SYSTEM_ONLY_KEY, attachSystemBlock, stripSystemMetadata, systemBlocksFor } from '../core/system-block.js';
 import type Database from 'better-sqlite3';
 import type { CommandImage, CommandRegistry, SlashCommandContext } from '../commands/registry.js';
 import { createSafeDatabase } from '../db/safe-database.js';
 import { logOutboundTranscript } from '../pipeline/outbound-transcript.js';
 import { validateAppDestination } from '../app/outbound.js';
 import { boundAppReply } from '../app/binding.js';
-import { routedAgent } from '../app/store.js';
+import { routedAgent, VISIBLE_TRANSCRIPT } from '../app/store.js';
+import { journalingHealth, runForApi, type JournalStatusDeps } from '../journaling/status.js';
 import { logWebhookRequest } from './webhook-log.js';
 import { registerSiriRoutes } from './siri-routes.js';
 import type { SiriAdapter } from '../adapters/siri.js';
@@ -74,6 +76,7 @@ import type { HeadlessCapacitySnapshot } from '../adapters/cc-headless.js';
 import { registerAppRoutes } from './app-routes.js';
 import { VERSION } from '../version.js';
 import { recordAgentPoll, getLastPollAt } from './agent-liveness.js';
+import type { RuntimeResolver } from '../core/runtime-resolver.js';
 import { toBareAgentId, toPrefixedAgentId } from '../pool/types.js';
 import { LeaseStore } from '../pool/lease-store.js';
 import type { PoolManager } from '../pool/pool-manager.js';
@@ -81,8 +84,13 @@ import { ApprovalStore } from '../approvals/store.js';
 import { defaultScheduleTopic } from '../scheduler/default-topic.js';
 import { resolveApprovalTarget } from '../approvals/resolve-target.js';
 import { dispatchApproval } from '../approvals/dispatch.js';
-import { resolveApproval } from '../approvals/resolve.js';
+import { resolveApproval, type ApprovalResolveHooks } from '../approvals/resolve.js';
+import type { ProposalService, ProposalStatus } from '../learning/proposals.js';
 import { APPROVAL_TIMEOUT_MS, type ApprovalStatus } from '../approvals/types.js';
+import { parseFreshnessQuery, type RecentFreshness } from '../memory/recent-freshness.js';
+import { parseHarnessEvent, type HarnessEvents } from '../journaling/events.js';
+import type { AdvisoryService } from '../advisories/service.js';
+import type { AdvisoryState } from '../advisories/types.js';
 import { writeKnowledge, getKnowledge, forgetKnowledge, searchKnowledge } from '../knowledge/store.js';
 
 export interface HttpServerDeps {
@@ -109,6 +117,26 @@ export interface HttpServerDeps {
    * `GET /api/v1/pool` observability route.
    */
   poolManagers?: Map<string, PoolManager>;
+  /** E64 — when present, /api/v1/health lists each agent's runtime and capabilities. */
+  runtimeResolver?: Pick<RuntimeResolver, 'list'>;
+  /** E65 — when present, the /api/v1/advisories routes are mounted. */
+  advisories?: AdvisoryService;
+  /** E66 — when present, POST /api/v1/journal/events is mounted (harness hook events). */
+  journalEvents?: Pick<HarnessEvents, 'handle'>;
+  /**
+   * E66 — System Message journal runs: held messages are skipped by the
+   * pending poll, the agent's outbound sends get 409, and
+   * POST /api/v1/journal/complete is mounted.
+   */
+  journalGate?: JournalGateLike;
+  /** E66 — when present, GET /api/v1/journal/runs is mounted and /api/v1/health includes a journaling summary. */
+  journalStatus?: JournalStatusDeps;
+  /** E67 — when present, GET /api/v1/memory/recent is mounted (the recent.md freshness hook). */
+  memoryRecent?: Pick<RecentFreshness, 'check'>;
+  /** E68 — hooks for POST /api/v1/approvals/:id/resolve (denied-approval feedback, self-edit proposals). */
+  approvalHooks?: ApprovalResolveHooks;
+  /** E68 — when present, the /api/v1/proposals routes are mounted (the propose_change MCP tool). */
+  proposals?: Pick<ProposalService, 'submit' | 'list' | 'get'>;
 }
 
 const MessagePayloadSchema = z.discriminatedUnion('type', [
@@ -235,6 +263,39 @@ export interface InboundResult {
   enqueued_count: number;
 }
 
+/**
+ * Options only in-process bus code can pass to `processInbound` (E65). An
+ * HTTP or adapter caller can't reach these: they are not part of
+ * `InboundMessage`, and the matching metadata keys are stripped from it.
+ */
+export interface InboundSystemOptions {
+  /**
+   * A bus-originated turn with no human message (`metadata.system_only`).
+   * The body is logged but not shown to the agent; only the system blocks
+   * added by pipeline stages are. Skips follow-up capture.
+   */
+  systemOnly?: boolean;
+  /** Keep only the fan-out targets this returns true for (e.g. the one agent a system turn is for). */
+  routeFilter?: (route: RouteTarget) => boolean;
+  /**
+   * E66 — system blocks to attach after the pipeline (so they are never
+   * stored in the transcript), for every fan-out copy that survives
+   * `routeFilter`. Used for journaling instructions.
+   */
+  blocks?: string[];
+  /** E66 — reserved metadata to set after ingress stripping (e.g. `journal_run_id`). */
+  metadata?: Record<string, unknown>;
+}
+
+/** E66 — the System Message journaler's state, as the HTTP layer uses it. */
+export interface JournalGateLike {
+  isHeld(envelope: Pick<MessageEnvelope, 'recipient' | 'metadata'>): boolean;
+  blockedSend(sender: string): { runId: string } | null;
+  complete(input: { runId: string; agentId: string; filesChanged?: string[]; notes?: string; nothingNew?: boolean }):
+    | { ok: true; runId: string }
+    | { ok: false; reason: 'unknown_run' | 'stale_run' | 'wrong_agent' | 'already_completed' };
+}
+
 export interface InboundAbort {
   ok: true;
   queued: false;
@@ -359,6 +420,7 @@ export async function processInbound(
     commandRegistry?: CommandRegistry;
     pauseSet?: Set<string>;
   },
+  system: InboundSystemOptions = {},
 ): Promise<InboundResult | InboundAbort> {
   // Validate payload for in-process callers that bypass Zod (e.g. TelegramAdapter).
   // The HTTP route validates via InboundSchema, but processInbound is also called
@@ -376,7 +438,11 @@ export async function processInbound(
   // Attachments travel through the envelope inside `metadata.attachments` so
   // they survive enqueue/dequeue (metadata is persisted as JSON on the queue
   // row; the envelope itself is rehydrated from that row).
-  const metadata: Record<string, unknown> = { ...(message.metadata ?? {}) };
+  // E65 — system blocks and the system-only flag are bus-originated: a caller
+  // can't supply them, only pipeline stages and `system` (below) add them.
+  const metadata: Record<string, unknown> = stripSystemMetadata(message.metadata);
+  if (system.systemOnly) metadata[SYSTEM_ONLY_KEY] = true;
+  if (system.metadata) Object.assign(metadata, system.metadata);
   if (message.attachments && message.attachments.length > 0) {
     metadata['attachments'] = message.attachments;
   }
@@ -415,6 +481,7 @@ export async function processInbound(
   if (!result) {
     return { ok: true, queued: false, reason: ctx.abortReason ?? 'pipeline_abort' };
   }
+  for (const block of system.blocks ?? []) attachSystemBlock(result.envelope.metadata, block);
 
   // ── Follow-up capture check (post-pipeline, pre slash-command dispatch) ──
   // A plain-text, non-slash-command message is checked against any pending
@@ -424,7 +491,7 @@ export async function processInbound(
   // before agent fan-out — exactly like a normal bus-command invocation.
   // consumeFollowUp always deletes on read (single-shot), so whether or not
   // it matches, the capture is gone after this check either way.
-  if (!result.isSlashCommand && result.envelope.payload.type === 'text' && deps.commandRegistry) {
+  if (!system.systemOnly && !result.isSlashCommand && result.envelope.payload.type === 'text' && deps.commandRegistry) {
     const followUp = deps.commandRegistry.consumeFollowUp(result.envelope.channel, result.envelope.sender);
     if (followUp) {
       const body = result.envelope.payload.body;
@@ -537,15 +604,24 @@ export async function processInbound(
       ? { type: 'text', body: result.envelope.payload.body }
       : { ...result.envelope.payload };
 
-  for (let i = 0; i < result.routes.length; i++) {
-    const route = result.routes[i]!;
+  const routes = system.routeFilter ? result.routes.filter(system.routeFilter) : result.routes;
+  if (routes.length === 0 && result.routes.length > 0) {
+    return { ok: true, queued: false, reason: 'no_matching_route' };
+  }
+  for (let i = 0; i < routes.length; i++) {
+    const route = routes[i]!;
+    // E65 — each fan-out copy carries only the system blocks meant for its
+    // recipient (an advisory for agent A must not reach also_notify agent B).
+    const blocks = systemBlocksFor(result.envelope.metadata, route.recipientId);
+    const { [SYSTEM_BLOCKS_KEY]: _pending, ...baseMetadata } = result.envelope.metadata;
     const fanEnvelope: MessageEnvelope = {
       ...result.envelope,
       payload: outboundPayload,
       id: i === 0 ? primaryId : randomUUID(),
       recipient: route.recipientId,
       metadata: {
-        ...result.envelope.metadata,
+        ...baseMetadata,
+        ...(blocks.length > 0 ? { [SYSTEM_BLOCKS_KEY]: blocks } : {}),
         adapter_id: route.adapterId,
         conversation_id: result.conversationId ?? undefined,
         ...(result.isSlashCommand && result.slashCommand
@@ -562,6 +638,15 @@ export async function processInbound(
   }
 
   return { ok: true, id: primaryId, queued: true, enqueued_count: enqueuedCount };
+}
+
+/** Health must answer even if the journaling summary can't be computed. */
+function safeJournalingHealth(deps: JournalStatusDeps): ReturnType<typeof journalingHealth> | { status: 'unknown'; error: string } {
+  try {
+    return journalingHealth(deps);
+  } catch (err) {
+    return { status: 'unknown', error: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 // ── HTTP server ──────────────────────────────────────────────────────────────
@@ -615,17 +700,25 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     const allHealthy = Object.values(adapters).every(
       (a) => (a as { status: string }).status === 'online'
     );
+    const journaling = deps.journalStatus ? safeJournalingHealth(deps.journalStatus) : null;
+    // Post-E66: critical journaling (3 exhausted runs in a row, or a day of backlog) degrades the bus.
+    const journalingCritical = journaling?.status === 'critical';
     return {
       ok: true,
-      status: allHealthy ? 'healthy' : 'degraded',
+      status: allHealthy && !journalingCritical ? 'healthy' : 'degraded',
       version: VERSION,
       adapters,
+      ...(deps.runtimeResolver
+        ? { runtimes: Object.fromEntries(deps.runtimeResolver.list().map((r) =>
+            [r.agentId, { runtime: r.kind, capabilities: r.capabilities }])) }
+        : {}),
       queue: {
         pending: counts['pending'] ?? 0,
         processing: counts['processing'] ?? 0,
         delivered: counts['delivered'] ?? 0,
         dead_letter: counts['dead_letter'] ?? 0,
       },
+      ...(journaling ? { journaling } : {}),
     };
   });
 
@@ -698,6 +791,157 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     },
   );
 
+  // ── Journal events (E66) ───────────────────────────────────────────────────
+  // POST /api/v1/journal/events — posted by scripts/hooks/agentbus_journal_hook.sh.
+  // Body: { harness_session_id, event: turn-ended|pre-compact|session-end|clear,
+  //         snapshot_path?, transcript_path? }. The bus resolves agent and
+  // conversation from the harness session id. 404 when it knows no session
+  // for that id; a rejected snapshot path is reported in `snapshot_error`
+  // while the event itself still counts. See docs/JOURNALING.md.
+  if (deps.journalEvents) {
+    const journalEvents = deps.journalEvents;
+    server.post<{ Body: unknown }>('/api/v1/journal/events', async (req, reply) => {
+      const parsed = parseHarnessEvent(req.body);
+      if ('error' in parsed) return reply.status(400).send({ ok: false, error: parsed.error });
+      const result = journalEvents.handle(parsed);
+      if (!result.ok) return reply.status(result.status).send({ ok: false, error: result.error });
+      return result;
+    });
+  }
+
+  // ── Recent memory freshness (E67) ──────────────────────────────────────────
+  // GET /api/v1/memory/recent?harness_session_id=&event=prompt|session-start&agent=
+  // — called by scripts/hooks/agentbus_recent_memory_hook.sh. Resolves the
+  // agent from the Claude session id (agent= is only a fallback), regenerates
+  // the agent's recent.md and returns it in `context` only when its hash
+  // differs from what that session last saw. session-start (and a session's
+  // first check) records a baseline. 404 when no agent resolves. See
+  // docs/AGENT_MEMORY.md#freshness-hook.
+  if (deps.memoryRecent) {
+    const memoryRecent = deps.memoryRecent;
+    server.get<{ Querystring: Record<string, unknown> }>('/api/v1/memory/recent', async (req, reply) => {
+      const parsed = parseFreshnessQuery(req.query ?? {});
+      if ('error' in parsed) return reply.status(400).send({ ok: false, error: parsed.error });
+      const result = memoryRecent.check(parsed);
+      if (!result.ok) return reply.status(result.status).send({ ok: false, error: result.error });
+      return result;
+    });
+  }
+
+  // GET /api/v1/journal/runs?agent=&conversation=&session=&limit= — journal_runs
+  // rows, newest first (E66 S66.10). `agent` accepts a bare or prefixed id; a
+  // pool pane id maps to its pool. limit: 1–500, default 50.
+  if (deps.journalStatus) {
+    const status = deps.journalStatus;
+    server.get<{ Querystring: { agent?: string; conversation?: string; session?: string; limit?: string } }>(
+      '/api/v1/journal/runs',
+      async (req) => {
+        const { agent, conversation, session } = req.query;
+        const limit = Math.max(1, Math.min(Number.parseInt(req.query.limit ?? '50', 10) || 50, 500));
+        let agentId: string | undefined;
+        if (agent) {
+          const prefixed = agent.startsWith('agent:') ? agent : `agent:${agent}`;
+          const runtime = status.resolver.resolve(prefixed);
+          agentId = runtime?.kind === 'cc-pool' ? runtime.poolAgentId : prefixed;
+        }
+        const runs = status.engine.store.listRuns({
+          ...(agentId ? { agentId } : {}),
+          ...(conversation ? { conversationId: conversation } : {}),
+          ...(session ? { sessionId: session } : {}),
+          limit,
+        });
+        return { ok: true, count: runs.length, runs: runs.map(runForApi) };
+      },
+    );
+  }
+
+  // POST /api/v1/journal/complete — the journal_complete MCP tool (E66 S66.8).
+  // Body: { run_id, agent_id, files_changed?, notes?, nothing_new? }. 404 for an
+  // unknown run, 409 for a stale one (already ended) or a repeat, 403 when the
+  // caller is not the run's agent.
+  if (deps.journalGate) {
+    const gate = deps.journalGate;
+    const CompleteSchema = z.object({
+      run_id: z.string().min(1),
+      agent_id: z.string().min(1),
+      files_changed: z.array(z.string()).max(500).optional(),
+      notes: z.string().max(10_000).optional(),
+      nothing_new: z.boolean().optional(),
+    });
+    server.post<{ Body: unknown }>('/api/v1/journal/complete', async (req, reply) => {
+      const parsed = CompleteSchema.safeParse(req.body);
+      if (!parsed.success) return reply.status(400).send({ ok: false, error: parsed.error.message });
+      const b = parsed.data;
+      const result = gate.complete({
+        runId: b.run_id, agentId: b.agent_id,
+        ...(b.files_changed ? { filesChanged: b.files_changed } : {}),
+        ...(b.notes !== undefined ? { notes: b.notes } : {}),
+        ...(b.nothing_new !== undefined ? { nothingNew: b.nothing_new } : {}),
+      });
+      if (!result.ok) {
+        const status = result.reason === 'unknown_run' ? 404 : result.reason === 'wrong_agent' ? 403 : 409;
+        return reply.status(status).send({ ok: false, error: result.reason });
+      }
+      return { ok: true, run_id: result.runId };
+    });
+  }
+
+  // ── Self-edit proposals (E68 S68.3) ──────────────────────────────────────
+  // POST /api/v1/proposals — the propose_change MCP tool. `agent_id` is the
+  //   caller (bare, prefixed or a pool pane id). One of new_content / diff.
+  // GET  /api/v1/proposals?agent=&status=&limit= — newest first, without content.
+  // GET  /api/v1/proposals/:id — one proposal, with its content and diff.
+  const proposals = deps.proposals;
+  if (proposals) {
+    const ProposalSchema = z.object({
+      agent_id: z.string().min(1),
+      path: z.string().min(1).max(1000),
+      new_content: z.string().max(512 * 1024).optional(),
+      diff: z.string().max(512 * 1024).optional(),
+      rationale: z.string().min(1).max(10_000),
+      evidence: z.union([z.string().max(10_000), z.array(z.string().max(2_000)).max(50)]).optional(),
+      run_id: z.string().min(1).optional(),
+    });
+    const PROPOSAL_STATUS: Record<string, number> = {
+      unknown_agent: 404, no_protected_paths: 422, not_protected: 400, invalid: 400, diff_failed: 409, no_change: 400,
+      too_large: 413, rate_limited: 429, no_owners: 422, not_delivered: 422,
+    };
+    const summaryOf = (p: ReturnType<typeof proposals.list>[number]) => {
+      const { new_content: _content, ...rest } = p;
+      return rest;
+    };
+    server.post<{ Body: unknown }>('/api/v1/proposals', async (req, reply) => {
+      const parsed = ProposalSchema.safeParse(req.body);
+      if (!parsed.success) return reply.status(400).send({ ok: false, error: 'invalid', message: parsed.error.message });
+      const b = parsed.data;
+      const result = await proposals.submit({
+        agentId: b.agent_id, path: b.path, rationale: b.rationale, source: 'mcp',
+        ...(b.new_content !== undefined ? { newContent: b.new_content } : {}),
+        ...(b.diff !== undefined ? { diff: b.diff } : {}),
+        ...(b.evidence !== undefined ? { evidence: b.evidence } : {}),
+        ...(b.run_id ? { runId: b.run_id } : {}),
+      });
+      if (!result.ok) return reply.status(PROPOSAL_STATUS[result.error] ?? 400).send({ ok: false, error: result.error, message: result.message });
+      return {
+        ok: true, id: result.proposal.id, status: result.proposal.status, path: result.proposal.path,
+        notified: result.notified, expires_at: result.proposal.expires_at, ...(result.duplicate ? { duplicate: true } : {}),
+      };
+    });
+    server.get<{ Querystring: { agent?: string; status?: string; limit?: string } }>('/api/v1/proposals', async (req, reply) => {
+      const valid: ProposalStatus[] = ['pending', 'applied', 'denied', 'stale', 'expired', 'failed'];
+      const status = req.query.status as ProposalStatus | undefined;
+      if (status && !valid.includes(status)) return reply.status(400).send({ ok: false, error: `status must be one of ${valid.join(', ')}` });
+      const limit = Math.max(1, Math.min(Number.parseInt(req.query.limit ?? '50', 10) || 50, 200));
+      const list = proposals.list({ ...(req.query.agent ? { agentId: req.query.agent } : {}), ...(status ? { status } : {}), limit });
+      return { ok: true, count: list.length, proposals: list.map(summaryOf) };
+    });
+    server.get<{ Params: { id: string } }>('/api/v1/proposals/:id', async (req, reply) => {
+      const p = proposals.get(req.params.id);
+      if (!p) return reply.status(404).send({ ok: false, error: 'not_found' });
+      return { ok: true, proposal: p };
+    });
+  }
+
   // ── Approval requests (E51) ────────────────────────────────────────────────
   // See docs/APPROVALS.md. Reception (POST), observability (GET), resolution
   // (POST :id/resolve). The Telegram callback_query handler resolves through
@@ -714,6 +958,59 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       context: z.unknown().optional(),
     })
     .refine((b) => b.agentId || b.sessionId, { message: 'agentId or sessionId is required' });
+
+  // ── Advisories (E65) ─────────────────────────────────────────────────────
+  //
+  // POST /api/v1/advisories/:id/ack — the advisory_ack MCP tool. `agent_id`
+  //   is the caller (bare or prefixed; a pool pane maps to its pool); an
+  //   agent can only acknowledge its own advisories.
+  //
+  // There is deliberately no HTTP route to raise an advisory: its text is
+  // rendered into a bus-originated system block, so producers are in-process
+  // bus code only (see docs/ADVISORIES.md).
+  const advisories = deps.advisories;
+  if (advisories) {
+    // GET /api/v1/advisories?agent=<id>&state=<active|all|open|delivered|acknowledged|resolved>
+    // Default state: active (everything not resolved). Most severe first.
+    server.get<{ Querystring: { agent?: string; state?: string } }>('/api/v1/advisories', async (req, reply) => {
+      const state = req.query.state ?? 'active';
+      const states: Record<string, AdvisoryState[] | undefined> = {
+        active: ['open', 'delivered', 'acknowledged'], all: undefined,
+        open: ['open'], delivered: ['delivered'], acknowledged: ['acknowledged'], resolved: ['resolved'],
+      };
+      if (!(state in states)) {
+        return reply.status(400).send({ ok: false, error: `state must be one of ${Object.keys(states).join(', ')}` });
+      }
+      const list = advisories.list({ ...(req.query.agent ? { agentId: req.query.agent } : {}), states: states[state] });
+      return { ok: true, count: list.length, advisories: list };
+    });
+
+    server.get<{ Params: { id: string } }>('/api/v1/advisories/:id', async (req, reply) => {
+      const advisory = advisories.get(req.params.id);
+      if (!advisory) return reply.status(404).send({ ok: false, error: 'not_found' });
+      return { ok: true, advisory };
+    });
+
+    server.post<{ Params: { id: string }; Body: { agent_id?: unknown } }>(
+      '/api/v1/advisories/:id/ack',
+      async (req, reply) => {
+        const agentId = req.body?.agent_id;
+        if (typeof agentId !== 'string' || agentId.length === 0) {
+          return reply.status(400).send({ ok: false, error: 'agent_id is required' });
+        }
+        const result = advisories.ack(req.params.id, agentId);
+        if (!result.ok) {
+          const status = result.reason === 'not_found' ? 404 : result.reason === 'wrong_agent' ? 403 : 409;
+          return reply.status(status).send({ ok: false, error: result.reason });
+        }
+        return {
+          ok: true,
+          already_acknowledged: result.alreadyAcknowledged,
+          advisory: { id: result.advisory.id, state: result.advisory.state, condition_key: result.advisory.condition_key },
+        };
+      },
+    );
+  }
 
   server.post<{ Body: unknown }>('/api/v1/approvals', async (req, reply) => {
     const parsed = ApprovalRequestSchema.safeParse(req.body);
@@ -788,7 +1085,7 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
         return reply.status(400).send({ ok: false, error: 'decision must be "approve" or "deny"' });
       }
       const result = await resolveApproval(
-        { store: approvalStore, poolManagers: poolManagers ?? new Map() },
+        { store: approvalStore, poolManagers: poolManagers ?? new Map(), ...deps.approvalHooks },
         req.params.id,
         decision,
         resolvedBy ?? 'api',
@@ -815,7 +1112,10 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     // E48 (S48.4) — record this poll so cc-pool's pane-launch readiness gate
     // can tell a pane's cc.ts has come up (see src/http/agent-liveness.ts).
     recordAgentPoll(agent ?? toBareAgentId(recipient!));
-    const messages = queue.dequeue(recipientId, topic, parsedLimit);
+    // E66 — messages for a conversation with an open System Message journal
+    // run wait in the queue until the run ends.
+    const gate = deps.journalGate;
+    const messages = queue.dequeue(recipientId, topic, parsedLimit, gate ? (env) => gate.isHeld(env) : undefined);
     return {
       ok: true,
       messages: messages.map((m) => m.envelope),
@@ -862,6 +1162,17 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     }
     const data = parsed.data;
 
+    // E66 — during a System Message journal run the agent may not message
+    // anyone. journal_complete and advisory_ack use their own endpoints.
+    const blockedBy = deps.journalGate?.blockedSend(data.sender);
+    if (blockedBy) {
+      return reply.status(409).send({
+        ok: false,
+        error: 'journal_run_in_progress',
+        reason: `Outbound messages are blocked while journal run ${blockedBy.runId} is open. Finish journaling and call journal_complete; do not reply during the run.`,
+      });
+    }
+
     // reply_to (bus message ID) resolves to the referenced transcript's
     // platform_message_id (E28) — the same lookup react_to_message already
     // does — so an adapter can turn it into a native platform reply without
@@ -871,7 +1182,8 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     // message in its conversation, the quote would be visually redundant — it's
     // already obvious what a reply is responding to — so it's sent as a plain
     // message instead of a native reply in that case.
-    const metadata: Record<string, unknown> = { ...data.metadata };
+    // E65 — only the bus adds system blocks; an agent or HTTP caller can't.
+    const metadata: Record<string, unknown> = stripSystemMetadata(data.metadata);
     // Captured alongside the reply_to lookup below so the E48 (S48.6)
     // stale-pane guard further down can reuse this same query result instead
     // of re-running it.
@@ -884,7 +1196,7 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
         replyToConversationId = transcript.conversation_id;
         const latestInbound = db
           .prepare(
-            `SELECT message_id FROM transcripts WHERE conversation_id = ? AND direction = 'inbound' ORDER BY created_at DESC LIMIT 1`,
+            `SELECT t.message_id FROM transcripts t WHERE t.conversation_id = ? AND t.direction = 'inbound' AND ${VISIBLE_TRANSCRIPT} ORDER BY t.created_at DESC LIMIT 1`,
           )
           .get(transcript.conversation_id) as { message_id: string } | undefined;
         const isLatestInbound = latestInbound?.message_id === data.reply_to;
@@ -1101,7 +1413,7 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       SELECT t.message_id, t.session_id, t.channel, t.contact_id, t.direction, t.body, t.created_at
       FROM transcripts t
       JOIN transcripts_fts fts ON fts.rowid = t.rowid
-      WHERE fts.body MATCH ?
+      WHERE fts.body MATCH ? AND ${VISIBLE_TRANSCRIPT}
     `;
     const params: unknown[] = [q];
 
@@ -1143,14 +1455,12 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     let sql = `
       SELECT s.id, s.conversation_id, s.channel, s.contact_id,
              s.started_at, s.last_activity, s.ended_at, s.message_count,
-             ss.summary, ss.model, ss.token_count, ss.created_at AS summary_created_at,
              cr.topic,
              CASE WHEN s.channel = 'app' AND cr.topic = 'general' THEN 'Main'
                   WHEN s.channel = 'app' THEN json_extract(
                     (SELECT t.metadata FROM threads t WHERE t.channel = 'app' AND t.topic = cr.topic), '$.title')
                   ELSE NULL END AS title
       FROM sessions s
-      LEFT JOIN session_summaries ss ON ss.session_id = s.id
       LEFT JOIN conversation_registry cr ON cr.id = s.conversation_id
       WHERE 1=1
     `;
@@ -1181,20 +1491,11 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
         last_activity: string;
         ended_at: string | null;
         message_count: number;
-        summary: string | null;
-        model: string | null;
-        token_count: number | null;
-        summary_created_at: string | null;
         topic: string | null;
         title: string | null;
       }>;
 
-      const sessions = rows.map(({ summary, model, token_count, summary_created_at, ...s }) => ({
-        ...s,
-        summary: summary
-          ? { summary, model, token_count, created_at: summary_created_at }
-          : null,
-      }));
+      const sessions = rows;
 
       return { ok: true, sessions, count: sessions.length };
     } catch (err) {
@@ -1210,14 +1511,12 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       .prepare(
         `SELECT s.id, s.conversation_id, s.channel, s.contact_id,
                 s.started_at, s.last_activity, s.ended_at, s.message_count,
-                ss.summary, ss.model, ss.token_count, ss.created_at AS summary_created_at,
                 cr.topic,
                 CASE WHEN s.channel = 'app' AND cr.topic = 'general' THEN 'Main'
                      WHEN s.channel = 'app' THEN json_extract(
                        (SELECT t.metadata FROM threads t WHERE t.channel = 'app' AND t.topic = cr.topic), '$.title')
                      ELSE NULL END AS title
          FROM sessions s
-         LEFT JOIN session_summaries ss ON ss.session_id = s.id
          LEFT JOIN conversation_registry cr ON cr.id = s.conversation_id
          WHERE s.id = ?`
       )
@@ -1231,10 +1530,6 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
           last_activity: string;
           ended_at: string | null;
           message_count: number;
-          summary: string | null;
-          model: string | null;
-          token_count: number | null;
-          summary_created_at: string | null;
           topic: string | null;
           title: string | null;
         }
@@ -1244,15 +1539,7 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       return reply.status(404).send({ ok: false, error: 'Session not found' });
     }
 
-    const { summary, model, token_count, summary_created_at, ...sessionFields } = row;
-    const session = {
-      ...sessionFields,
-      summary: summary
-        ? { summary, model, token_count, created_at: summary_created_at }
-        : null,
-    };
-
-    return { ok: true, session };
+    return { ok: true, session: row };
   });
 
   // GET /api/v1/sessions/:id/transcript — full ordered message history for a
@@ -1275,8 +1562,8 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
 
     let sql = `
       SELECT message_id, session_id, channel, contact_id, direction, body, created_at
-      FROM transcripts
-      WHERE session_id = ?
+      FROM transcripts t
+      WHERE session_id = ? AND ${VISIBLE_TRANSCRIPT}
     `;
     const params: unknown[] = [id];
 
@@ -1406,128 +1693,9 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     }
   );
 
-  // ── Memory endpoints (E8) ────────────────────────────────────────────────────
-
-  // GET /api/v1/memories/recall — FTS5 search over memories for a contact
-  server.get<{ Querystring: { q?: string; contact_id?: string; category?: string; limit?: string } }>(
-    '/api/v1/memories/recall',
-    async (req, reply) => {
-      const { q, contact_id, category } = req.query;
-      const limit = Math.min(Math.max(1, parseInt(req.query.limit ?? '10', 10)), 50);
-
-      if (!q || q.trim().length === 0) {
-        return reply.status(400).send({ ok: false, error: 'Query parameter "q" is required' });
-      }
-
-      // Graceful degradation if memories table doesn't exist
-      const tableExists = db
-        .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='memories'`)
-        .get();
-      if (!tableExists) {
-        return { ok: true, available: false, reason: 'Memory system not yet initialized', memories: [] };
-      }
-
-      const now = new Date().toISOString();
-      try {
-        let sql = `
-          SELECT m.id, m.session_id, m.contact_id, m.category, m.content,
-                 m.confidence, m.source, m.created_at, m.expires_at
-          FROM memories m
-          JOIN memories_fts fts ON fts.rowid = m.rowid
-          WHERE fts.content MATCH ?
-            AND m.superseded_by IS NULL
-            AND (m.expires_at IS NULL OR m.expires_at > ?)
-        `;
-        const params: unknown[] = [q, now];
-
-        if (contact_id) {
-          sql += ' AND m.contact_id = ?';
-          params.push(contact_id);
-        }
-        if (category) {
-          sql += ' AND m.category = ?';
-          params.push(category);
-        }
-        sql += ' ORDER BY m.confidence DESC, m.created_at DESC LIMIT ?';
-        params.push(limit);
-
-        const memories = db.prepare(sql).all(...params);
-        return { ok: true, memories, count: memories.length };
-      } catch (err) {
-        return reply.status(500).send({ ok: false, error: String(err) });
-      }
-    }
-  );
-
-  // POST /api/v1/memories — manually log a memory
-  const MEMORY_CATEGORIES = [
-    'preference', 'fact', 'plan', 'relationship', 'work', 'health', 'general',
-  ] as const;
-  const MemoryInsertSchema = z.object({
-    contact_id: z.string().min(1),
-    content: z.string().min(1),
-    category: z.enum(MEMORY_CATEGORIES).default('general'),
-    confidence: z.number().min(0).max(1).default(0.9),
-    source: z.string().default('manual'),
-    expires_at: z.string().optional(),
-    channel: z.string().optional(),
-  });
-
-  server.post<{ Body: unknown }>('/api/v1/memories', async (req, reply) => {
-    const parsed = MemoryInsertSchema.safeParse(req.body);
-    if (!parsed.success) {
-      return reply.status(400).send({ ok: false, error: parsed.error.message });
-    }
-
-    // Graceful degradation
-    const tableExists = db
-      .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='memories'`)
-      .get();
-    if (!tableExists) {
-      return reply.status(503).send({ ok: false, error: 'Memory system not yet initialized' });
-    }
-
-    const { contact_id, content, category, confidence, source, expires_at, channel } = parsed.data;
-    const now = new Date().toISOString();
-    const newId = randomUUID();
-
-    // Supersede + insert atomically to prevent two concurrent requests from both
-    // believing they are the sole active memory for a given (contact_id, category, channel).
-    let supersededId: string | undefined;
-    db.transaction(() => {
-      const existing = db
-        .prepare(
-          `SELECT id FROM memories
-           WHERE contact_id = ? AND category = ? AND superseded_by IS NULL
-             AND (expires_at IS NULL OR expires_at > ?)
-             AND (channel = ? OR channel IS NULL)
-           ORDER BY created_at DESC LIMIT 1`,
-        )
-        .get(contact_id, category, now, channel ?? null) as { id: string } | undefined;
-
-      if (existing) {
-        db.prepare(`UPDATE memories SET superseded_by = ? WHERE id = ?`).run(newId, existing.id);
-        supersededId = existing.id;
-      }
-
-      db.prepare(
-        `INSERT INTO memories
-           (id, session_id, contact_id, category, content, confidence, source, created_at, expires_at, superseded_by, channel)
-         VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
-      ).run(newId, contact_id, category, content, confidence, source, now, expires_at ?? null, channel ?? null);
-    })();
-
-    return reply.status(201).send({
-      ok: true,
-      id: newId,
-      superseded: supersededId ?? null,
-    });
-  });
-
   // ── Knowledge store endpoints (agent-managed structured knowledge, Phase 1) ──
   //
-  // Unlike the /api/v1/memories endpoints above, this table is new and
-  // always-on (no config flag gates it, no `available: false` degradation —
+  // Always-on (no config flag gates it, no `available: false` degradation —
   // ordinary 400/404/500 is correct here). See src/knowledge/store.ts and
   // docs/KNOWLEDGE_STORE.md.
 

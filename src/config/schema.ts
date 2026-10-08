@@ -10,11 +10,12 @@
  *   adapters  — Per-adapter credentials and tuning
  *   contacts  — Known sender → contact mappings
  *   topics    — Recognised topic labels
- *   memory    — Session and transcript retention settings
+ *   memory    — Session tracking settings (idle close, close hooks)
  *   pipeline  — Inbound message processing rules
  */
 import { z } from 'zod';
 import { isAbsolute } from 'node:path';
+import { Cron } from 'croner';
 import { parseFireAt } from '../scheduler/time.js';
 
 /** Platform identifiers and credentials for a known contact. */
@@ -158,6 +159,27 @@ const ClaudeCodeAdapterSchema = z.object({
   plugin: z.string().optional(),
 });
 
+/** Default journaling instruction (E20; shared by every journaler since E66). */
+export const DEFAULT_JOURNALING_PROMPT =
+  'Our conversation has paused. Review it and update your memory files ' +
+  "(today's daily journal, MEMORY.md, and any relevant topic files) with " +
+  'anything durable worth remembering. If something is already in memory ' +
+  '(you may have saved it during the conversation), do not record it again: ' +
+  'skip it, or correct or update the existing memory where needed. Do NOT ' +
+  'message the user — this is an internal journaling turn, not a reply.';
+
+/** E68 — default consolidation schedule: nightly at 03:00 (bus local time unless `timezone` is set). */
+export const DEFAULT_CONSOLIDATION_CRON = '0 3 * * *';
+
+/**
+ * Per-channel idle gap (ms): a number for every channel, or a record of
+ * channel → ms with a required `default` key.
+ */
+const JournalingThresholdSchema = z.union([
+  z.number().int().positive(),
+  z.object({ default: z.number().int().positive() }).catchall(z.number().int().positive()),
+]);
+
 /**
  * Headless Claude Code adapter — spawns `claude -p` per message batch instead
  * of running a persistent MCP session. Compatible with in-process bus-core.
@@ -200,9 +222,11 @@ const CcHeadlessAdapterSchema = z.object({
    */
   error_passthrough: z.boolean().default(false),
   /**
-   * E20 — memory file assembly. The agent's own files are the source of truth;
-   * the bus front-loads them into each turn's context. All paths are resolved
-   * relative to `working_dir`. Missing files are skipped silently.
+   * E20 — memory file layout. DEPRECATED since E67: use
+   * `agents.<agent-id>.memory` (`journal_lookback_days` is `lookback_days`
+   * there). Still read as a fallback for fields the agent block leaves
+   * unset; the loader warns when it is set. All paths are resolved relative
+   * to `working_dir`.
    */
   memory: z
     .object({
@@ -241,12 +265,7 @@ const CcHeadlessAdapterSchema = z.object({
        * nothing new worth journaling, so this only needs to catch a real
        * pause in the conversation, not every reply.
        */
-      threshold_ms: z
-        .union([
-          z.number().int().positive(),
-          z.object({ default: z.number().int().positive() }).catchall(z.number().int().positive()),
-        ])
-        .default({ default: 1_800_000 }),
+      threshold_ms: JournalingThresholdSchema.default({ default: 1_800_000 }),
       /**
        * E30 — hard ceiling (ms) since the last sweep (or session start, if
        * never journaled), applied globally across channels regardless of
@@ -257,14 +276,7 @@ const CcHeadlessAdapterSchema = z.object({
        */
       ceiling_ms: z.number().int().positive().optional(),
       /** Prompt sent on the silent journaling turn. */
-      prompt: z
-        .string()
-        .default(
-          'Our conversation has paused. Review it and update your memory files ' +
-            "(today's daily journal, MEMORY.md, and any relevant topic files) with " +
-            'anything durable worth remembering. Do NOT message the user — this is ' +
-            'an internal journaling turn, not a reply.',
-        ),
+      prompt: z.string().default(DEFAULT_JOURNALING_PROMPT),
     })
     .prefault({}),
 }).refine((cfg) => cfg.reserved_system_slots < cfg.max_concurrent_turns, {
@@ -505,10 +517,9 @@ const AdaptersConfigSchema = z.object({
 const MemoryConfigSchema = z.object({
   summarizer_interval_ms: z.number().int().positive().default(60000),
   session_idle_threshold_ms: z.number().int().positive().default(1800000),
-  context_window_hours: z.number().positive().default(48),
-  claude_api_model: z.string().default('claude-sonnet-4-6'),
-  /** Max tokens for the summarization API response (default: 8192) */
-  summary_max_tokens: z.number().int().positive().default(8192),
+  // Retired keys (context_window_hours, memory_inject_exclude, claude_api_model,
+  // summary_max_tokens, structured_extraction) are not in the schema: zod
+  // drops them, and the loader warns (RETIRED_MEMORY_KEYS in loader.ts).
   /**
    * Shell command(s) to run when a session is closed due to inactivity.
    * Executed via /bin/sh -c, so shell syntax is supported.
@@ -552,23 +563,6 @@ const MemoryConfigSchema = z.object({
   session_close_min_messages: z
     .union([z.number().int().min(0), z.record(z.string(), z.number().int().min(0))])
     .default(0),
-  /**
-   * Channels for which memory injection (Stage 85) is disabled.
-   * Useful for agents that manage their own memory (e.g. pokeclaude).
-   *
-   * Example:
-   *   memory_inject_exclude:
-   *     - telegram:pokeclaude
-   */
-  memory_inject_exclude: z.array(z.string()).default([]),
-  /**
-   * E20 — when false (default), the summarizer's structured-extraction content
-   * path is disabled: the bus writes neither the `memories` nor the
-   * `session_summaries` table, and the agent's own files are the single source
-   * of truth. Set true to restore legacy behavior for MCP-adapter deployments
-   * that still rely on the structured store.
-   */
-  structured_extraction: z.boolean().default(false),
 });
 
 /**
@@ -587,11 +581,174 @@ const AgentMediaSchema = z.object({
 });
 
 /**
+ * An owner contact (E65): a person who receives bus advisories about this
+ * agent, on one channel. `contact_id` is a bare key of `contacts`; `channel`
+ * is the exact channel their conversation arrives on (e.g. "telegram",
+ * "telegram:peggy", "app"). Owners are used for advisories (and E68
+ * proposals) only — they are not a trust tier.
+ */
+const AgentOwnerSchema = z.object({
+  channel: z.string().min(1),
+  contact_id: z.string().min(1).refine((id) => !id.startsWith('contact:'), {
+    message: 'contact_id must be a bare contact key (drop the "contact:" prefix)',
+  }),
+});
+
+/** Journalers that can carry out a journal run (E66). See docs/JOURNALING.md. */
+export const JOURNALER_IDS = ['system-message', 'cc-headless', 'script'] as const;
+export type JournalerId = (typeof JOURNALER_IDS)[number];
+
+/**
+ * Per-agent journaling (E66 S66.1): when the bus journals this agent's
+ * conversations (triggers) and who does it (the journaler chain). Replaces
+ * the `adapters.cc-headless.journaling` block, which still works as a
+ * deprecated alias for agents without this block.
+ */
+const AgentJournalingSchema = z.object({
+  enabled: z.boolean().default(true),
+  /**
+   * Journalers to try, in order. The bus moves to the next one when a
+   * journaler can't run or fails. Entries the agent's runtime can never
+   * support are skipped. Default: every journaler, in the order below, with
+   * `script` only when `script.command` is set.
+   */
+  chain: z.array(z.enum(JOURNALER_IDS)).min(1).optional(),
+  /** Pause trigger: idle gap before a conversation is evaluated. Default 30 min. */
+  threshold_ms: JournalingThresholdSchema.default({ default: 1_800_000 }),
+  /** Ceiling trigger: max time since the last journal (or session start). Unset → no ceiling. */
+  ceiling_ms: z.number().int().positive().optional(),
+  /** New human messages needed before a non-final trigger journals. */
+  min_human_messages: z.number().int().positive().default(2),
+  /** Per-run timeout for journalers that wait on the agent. */
+  timeout_ms: z.number().int().positive().default(300_000),
+  /** Model for journal runs. Default: the agent's runtime model. */
+  model: z.string().min(1).optional(),
+  /** Journaling instruction. Default: the built-in prompt. */
+  prompt: z.string().min(1).optional(),
+  'system-message': z
+    .object({
+      timeout_ms: z.number().int().positive().optional(),
+      model: z.string().min(1).optional(),
+      prompt: z.string().min(1).optional(),
+    })
+    .optional(),
+  'cc-headless': z
+    .object({
+      model: z.string().min(1).optional(),
+      prompt: z.string().min(1).optional(),
+    })
+    .optional(),
+  script: z
+    .object({
+      /** Executable run directly (no shell). Absolute, or resolved against the agent's working_dir. */
+      command: z.string().min(1),
+      args: z.array(z.string()).default([]),
+      timeout_ms: z.number().int().positive().optional(),
+      env: z.record(z.string(), z.string()).default({}),
+      model: z.string().min(1).optional(),
+    })
+    .optional(),
+  /**
+   * E68 S68.1 — consolidation: a periodic agent-level pass that turns the
+   * daily journals into lasting memory. Runs on its own cron (not the
+   * scheduler), through the same journaler chain, and is skipped when no
+   * session journal completed since the last pass. See docs/AGENT_LEARNING.md.
+   */
+  consolidation: z
+    .object({
+      enabled: z.boolean().default(true),
+      /** Cron expression (5 or 6 fields). Default nightly at 03:00. */
+      cron: z.string().min(1).default(DEFAULT_CONSOLIDATION_CRON),
+      /** IANA time zone for `cron`. Default: the bus host's local time zone. */
+      timezone: z.string().min(1).optional(),
+      /** Consolidation instruction. Default: the built-in prompt. */
+      prompt: z.string().min(1).optional(),
+      /** Line budget for MEMORY.md. Capped at the native 200-line load limit. */
+      max_memory_lines: z.number().int().positive().max(200).default(200),
+      /** Per-run timeout. Default: the journaling timeout_ms. */
+      timeout_ms: z.number().int().positive().optional(),
+    })
+    .optional(),
+}).superRefine((j, ctx) => {
+  const chain = j.chain ?? [];
+  const seen = new Set<string>();
+  chain.forEach((id, i) => {
+    if (seen.has(id)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `Duplicate journaler "${id}" in chain`, path: ['chain', i] });
+    }
+    seen.add(id);
+  });
+  if (chain.includes('script') && !j.script) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'chain includes "script" but journaling.script.command is not set',
+      path: ['script'],
+    });
+  }
+  if (j.consolidation) {
+    try {
+      new Cron(j.consolidation.cron, { paused: true, ...(j.consolidation.timezone ? { timezone: j.consolidation.timezone } : {}) }).stop();
+    } catch (err) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `invalid consolidation cron/timezone: ${err instanceof Error ? err.message : String(err)}`,
+        path: ['consolidation', 'cron'],
+      });
+    }
+  }
+});
+
+export type AgentJournalingConfig = z.infer<typeof AgentJournalingSchema>;
+
+/**
+ * Per-agent memory layout (E67 S67.1): where the agent's memory files live
+ * and how the bus builds `recent.md` from the daily journals. Shared by
+ * journaling (the memory dir handed to journalers) and loading (native auto
+ * memory's `autoMemoryDirectory`, or bus injection on runtimes without
+ * native memory). Every field is optional; unset fields fall back to the
+ * deprecated `adapters.cc-headless.memory` block, then to the defaults.
+ * See docs/AGENT_MEMORY.md.
+ */
+const AgentMemorySchema = z.object({
+  /** Memory directory: relative to the agent's working_dir, or absolute. Default `memory`. */
+  dir: z.string().min(1).optional(),
+  /** Index file inside `dir`. Default `MEMORY.md`. */
+  index_file: z.string().min(1).optional(),
+  /** Subdirectory of `dir` with the daily journals `YYYY-MM-DD.md`. Default `daily`. */
+  daily_subdir: z.string().min(1).optional(),
+  /** Days of daily journals in `recent.md` (today and the previous N-1, local dates). Default 3; 0 = none. */
+  lookback_days: z.number().int().nonnegative().optional(),
+  /** Character budget for the whole `recent.md`. Default 20000. */
+  recent_budget_chars: z.number().int().min(500).optional(),
+  /**
+   * Load memory natively (Claude Code auto memory pointed at `dir`) on
+   * runtimes that support it. Default true. false keeps bus injection of
+   * the index and `recent.md` (cc-headless only).
+   */
+  native: z.boolean().optional(),
+});
+
+export type AgentMemoryConfig = z.infer<typeof AgentMemorySchema>;
+
+/**
  * Per-agent configuration, keyed by recipient id (e.g. "agent:claude").
- * Additional agent-scoped settings can be added here over time.
+ * Additional agent-scoped settings live here under the same key: E65 adds
+ * `owners`; E66 adds `journaling`, E67 `memory`, E68 `protected_paths`.
  */
 const AgentConfigSchema = z.object({
   media: AgentMediaSchema.optional(),
+  owners: z.array(AgentOwnerSchema).optional(),
+  journaling: AgentJournalingSchema.optional(),
+  memory: AgentMemorySchema.optional(),
+  /**
+   * E68 S68.4 — files and directories (trailing `/`) the agent may not edit
+   * itself; it proposes changes with `propose_change` and an owner approves.
+   * Relative to the agent's working_dir, or absolute. Replaces the default
+   * list: `CLAUDE.md`, the files the runtime's `system_prompt` imports with
+   * `@path`, `skills/` and `.claude/`. The memory dir is never protected.
+   * See docs/AGENT_LEARNING.md#protected-paths.
+   */
+  protected_paths: z.array(z.string().min(1)).optional(),
 });
 
 /**
@@ -801,6 +958,29 @@ export const AppConfigSchema = z.object({
     routes: [],
     relays: [],
   }),
+}).superRefine((cfg, ctx) => {
+  // E65 — owner contacts must name a configured contact, once per channel.
+  for (const [agentKey, agent] of Object.entries(cfg.agents)) {
+    const seen = new Set<string>();
+    (agent.owners ?? []).forEach((owner, i) => {
+      if (!cfg.contacts[owner.contact_id]) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Owner contact "${owner.contact_id}" is not defined under contacts`,
+          path: ['agents', agentKey, 'owners', i, 'contact_id'],
+        });
+      }
+      const key = `${owner.contact_id}\u0000${owner.channel}`;
+      if (seen.has(key)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Duplicate owner ${owner.contact_id} on ${owner.channel}`,
+          path: ['agents', agentKey, 'owners', i],
+        });
+      }
+      seen.add(key);
+    });
+  }
 });
 
 /** Fully-typed application configuration */

@@ -17,6 +17,7 @@
  *   8. Register SIGTERM/SIGINT handlers for graceful shutdown
  */
 import { mkdirSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { loadConfig } from './config/loader.js';
 import { getTelegramInstances, getEmailInstances } from './config/schema.js';
@@ -35,14 +36,14 @@ import { createTopicClassify } from './pipeline/stages/topic-classify.js';
 import { createPriorityScore } from './pipeline/stages/priority-score.js';
 import { createRouteResolve } from './pipeline/stages/route-resolve.js';
 import { createTranscriptLog } from './pipeline/stages/transcript-log.js';
-import { createMemoryInject } from './pipeline/stages/memory-inject.js';
 import { TelegramAdapter } from './adapters/telegram.js';
 import { EmailAdapter } from './adapters/email.js';
 import { SiriAdapter } from './adapters/siri.js';
 import { AppAdapter } from './adapters/app.js';
 import { routedAgent } from './app/store.js';
-import { startHeadless, stopHeadless, getHeadlessSnapshots } from './adapters/cc-headless.js';
+import { startHeadless, stopHeadless, getHeadlessSnapshots, buildMcpConfig } from './adapters/cc-headless.js';
 import { createPoolManagers } from './pool/pool-manager.js';
+import { RuntimeResolver } from './core/runtime-resolver.js';
 import { createPoolRouteResolve } from './pipeline/stages/pool-route-resolve.js';
 import { DeliveryWorker } from './core/delivery.js';
 import { createCommandSystem } from './commands/index.js';
@@ -51,14 +52,39 @@ import { createCostCommand } from './commands/cost.js';
 import { createPoolCommand } from './commands/pool.js';
 import { createPaneCommand } from './commands/pane.js';
 import { createRcCommand } from './commands/rc.js';
-import { Summarizer } from './memory/summarizer.js';
+import { createJournalCommand } from './commands/journal.js';
 import { SessionTracker } from './memory/session-tracker.js';
 import { Scheduler } from './scheduler/scheduler.js';
 import { AttachmentSweeper } from './media/attachment-sweeper.js';
 import { ApprovalStore } from './approvals/store.js';
-import { resolveApproval } from './approvals/resolve.js';
+import { resolveApproval, type ApprovalResolveHooks } from './approvals/resolve.js';
 import { sweepApprovals } from './approvals/sweep.js';
 import type { ApprovalDecision } from './approvals/types.js';
+import { OwnerDirectory } from './core/owners.js';
+import { AdvisoryStore } from './advisories/store.js';
+import { AdvisoryService } from './advisories/service.js';
+import { createBusAdvisoryTransport } from './advisories/transport.js';
+import { createAdvisoryInject } from './pipeline/stages/advisory-inject.js';
+import { resolveJournalingSettings } from './journaling/config.js';
+import { reviewChains } from './journaling/advisories.js';
+import { JournalEngine } from './journaling/engine.js';
+import { JournalerRegistry } from './journaling/registry.js';
+import { CcHeadlessJournaler } from './journaling/journalers/cc-headless.js';
+import { ScriptJournaler } from './journaling/journalers/script.js';
+import { JournalRunGate, SystemMessageJournaler, BUSY_NOTICE_TEXT, type ActiveSystemRun } from './journaling/journalers/system-message.js';
+import { createJournalInstructionDelivery } from './journaling/delivery.js';
+import { createJournalHoldNotice } from './pipeline/stages/journal-hold.js';
+import { HarnessEvents, createHookHealthTicker } from './journaling/events.js';
+import { RecentMemory } from './memory/recent-service.js';
+import { ConsolidationScheduler } from './journaling/consolidation.js';
+import { ProtectedPathMonitor } from './learning/monitor.js';
+import { ProposalService, SELF_EDIT_ADAPTER } from './learning/proposals.js';
+import { dispatchApproval } from './approvals/dispatch.js';
+import { recordApprovalOutcome, recordDeliveryFailure, recordLapsedProposal, recordToolError, type FeedbackProducerDeps } from './journaling/feedback-producers.js';
+import { createFeedbackCommand } from './commands/feedback.js';
+import { RecentFreshness } from './memory/recent-freshness.js';
+import { checkMemorySetup } from './memory/setup-check.js';
+import { MEMORY_SETUP_RECHECK_MS, syncMemorySetupAdvisory } from './memory/setup-advisory.js';
 
 const configPath = process.env['AGENTBUS_CONFIG'] ?? resolve(process.cwd(), 'config.yaml');
 
@@ -94,12 +120,151 @@ const registry = new AdapterRegistry();
 const busBaseUrl = `http://127.0.0.1:${config.bus.http_port}`;
 const poolManagers = createPoolManagers(config, db, busBaseUrl, queue);
 
+// E64 — one agent_id → runtime lookup (cc-headless, cc-pool, claude-code,
+// mcp-polled) with live capability checks. Shown in /status and health.
+const runtimeResolver = new RuntimeResolver(config, { poolManagers, db });
+
+// E65 — owner contacts and bus advisories. Producers (E66 journaling, E68
+// protected files, …) call advisories.raise()/resolve(). The transport
+// needs the pipeline and adapters, so it is bound further down.
+const ownerDirectory = new OwnerDirectory(config);
+const advisoryStore = new AdvisoryStore(db);
+const advisories = new AdvisoryService({ store: advisoryStore, owners: ownerDirectory, resolver: runtimeResolver });
+for (const agentId of ownerDirectory.agentsWithOwners()) {
+  if (!runtimeResolver.resolve(agentId)) {
+    console.warn(`[agentbus] agents.${agentId}.owners: ${agentId} has no runtime; its advisories go directly to owners`);
+  }
+}
+
+// E66 — per-agent journaling settings (agents.<id>.journaling, or the
+// deprecated cc-headless block). A chain that can run out of options raises
+// an advisory to the agent's owners.
+const journalingSettings = resolveJournalingSettings(config);
+reviewChains(journalingSettings.values(), runtimeResolver, advisories);
+
+// E66 — one journaling engine for every runtime: bus-side triggers (pause,
+// ceiling, close, /clear, pool evict/release, shutdown) and harness hook
+// events feed it; it walks each agent's journaler chain. Journalers are
+// registered once their runtimes start (below).
+const journalers = new JournalerRegistry();
+const headlessJournaler = new CcHeadlessJournaler({ resolver: runtimeResolver, toolsMcpConfig: buildMcpConfig });
+journalers.register(headlessJournaler);
+journalers.register(new ScriptJournaler({ busUrl: busBaseUrl }));
+// E66 S66.8 — System Message journaler: the live agent journals in its own
+// session. The gate holds the conversation's new messages, blocks the
+// agent's outbound sends and takes journal_complete. Delivery needs the
+// pipeline, built further down, so it is late-bound.
+const journalGate = new JournalRunGate();
+let deliverJournalInstruction: ReturnType<typeof createJournalInstructionDelivery> | null = null;
+journalers.register(new SystemMessageJournaler({
+  db, resolver: runtimeResolver, gate: journalGate, owners: ownerDirectory, poolManagers,
+  deliver: (req) => deliverJournalInstruction
+    ? deliverJournalInstruction(req)
+    : Promise.resolve({ queued: false, reason: 'bus is still starting' }),
+  withdraw: (messageId, reason) => {
+    const row = db.prepare('SELECT status FROM message_queue WHERE id = ?').get(messageId) as { status: string } | undefined;
+    if (row?.status === 'pending') queue.deadLetter(messageId, reason);
+  },
+}));
+// E67 — bus-generated memory/recent.md for every agent with a memory layout:
+// at startup, after each successful journal run and at local midnight.
+const recentMemory = new RecentMemory({ config, resolver: runtimeResolver });
+// E68 S68.4 — protected paths: deny rules on cc-headless journal turns, and
+// before/after hashing of protected files around every journal run.
+const protectedPaths = new ProtectedPathMonitor({ config, resolver: runtimeResolver, advisories });
+// E68 S68.3 — self-edit proposals: approval requests to owners; the bus
+// applies an approved change itself (base-hash checked).
+const proposalApprovals = new ApprovalStore(db);
+const proposalService = new ProposalService({
+  db, owners: ownerDirectory, protectedPaths, approvals: proposalApprovals,
+  dispatch: (request, channel) => dispatchApproval({ registry, store: proposalApprovals }, request, channel),
+  // A stale or expired proposal becomes a lapsed-proposal feedback event.
+  onLapsed: (row, reason, conversationId) => safeFeedback(() => recordLapsedProposal(feedbackProducers, row, reason, conversationId)),
+});
+const journalEngine = new JournalEngine({
+  db, config, resolver: runtimeResolver, registry: journalers, advisories, owners: ownerDirectory, settings: journalingSettings,
+  protectedPaths,
+  proposals: proposalService,
+  onJournaled: (result) => {
+    if (!result.agentId) return;
+    recentMemory.regenerate(result.agentId, 'journaled');
+    memorySetup(result.agentId);
+  },
+});
+journalEngine.addTicker(() => recentMemory.tick());
+// E68 S68.1 — nightly (per-agent cron) consolidation, on the engine tick.
+const consolidationScheduler = new ConsolidationScheduler({ engine: journalEngine });
+journalEngine.addTicker(() => { consolidationScheduler.tick(); });
+// E68 S68.2 — feedback events: denied approvals, /feedback, tool errors.
+const feedbackProducers: FeedbackProducerDeps = {
+  db, feedback: journalEngine.feedback, logicalAgentId: (id) => ownerDirectory.logicalAgentId(id),
+};
+const safeFeedback = (fn: () => void) => { try { fn(); } catch (err) { console.error(`[feedback] failed to record: ${String(err)}`); } };
+// Shared by every approval resolution path (Telegram taps, POST /api/v1/approvals/:id/resolve).
+const approvalHooks: ApprovalResolveHooks = {
+  onResolved: (request, status) => safeFeedback(() => recordApprovalOutcome(feedbackProducers, request, status)),
+  backends: { [SELF_EDIT_ADAPTER]: (request, decision) => proposalService.decide(request, decision) },
+};
+// E67 S67.5 — memory setup checks: /journal shows them; startup logs them.
+// Every check also raises/resolves the memory:recent-not-imported advisory
+// (src/memory/setup-advisory.ts), so it clears on its own once fixed.
+function memorySetup(agentId: string) {
+  const layout = recentMemory.layoutFor(agentId);
+  const status = checkMemorySetup(layout, runtimeResolver.resolve(layout.agentId));
+  try {
+    syncMemorySetupAdvisory(advisories, status, layout);
+  } catch (err) {
+    console.error(`[memory] ${layout.agentId}: setup advisory failed: ${String(err)}`);
+  }
+  return status;
+}
+let lastMemorySetupCheck = Date.now();
+journalEngine.addTicker(() => {
+  if (Date.now() - lastMemorySetupCheck < MEMORY_SETUP_RECHECK_MS) return;
+  lastMemorySetupCheck = Date.now();
+  for (const layout of recentMemory.layouts()) memorySetup(layout.agentId);
+});
+// Harness hook events (POST /api/v1/journal/events) and hook health.
+const journalEvents = new HarnessEvents({ db, engine: journalEngine, store: journalEngine.store, poolManagers });
+journalEngine.addTicker(createHookHealthTicker({
+  db, store: journalEngine.store, advisories,
+  agents: () => journalEngine.allSettings().map((s) => ({ agentId: s.agentId, runtime: runtimeResolver.resolve(s.agentId) })),
+}));
+for (const [poolAgentId, pool] of poolManagers) {
+  // E66 S66.9 — hard-idle release waits for the conversation's journal
+  // run, bounded by the journaling timeout, before the pane is cleared or
+  // killed. LRU eviction only fires the trigger (post-E66 decision): the
+  // lease has already moved, so the journal runs in the background from the
+  // transcript on disk while the pane is reused.
+  pool.setReleaseHook(async ({ reason, conversationId }) => {
+    const handle = journalEngine.trigger({ reason, conversationId });
+    if (handle.status === 'unknown-session') {
+      console.warn(`[journaling] ${poolAgentId}: no session for released conversation ${conversationId.slice(0, 8)}`);
+      return;
+    }
+    if (reason === 'evict') return;
+    if (handle.status !== 'queued' && handle.status !== 'merged') return;
+    const settings = journalEngine.settingsFor(poolAgentId);
+    const bound = Math.max(settings?.timeoutMs ?? 0, settings?.journalers['system-message'].timeoutMs ?? 0) || 300_000;
+    const outcome = await Promise.race([
+      handle.done.then((r) => r.status),
+      new Promise<'timeout'>((resolve) => { const t = setTimeout(() => resolve('timeout'), bound); t.unref?.(); }),
+    ]);
+    if (outcome === 'timeout') {
+      console.warn(`[journaling] ${poolAgentId}: journal for ${conversationId.slice(0, 8)} still running after ${bound} ms; releasing the pane`);
+    }
+  });
+}
+
 const { registry: commandRegistry, pauseSet, headlessControl } = createCommandSystem({
   adapterRegistry: registry,
   queue,
   db,
   config,
   poolManagers,
+  runtimeResolver,
+  advisories,
+  journal: journalEngine,
 });
 
 // ── Custom commands ───────────────────────────────────────────────────────────
@@ -109,6 +274,11 @@ commandRegistry.register(createCostCommand({ db, headlessControl }));
 commandRegistry.register(createPoolCommand({ poolManagers }));
 commandRegistry.register(createPaneCommand({ poolManagers }));
 commandRegistry.register(createRcCommand({ poolManagers }));
+commandRegistry.register(createFeedbackCommand({ db, engine: journalEngine }));
+commandRegistry.register(createJournalCommand({
+  db, engine: journalEngine, resolver: runtimeResolver, advisories, gate: journalGate, memorySetup, consolidation: consolidationScheduler,
+  protectedPaths: (agentId) => protectedPaths.paths(agentId).entries.map((e) => e.spec),
+}));
 
 const pipeline = new PipelineEngine();
 pipeline.use({ slot: 10, name: 'normalize',        stage: normalize });
@@ -126,7 +296,12 @@ pipeline.use({ slot: 70, name: 'route-resolve',    stage: createRouteResolve(con
 // route targets (e.g. an also_notify entry).
 pipeline.use({ slot: 72, name: 'pool-route-resolve', stage: createPoolRouteResolve(poolManagers), critical: false });
 pipeline.use({ slot: 80, name: 'transcript-log',   stage: createTranscriptLog(db, config), critical: false });
-pipeline.use({ slot: 85, name: 'memory-inject',    stage: createMemoryInject(db, config),  critical: false });
+// E65 — open advisories ride along with an owner's next message, as a
+// bus-originated system block for the owned agent's route only.
+pipeline.use({ slot: 86, name: 'advisory-inject',  stage: createAdvisoryInject(advisories), critical: false });
+// E66 — a message held by a System Message journal run tells its sender,
+// once per hold, that the agent is busy.
+pipeline.use({ slot: 87, name: 'journal-hold',     stage: createJournalHoldNotice(journalGate, (run, target) => notifyBusy(run, target)), critical: false });
 
 // ── Siri channel (E42) ───────────────────────────────────────────────────────
 // Registered before the HTTP server is built because the /api/v1/siri routes
@@ -138,7 +313,66 @@ const app = config.adapters.app?.enabled
   ? new AppAdapter(db, (contactId) => routedAgent(config, contactId), getHeadlessSnapshots) : undefined;
 if (app) registry.register(app);
 
-const httpServer = await createHttpServer({ queue, registry, config, pipeline, db, commandRegistry, pauseSet, siri, app, poolManagers, getHeadlessSnapshots });
+const journalStatus = { db, engine: journalEngine, resolver: runtimeResolver, advisories, gate: journalGate, memorySetup };
+// E67 — UserPromptSubmit freshness hook: recent.md for a live session, only when it changed.
+const memoryRecent = new RecentFreshness({
+  db,
+  recent: recentMemory,
+  resolveAgent: (harnessSessionId) => {
+    const session = journalEvents.findSession(harnessSessionId);
+    const agent = session ? journalEngine.agentForSession(session) : null;
+    if (agent?.runtime) return agent.agentId;
+    for (const [poolAgentId, manager] of poolManagers) {
+      if (manager.leaseStore.list(manager.poolId).some((p) => p.claude_session_id === harnessSessionId)) return poolAgentId;
+    }
+    return null;
+  },
+  knownAgent: (agentId) => runtimeResolver.resolve(agentId.startsWith('agent:') ? agentId : `agent:${agentId}`) !== undefined,
+});
+const httpServer = await createHttpServer({ queue, registry, config, pipeline, db, commandRegistry, pauseSet, siri, app, poolManagers, getHeadlessSnapshots, runtimeResolver, advisories, journalEvents, journalGate, journalStatus, memoryRecent, approvalHooks, proposals: proposalService });
+
+// E66 — busy notice for a held message: the channel's native queued/status
+// signal where it has one, a short text elsewhere, nothing on email.
+const appNoticeRuns = new Map<string, { agentId: string; conversationId: string }>();
+function notifyBusy(run: ActiveSystemRun, target: { contactId: string; channel: string; topic: string; conversationId: string }): void {
+  const { contactId, channel, topic, conversationId } = target;
+  // Email waits silently. Siri answers each ask once, so a notice would take the reply's place.
+  if (channel === 'email' || channel.startsWith('email:') || channel === 'siri') return;
+  const adapter = registry.lookupPrimaryByChannel(channel);
+  if (!adapter) return;
+  try {
+    if (app && adapter.id === 'app') {
+      const agentId = routedAgent(config, contactId) ?? run.agentId;
+      appNoticeRuns.set(run.runId, { agentId, conversationId });
+      app.publishActivity({
+        agent_id: agentId, conversation_id: conversationId, state: 'queued', turn_class: 'user',
+        running_user: 0, running_system: 1, waiting: 1, limit: 0, reserved_system_slots: 0,
+      });
+      return;
+    }
+    if (adapter.capabilities.toolStatus && adapter.reportToolCall) {
+      adapter.reportToolCall(contactId, BUSY_NOTICE_TEXT, channel, topic, true, conversationId);
+      return;
+    }
+    void adapter.send({
+      id: randomUUID(), timestamp: new Date().toISOString(), channel, topic, sender: 'system:bus',
+      recipient: `contact:${contactId}`, reply_to: null, priority: 'normal',
+      payload: { type: 'text', body: BUSY_NOTICE_TEXT }, metadata: { adapter_id: adapter.id, bus_notice: true },
+    }).catch((err: unknown) => console.warn(`[journaling] busy notice on ${channel} failed: ${String(err)}`));
+  } catch (err) {
+    console.warn(`[journaling] busy notice on ${channel} failed: ${String(err)}`);
+  }
+}
+journalGate.onChange((run, event) => {
+  if (event !== 'end' || !app) return;
+  const notice = appNoticeRuns.get(run.runId);
+  if (!notice) return;
+  appNoticeRuns.delete(run.runId);
+  app.publishActivity({
+    agent_id: notice.agentId, conversation_id: notice.conversationId, state: 'idle', turn_class: 'user',
+    running_user: 0, running_system: 0, waiting: 0, limit: 0, reserved_system_slots: 0,
+  });
+});
 
 // ── Platform adapter registration ────────────────────────────────────────────
 // Platform adapters run in-process. They are instantiated from config,
@@ -153,7 +387,7 @@ const adapterDeps = { config, queue, pipeline, db, registry, commandRegistry, pa
 // expiry sweep below.
 const approvalStore = new ApprovalStore(db);
 const resolveApprovalFn = (id: string, decision: ApprovalDecision, resolvedBy: string, onlyContactId?: string) =>
-  resolveApproval({ store: approvalStore, poolManagers }, id, decision, resolvedBy, undefined, onlyContactId);
+  resolveApproval({ store: approvalStore, poolManagers, ...approvalHooks }, id, decision, resolvedBy, undefined, onlyContactId);
 
 for (const inst of getTelegramInstances(config)) {
   const telegram = new TelegramAdapter({
@@ -178,15 +412,29 @@ for (const inst of getEmailInstances(config)) {
 // Dequeues contact-bound messages and dispatches to platform adapters.
 // Agent-bound messages (agent:*) stay in the queue for CC adapter to poll.
 
-const deliveryWorker = new DeliveryWorker({ queue, registry, db });
+const deliveryWorker = new DeliveryWorker({
+  queue, registry, db,
+  onFailed: (envelope, reason) => safeFeedback(() => recordDeliveryFailure(feedbackProducers, envelope, reason)),
+});
 
-// ── Memory system ─────────────────────────────────────────────────────────────
-// Summarizer calls the Claude API to extract memories from completed sessions.
-// SessionTracker runs a background loop to close idle sessions and trigger
-// summarization. Both degrade gracefully when ANTHROPIC_API_KEY is not set.
+// E65 — proactive advisory delivery: system-only turns through the pipeline,
+// or direct messages to owners through the delivery worker above.
+advisories.setTransport(createBusAdvisoryTransport({
+  queue, registry, owners: ownerDirectory, pipeline, config, db, commandRegistry, pauseSet,
+}));
+// E66 — journaling instructions use the same system-only turn path.
+deliverJournalInstruction = createJournalInstructionDelivery({
+  queue, registry, owners: ownerDirectory, pipeline, config, db, commandRegistry, pauseSet,
+});
 
-const summarizer = new Summarizer({ db, config });
-const sessionTracker = new SessionTracker({ db, config, summarizer });
+// ── Session tracker ───────────────────────────────────────────────────────────
+// Closes idle legacy (MCP-adapter) sessions and reports every close to the
+// journaling engine. (E66 retired the Anthropic-API summarizer.)
+
+const sessionTracker = new SessionTracker({
+  db, config,
+  onSessionClosed: (session) => { journalEngine.trigger({ reason: 'close', sessionId: session.id }); },
+});
 
 // ── Attachment sweeper (E17) ──────────────────────────────────────────────────
 // Periodically deletes expired image files + their DB rows. Runs on a fixed
@@ -219,17 +467,33 @@ const maintenanceTimer = setInterval(() => {
   if (recovered > 0) console.log(`[agentbus] Recovered ${recovered} stuck processing message(s)`);
   const swept = queue.sweepExpired();
   if (swept > 0) console.log(`[agentbus] Swept ${swept} expired message(s)`);
+  try {
+    const expiredProposals = proposalService.sweep();
+    if (expiredProposals > 0) console.log(`[learning] ${expiredProposals} self-edit proposal(s) expired`);
+  } catch (err) {
+    console.error(`[agentbus] Proposal sweep failed: ${String(err)}`);
+  }
   sweepApprovals({ registry, store: approvalStore }).catch((err) =>
     console.error(`[agentbus] Approval sweep failed: ${String(err)}`),
+  );
+  advisories.retryPending().catch((err) =>
+    console.error(`[agentbus] Advisory retry failed: ${String(err)}`),
   );
 }, SWEEP_INTERVAL_MS);
 
 // ── Shutdown ─────────────────────────────────────────────────────────────────
 
-function shutdown() {
+let shuttingDown = false;
+async function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
   console.log('AgentBus shutting down…');
   scheduler.stop();
   sessionTracker.stop();
+  // E66 — persist a `shutdown` trigger for sessions with unjournaled human
+  // content (journaled after restart) and give in-flight runs a moment.
+  const marked = await journalEngine.shutdown().catch(() => [] as string[]);
+  if (marked.length > 0) console.log(`[journaling] ${marked.length} session(s) will be journaled after restart`);
   attachmentSweeper.stop();
   deliveryWorker.stop();
   stopHeadless();
@@ -244,8 +508,8 @@ function shutdown() {
   });
 }
 
-process.on('SIGTERM', shutdown);
-process.on('SIGINT', shutdown);
+process.on('SIGTERM', () => void shutdown());
+process.on('SIGINT', () => void shutdown());
 
 // ── Start ────────────────────────────────────────────────────────────────────
 
@@ -262,10 +526,12 @@ deliveryWorker.start();
 // their journaling runners are wired in before the tracker's first tick
 // (E20). Each instance registers its own runner, keyed by agent_id, so a
 // multi-agent deployment (E23) journals each session with its owning agent.
-for (const [agentId, headless] of startHeadless(db)) {
-  sessionTracker.registerJournalingRunner(agentId, headless.runJournalingTurn);
-  // Let /clear reach the owning instance's journaling hook.
-  headlessControl.journalResumeId.set(agentId, headless.journalResumeId);
+for (const [agentId, headless] of startHeadless(db, {
+  onToolError: (event) => safeFeedback(() => recordToolError(feedbackProducers, event)),
+})) {
+  // E66 — the cc-headless journaler runs this instance's journaling turns
+  // through its handle (serialized with live turns on the same session).
+  headlessJournaler.addHandle(agentId, headless);
   // Let /stop reach the owning instance's in-flight turn.
   headlessControl.stopTurn.set(agentId, headless.stopTurn);
   headlessControl.snapshots?.set(agentId, headless.snapshot);
@@ -277,18 +543,20 @@ for (const [agentId, headless] of startHeadless(db)) {
 // left over from before a restart / release any whose window actually
 // vanished (reconcileLiveness — see src/pool/pool-manager.ts's doc comment:
 // a free pane with no tmux window yet is normal and is NOT touched here),
-// then start the recurring hard-idle/park-drain sweep. Registering a
-// journaling runner per pool is currently inert (SessionTracker's dispatch
-// only recognizes cc-headless instances — see the maintenance backlog) but
-// costs nothing and keeps parity with cc-headless's own wiring above.
-for (const [agentId, pool] of poolManagers) {
+// then start the recurring hard-idle/park-drain sweep. Pool journaling goes
+// through the journaling engine (release hook above, harness hook events).
+for (const pool of poolManagers.values()) {
   await pool.ensureStarted();
   await pool.reconcileLiveness();
   pool.start();
-  sessionTracker.registerJournalingRunner(agentId, pool.journalingRunner);
 }
 
 sessionTracker.start();
+recentMemory.regenerateAll('startup');
+for (const layout of recentMemory.layouts()) {
+  for (const warning of memorySetup(layout.agentId).warnings) console.warn(`[memory] ${layout.agentId}: ${warning}`);
+}
+journalEngine.start();
 attachmentSweeper.start();
 scheduler.loadConfig();
 if (config.scheduler.enabled) scheduler.start();
@@ -304,4 +572,4 @@ for (const adapter of registry.list()) {
   }
 }
 
-export { config, queue, registry };
+export { config, queue, registry, advisories };

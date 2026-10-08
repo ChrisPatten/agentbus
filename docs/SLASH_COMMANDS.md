@@ -13,6 +13,8 @@ Slash commands let you operate AgentBus from any connected channel without SSH a
 | `/sessions [channel] [--limit N]` | List recent sessions | `/sessions telegram --limit 5` |
 | `/clear` | Start a fresh session; journal the previous one in the background | `/clear` |
 | `/stop` | Cancel the current in-flight turn | `/stop` |
+| `/feedback <text>` | Tell the agent what to do differently; used when it next journals | `/feedback Use 24-hour time.` |
+| `/journal [runs [n] \| now \| consolidate]` | Journaling status, recent journal runs, journal this conversation now, or consolidate memory now | `/journal runs 10` |
 | `/cost` | Show day/week/month API cost for this agent | `/cost` |
 | `/pool [pool-agent-id]` | Show cc-pool pane leases and parked-queue depth | `/pool peggy` |
 | `/pane [n\|all]` | Send a PNG snapshot of the cc-pool tmux pane(s) | `/pane 2` |
@@ -43,6 +45,10 @@ If an adapter is paused it shows `[PAUSED]` next to its name. The `dead_letter` 
 The `Pool:` section is one line per configured `cc-pool` instance — `<leased pane count>/<total pane count> leased`, plus a `, N parked` clause when that pool's parked-message queue is non-empty. It is omitted entirely, header included, on any deployment with no `cc-pool` instances configured — `/status`'s output there is unchanged from before this section existed. See [`/pool`](#pool-pool-agent-id) for the per-pane breakdown.
 
 The `Headless:` section shows each `cc-headless` agent's running user and system turns, waiting turns, total process limit, and reserved system slots.
+
+The `Runtimes:` section lists each configured agent with its runtime and static capabilities, for example `agent:baxter: cc-headless (systemMessages, schedules, sessionResume, sessionFork, exclusiveSession, nativeMemory, contextInjection; hooks: pre-compact)`. It is omitted when no agent resolves. See [RUNTIME_CAPABILITIES.md](RUNTIME_CAPABILITIES.md).
+
+The `Advisories:` section lists every active (not resolved) bus advisory, most severe first, for example `agent:baxter [warning] Journaling chain exhausted (delivered, raised 2h ago) id:3f9c2a4e`. It is omitted when there are none. See [ADVISORIES.md](ADVISORIES.md).
 
 ### `/help [command]`
 
@@ -90,9 +96,9 @@ Lists recent sessions (default: 10, max: 50). Optionally filter by channel name 
 
 ### `/clear`
 
-The `/clear` equivalent for headless (`cc-headless`) agents: start a fresh context window. It closes the current selected session, so your next message in that conversation spawns a brand-new `claude -p` with no `--resume`. The close is immediate — there is no window where a follow-up re-attaches to the old session. From the Mac app, `/clear` targets the selected foreign or app session.
+Start a fresh context window. It closes the current selected session, so your next message in that conversation spawns a brand-new `claude -p` with no `--resume` (`cc-headless`), or a fresh Claude session in a pool pane (`cc-pool`: the conversation's pane is detached at once, then cleared or killed per `on_evict` in the background). The close is immediate — there is no window where a follow-up re-attaches to the old session. From the Mac app, `/clear` targets the selected foreign or app session.
 
-The previous session is **not discarded**: after closing it, the bus fires a silent background journaling turn (resuming the old `claude_session_id`) so the agent reviews the conversation one last time and updates its memory files before the context is left behind. Nothing is delivered to the user from that turn. Because journaling resumes the underlying claude session by id and writes to the agent's memory *files*, it works correctly even though the DB session row is already closed.
+The previous session is **not discarded**: after closing it, the bus fires the journaling `clear` trigger for it (E66, [JOURNALING.md](JOURNALING.md)). The trigger is persisted (it survives a restart), bypasses `min_human_messages`, and runs the agent's journaler chain in the background; the `cc-headless` journaler resumes the old `claude_session_id` (forking it, on cc-pool) so the agent reviews the conversation one last time and updates its memory files. The `system-message` journaler doesn't run for a cleared session: its live context is gone. Nothing is delivered to the user from that run. It works even though the DB session row is already closed.
 
 ```
 /clear
@@ -103,9 +109,32 @@ Scope and edge cases:
 
 - **Conversation-scoped.** `/clear` only closes the active session in the selected conversation. A Telegram `/clear` leaves a `system:peggy` (scheduler) session untouched, and vice versa. An app command bound to a Telegram session closes that Telegram session.
 - **Nothing to clear.** If you have no active session with a live `claude_session_id` on that channel, it replies `No active session to clear` and does nothing.
-- **Headless not running.** On an MCP-only deployment the session is still closed, but there is no background memory pass (the reply says so).
+- **Journaling not set up.** When the session's agent has no journaling settings (or they're disabled), the session is still closed, but there is no memory pass (the reply says so).
 
-This command is most useful for headless agents (see [CC_HEADLESS_ADAPTER.md](./CC_HEADLESS_ADAPTER.md)); the journaling step is a no-op pass-through when the headless adapter isn't running.
+See [CC_HEADLESS_ADAPTER.md](./CC_HEADLESS_ADAPTER.md) and [CC_POOL_ADAPTER.md](./CC_POOL_ADAPTER.md#session-tracker-interaction).
+
+### `/journal [runs [n] | now | consolidate]`
+
+Journaling status and control for the conversation you send it from (E66, [JOURNALING.md](JOURNALING.md#observability)).
+
+- **`/journal`**: for this conversation, when it was last journaled, how many messages from people are waiting (and whether that is below `min_human_messages`), a pending final trigger, and a run in progress. For its agent: the chain (and entries the runtime can't run), last success, failed runs in a row, the last failure, the backlog, hook health and open journaling advisories. Then the agent's memory setup (E67): how memory loads, whether its `CLAUDE.md` imports `recent.md`, and warnings such as a missing import or an `autoMemoryDirectory` set where Claude Code ignores it ([AGENT_MEMORY.md](AGENT_MEMORY.md#setup-checks)).
+- **`/journal runs [n]`**: the agent's last `n` journal attempts (default 5, at most 20): when, trigger, journaler (and which one it fell back from), outcome, what it could see (`bus-transcript`, `snapshot`, `full-session`), cost, and the error or note.
+- **`/journal now`**: journal this conversation now (trigger `manual`). Bypasses the pause threshold, `min_human_messages` and the attempt cap, but respects the cursor: with nothing new since the last run, it says so. The reply comes when the run finishes within about 1.5 s, otherwise it says the run started.
+- **`/journal consolidate`** (E68): run the agent's consolidation pass now, even when nothing new was journaled ([AGENT_LEARNING.md](AGENT_LEARNING.md#consolidation)). Same 1.5 s wait. `/journal` shows the last and next pass; `/journal runs` lists passes as `consolidate(manual)` or `consolidate(scheduled)`.
+
+```
+/journal now
+-> Journaled with cc-headless.
+```
+
+### `/feedback <text>`
+
+A correction for the conversation's agent (E68, [AGENT_LEARNING.md](AGENT_LEARNING.md#feedback-text)). The bus records it as a `user-feedback` event about the agent's latest message in the conversation and acknowledges at once. It is not delivered to the agent as a message and doesn't start a journal run: the conversation's next journal run gets it (even below `min_human_messages`), and consolidation counts it across conversations. Without text it prints its usage.
+
+```
+/feedback Use 24-hour time when you list my meetings.
+-> Thanks, noted. Your feedback is used the next time this conversation is journaled.
+```
 
 ### `/stop`
 

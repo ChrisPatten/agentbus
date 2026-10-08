@@ -45,17 +45,23 @@
 
 set -uo pipefail
 
-AGENTBUS_BASE="http://127.0.0.1:3000"
+AGENTBUS_BASE="${AGENTBUS_URL:-http://127.0.0.1:3000}"
 
-# bus.auth_token support: when AGENTBUS_BUS_TOKEN is set (cc-pool exports it
-# into every pane window it creates; otherwise export it yourself in the
-# shell that starts claude), every POST carries X-Bus-Token. The header goes
+# bus.auth_token support (the convention every AgentBus hook shares, see
+# docs/JOURNALING.md#harness-events-and-hooks): the token is AGENTBUS_BUS_TOKEN (cc-pool exports it into
+# every pane window it creates; otherwise export it yourself in the shell
+# that starts claude), else the older AGENTBUS_TOKEN, else the first line of
+# AGENTBUS_TOKEN_FILE. Every POST then carries X-Bus-Token. The header goes
 # to curl on stdin (-K -) so the token never shows up in the process list.
 # With no token set, the request is exactly what it was before.
+TOKEN="${AGENTBUS_BUS_TOKEN:-${AGENTBUS_TOKEN:-}}"
+if [[ -z "$TOKEN" && -n "${AGENTBUS_TOKEN_FILE:-}" && -r "${AGENTBUS_TOKEN_FILE}" ]]; then
+  TOKEN="$(head -n 1 "$AGENTBUS_TOKEN_FILE" 2>/dev/null | tr -d '[:space:]')"
+fi
 bus_post() {
   local url="$1" body="$2"
-  if [[ -n "${AGENTBUS_BUS_TOKEN:-}" ]]; then
-    local t="${AGENTBUS_BUS_TOKEN//\\/\\\\}"
+  if [[ -n "$TOKEN" ]]; then
+    local t="${TOKEN//\\/\\\\}"
     t="${t//\"/\\\"}"
     printf 'header = "X-Bus-Token: %s"\n' "$t" \
       | curl -s --max-time 3 -K - -X POST "$url" -H 'Content-Type: application/json' -d "$body"

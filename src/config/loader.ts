@@ -4,6 +4,9 @@ import { homedir } from 'node:os';
 import { load as parseYaml } from 'js-yaml';
 import dotenv from 'dotenv';
 import { AppConfigSchema, type AppConfig } from './schema.js';
+import { RuntimeResolver, collectRuntimeRequirements, validateRuntimeRequirements } from '../core/runtime-resolver.js';
+import { legacyJournalingBlocks, resolveJournalingSettings } from '../journaling/config.js';
+import { legacyMemoryBlocks } from '../memory/layout.js';
 
 /**
  * Walk an unknown object tree and replace all `${VAR_NAME}` tokens in string
@@ -41,6 +44,21 @@ function substituteEnvVars(obj: unknown): unknown {
 }
 
 /**
+ * Retired keys of the raw `memory` block: the summarizer's (E66) and the
+ * legacy structured memory store's (removed after E66). Ignored with a
+ * warning, so an old config.yaml still starts.
+ */
+export const RETIRED_MEMORY_KEYS = [
+  'claude_api_model', 'summary_max_tokens', 'structured_extraction', 'context_window_hours', 'memory_inject_exclude',
+] as const;
+
+export function retiredMemoryKeys(raw: unknown): string[] {
+  const memory = (raw as { memory?: unknown } | null)?.memory;
+  if (!memory || typeof memory !== 'object') return [];
+  return RETIRED_MEMORY_KEYS.filter((k) => k in (memory as Record<string, unknown>));
+}
+
+/**
  * Load, validate, and return the application configuration.
  *
  * Load sequence:
@@ -49,7 +67,8 @@ function substituteEnvVars(obj: unknown): unknown {
  *  3. Parse YAML → raw JS object
  *  4. Substitute `${VAR_NAME}` tokens with env values
  *  5. Validate against Zod schema
- *  6. Return typed `AppConfig`
+ *  6. Check feature requirements against agent runtime capabilities (E64)
+ *  7. Return typed `AppConfig`
  *
  * Throws on any validation or substitution failure; process should exit non-zero.
  */
@@ -74,6 +93,46 @@ export function loadConfig(path: string, envPath?: string): AppConfig {
       .map((issue) => `  ${issue.path.join('.')}: ${issue.message}`)
       .join('\n');
     throw new Error(`Config validation failed:\n${formatted}`);
+  }
+
+  // E64 — reject configs that ask a runtime for a capability it lacks, naming
+  // the feature, agent, runtime and missing capability.
+  const requirements = collectRuntimeRequirements(result.data);
+  if (requirements.length > 0) {
+    validateRuntimeRequirements(new RuntimeResolver(result.data), requirements);
+  }
+
+  // E66 — the cc-headless `journaling` block is a deprecated alias for
+  // `agents.<id>.journaling`. Logged to stderr (stdout is MCP's in cc.ts).
+  const legacy = legacyJournalingBlocks(substituted);
+  if (legacy.length > 0) {
+    const settings = resolveJournalingSettings(result.data);
+    const shadowed = [...settings.values()].filter((s) => s.source === 'agents').length > 0;
+    console.warn(
+      `[config] ${legacy.join(', ')} is deprecated; move it to agents.<agent-id>.journaling (see docs/JOURNALING.md).` +
+        (shadowed ? ' Agents that have agents.<id>.journaling ignore their cc-headless block.' : ''),
+    );
+  }
+
+  // E67 — the cc-headless `memory` block is a deprecated alias for
+  // agents.<id>.memory. Its fields still apply where the agent block is unset.
+  const legacyMemory = legacyMemoryBlocks(substituted);
+  if (legacyMemory.length > 0) {
+    console.warn(
+      `[config] ${legacyMemory.join(', ')} is deprecated; move it to agents.<agent-id>.memory ` +
+        '(journal_lookback_days is lookback_days there; see docs/AGENT_MEMORY.md). ' +
+        'Fields set in agents.<id>.memory take precedence.',
+    );
+  }
+
+  // Retired memory-store and summarizer settings are ignored.
+  const retired = retiredMemoryKeys(substituted);
+  if (retired.length > 0) {
+    console.warn(
+      `[config] ${retired.map((k) => `memory.${k}`).join(', ')} ${retired.length === 1 ? 'is' : 'are'} deprecated and ignored: ` +
+        'the summarizer and the legacy memory store were removed (journaling and the agent\'s memory files replace them, ' +
+        `see docs/JOURNALING.md and docs/AGENT_MEMORY.md). Remove ${retired.length === 1 ? 'it' : 'them'} from config.yaml.`,
+    );
   }
 
   // Ensure the db directory exists so better-sqlite3 can create the file

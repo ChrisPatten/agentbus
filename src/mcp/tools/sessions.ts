@@ -1,18 +1,11 @@
 /**
  * S7.4 — Session Tools: get_session, list_sessions
  *
- * Provides access to session metadata and summaries stored in bus-core.
+ * Provides access to session metadata stored in bus-core.
  */
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { toolError, toolSuccess } from './helpers.js';
-
-interface SessionSummary {
-  summary: string | null;
-  model: string | null;
-  token_count: number | null;
-  created_at: string | null;
-}
 
 interface Session {
   id: string;
@@ -23,7 +16,6 @@ interface Session {
   last_activity: string;
   ended_at: string | null;
   message_count: number;
-  summary: SessionSummary | null;
   /** Conversation topic (e.g. "general" or "thread:<hash>"), via conversation_registry (E32). */
   topic: string | null;
   /** App topic title (Main or the named topic); null for other channels. */
@@ -64,7 +56,7 @@ export function registerSessionTools(server: McpServer, busBaseUrl: string): voi
     {
       description:
         'Get details for a specific session, or the most recent session if no ID is provided. ' +
-        'Returns session metadata plus any available summary. App sessions include title and topic for proactive delivery.',
+        'Returns session metadata. App sessions include title and topic for proactive delivery.',
       inputSchema: {
         session_id: z.string().optional().describe('Session ID to fetch. Omit to get the most recent session.'),
       },
@@ -157,7 +149,7 @@ export function registerSessionTools(server: McpServer, busBaseUrl: string): voi
         'inbound and outbound message, oldest first. Use this to pull real conversation context ' +
         'for a session surfaced by list_sessions or referenced in a memory file. Complements ' +
         'search_transcripts (keyword-driven, cross-session snippets, no surrounding context) and ' +
-        'get_session (metadata + summary only, no message content).',
+        'get_session (metadata only, no message content).',
       inputSchema: {
         session_id: z.string().describe('Session ID to fetch the transcript for'),
         limit: z

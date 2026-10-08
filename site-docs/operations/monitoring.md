@@ -20,10 +20,11 @@ The report includes:
 
 | Field | Meaning |
 |---|---|
-| `status` | `healthy` when every channel is online, otherwise `degraded` |
+| `status` | `healthy` when every channel is online and journaling isn't `critical`, otherwise `degraded` |
 | `version` | The AgentBus version running |
 | `adapters` | Each channel with its status: `online`, `degraded` or `unhealthy` |
 | `queue` | Messages `pending` (waiting for an agent), `processing`, `delivered`, and in `dead_letter` (couldn't be delivered) |
+| `journaling` | Journaling health per agent: its own `status` (`ok`, `warning`, `critical`), how long the oldest conversation has waited to be journaled, and failed runs in a row. See [Journaling and memory](/features/journaling-and-memory#staying-informed). |
 
 A channel becomes `degraded` after a few failed attempts to reach its service (3 for Telegram, 2 for email) and `unhealthy` after more (10 and 5). It recovers by itself once the service is reachable again.
 

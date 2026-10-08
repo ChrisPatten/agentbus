@@ -523,8 +523,8 @@ describe('conversation serialization after early delivery (E58)', () => {
     });
     const { startHeadless } = await import('./cc-headless.js');
     const handle = startHeadless(realDb as unknown as Database.Database).get('agent:peggy')!;
-    handle.journalResumeId({ claudeSessionId: 'old-a', contactId: 'alice', channel: 'telegram', conversationId: 'conv-a' });
-    handle.journalResumeId({ claudeSessionId: 'old-b', contactId: 'alice', channel: 'telegram', conversationId: 'conv-b' });
+    void handle.journalSession({ claudeSessionId: 'old-a', contactId: 'alice', channel: 'telegram', conversationId: 'conv-a' });
+    void handle.journalSession({ claudeSessionId: 'old-b', contactId: 'alice', channel: 'telegram', conversationId: 'conv-b' });
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(children).toHaveLength(1);
     expect(handle.snapshot()).toMatchObject({ running_system: 1, waiting: 1 });
@@ -536,6 +536,47 @@ describe('conversation serialization after early delivery (E58)', () => {
     children[1]!.emit('close', 0);
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(handle.snapshot()).toMatchObject({ running_system: 0, waiting: 0 });
+  });
+
+  it('runs a journaling turn with the journaler model, no delivery tools, in its own process group (E66 S66.6)', async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(pendingResponse([])));
+    const children: ReturnType<typeof makeFakeChild>[] = [];
+    spawnMock.mockImplementation(() => {
+      const child = makeFakeChild();
+      children.push(child);
+      return child as unknown as import('node:child_process').ChildProcess;
+    });
+    const { startHeadless } = await import('./cc-headless.js');
+    const handle = startHeadless(realDb as unknown as Database.Database).get('agent:peggy')!;
+    const pending = handle.journalSession({
+      claudeSessionId: 'old-a', contactId: 'alice', channel: 'telegram', conversationId: 'conv-a', model: 'claude-haiku-4-5', prompt: 'Journal.',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const [, args, options] = spawnMock.mock.calls[0]!;
+    expect(args).toEqual(expect.arrayContaining(['--model', 'claude-haiku-4-5', '--resume', 'old-a', '--disallowedTools']));
+    expect(args).not.toContain('--allowedTools');
+    // E68: journal turns run without Bash (Edit denies don't cover redirects).
+    expect((args as string[])[(args as string[]).indexOf('--disallowedTools') + 1]!.split(',')).toContain('Bash');
+    expect(options).toMatchObject({ detached: true });
+    writeEvent(children[0]!.stdout, { type: 'result', session_id: 'old-a', result: 'Recorded.', total_cost_usd: 0.03, usage: { input_tokens: 9, output_tokens: 4 } });
+    children[0]!.emit('close', 0);
+    await expect(pending).resolves.toMatchObject({ error: null, costUsd: 0.03, inputTokens: 9, outputTokens: 4, resultText: 'Recorded.' });
+  });
+
+  it('kills a journaling turn that outlives its timeout (E66 S66.6)', async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(pendingResponse([])));
+    const children: ReturnType<typeof makeFakeChild>[] = [];
+    spawnMock.mockImplementation(() => {
+      const child = makeFakeChild();
+      child.kill.mockImplementation(() => { setImmediate(() => child.emit('close', null)); return true; });
+      children.push(child);
+      return child as unknown as import('node:child_process').ChildProcess;
+    });
+    const { startHeadless } = await import('./cc-headless.js');
+    const handle = startHeadless(realDb as unknown as Database.Database).get('agent:peggy')!;
+    const result = await handle.journalSession({ claudeSessionId: 'old-a', contactId: 'alice', channel: 'telegram', conversationId: 'conv-a', timeoutMs: 30 });
+    expect(children[0]!.kill).toHaveBeenCalledWith('SIGTERM');
+    expect(result).toMatchObject({ timedOut: true, error: expect.stringContaining('timed out') });
   });
 
   it('serializes an Earlier fork against journaling on the same Claude transcript without holding capacity', async () => {
@@ -560,7 +601,7 @@ describe('conversation serialization after early delivery (E58)', () => {
     });
     const { startHeadless } = await import('./cc-headless.js');
     const handle = startHeadless(realDb as unknown as Database.Database).get('agent:peggy')!;
-    handle.journalResumeId({ claudeSessionId: 'shared-claude-id', contactId: 'alice', channel: 'telegram', conversationId: 'old-conversation' });
+    void handle.journalSession({ claudeSessionId: 'shared-claude-id', contactId: 'alice', channel: 'telegram', conversationId: 'old-conversation' });
     await new Promise(resolve => setTimeout(resolve, 45));
     expect(children).toHaveLength(1);
     expect(handle.snapshot()).toMatchObject({ running_system: 1, running_user: 0, waiting: 1 });
@@ -841,6 +882,8 @@ describe('turn cost persistence (E39)', () => {
 
     const args = spawnMock.mock.calls[0]![1] as string[];
     expect(args[args.indexOf('--allowedTools') + 1]).toBe('mcp__agentbus__reply,mcp__agentbus__send_message');
+    // E68: normal conversation turns keep Bash; only journal turns deny it.
+    expect(args).not.toContain('--disallowedTools');
 
     writeEvent(child.stdout, {
       type: 'assistant',
@@ -859,6 +902,42 @@ describe('turn cost persistence (E39)', () => {
       String(url).endsWith('/api/v1/messages') && (init as RequestInit | undefined)?.method === 'POST');
     expect(outbound).toHaveLength(1);
     expect(JSON.stringify(outbound[0]![1])).toContain('I could not use the reply tool.');
+  });
+
+  it('reports failed tool calls of a normal turn through onToolError (E68 S68.2)', async () => {
+    setupOneMessagePoll();
+    const child = makeFakeChild();
+    spawnMock.mockImplementation(() => child as unknown as import('node:child_process').ChildProcess);
+    const onToolError = vi.fn();
+
+    const { startHeadless } = await import('./cc-headless.js');
+    startHeadless(realDb as unknown as Database.Database, { onToolError });
+    await new Promise((r) => setTimeout(r, 30));
+
+    writeEvent(child.stdout, {
+      type: 'assistant',
+      message: { content: [
+        { type: 'tool_use', id: 'tool-1', name: 'Bash', input: { command: 'ls /nope' } },
+        { type: 'tool_use', id: 'tool-2', name: 'mcp__agentbus__reply', input: {} },
+        { type: 'tool_use', id: 'tool-3', name: 'Read', input: {} },
+      ] },
+    });
+    writeEvent(child.stdout, {
+      type: 'user',
+      message: { content: [
+        { type: 'tool_result', tool_use_id: 'tool-1', is_error: true, content: [{ type: 'text', text: 'ls: /nope: No such file' }] },
+        { type: 'tool_result', tool_use_id: 'tool-2', is_error: true, content: 'channel rejected the reply' },
+        { type: 'tool_result', tool_use_id: 'tool-3', content: 'ok' },
+      ] },
+    });
+    writeEvent(child.stdout, { type: 'result', result: 'done' });
+    child.emit('close', 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    expect(onToolError).toHaveBeenCalledTimes(2);
+    expect(onToolError.mock.calls[0]![0]).toMatchObject({ agentId: 'agent:peggy', toolName: 'Bash', error: 'ls: /nope: No such file', delivery: false });
+    expect(onToolError.mock.calls[1]![0]).toMatchObject({ toolName: 'mcp__agentbus__reply', error: 'channel rejected the reply', delivery: true });
+    expect(typeof onToolError.mock.calls[0]![0].conversationId).toBe('string');
   });
 
   it('persists cost/usage/turn count from a successful result event (S39.2/S39.3)', async () => {
@@ -1014,7 +1093,8 @@ describe('context-block ledger (per-session memory dedup)', () => {
     vi.restoreAllMocks();
   });
 
-  it('sends the memory block on a fresh session, then withholds it on the next turn of the same session', async () => {
+  /** Two turns of one open session; returns the spawn calls. */
+  async function runTwoTurns(): Promise<unknown[][]> {
     const conversationId = fallbackConversationId('contact:alice', 'telegram', undefined);
     const now = new Date().toISOString();
     // Pre-seed an open session for this conversation, matching what a real
@@ -1078,16 +1158,42 @@ describe('context-block ledger (per-session memory dedup)', () => {
 
     expect(spawnMock).toHaveBeenCalledTimes(2);
 
+    return spawnMock.mock.calls as unknown[][];
+  }
+
+  it('memory.native: false — sends the memory block on a fresh session, then withholds it on the next turn of the same session', async () => {
+    currentConfig = { ...singleInstanceConfig, agents: { 'agent:peggy': { memory: { native: false } } } } as unknown as AppConfig;
+    const calls = await runTwoTurns();
     // spawn(claude_bin, args, opts) — args[1] is the `-p` prompt (args = ['-p', prompt, ...]).
-    const turn1Args = spawnMock.mock.calls[0]![1] as string[];
-    const turn2Args = spawnMock.mock.calls[1]![1] as string[];
+    const turn1Args = calls[0]![1] as string[];
+    const turn2Args = calls[1]![1] as string[];
     expect(turn1Args[1]).toContain('=== memory/MEMORY.md ===');
     expect(turn1Args[1]).toContain('# Peggy memory index');
     expect(turn2Args[1]).not.toContain('=== memory/MEMORY.md ===');
+    expect(turn1Args).not.toContain('--settings');
+    expect((calls[0]![2] as { env: NodeJS.ProcessEnv }).env['CLAUDE_CODE_DISABLE_AUTO_MEMORY']).toBe('1');
 
     const ledgerRows = realDb
       .prepare(`SELECT block_key FROM context_blocks WHERE session_id = 'sess-1'`)
       .all() as Array<{ block_key: string }>;
     expect(ledgerRows.map((r) => r.block_key)).toEqual(['memory:memory/MEMORY.md']);
+  });
+
+  it('native memory (E67 default) — injects nothing, points auto memory at the memory dir, leaves the ledger empty', async () => {
+    process.env['CLAUDE_CODE_DISABLE_AUTO_MEMORY'] = '1'; // inherited from the bus's environment
+    try {
+      const calls = await runTwoTurns();
+      for (const call of calls.slice(0, 2)) {
+        const args = call[1] as string[];
+        expect(args[1]).not.toContain('=== memory/');
+        const i = args.indexOf('--settings');
+        expect(i).toBeGreaterThan(0);
+        expect(JSON.parse(args[i + 1]!)).toEqual({ autoMemoryDirectory: join(workingDir, 'memory') });
+        expect((call[2] as { env: NodeJS.ProcessEnv }).env).not.toHaveProperty('CLAUDE_CODE_DISABLE_AUTO_MEMORY');
+      }
+      expect(realDb.prepare(`SELECT COUNT(*) AS n FROM context_blocks`).get()).toEqual({ n: 0 });
+    } finally {
+      delete process.env['CLAUDE_CODE_DISABLE_AUTO_MEMORY'];
+    }
   });
 });

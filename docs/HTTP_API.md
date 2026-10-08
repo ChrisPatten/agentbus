@@ -16,7 +16,7 @@ bus-core serves a JSON API on `bus.host:bus.http_port` (default `127.0.0.1:3000`
 
 If `bus.auth_token` is set, every request except `GET /api/v1/health` must send a matching `X-Bus-Token` header or it receives `401`. The Pebble webhook additionally requires its own per-contact bearer token; the two checks are layered. The comparison is not constant time; the token is a shared secret between local processes, not a user password.
 
-AgentBus's own clients send the header automatically when a token is configured: the `claude-code` MCP server (`src/adapters/cc.ts`: polling loop and every MCP tool), `cc-headless`, the `cc-pool` manager and pane readiness poll, and the pool hook scripts in `scripts/hooks/`. They share `src/core/bus-auth.ts`, which only attaches the header to requests for the bus's own base URL. The token comes from the loaded config's `bus.auth_token`, falling back to the `AGENTBUS_BUS_TOKEN` environment variable. `cc-headless` passes `AGENTBUS_BUS_TOKEN` to its `claude -p` children, and `cc-pool` sets it in every pane window it creates, so the pane's MCP server and hook scripts inherit it. The hooks read `AGENTBUS_BUS_TOKEN` and hand the header to `curl` on stdin (`-K -`), keeping it out of the process list. With no token configured, none of these requests change.
+AgentBus's own clients send the header automatically when a token is configured: the `claude-code` MCP server (`src/adapters/cc.ts`: polling loop and every MCP tool), `cc-headless`, the `cc-pool` manager and pane readiness poll, and the pool hook scripts in `scripts/hooks/`. They share `src/core/bus-auth.ts`, which only attaches the header to requests for the bus's own base URL. The token comes from the loaded config's `bus.auth_token`, falling back to the `AGENTBUS_BUS_TOKEN` environment variable. `cc-headless` passes `AGENTBUS_BUS_TOKEN` to its `claude -p` children, and `cc-pool` sets it in every pane window it creates, so the pane's MCP server and hook scripts inherit it. The hooks read `AGENTBUS_BUS_TOKEN` (else the older `AGENTBUS_TOKEN` or `AGENTBUS_TOKEN_FILE`; the bus address from `AGENTBUS_URL`) and hand the header to `curl` on stdin (`-K -`), keeping it out of the process list. With no token configured, none of these requests change.
 
 ### Binding to the LAN
 
@@ -26,13 +26,23 @@ Set `bus.host: 0.0.0.0` to accept connections from other hosts, for example a re
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/v1/health` | Liveness, adapter health, queue counts |
+| GET | `/api/v1/health` | Liveness, adapter health, agent runtimes, queue counts |
 | GET | `/api/v1/pool` | cc-pool pane leases and parked-queue depth (when configured) |
-| POST | `/api/v1/pool/:agentId/turn-ended` | Real-time pane activity signal, fed by a `Stop` hook |
+| POST | `/api/v1/pool/:agentId/turn-ended` | Real-time pane activity signal, fed by a `Stop` hook (superseded by `/api/v1/journal/events`) |
+| POST | `/api/v1/journal/events` | Harness hook events for journaling (`turn-ended`, `pre-compact`, `session-end`, `clear`) |
+| POST | `/api/v1/journal/complete` | Finish a System Message journal run (the `journal_complete` tool) |
+| GET | `/api/v1/journal/runs` | Journal run attempts, by agent, conversation or session |
+| GET | `/api/v1/memory/recent` | The agent's `recent.md` for a live Claude session, only when it changed since that session saw it (E67 freshness hook) |
 | POST | `/api/v1/approvals` | Raise an interactive-approval request for a blocked pane |
 | GET | `/api/v1/approvals` | List approval requests, optionally by status |
 | GET | `/api/v1/approvals/:id` | Fetch one approval request |
 | POST | `/api/v1/approvals/:id/resolve` | Answer an approval request |
+| POST | `/api/v1/proposals` | Propose a change to a protected file (the `propose_change` tool) |
+| GET | `/api/v1/proposals` | List self-edit proposals, by agent and status |
+| GET | `/api/v1/proposals/:id` | Fetch one proposal, with its content |
+| GET | `/api/v1/advisories` | List bus advisories, by agent and state |
+| GET | `/api/v1/advisories/:id` | Fetch one advisory |
+| POST | `/api/v1/advisories/:id/ack` | Acknowledge a bus advisory (the `advisory_ack` tool) |
 | POST | `/api/v1/inbound` | Submit an inbound message to the pipeline |
 | POST | `/api/v1/webhooks/pebble` | Pebble Ring voice-memo ingress (when configured) |
 | POST | `/api/v1/siri/ask` | Siri ask: submit a question and wait for the agent's reply (when configured) |
@@ -52,8 +62,6 @@ Set `bus.host: 0.0.0.0` to accept connections from other hosts, for example a re
 | GET | `/api/v1/sessions/:id/transcript` | Ordered transcript for a session |
 | GET | `/api/v1/transcripts/search` | Full-text search across transcripts |
 | GET | `/api/v1/attachments/:id` | Resolve a stored attachment |
-| GET | `/api/v1/memories/recall` | Search the legacy memory store |
-| POST | `/api/v1/memories` | Insert into the legacy memory store |
 | POST | `/api/v1/knowledge` | Write a knowledge row |
 | GET | `/api/v1/knowledge/search` | Search knowledge rows |
 | GET | `/api/v1/knowledge/:id` | Fetch one knowledge row |
@@ -71,7 +79,7 @@ Set `bus.host: 0.0.0.0` to accept connections from other hosts, for example a re
 
 ### `GET /api/v1/health`
 
-Always returns `200`. `status` is `healthy` when every adapter reports `online`, otherwise `degraded`. Each adapter entry carries a `status` of `online`, `degraded`, or `unhealthy`, its capabilities, and any `lastActivity`, `latencyMs`, or `details` fields the adapter reports.
+Always returns `200`. `status` is `healthy` when every adapter reports `online` and journaling isn't `critical`, otherwise `degraded` (post-E66: a `critical` `journaling.status` degrades the bus; `warning` doesn't). Each adapter entry carries a `status` of `online`, `degraded`, or `unhealthy`, its capabilities, and any `lastActivity`, `latencyMs`, or `details` fields the adapter reports.
 
 ```json
 {
@@ -88,6 +96,10 @@ Always returns `200`. `status` is `healthy` when every adapter reports `online`,
   "queue": { "pending": 0, "processing": 1, "delivered": 142, "dead_letter": 0 }
 }
 ```
+
+`runtimes` lists each configured agent's runtime and static capabilities, keyed by agent id, for example `"agent:baxter": { "runtime": "cc-headless", "capabilities": { "systemMessages": true, …, "hookEvents": ["pre-compact"] } }`. See [RUNTIME_CAPABILITIES.md](RUNTIME_CAPABILITIES.md).
+
+`journaling` (E66) summarizes journaling per agent: `status` is `critical` when an enabled agent has 3 or more consecutive exhausted runs or a backlog at least 24 h old, `warning` when one has an exhausted run, else `ok`. Each entry under `agents` has `enabled`, `chain`, `backlog_age_ms` (age of the oldest unjournaled eligible content, or null), `backlog_sessions`, `consecutive_exhaustions`, `last_success_at`, `last_failure_at`, `last_failure` and `in_flight`. A `critical` journaling status makes the top-level `status` `degraded`. See [JOURNALING.md](JOURNALING.md#observability).
 
 `queue` counts rows in `message_queue` by status. Dead-lettered messages are moved to a separate `dead_letter` table, so `dead_letter` is always `0` here; query the table directly to inspect them.
 
@@ -150,7 +162,40 @@ Real-time correction to a pane's `last_activity_at`, which also records `last_tu
 |---|---|---|
 | `session_id` | Yes (to have any effect) | The pane's `claude_session_id`; matched against `pool_leases` |
 
-Fire-and-forget, like `/typing` and `/tool-status`: always `200 { "ok": true }`, silently a no-op if the pool or a matching pane isn't found. The pane stall watchdog compares `last_turn_ended_at` against message acks to detect a pane that received a message but never finished a turn; the timestamp is cleared when the pane is leased to a new conversation or released. Does not decide journal-worthiness or run any journaling turn — see [CC_POOL_ADAPTER.md#session-tracker-interaction](CC_POOL_ADAPTER.md#session-tracker-interaction) for that separate, still-open gap.
+Fire-and-forget, like `/typing` and `/tool-status`: always `200 { "ok": true }`, silently a no-op if the pool or a matching pane isn't found. The pane stall watchdog compares `last_turn_ended_at` against message acks to detect a pane that received a message but never finished a turn; the timestamp is cleared when the pane is leased to a new conversation or released. Does not decide journal-worthiness or run any journaling turn. Since E66 the bundled `Stop` hook posts `turn-ended` to [`POST /api/v1/journal/events`](#post-apiv1journalevents) instead, which marks the same pane and needs no agent id in the URL.
+
+## Journaling
+
+See [JOURNALING.md](JOURNALING.md).
+
+### `POST /api/v1/journal/events`
+
+Posted by `scripts/hooks/agentbus_journal_hook.sh` (and the cc-pool `Stop` hook). The bus resolves the agent and conversation from the harness session id.
+
+| Field | Required | Notes |
+|---|---|---|
+| `harness_session_id` | Yes | The harness's session id (Claude Code's `session_id`), matched against `sessions.claude_session_id`, open sessions first |
+| `event` | Yes | `turn-ended`, `pre-compact`, `session-end` or `clear` |
+| `snapshot_path` | No | Absolute path of a transcript snapshot the hook saved. Must be a file under the agent's working directory or `~/.agentbus/journal-snapshots`. |
+| `transcript_path` | No | The harness's own transcript file, recorded for journalers |
+
+`turn-ended` re-anchors the journaling pause timer (and marks a cc-pool pane's turn ended) and never journals. The other events register the snapshot, if any, and fire the journaling trigger of the same name, which bypasses `min_human_messages`.
+
+Returns `200 { ok: true, session_id, agent_id, action: "turn-ended" | "triggered", trigger?, snapshot_id?, snapshot_error? }`. `trigger` is the engine's answer (`queued`, `merged`, `not-configured`, `disabled`). A rejected snapshot path is reported in `snapshot_error` while the event still counts. `400` for a malformed body, `404` when no bus session matches the harness session id. Subject to `bus.auth_token` (`X-Bus-Token`) like every route.
+
+### `GET /api/v1/journal/runs`
+
+`?agent=<id>` (bare or prefixed; a pool pane maps to its pool), `?conversation=<conversation id>`, `?session=<session id>`, `?limit=` (1 to 500, default 50). Returns `{ ok, count, runs }`, newest first, one row per journaler attempt: `run_id`, `agent_id`, `session_id`, `conversation_id`, `kind`, `trigger`, `journaler`, `chain_position`, `fallback_from`, `outcome`, `error`, `fidelity`, `window_from`, `window_to`, `message_count`, `started_at`, `duration_ms`, `files_changed` (array), `notes`, `cost_usd`, `input_tokens`, `output_tokens`. Rows are kept 90 days.
+
+### `GET /api/v1/memory/recent`
+
+Called by `scripts/hooks/agentbus_recent_memory_hook.sh` (`UserPromptSubmit`, `SessionStart`). Query: `harness_session_id` (required, the Claude Code session id), `event` (`prompt`, the default, or `session-start`), `agent` (optional fallback agent id, used only when the session id resolves to no agent and the id names a configured agent). The agent is resolved from the session id: the bus session with that `claude_session_id` (or `journal_state.harness_session_id`), else a cc-pool pane whose lease has it. The bus regenerates the agent's `recent.md`, then compares its sha256 with what that harness session last saw (`memory_recent_seen`, migration 027).
+
+Returns `200 { ok: true, agent_id, changed, hash, reason?, context? }`. `changed: true` carries `context`: a one-line note followed by the full current `recent.md`, for the hook to print. `reason` is `baseline` (`session-start`, or the session's first check: the hash is recorded and nothing returned), `unchanged`, or `no-recent` (no memory dir or no `recent.md`). `400` for a missing `harness_session_id` or a bad `event`, `404` when no agent resolves. Subject to `bus.auth_token`. See [AGENT_MEMORY.md](AGENT_MEMORY.md#freshness-hook).
+
+### `POST /api/v1/journal/complete`
+
+The `journal_complete` MCP tool. Body `{ "run_id", "agent_id", "files_changed"?, "notes"?, "nothing_new"? }`; `agent_id` is the caller, bare or prefixed (a pool pane id). Returns `200 { ok: true, run_id }`. `400` for a malformed body, `404` (`unknown_run`) when the bus has no record of the run, `409` (`stale_run`) when the run already ended (timed out, or the bus restarted) and `409` (`already_completed`) for a repeat, `403` (`wrong_agent`) when the caller is not the run's agent.
 
 ## Approvals
 
@@ -182,7 +227,39 @@ Returns `{ ok, approval }`, or `404`.
 
 ### `POST /api/v1/approvals/:id/resolve`
 
-Body: `{ "decision": "approve" | "deny", "resolvedBy": "<who>" }`. Sends the key into the pane if the request is still answerable. Returns `{ ok, outcome, approval }` where `outcome` is `approved`, `denied`, `stale`, `expired`, or `already_resolved`. `404` for an unknown id, `400` for a bad `decision`.
+Body: `{ "decision": "approve" | "deny", "resolvedBy": "<who>" }`. Sends the key into the pane if the request is still answerable (for a `self-edit` request: applies or rejects the proposal). A denial is recorded as a `denied-approval` feedback event (E68). Returns `{ ok, outcome, approval }` where `outcome` is `approved`, `denied`, `stale`, `expired`, or `already_resolved`. `404` for an unknown id, `400` for a bad `decision`.
+
+## Proposals
+
+Self-edit proposals (E68): an agent proposes a change to a protected file and its owners approve it. See [AGENT_LEARNING.md](AGENT_LEARNING.md#self-edit-proposals).
+
+### `POST /api/v1/proposals`
+
+The `propose_change` MCP tool. Body `{ "agent_id", "path", "new_content"? | "diff"?, "rationale", "evidence"?: string | string[], "run_id"? }`; `agent_id` is the caller (bare, prefixed or a pool pane id). Returns `200 { ok: true, id, status: "pending", path, notified, expires_at }` (`duplicate: true` for an identical pending proposal, which notifies no one again). Errors are `{ ok: false, error, message }`: `400` `invalid` / `not_protected` / `no_change`, `409` `diff_failed`, `413` `too_large` (over 256 KB), `429` `rate_limited` (3 per agent per 24 h), `422` `no_owners` / `no_protected_paths` / `not_delivered`.
+
+### `GET /api/v1/proposals`
+
+`?agent=<id>`, `?status=` one of `pending`, `applied`, `denied`, `stale`, `expired`, `failed`, `?limit=` (default 50, max 200). Returns `{ ok, count, proposals }`, newest first, without `new_content`. `400` for an unknown status.
+
+### `GET /api/v1/proposals/:id`
+
+Returns `{ ok, proposal }` with `new_content`, `diff`, `base_hash`, `evidence`, `approval_ids` and the status, or `404`.
+
+## Advisories
+
+Bus advisories for agent owners. See [ADVISORIES.md](ADVISORIES.md). There is no route to raise one: advisory text becomes a bus-originated system block, so only in-process bus code produces advisories.
+
+### `GET /api/v1/advisories`
+
+`?agent=<id>` (bare or prefixed; a pool pane maps to its pool) and `?state=` one of `active` (default: everything not resolved), `all`, `open`, `delivered`, `acknowledged`, `resolved`. Returns `{ ok, count, advisories }`, most severe first, then newest. Each row has `id`, `agent_id`, `condition_key`, `severity`, `title`, `body`, `remediation`, `source`, `state`, timestamps, `raise_count`, `delivered_via`, `delivery_attempts` and `last_error`. `400` for an unknown state.
+
+### `GET /api/v1/advisories/:id`
+
+Returns `{ ok, advisory }`, or `404`.
+
+### `POST /api/v1/advisories/:id/ack`
+
+Body: `{ "agent_id": "<calling agent, bare or prefixed>" }`. A pool pane id maps to its pool. Returns `200 { ok, already_acknowledged, advisory: { id, state, condition_key } }`; `400` without `agent_id`, `404` for an unknown id, `403` when the advisory belongs to another agent, `409` when it is already resolved.
 
 ## Inbound
 
@@ -210,7 +287,9 @@ Responses (both `200`):
 { "ok": true, "queued": false, "reason": "command_handled" }
 ```
 
-`reason` is one of `invalid_payload`, `command_handled`, `adapter_paused`, `Aborted at stage "<name>"` (for example `dedup`), or `Stage "<name>" error: ...`. A body that fails validation returns `400`.
+`reason` is one of `invalid_payload`, `command_handled`, `adapter_paused`, `no_matching_route` (an in-process system turn whose route filter matched nothing), `Aborted at stage "<name>"` (for example `dedup`), or `Stage "<name>" error: ...`. A body that fails validation returns `400`.
+
+`metadata.system_blocks` and `metadata.system_only` are reserved for the bus and are dropped from the request (E65, see [ADVISORIES.md](ADVISORIES.md)). The same applies to `POST /api/v1/messages`.
 
 ### `POST /api/v1/webhooks/pebble`
 
@@ -234,6 +313,8 @@ Dequeues up to `limit` pending messages for one recipient and marks them `proces
 
 Returns `{ "ok": true, "messages": [<MessageEnvelope>], "count": n }`, ordered urgent, high, normal, then oldest first.
 
+While a System Message journal run is open for a conversation (E66), messages for it addressed to the journaled agent stay `pending` and are skipped, except the run's own instruction. They are returned once the run ends.
+
 ### `POST /api/v1/messages/:id/ack`
 
 Body `{ "status": "delivered" }` marks the message delivered. Body `{ "status": "failed", "error": "..." }` moves it to the dead-letter table. Returns `404` if the message is not in `processing` state (for `delivered`) or does not exist (for `failed`).
@@ -249,10 +330,10 @@ Enqueues an outbound message for the delivery worker. The `reply`, `send_message
 | `topic` | no | Default `general`. Use a `thread:<hash>` value to target a thread |
 | `reply_to` | no | Bus message ID. Resolved to the platform message ID so Telegram can quote it, unless it is the latest inbound message in the conversation |
 | `priority` | no | `normal` (default), `high`, or `urgent` |
-| `metadata` | no | Free-form object |
+| `metadata` | no | Free-form object. The reserved keys `system_blocks`, `system_only` and `journal_run_id` are dropped |
 | `expires_at` | no | ISO 8601, in the future. Expired pending messages are dead-lettered by the sweep |
 
-Returns `201 { "ok": true, "id": "<uuid>", "queued": true }`.
+Returns `201 { "ok": true, "id": "<uuid>", "queued": true }`. While a System Message journal run is open for the sending agent (E66), returns `409 { ok: false, error: "journal_run_in_progress", reason }` and enqueues nothing.
 
 ### `GET /api/v1/messages/:id`
 
@@ -293,7 +374,7 @@ Body `{ "name": string, "context"?: string }`. Creates a Telegram forum topic in
 
 ## Sessions and transcripts
 
-Session objects have this shape. `contact_id` is the bare contact ID (`chris`, not `contact:chris`). `topic` comes from `conversation_registry`. `summary` is `null` unless the legacy summarizer wrote one.
+Session objects have this shape. `contact_id` is the bare contact ID (`chris`, not `contact:chris`). `topic` comes from `conversation_registry`; `title` is the app topic title (`Main` or the named topic), `null` on other channels. The `summary` field was removed with the legacy memory store.
 
 ```json
 {
@@ -306,7 +387,7 @@ Session objects have this shape. `contact_id` is the bare contact ID (`chris`, n
   "ended_at": null,
   "message_count": 15,
   "topic": "general",
-  "summary": null
+  "title": null
 }
 ```
 
@@ -336,6 +417,8 @@ Every transcript row for the session, oldest first: `{ message_id, session_id, c
 
 Returns `{ "ok": true, "transcript": [...], "count": n }`, or `404` for an unknown session.
 
+Bus-originated system-only turns (advisory turns, journal instructions) are left out here and in `GET /api/v1/transcripts/search`; they stay in the database.
+
 ### `GET /api/v1/transcripts/search`
 
 FTS5 search over transcript bodies.
@@ -354,24 +437,6 @@ Returns `{ "ok": true, "results": [<same row shape as a transcript>], "count": n
 ### `GET /api/v1/attachments/:id`
 
 Returns `{ "ok": true, "attachment": { "id", "local_path", "mime_type", "original_filename" } }`. `404` if the ID is unknown or the attachment has expired. See [ATTACHMENTS.md](ATTACHMENTS.md).
-
-## Memories (legacy)
-
-The structured memory store is dormant unless `memory.structured_extraction` is true. See [MEMORY.md](MEMORY.md).
-
-### `GET /api/v1/memories/recall`
-
-| Param | Notes |
-|---|---|
-| `q` | Required. FTS5 query |
-| `contact_id`, `category` | Optional filters |
-| `limit` | 1 to 50, default 10 |
-
-Returns active memories (not superseded, not expired) ordered by confidence, then recency: `{ "ok": true, "memories": [...], "count": n }`.
-
-### `POST /api/v1/memories`
-
-Body `{ "contact_id", "content", "category"?, "confidence"?, "source"?, "expires_at"?, "channel"? }`. Supersedes the existing active memory for the same contact, category, and channel. Returns `201 { "ok": true, "id", "superseded": "<old-id>" | null }`.
 
 ## Knowledge
 

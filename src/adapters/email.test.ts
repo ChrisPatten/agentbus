@@ -29,11 +29,9 @@ function makeEmailConfig(tmpDownloadDir: string, withMedia = true): AppConfig {
     memory: {
       summarizer_interval_ms: 60000,
       session_idle_threshold_ms: 1800000,
-      context_window_hours: 48,
       claude_api_model: 'claude-opus-4-6',
       summary_max_tokens: 8192,
       session_close_min_messages: 0,
-      memory_inject_exclude: [],
     },
     scheduler: { tick_interval_ms: 30000, enabled: true },
     schedules: [],

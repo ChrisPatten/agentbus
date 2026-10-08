@@ -275,6 +275,39 @@ describe('PaneLifecycle.launch — optional flags', () => {
     expect(line.trimEnd().endsWith(q('--verbose'))).toBe(true);
   });
 
+  it('native memory (E67): adds --settings autoMemoryDirectory and unsets CLAUDE_CODE_DISABLE_AUTO_MEMORY', async () => {
+    const tmux = makeTmux({ capturePane: makeNoAckCapture() });
+    const pl = new PaneLifecycle({ tmux, busBaseUrl: 'http://x', cfg: makeCfg(), scratchDir, fetchFn: makeReadyFetch(), autoMemoryDir: '/agents/peggy/memory' });
+    const launchPromise = pl.launch(makeLaunchParams());
+    await vi.advanceTimersByTimeAsync(600);
+    await launchPromise;
+    const line = tmux.sendCommand.mock.calls[0]![1] as string;
+    expect(line).toContain(`${q('--settings')} ${q('{"autoMemoryDirectory":"/agents/peggy/memory"}')}`);
+    expect(line.split(';')[0]).toContain('CLAUDE_CODE_DISABLE_AUTO_MEMORY');
+
+    // An operator's own --settings in launch_args wins; no second one is added.
+    const tmux2 = makeTmux({ capturePane: makeNoAckCapture() });
+    const cfg2 = makeCfg({ launch_args: ['--settings', '/my/settings.json'] });
+    const pl2 = new PaneLifecycle({ tmux: tmux2, busBaseUrl: 'http://x', cfg: cfg2, scratchDir, fetchFn: makeReadyFetch(), autoMemoryDir: '/m' });
+    const p2 = pl2.launch(makeLaunchParams());
+    await vi.advanceTimersByTimeAsync(600);
+    await p2;
+    const line2 = tmux2.sendCommand.mock.calls[0]![1] as string;
+    expect(line2.split(q('--settings')).length - 1).toBe(1);
+    expect(line2).not.toContain('autoMemoryDirectory');
+  });
+
+  it('without autoMemoryDir the launch line has no --settings', async () => {
+    const tmux = makeTmux({ capturePane: makeNoAckCapture() });
+    const pl = new PaneLifecycle({ tmux, busBaseUrl: 'http://x', cfg: makeCfg(), scratchDir, fetchFn: makeReadyFetch() });
+    const launchPromise = pl.launch(makeLaunchParams());
+    await vi.advanceTimersByTimeAsync(600);
+    await launchPromise;
+    const line = tmux.sendCommand.mock.calls[0]![1] as string;
+    expect(line).not.toContain('--settings');
+    expect(line).not.toContain('CLAUDE_CODE_DISABLE_AUTO_MEMORY');
+  });
+
   it('dedupeDevChannelsArgs drops the flag and server:agentbus forms, keeps other channels', () => {
     expect(dedupeDevChannelsArgs(['--dangerously-load-development-channels'])).toEqual([]);
     expect(dedupeDevChannelsArgs(['--dangerously-load-development-channels', 'server:agentbus', '-v'])).toEqual(['-v']);

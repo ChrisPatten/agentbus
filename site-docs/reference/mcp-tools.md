@@ -107,9 +107,13 @@ See [Scheduling](/features/scheduling).
 
 See [Knowledge store](/features/knowledge-store).
 
-## Memory
+## Advisories, journaling and learning
 
-`recall_memory` and `log_memory` belong to the memory system that's being rebuilt. See [Journaling and memory](/features/journaling-and-memory).
+| Tool | What it does |
+|---|---|
+| `advisory_ack` | Confirms the agent has told its owner about an advisory: `id` from the advisory block. See [Owners and advisories](/features/owners-and-advisories). |
+| `journal_complete` | Finishes a journal run: `run_id` from the journal block, plus `files_changed`, a one-line `notes`, or `nothing_new: true`. Until it's called, messages to the agent wait and its own messages are refused. Not available to `cc-headless`. See [Journaling and memory](/features/journaling-and-memory#while-the-agent-is-journaling). |
+| `propose_change` | Proposes a change to one of the agent's protected files, such as `CLAUDE.md` or a skill, for its owners to approve: `path`, either `new_content` or a unified `diff`, a `rationale`, and optional `evidence`. Approved changes are applied by the bus. At most three a day. See [Journaling and memory](/features/journaling-and-memory#approve-improvements-to-the-agent-s-instructions). |
 
 ## Runtime-specific
 

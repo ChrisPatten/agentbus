@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Epic ID | E65 |
-| Status | Planned |
+| Status | Complete |
 | Dependencies | E64 |
 | Story Count | 4 |
 | Estimated Complexity | M |
@@ -52,3 +52,20 @@ List open advisories in `/status` and `GET /api/v1/advisories?agent=…`. Add `d
 
 - Specific producers beyond a test producer. Journaling producers land in E66; others are follow-ups.
 - Owner-based trust for memory or journaling (explicitly not wanted).
+
+## Implementation Notes
+
+Implemented 2026-10-05/06 on `feat/e64-e68-journaling`. Code: `src/core/owners.ts`, `src/core/system-block.ts`, `src/advisories/` (store, service, render, transport), `src/pipeline/stages/advisory-inject.ts`, `src/mcp/tools/advisories.ts`, migration 025. Docs: `docs/ADVISORIES.md`.
+
+Decisions and places where the code shaped the design:
+
+- **Config shape.** A top-level `agents:` record already existed (keyed by prefixed recipient id, holding `media`). Owners went there as `agents.<id>.owners: [{ channel, contact_id }]`, optional. E66 adds `journaling` and E67 `memory` under the same key. Validation (root `superRefine`): the contact must exist, `contact_id` is bare, no duplicate contact+channel. `owners` is optional rather than defaulted to `[]` so existing typed test configs keep compiling.
+- **Owner matching is exact on channel.** A Telegram group derived from the owner's bot channel is not an owner conversation. Pool panes map to the pool id (`OwnerDirectory.logicalAgentId`). The owner's default conversation is topic `general`.
+- **No runtime requirement registered.** Advisories degrade (direct delivery) rather than requiring `systemMessages`, so `collectRuntimeRequirements` stays empty. Owners on an agent that resolves to no runtime log a startup warning only.
+- **Injection is a pipeline stage (slot 86)**, after pool-route-resolve and transcript-log, so it sees the leased pane id and the block never lands in transcripts. Blocks are attached per route recipient and filtered at fan-out, so an `also_notify` agent never gets another agent's advisories. Advisories are marked `delivered` when attached (the epic's "mark delivered"); if `processInbound` then drops the message (paused adapter, follow-up capture) that advisory is not re-injected. Known edge, accepted.
+- **Injection gate follows the epic, not `contextInjection`.** `claude-code` could technically carry an injected block, but per the epic every runtime without `systemMessages` gets direct delivery for all severities. Any still-open advisory (including a critical whose proactive delivery failed) is injected on runtimes with `systemMessages`.
+- **Critical system-only turn** goes through `processInbound` as the owner contact in the owner's default conversation with a new trusted option (`systemOnly`, `routeFilter`), not through `pool-manager`'s `notifySystem()`: that posts to channel `system`, which routes by the default rule rather than to the owning agent's conversation. The pipeline gives routing, pane leasing and session tracking for free. cc-headless treats `system_only` batches as system turn class. The placeholder body is logged to the transcript as an inbound message from the owner (flagged in metadata), which the Mac app may show in Main — open question.
+- **Direct delivery** enqueues a `system:bus` → `contact:<owner>` envelope for the delivery worker (the same path agent `send_message` uses), with an adapter check up front.
+- **Spoofing.** Three layers: look-alike marker neutralization in everything rendered after the blocks (bodies, quotes, file names, memory/topic context, and producer text inside blocks); the reserved metadata keys `system_blocks`/`system_only` are stripped in `processInbound` and `POST /api/v1/messages` (the agent-to-agent path could otherwise forge them); and **no HTTP route raises advisories**, so an agent with bus API access can't author block text. The "test producer" is the test suite.
+- **Retries.** Proactive delivery retries from the existing 60 s maintenance tick with linear backoff, max 5 attempts per (re)open; escalation resets attempts.
+- **Lifecycle storage.** A recurrence after resolve inserts a new row (history kept); a partial unique index enforces one active row per (agent, condition).

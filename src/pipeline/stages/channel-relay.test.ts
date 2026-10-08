@@ -34,7 +34,7 @@ function makeConfig(overrides: Partial<AppConfig['pipeline']> = {}): AppConfig {
     adapters: {},
     contacts: {},
     topics: ['general'],
-    memory: { summarizer_interval_ms: 60000, session_idle_threshold_ms: 1800000, context_window_hours: 48, claude_api_model: 'claude-opus-4-6' },
+    memory: { summarizer_interval_ms: 60000, session_idle_threshold_ms: 1800000, claude_api_model: 'claude-opus-4-6' },
     pipeline: {
       dedup_window_ms: 30000,
       drop_unrouted: false,

@@ -100,7 +100,7 @@ describe('scripts/hooks bus token', { timeout: 30_000 }, () => {
     const { args, stdin } = runHook('agentbus_stop_hook.sh', stopInput, 'tok-123');
     expect(stdin).toContain('header = "X-Bus-Token: tok-123"');
     expect(args).not.toContain('tok-123'); // never on the command line
-    expect(args).toContain('/api/v1/pool/peggy/turn-ended');
+    expect(args).toContain('/api/v1/journal/events');
   });
 
   it('stop hook sends no token header when AGENTBUS_BUS_TOKEN is unset', () => {

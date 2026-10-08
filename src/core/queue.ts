@@ -112,13 +112,16 @@ export class MessageQueue {
    * Atomically marks selected rows as `processing` within a transaction.
    * Optional `topic` filter restricts to a specific topic.
    */
-  dequeue(recipientId: string, topic?: string, limit = 10): QueuedMessage[] {
+  dequeue(recipientId: string, topic?: string, limit = 10, skip?: (envelope: MessageEnvelope) => boolean): QueuedMessage[] {
     const dequeueTransaction = this.db.transaction(
       (recipientId: string, topic: string | undefined, limit: number) => {
         const topicClause = topic ? 'AND topic = ?' : '';
+        // E66 — with `skip` (held messages), look further ahead so held rows
+        // don't crowd out deliverable ones; skipped rows stay pending.
+        const scan = skip ? Math.max(limit * 5, 200) : limit;
         const params: unknown[] = topic
-          ? [recipientId, topic, limit]
-          : [recipientId, limit];
+          ? [recipientId, topic, scan]
+          : [recipientId, scan];
 
         const rows = this.db
           .prepare(
@@ -133,9 +136,12 @@ export class MessageQueue {
           )
           .all(...params) as MessageRow[];
 
-        if (rows.length === 0) return [];
+        const picked = skip
+          ? rows.map(rowToQueuedMessage).filter((m) => !skip(m.envelope)).slice(0, limit)
+          : rows.map(rowToQueuedMessage);
+        if (picked.length === 0) return [];
 
-        const ids = rows.map((r) => r.id);
+        const ids = picked.map((m) => m.messageId);
         const placeholders = ids.map(() => '?').join(', ');
         const now = new Date().toISOString();
 
@@ -147,7 +153,7 @@ export class MessageQueue {
           )
           .run(now, ...ids);
 
-        return rows.map(rowToQueuedMessage);
+        return picked;
       }
     );
 

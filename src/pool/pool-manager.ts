@@ -22,6 +22,9 @@
  * queue/enqueue machinery itself, and never talks to tmux directly — all
  * pane mechanics go through the injected `PaneLauncher` seam.
  */
+import { memoryLayout, memorySettingsFor } from '../memory/layout.js';
+import { usesNativeMemory } from '../memory/native.js';
+import { runtimeCapabilities } from '../core/runtime-capabilities.js';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -43,7 +46,6 @@ import {
 } from './types.js';
 import { getUnhandledSince } from './unhandled-work.js';
 import { resolveModel as resolveModelFromStore, type ModelSource, type ResolvedModel } from '../adapters/model-override-loader.js';
-import type { JournalingRunner } from '../memory/session-tracker.js';
 import type { MessageQueue } from '../core/queue.js';
 import { resolveBusToken, withBusToken } from '../core/bus-auth.js';
 
@@ -143,6 +145,11 @@ export interface PoolManagerDeps {
    * windows get it as `AGENTBUS_BUS_TOKEN`.
    */
   busToken?: string;
+  /**
+   * E67 — the pool's memory dir when it loads memory natively. Every pane
+   * launch passes it to `claude` as `--settings {"autoMemoryDirectory":…}`.
+   */
+  autoMemoryDir?: string;
   /** Override for the recurring `sweepHardIdle()`+`drainParked()` interval
    *  `start()` schedules. Defaults to `DEFAULT_SWEEP_INTERVAL_MS` (60s). */
   sweepIntervalMs?: number;
@@ -196,17 +203,36 @@ export interface PoolPromptContext {
   background?: boolean;
 }
 
+/**
+ * E66 — called before a leased pane is released from its conversation, so
+ * journaling can evaluate the conversation (`evict` / `release` triggers).
+ * Hard-idle release (`release`) awaits it: the bus's hook waits for the
+ * journal run (bounded by the journaling timeout) before the pane is
+ * cleared or killed. LRU eviction (`evict`) does not wait (post-E66
+ * decision): the hook is called and the pane is released at once; the
+ * journal runs in the background from the transcript on disk. Must not
+ * throw; a rejection is logged and the release proceeds.
+ */
+export type PoolReleaseHook = (event: {
+  reason: 'evict' | 'release';
+  poolAgentId: string;
+  paneId: string;
+  /** Prefixed pane agent id, e.g. "agent:peggy-pool-2". */
+  paneAgentId: string;
+  conversationId: string;
+  claudeSessionId: string | null;
+}) => Promise<void> | void;
+
 export class PoolManager {
   /** = cfg.agent_id (bare) — validated unique across instances already by getCcPoolInstances. */
   readonly poolId: string;
   readonly leaseStore: LeaseStore;
   /** E52 stall detector; started/stopped with the manager. */
   readonly watchdog: PaneWatchdog;
-  /** Permanent, deliberate no-op — see the constructor assignment below for the full rationale. */
-  readonly journalingRunner: JournalingRunner;
 
   private readonly cfg: CcPoolInstanceConfig;
   private readonly db: Database.Database;
+  private releaseHook: PoolReleaseHook | undefined;
   private readonly paneLauncher: PaneLauncher;
   private readonly tmux: TmuxController;
   private readonly busBaseUrl: string;
@@ -290,43 +316,11 @@ export class PoolManager {
         busBaseUrl: deps.busBaseUrl,
         cfg: deps.cfg,
         ...(deps.busToken ? { busToken: deps.busToken } : {}),
+        ...(deps.autoMemoryDir ? { autoMemoryDir: deps.autoMemoryDir } : {}),
         scratchDir: deps.scratchDir ?? join(tmpdir(), 'agentbus-pool-scratch'),
       });
     }
 
-    // Permanent, deliberate no-op — not a placeholder to fill in later.
-    //
-    // Pool-managed sessions are interactive and long-lived: a human, or the
-    // live `claude` process already running in the pane, can update its own
-    // memory files directly at any time. Unlike cc-headless's batch
-    // `claude -p` turns — which have no ambient session to journal from
-    // between invocations, hence the silent `--resume` journaling turn —
-    // there is no out-of-band turn this bus process could productively fire
-    // for a pool pane.
-    //
-    // It still has to be registered. src/pool/types.ts's module doc explains
-    // why `sessions.claude_session_id` is deliberately written for
-    // pool-owned sessions (not left NULL): doing so opts them INTO
-    // `SessionTracker.dispatchJournaling()`'s base candidate query
-    // (`claude_session_id IS NOT NULL AND ...`), same as cc-headless
-    // sessions. `registerJournalingRunner()` requires *a* callable for
-    // whatever key it's registered under, so this exists to be that
-    // callable — a safe, correct default if it is ever actually invoked.
-    //
-    // Verified directly against src/memory/session-tracker.ts (not
-    // assumed): as `dispatchJournaling()` is written today, a pool
-    // session's runner is NOT actually reachable yet. Per-session dispatch
-    // resolves the owning instance via `instanceByAgentId`, which is built
-    // exclusively from `getCcHeadlessInstances(this.config)` — cc-pool
-    // instances are never in that map. So for a session whose `agent_id` is
-    // a pool pane's id (e.g. "agent:peggy-pool-3"), `instCfg` is
-    // `undefined` and the loop `continue`s before it even looks up
-    // `journalingRunners.get(agentKey)` — a registered pool runner is inert
-    // today regardless of this function's body. Closing that gap (teaching
-    // `dispatchJournaling()` to also consult `getCcPoolInstances()`)
-    // touches session-tracker.ts, which is outside this story's file list —
-    // left for the story that wires `PoolManager` into
-    // index.ts/SessionTracker.
     this.watchdog =
       deps.watchdog ??
       new PaneWatchdog({
@@ -337,10 +331,20 @@ export class PoolManager {
         incidentStore: new IncidentStore(deps.db),
         cfg: resolveWatchdogConfig(deps.cfg.watchdog),
       });
+  }
 
-    this.journalingRunner = async (_conversationId: string) => {
-      return { skipped: true };
-    };
+  /** E66 — install the journaling release hook (see `PoolReleaseHook`). */
+  setReleaseHook(hook: PoolReleaseHook | undefined): void {
+    this.releaseHook = hook;
+  }
+
+  private async beforeRelease(event: Parameters<PoolReleaseHook>[0]): Promise<void> {
+    if (!this.releaseHook) return;
+    try {
+      await this.releaseHook(event);
+    } catch (err) {
+      console.error(`[pool:${this.poolId}] release hook failed for ${event.paneId} (${event.reason}):`, err);
+    }
   }
 
   /**
@@ -462,8 +466,19 @@ export class PoolManager {
       // release below (or the launch after it) ever runs — see that
       // method's doc comment for why the entry must cover release too, not
       // just the launch call `runTrackedLaunch()` makes.
-      const launched = await this.trackPaneOperation(lease.pane_id, async () => {
+      // Post-E66 decision — eviction does not wait for the displaced
+      // conversation's journal run: acquire() has already moved the lease,
+      // so the live agent can't journal it anyway. The release hook fires
+      // the `evict` trigger and the journal runs in the background from the
+      // transcript on disk (cc-headless --fork-session, script), while the
+      // pane is released and relaunched right away.
+      const operation = this.trackPaneOperation(lease.pane_id, async () => {
         if (result.kind === 'evict') {
+          void this.beforeRelease({
+            reason: 'evict', poolAgentId: toPrefixedAgentId(this.cfg.agent_id), paneId: lease.pane_id,
+            paneAgentId: lease.agent_id, conversationId: result.evicted.conversationId,
+            claudeSessionId: result.evicted.claudeSessionId,
+          });
           // A failed /clear or kill on the displaced occupant must not block
           // seating the new conversation.
           try {
@@ -493,6 +508,8 @@ export class PoolManager {
           resolved,
         );
       });
+
+      const launched = await operation;
       if (!launched) {
         console.error(
           `[pool:${this.poolId}] Pane launch failed for ${lease.pane_id} — parking conversation ${conversationId}`,
@@ -1027,6 +1044,20 @@ export class PoolManager {
     const idleRows = this.leaseStore.findIdleOlderThan(this.poolId, cutoffIso);
 
     for (const row of idleRows) {
+      if (row.conversation_id) {
+        const hookStarted = new Date().toISOString();
+        await this.beforeRelease({
+          reason: 'release', poolAgentId: toPrefixedAgentId(this.cfg.agent_id), paneId: row.pane_id,
+          paneAgentId: row.agent_id, conversationId: row.conversation_id, claudeSessionId: row.claude_session_id,
+        });
+        // E66 — the hook may have waited minutes for a journal run (which
+        // itself holds new messages). Keep the pane if the conversation came
+        // back to life meanwhile.
+        if (this.revivedSince(row, hookStarted)) {
+          console.log(`[pool:${this.poolId}] sweepHardIdle: ${row.pane_id} is active again; not releasing`);
+          continue;
+        }
+      }
       try {
         await this.paneLauncher.release(row.pane_id, this.cfg.on_evict);
       } catch (err) {
@@ -1038,6 +1069,54 @@ export class PoolManager {
       }
       this.leaseStore.release(this.poolId, row.pane_id);
     }
+  }
+
+  /**
+   * E66 — true when, since `sinceIso`, the pane was re-leased, a person
+   * wrote in its conversation, or messages are waiting for it.
+   */
+  private revivedSince(row: PoolLeaseRow, sinceIso: string): boolean {
+    const fresh = this.leaseStore.findByPane(this.poolId, row.pane_id);
+    if (!fresh || fresh.state !== 'leased' || fresh.conversation_id !== row.conversation_id) return true;
+    const human = this.db
+      .prepare(
+        `SELECT 1 FROM transcripts
+         WHERE conversation_id = ? AND direction = 'inbound' AND created_at > ?
+           AND COALESCE(json_extract(metadata, '$.system_only'), 0) = 0
+         LIMIT 1`,
+      )
+      .get(row.conversation_id, sinceIso);
+    if (human) return true;
+    const waiting = this.db
+      .prepare(`SELECT 1 FROM message_queue WHERE recipient = ? AND status IN ('pending', 'processing') LIMIT 1`)
+      .get(row.agent_id);
+    return !!waiting;
+  }
+
+  /**
+   * E66 S66.9 — `/clear` on a pool conversation: detach the pane leased to
+   * it at once (so the next message gets a fresh pane and a fresh Claude
+   * session instead of the old context), then clear or kill the pane per
+   * `on_evict` and free it, in the background. The `/clear` handler has
+   * already closed the bus session and fired the journaling `clear`
+   * trigger; journalers that need the session read its transcript on disk,
+   * which neither `/clear` nor a kill removes. Returns the pane id, or null
+   * when no pane was leased to the conversation.
+   */
+  clearConversation(conversationId: string): { paneId: string; done: Promise<void> } | null {
+    const row = this.leaseStore.findByConversation(this.poolId, conversationId);
+    if (!row || row.state !== 'leased') return null;
+    if (!this.leaseStore.detach(this.poolId, row.pane_id, conversationId)) return null;
+    const done = this.trackPaneOperation(row.pane_id, async () => {
+      try {
+        await this.paneLauncher.release(row.pane_id, this.cfg.on_evict);
+      } catch (err) {
+        console.error(`[pool:${this.poolId}] /clear: failed to ${this.cfg.on_evict} ${row.pane_id} — freeing the lease anyway:`, err);
+      }
+      this.leaseStore.release(this.poolId, row.pane_id);
+      console.log(`[pool:${this.poolId}] /clear: released ${row.pane_id} (${this.cfg.on_evict}) for ${conversationId.slice(0, 8)}`);
+    });
+    return { paneId: row.pane_id, done };
   }
 
   /**
@@ -1277,7 +1356,12 @@ export function createPoolManagers(
     const resolveModel = (scheduleModel: string | null): PoolResolvedModel =>
       resolveModelFromStore({ scheduleModel, db, agentId, configModel: cfg.model });
     const busToken = resolveBusToken(config);
-    managers.set(agentId, new PoolManager({ cfg, db, busBaseUrl, queue, resolveModel, ...(busToken ? { busToken } : {}) }));
+    // E67 — native memory: panes load the pool's memory dir through auto memory.
+    const layout = memoryLayout(memorySettingsFor(config, agentId), cfg.working_dir ?? process.cwd());
+    const autoMemoryDir = usesNativeMemory(layout, runtimeCapabilities('cc-pool')) ? layout.memoryDir : null;
+    managers.set(agentId, new PoolManager({
+      cfg, db, busBaseUrl, queue, resolveModel, ...(busToken ? { busToken } : {}), ...(autoMemoryDir ? { autoMemoryDir } : {}),
+    }));
   }
   return managers;
 }

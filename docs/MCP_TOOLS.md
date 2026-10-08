@@ -20,8 +20,10 @@ Errors come back as `{ "content": [{ "type": "text", "text": "Error: ..." }], "i
 | `fetch_attachment` | Resolve an attachment ID to a file path | Always |
 | `schedule_message`, `list_schedules`, `cancel_schedule`, `update_schedule` | Scheduled messages | Always |
 | `set_model_override`, `get_model_override`, `list_model_overrides`, `delete_model_override` | Runtime model overrides (agent or global) | Always |
-| `recall_memory`, `log_memory` | Legacy structured memory store | Always; dormant unless `memory.structured_extraction` |
 | `write_knowledge`, `get_knowledge`, `forget_knowledge`, `search_knowledge` | Agent-managed structured knowledge store (Phase 1) | Always |
+| `advisory_ack` | Acknowledge a bus advisory after relaying it to the owner | Always |
+| `journal_complete` | Finish a System Message journal run | Polling adapter and cc-pool panes (not cc-headless) |
+| `propose_change` | Propose a change to a protected file (CLAUDE.md, skills, …) for an owner to approve | Always |
 | `get_adapter_status` | Health of the polling MCP adapter | Polling mode only |
 
 ## Messaging
@@ -174,23 +176,9 @@ Output: `{ "ok": true, "overrides": [{ "id", "scope", "model", "created_at", "up
 Input: `{ "agent_id"? }` deletes that agent's override; `{ "scope": "global" }` deletes the global one; `{ "all": true }` deletes every override.
 Output: `{ "ok": true, "deleted_count": n, "message" }`.
 
-## Legacy memory store
-
-Dormant unless `memory.structured_extraction` is true. The file-based memory model replaces it. See [MEMORY.md](MEMORY.md).
-
-### `recall_memory`
-
-Input: `{ "query": "...", "contact_id"?, "category"?, "limit"?: 10 }`. `limit` max 50; categories are `preference`, `fact`, `plan`, `relationship`, `work`, `health`, and `general`.
-Output: `{ "memories": [...], "count": n }`.
-
-### `log_memory`
-
-Input: `{ "contact_id": "chris", "content": "...", "category"?: "general", "confidence"?: 0.9, "source"?: "manual", "expires_at"? }`
-Output: `{ "ok": true, "id", "superseded": "<old id>" | null }`.
-
 ## Knowledge store
 
-Agent-managed structured knowledge (Phase 1: FTS5 keyword search, no embeddings yet). New and always-on, independent of the legacy memory store above. See [KNOWLEDGE_STORE.md](KNOWLEDGE_STORE.md).
+Agent-managed structured knowledge (Phase 1: FTS5 keyword search, no embeddings yet). New and always-on. (The legacy `recall_memory` / `log_memory` tools were removed after E66; see [MEMORY.md](MEMORY.md).) See [KNOWLEDGE_STORE.md](KNOWLEDGE_STORE.md).
 
 ### `write_knowledge`
 
@@ -211,6 +199,35 @@ Output: `{ "ok": true }`.
 
 Input: `{ "agent_id", "q"?, "kind"?, "tags"?, "facets"?, "event_from"?, "event_to"?, "limit"?: 10 }`. `limit` max 50. Omit `q` to filter/browse, newest-updated first. Always excludes superseded and expired rows.
 Output: `{ "results": [...], "count": n }`.
+
+## Advisories
+
+### `advisory_ack`
+
+Acknowledges a bus advisory once the agent has told its owner about it. Advisories arrive in an `<agentbus-system kind="advisories">` block at the start of a turn, each with an `id:` line. See [ADVISORIES.md](ADVISORIES.md).
+
+Input: `{ "id": "<advisory id>" }`. The calling agent's id is sent with it; a pool pane is mapped to its pool, and an agent can only acknowledge its own advisories.
+Output: `{ "success": true, "id", "state": "acknowledged", "already_acknowledged": false }`. Acknowledging twice is not an error (`already_acknowledged: true`). An unknown id, another agent's advisory, or a resolved one returns `isError`.
+
+## Journaling
+
+### `journal_complete`
+
+Finishes a System Message journal run (E66). The run arrives in an `<agentbus-system kind="journal" run_id="…">` block at the start of a turn. While it is open, new messages to the agent are held and its outbound sends (`reply`, `send_message`, `send_email`) fail with `journal_run_in_progress`; only this tool and `advisory_ack` work. See [JOURNALING.md](JOURNALING.md#system-message-journaler).
+
+Input: `{ "run_id", "files_changed"?: string[], "notes"?: string, "nothing_new"?: boolean }`. The calling agent's id is sent with it.
+Output: `{ "success": true, "run_id" }`. A run that already ended (timed out) or was already completed, an unknown run id, or another agent's run returns `isError`.
+
+## Agent learning
+
+### `propose_change`
+
+Proposes a change to one of the agent's **protected files** (`CLAUDE.md`, its system prompt file, `skills/`, `.claude/`, or what `agents.<id>.protected_paths` lists), which the agent can't edit itself (E68). The bus sends each owner an Approve/Deny request with the rationale, evidence and a compact diff; on approval it writes the file itself, if the file hasn't changed since the proposal. See [AGENT_LEARNING.md](AGENT_LEARNING.md#self-edit-proposals).
+
+Input: `{ "path", "new_content"? | "diff"?, "rationale", "evidence"?: string[], "run_id"? }`. Exactly one of `new_content` (the whole new file) and `diff` (a unified diff against the current file). `path` is relative to the agent's working dir. The calling agent's id is sent with it.
+Output: `{ "success": true, "proposal_id", "status": "pending", "notified_owners", "expires_at" }` (plus a `note` for an identical proposal already waiting). `isError` with the reason for a path that isn't protected (memory files: edit them directly), a diff that doesn't apply, no change, more than 3 proposals in 24 h, an agent without owners, or no owner reachable on a channel with interactive approvals (Telegram).
+
+Not available to cc-pool session journal forks (they run with no MCP servers); everywhere else, including cc-headless journaling and consolidation turns, it is.
 
 ## Polling adapter only
 
