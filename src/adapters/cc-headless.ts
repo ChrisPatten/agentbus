@@ -7,13 +7,13 @@
  *
  * Each configured `cc-headless` entry (legacy single-instance or named record,
  * see `getCcHeadlessInstances`) becomes an independent `HeadlessInstance` with
- * its own state (agent id, working dir, per-contact serialization queue, poll
+ * its own state (agent id, working dir, per-conversation queue, poll
  * timer) — multiple headless agents can run concurrently in one process
  * without sharing mutable state.
  *
- * Flow per contact batch:
+ * Flow per conversation batch:
  *   1. Poll bus HTTP API for pending messages scoped to this instance's agent_id
- *   2. Group by contact, serialize per-contact via promise chaining
+ *   2. Group by conversation, serialize within it via promise chaining
  *   3. Look up active session → claude_session_id for --resume
  *   4. Assemble memory blocks; for a real session, filter to new/changed
  *      blocks via the context-block ledger (context-ledger.ts) and prepend
@@ -37,13 +37,21 @@ import { loadConfig } from '../config/loader.js';
 import { getCcHeadlessInstances, type CcHeadlessInstanceConfig } from '../config/schema.js';
 import { renderSystemPrompt, expandFileReferences, type PromptContext } from './prompt-renderer.js';
 import { assembleMemoryContext, assembleMemoryBlocks, formatLocalDate } from './memory-context.js';
+import { memoryLayout, memorySettingsFor, type MemoryLayout } from '../memory/layout.js';
+import { DISABLE_AUTO_MEMORY_ENV, autoMemoryArgs, usesNativeMemory } from '../memory/native.js';
+import { runtimeCapabilities } from '../core/runtime-capabilities.js';
 import type { MessageEnvelope } from '../types/envelope.js';
 import { formatMessagesForSampling } from './cc.js';
+import { isSystemOnly } from '../core/system-block.js';
 import { formatToolCallSummary } from './tool-call-summary.js';
 import { resolveModel } from './model-override-loader.js';
 import { hashBlock, shouldSendBlock, markBlockSent, clearLedger, detectCompaction } from './context-ledger.js';
+import { HeadlessLimiter, type TurnClass } from './headless-limiter.js';
+import { terminateProcessGroup } from '../journaling/process.js';
+import { busTokenEnv, resolveBusToken, withBusToken } from '../core/bus-auth.js';
+import { JOURNAL_TURN_DISALLOWED_TOOLS } from '../learning/protected-paths.js';
 
-const configPath = process.env['AGENTBUS_CONFIG'] ?? resolve(process.cwd(), 'config.yaml');
+const configPath = resolve(process.env['AGENTBUS_CONFIG'] ?? 'config.yaml');
 const config = loadConfig(configPath);
 
 // ── DB helpers ────────────────────────────────────────────────────────────────
@@ -115,6 +123,9 @@ function resolveConversationId(db: Database.Database, env: MessageEnvelope): str
     .get(env.id) as { conversation_id: string } | undefined;
   if (row) return row.conversation_id;
 
+  const boundConversation = env.metadata?.['conversation_id'];
+  if (typeof boundConversation === 'string' && boundConversation.length > 0) return boundConversation;
+
   const parts = [normalizeContactId(env.sender), env.channel, env.topic].sort();
   return createHash('sha256').update(parts.join(':')).digest('hex');
 }
@@ -144,8 +155,12 @@ function cleanTmp(...paths: string[]): void {
   }
 }
 
-/** Build the stdio MCP config that exposes the headless tool subset to claude -p. Shared across instances — same config file, same tool subset. */
-function buildMcpConfig(): unknown {
+/**
+ * Build the stdio MCP config for this headless agent's tool subprocess.
+ * E68: also used for fresh consolidation runs on cc-pool agents, so the
+ * pass can call `propose_change`.
+ */
+export function buildMcpConfig(agentId: string): unknown {
   return {
     mcpServers: {
       agentbus: {
@@ -155,6 +170,7 @@ function buildMcpConfig(): unknown {
         env: {
           AGENTBUS_TOOLS_ONLY: 'true',
           AGENTBUS_CONFIG: configPath,
+          AGENTBUS_AGENT_ID: agentId,
         },
       },
     },
@@ -180,12 +196,47 @@ interface SpawnResult {
   inputTokens: number | null;
   outputTokens: number | null;
   numTurns: number | null;
+  /** E66 — a journaling turn hit its timeout or was aborted; its process group was killed. */
+  timedOut?: boolean;
 }
+
+/**
+ * E66 — options for a silent journaling turn: the journaler's model, a
+ * timeout, and an abort signal. Journaling turns run in their own process
+ * group, so a timeout or abort kills everything `claude -p` started.
+ */
+export interface JournalTurnOptions {
+  /** Overrides model resolution when set. */
+  model?: string | null;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+  /**
+   * E68 S68.4 — extra `--disallowedTools` rules for the turn, e.g.
+   * `Edit(//abs/agent/CLAUDE.md)`: edits to the agent's protected paths.
+   */
+  denyTools?: readonly string[];
+}
+
+/** Delivery tools a journaling turn may never call (a journal run never messages anyone). */
+const JOURNAL_DISALLOWED_TOOLS = 'mcp__agentbus__reply,mcp__agentbus__send_message,mcp__agentbus__send_email';
 
 /** MCP tool names (namespaced by the server key) that deliver to the user. */
 const DELIVERY_TOOL_NAMES = new Set(['mcp__agentbus__reply', 'mcp__agentbus__send_message']);
 
 const ERROR_DETAIL_MAX_LENGTH = 500;
+
+/** Text of a stream-json tool_result `content` (a string or an array of text blocks). */
+export function toolResultText(content: unknown): string {
+  if (typeof content === 'string') return content.slice(0, ERROR_DETAIL_MAX_LENGTH);
+  if (Array.isArray(content)) {
+    return content
+      .map((c) => (c && typeof c === 'object' && typeof (c as { text?: unknown }).text === 'string' ? (c as { text: string }).text : ''))
+      .filter(Boolean)
+      .join('\n')
+      .slice(0, ERROR_DETAIL_MAX_LENGTH);
+  }
+  return String(content ?? '').slice(0, ERROR_DETAIL_MAX_LENGTH);
+}
 
 /** One tool_use content block from a stream-json `assistant` event, with
  * delivery-tool detection folded in so extraction and delivery detection
@@ -241,32 +292,99 @@ export function selectReportableCalls(
   return { reportable, delivered };
 }
 
+/**
+ * E68 S68.2 — a tool call that failed in a normal (non-journaling) turn:
+ * a `tool_result` with `is_error` in the stream. `delivery` marks a failed
+ * reply/send_message call.
+ */
+export interface HeadlessToolError {
+  /** Prefixed agent id of the instance. */
+  agentId: string;
+  conversationId: string;
+  sessionId: string | null;
+  toolName: string;
+  error: string;
+  delivery: boolean;
+}
+
+/** E68 — bus hooks for headless instances. */
+export interface HeadlessHooks {
+  onToolError?: (event: HeadlessToolError) => void;
+}
+
 /** Handle returned per instance for the bus to drive journaling turns. */
 export interface HeadlessHandle {
   /**
-   * Fire a silent journaling turn for the given conversation. Resolves with
-   * `{ skipped: true }` when there is nothing to journal; rejects on error.
+   * E66 — run one silent `--resume` journaling turn and report how it went.
+   * Used by the journaling engine's cc-headless journaler. Works for open
+   * and closed (`/clear`) sessions alike: the ledger is only consulted when
+   * the conversation's active session still owns `claudeSessionId`.
    */
-  runJournalingTurn(conversationId: string): Promise<{ skipped?: boolean }>;
+  journalSession(opts: JournalSessionRequest): Promise<JournalSessionResult>;
   /**
-   * Fire a silent background journaling turn for an explicit claude session id
-   * whose DB session row has already been closed (used by `/clear`).
+   * E68 S68.1 — run one silent consolidation turn: a fresh `claude -p`
+   * (no `--resume`) in the agent's working dir, with the agent's system
+   * prompt and MCP tools, delivery tools disallowed. Serialized with the
+   * instance's other journaling turns.
    */
-  journalResumeId(opts: { claudeSessionId: string; contactId: string; channel: string }): void;
+  consolidate(opts: ConsolidationTurnRequest): Promise<JournalSessionResult>;
   /**
    * Kill the in-flight `claude -p` turn for `contactId`, if one is running
    * (used by `/stop`). Returns true if a turn was found and killed, false if
    * none was running.
    */
-  stopTurn(contactId: string): boolean;
+  stopTurn(conversationId: string): boolean;
+  subscribeActivity(listener: (event: HeadlessActivityEvent) => void): () => void;
+  snapshot(): HeadlessCapacitySnapshot;
   /**
    * The slash commands the CLI listed in its most recent `init` event, without
-   * the leading slash, or null before this instance's first turn (E58).
+   * the leading slash, or null before this instance's first turn (E71).
    */
   slashCommands(): string[] | null;
 }
 
-/** The forwarded provider command an envelope carries, if any (E58). */
+export interface JournalSessionRequest extends JournalTurnOptions {
+  conversationId: string;
+  claudeSessionId: string;
+  contactId: string;
+  channel: string;
+  /** Defaults to the instance's `journaling.prompt`. */
+  prompt?: string;
+}
+
+export interface ConsolidationTurnRequest extends JournalTurnOptions {
+  prompt: string;
+}
+
+export interface JournalSessionResult {
+  /** Null when the turn completed. */
+  error: string | null;
+  costUsd: number | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  /** True when the turn hit its timeout or was aborted and was killed. */
+  timedOut?: boolean;
+  /** The turn's final result text, when it completed. */
+  resultText?: string | null;
+}
+
+export interface HeadlessCapacitySnapshot {
+  agent_id: string;
+  running_user: number;
+  running_system: number;
+  waiting: number;
+  limit: number;
+  reserved_system_slots: number;
+}
+
+export interface HeadlessActivityEvent extends HeadlessCapacitySnapshot {
+  conversation_id: string;
+  session_id?: string;
+  state: 'queued' | 'running' | 'idle';
+  turn_class: TurnClass;
+}
+
+/** The forwarded provider command an envelope carries, if any (E71). */
 export function providerCommandOf(env: MessageEnvelope): { command: string; args_raw: string } | null {
   const pc = env.metadata?.['provider_command'] as { command?: unknown; args_raw?: unknown } | undefined;
   if (!pc || typeof pc.command !== 'string') return null;
@@ -275,7 +393,7 @@ export function providerCommandOf(env: MessageEnvelope): { command: string; args
 
 /**
  * Pure. Splits one contact's polled envelopes into turns, in order: a
- * forwarded provider command (E58) is always a turn of its own, and the
+ * forwarded provider command (E71) is always a turn of its own, and the
  * ordinary messages between commands stay batched together.
  */
 export function splitProviderCommands(batch: MessageEnvelope[]): MessageEnvelope[][] {
@@ -295,7 +413,7 @@ export function splitProviderCommands(batch: MessageEnvelope[]): MessageEnvelope
 }
 
 /**
- * A single headless agent's runtime state and behavior: poll loop, per-contact
+ * A single headless agent's runtime state and behavior: poll loop, per-conversation
  * serialization queue, and claude -p invocation. Fully self-contained — running
  * N instances concurrently in one process never shares mutable state between
  * them (E23).
@@ -304,35 +422,142 @@ class HeadlessInstance {
   private readonly cfg: CcHeadlessInstanceConfig;
   private readonly agentId: string;
   private readonly workingDir: string;
+  /** E67 — the agent's memory layout (agents.<id>.memory, else the deprecated cfg.memory). */
+  private readonly memory: MemoryLayout;
+  /** E67 — Claude Code auto memory loads the memory dir; the bus injects nothing. */
+  private readonly nativeMemory: boolean;
   private readonly busBaseUrl: string;
+  /** Fetch that adds X-Bus-Token to bus requests when bus.auth_token is set. */
+  private readonly busFetch: typeof fetch;
   private readonly label: string;
   private readonly queues = new Map<string, Promise<void>>();
-  /** In-flight `claude -p` child processes, keyed by contactId. Used by `/stop`. */
+  /** Serialize turns that resume the same Claude transcript even after an Earlier fork changes conversation ID. */
+  private readonly resumeTails = new Map<string, Promise<void>>();
+  private readonly limiter: HeadlessLimiter;
+  private readonly waiting = new Map<string, AbortController[]>();
+  private readonly listeners = new Set<(event: HeadlessActivityEvent) => void>();
+  private journalTail: Promise<void> = Promise.resolve();
+  /** In-flight `claude -p` child processes, keyed by conversation ID. */
   private readonly activeChildren = new Map<string, ChildProcess>();
   /** contactIds whose in-flight turn was killed via `/stop` — consulted once,
    * by that turn's own close handler, to skip the normal error-reply path. */
   private readonly stoppedByUser = new Set<string>();
-  /** Slash commands from the latest `init` event; null until the first turn (E58). */
+  /** Slash commands from the latest `init` event; null until the first turn (E71). */
   private knownSlashCommands: string[] | null = null;
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
   private shuttingDown = false;
 
-  constructor(cfg: CcHeadlessInstanceConfig, busBaseUrl: string) {
+  constructor(cfg: CcHeadlessInstanceConfig, busBaseUrl: string, private readonly hooks: HeadlessHooks = {}) {
     this.cfg = cfg;
     this.agentId = `agent:${cfg.agent_id}`;
     this.workingDir = cfg.working_dir ?? process.cwd();
+    this.memory = memoryLayout(memorySettingsFor(config, this.agentId), this.workingDir);
+    this.nativeMemory = usesNativeMemory(this.memory, runtimeCapabilities('cc-headless'));
     this.busBaseUrl = busBaseUrl;
+    this.busFetch = withBusToken(busBaseUrl, resolveBusToken(config));
     this.label = cfg.name ? `cc-headless:${cfg.name}` : 'cc-headless';
+    this.limiter = new HeadlessLimiter(cfg.max_concurrent_turns, cfg.reserved_system_slots);
   }
 
-  // ── Per-contact serialization ────────────────────────────────────────────
+  /** Environment for `claude -p` children. */
+  private childEnv(): NodeJS.ProcessEnv {
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      AGENTBUS_CONFIG: configPath,
+      AGENTBUS_AGENT_ID: this.cfg.agent_id,
+      AGENTBUS_TOOLS_ONLY: 'true',
+      ...busTokenEnv(resolveBusToken(config)),
+    };
+    if (this.nativeMemory) delete env[DISABLE_AUTO_MEMORY_ENV];
+    else env[DISABLE_AUTO_MEMORY_ENV] = '1';
+    return env;
+  }
 
-  private enqueue(contactId: string, task: () => Promise<void>): void {
-    const prev = this.queues.get(contactId) ?? Promise.resolve();
-    const next = prev.then(task).catch((err: unknown) => {
-      console.error(`[${this.label}] Error processing batch for ${contactId}:`, err);
+  snapshot(): HeadlessCapacitySnapshot {
+    const capacity = this.limiter.snapshot();
+    const waiting = [...this.waiting.values()].reduce((count, entries) => count + entries.length, 0);
+    return { agent_id: this.agentId, ...capacity, waiting };
+  }
+
+  subscribeActivity(listener: (event: HeadlessActivityEvent) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  private emitActivity(conversationId: string, sessionId: string | undefined,
+    state: HeadlessActivityEvent['state'], turnClass: TurnClass): void {
+    // E68: consolidation turns belong to no conversation; nothing to show.
+    if (conversationId.startsWith('consolidate:')) return;
+    const event: HeadlessActivityEvent = {
+      ...this.snapshot(), conversation_id: conversationId, session_id: sessionId,
+      state, turn_class: turnClass,
+    };
+    for (const listener of this.listeners) {
+      try { listener(event); } catch (error) { console.error(`[${this.label}] activity listener failed:`, error); }
+    }
+  }
+
+  // ── Per-conversation serialization and per-instance capacity ─────────────
+
+  private enqueue(conversationId: string, sessionId: string | undefined, turnClass: TurnClass,
+    journal: boolean, task: () => Promise<void>, resumeId?: string | null): Promise<void> {
+    const previous = (this.queues.get(conversationId) ?? Promise.resolve()).catch(() => {});
+    const controller = new AbortController();
+    const entries = this.waiting.get(conversationId) ?? [];
+    entries.push(controller);
+    this.waiting.set(conversationId, entries);
+    const queuedAt = Date.now();
+    this.emitActivity(conversationId, sessionId, 'queued', turnClass);
+    let releaseJournal: (() => void) | undefined;
+    const journalGate = journal ? new Promise<void>((resolve) => { releaseJournal = resolve; }) : undefined;
+    const previousJournal = this.journalTail;
+    if (journalGate) this.journalTail = journalGate;
+    const previousResume = resumeId ? (this.resumeTails.get(resumeId) ?? Promise.resolve()) : Promise.resolve();
+    let releaseResume: (() => void) | undefined;
+    const resumeGate = resumeId ? new Promise<void>(resolve => { releaseResume = resolve; }) : undefined;
+    if (resumeId && resumeGate) this.resumeTails.set(resumeId, resumeGate);
+    const next = previous.then(async () => {
+      let release: (() => void) | undefined;
+      let startedAt: number | undefined;
+      try {
+        if (journal) await previousJournal;
+        await previousResume;
+        if (controller.signal.aborted) throw new Error('turn cancelled');
+        release = await this.limiter.acquire(turnClass, controller.signal);
+        const pending = this.waiting.get(conversationId);
+        if (pending) {
+          const index = pending.indexOf(controller);
+          if (index >= 0) pending.splice(index, 1);
+          if (pending.length === 0) this.waiting.delete(conversationId);
+        }
+        startedAt = Date.now();
+        this.emitActivity(conversationId, sessionId, 'running', turnClass);
+        console.log(`[${this.label}] turn start class=${turnClass} conversation=${conversationId.slice(0, 8)} wait_ms=${startedAt - queuedAt}`);
+        await task();
+      } catch (error) {
+        if (!controller.signal.aborted) console.error(`[${this.label}] Error processing ${conversationId.slice(0, 8)}:`, error);
+        throw error;
+      } finally {
+        if (startedAt !== undefined) {
+          console.log(`[${this.label}] turn settle class=${turnClass} conversation=${conversationId.slice(0, 8)} run_ms=${Date.now() - startedAt}`);
+        }
+        release?.();
+        releaseResume?.();
+        if (resumeId && this.resumeTails.get(resumeId) === resumeGate) this.resumeTails.delete(resumeId);
+        releaseJournal?.();
+        const pending = this.waiting.get(conversationId);
+        if (pending?.includes(controller)) {
+          pending.splice(pending.indexOf(controller), 1);
+          if (pending.length === 0) this.waiting.delete(conversationId);
+        }
+        this.emitActivity(conversationId, sessionId,
+          this.waiting.has(conversationId) ? 'queued' : 'idle', turnClass);
+      }
     });
-    this.queues.set(contactId, next);
+    this.queues.set(conversationId, next);
+    void next.then(() => { if (this.queues.get(conversationId) === next) this.queues.delete(conversationId); },
+      () => { if (this.queues.get(conversationId) === next) this.queues.delete(conversationId); });
+    return next;
   }
 
   // ── claude -p invocation ─────────────────────────────────────────────────
@@ -342,36 +567,41 @@ class HeadlessInstance {
     systemPromptPath: string,
     mcpConfigPath: string,
     resumeId: string | null,
-    contactId: string,
+    conversationId: string,
     onToolCall?: (call: { name: string; input: Record<string, unknown> }) => void,
     /**
      * E30 — fired exactly once, the moment a delivery tool call
      * (`reply`/`send_message`) is first seen in the stream, *before* the
-     * child process necessarily exits. Lets callers (processBatch) unblock
-     * the per-contact queue as soon as the user has their answer instead of
-     * waiting on any trailing tool calls / process teardown — see
-     * `HeadlessInstance.enqueue` and docs/CC_HEADLESS_ADAPTER.md#memory-logging-e30.
+     * child process necessarily exits. Callers may observe delivery, while
+     * conversation ownership remains held until child exit.
      */
     onDelivered?: () => void,
     /**
      * E30 — fired exactly once, as soon as the claude session id is first
      * seen in the stream (the earliest event, well before delivery). Lets
      * `runClaudeTurn` persist it to the DB immediately instead of waiting
-     * for the process to close — needed because S30.4 now lets the next
-     * queued message for this contact start as soon as `onDelivered` fires,
-     * which can be before this function's promise resolves. Without early
-     * persistence, a rapid-fire second message on a brand-new conversation
-     * could read a stale/null `claude_session_id` and fail to `--resume` the
-     * session the first message just created.
+     * for the process to close, so queued work and activity observers can
+     * learn the session identity promptly.
      */
     onSessionId?: (id: string) => void,
-    opts?: { db?: Database.Database; scheduleModel?: string | null; agentId?: string | null },
+    opts?: {
+      db?: Database.Database; scheduleModel?: string | null; agentId?: string | null; journal?: JournalTurnOptions;
+      /** E68 — a tool_result with is_error arrived (tool name, error text). */
+      onToolError?: (toolName: string, error: string, delivery: boolean) => void;
+    },
   ): Promise<SpawnResult> {
+    const journal = opts?.journal;
     const args = [
       '-p', prompt,
       '--output-format', 'stream-json',
       '--verbose', // required by the CLI when --print is combined with --output-format=stream-json
-      '--allowedTools', 'all',
+      // "all" is treated as a tool name, not a wildcard. Delivery must be
+      // explicitly allowed because this is a noninteractive Claude process.
+      // E66: a journaling turn never delivers, so it gets the opposite.
+      // E68: journal and consolidation turns also run without Bash.
+      ...(journal
+        ? ['--disallowedTools', [JOURNAL_DISALLOWED_TOOLS, ...JOURNAL_TURN_DISALLOWED_TOOLS, ...(journal.denyTools ?? [])].join(',')]
+        : ['--allowedTools', 'mcp__agentbus__reply,mcp__agentbus__send_message']),
       '--mcp-config', mcpConfigPath,
       '--system-prompt-file', systemPromptPath,
     ];
@@ -379,12 +609,15 @@ class HeadlessInstance {
     // Resolve model: the fired schedule's own model, then an agent/global
     // override, then this instance's configured model. See
     // src/adapters/model-override-loader.ts and docs/CC_HEADLESS_ADAPTER.md.
-    const { model, source } = resolveModel({
-      scheduleModel: opts?.scheduleModel,
-      db: opts?.db,
-      agentId: opts?.agentId,
-      configModel: this.cfg.model,
-    });
+    // E66: a journaling turn with a journaler model uses it as-is.
+    const { model, source } = journal?.model
+      ? { model: journal.model, source: 'journaler' }
+      : resolveModel({
+          scheduleModel: opts?.scheduleModel,
+          db: opts?.db,
+          agentId: opts?.agentId,
+          configModel: this.cfg.model,
+        });
     console.error(`[${this.label}] Resolved model: ${model ?? '(cli default)'} (source=${source})`);
 
     if (model) {
@@ -393,27 +626,51 @@ class HeadlessInstance {
     if (resumeId) {
       args.push('--resume', resumeId);
     }
+    // E67 — native memory: point Claude Code auto memory at the agent's
+    // memory dir (no per-agent settings file needed).
+    args.push(...autoMemoryArgs(this.memory, runtimeCapabilities('cc-headless')));
 
-    // Normalized so /stop's stopTurn() finds this turn regardless of which
-    // contactId format the caller used (see normalizeContactId).
-    const trackingId = normalizeContactId(contactId);
+    const trackingId = conversationId;
 
     return new Promise((resolvePromise) => {
       // cwd drives which CLAUDE.md hierarchy claude -p auto-loads into context.
-      // CLAUDE_CODE_DISABLE_AUTO_MEMORY: the adapter already injects the agent's
-      // memory files via {{memories}} in the system prompt, so the CLI's native
-      // auto-memory feature would load MEMORY.md a second time. Disable it here so
-      // every headless agent avoids the double-load without per-agent config.
+      // E67: with native memory, auto memory loads the memory dir (--settings
+      // above) and an inherited CLAUDE_CODE_DISABLE_AUTO_MEMORY is dropped.
+      // An agent that keeps bus injection (memory.native: false) gets the
+      // variable set, so the CLI doesn't load MEMORY.md a second time.
       const child = spawn(this.cfg.claude_bin, args, {
         stdio: ['ignore', 'pipe', 'pipe'],
         cwd: this.workingDir,
-        env: { ...process.env, CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' },
+        // E66: journaling turns lead their own process group so a timeout
+        // or abort can stop everything they started.
+        ...(journal ? { detached: true } : {}),
+        // Claude may pass its own process environment through to MCP children
+        // ahead of the per-server env block. Keep these absolute and scoped to
+        // this headless instance so cc.ts does not look for config.yaml in the
+        // agent's working directory or fall back to the wrong agent.
+        env: this.childEnv(),
       });
       this.activeChildren.set(trackingId, child);
+
+      // E66 — journaling turns: kill the process group on timeout or abort.
+      let timedOut = false;
+      let cancelKill: (() => void) | null = null;
+      const stopJournal = () => {
+        timedOut = true;
+        if (!cancelKill) cancelKill = terminateProcessGroup(child);
+      };
+      const journalTimer = journal?.timeoutMs ? setTimeout(stopJournal, journal.timeoutMs) : null;
+      journalTimer?.unref?.();
+      if (journal?.signal?.aborted) stopJournal();
+      else journal?.signal?.addEventListener('abort', stopJournal, { once: true });
 
       let claudeSessionId: string | null = null;
       let resultText: string | null = null;
       let deliveredViaTool = false;
+      const pendingDeliveryIds = new Set<string>();
+      /** E68: tool_use id → tool name, to name a failed tool_result. */
+      const toolNames = new Map<string, string>();
+      let completedDelivery = false;
       let errorOutput = '';
       let spawnError: string | null = null;
       let totalCostUsd: number | null = null;
@@ -437,7 +694,7 @@ class HeadlessInstance {
             subtype?: string;
             /** Only on the `system`/`init` event. */
             slash_commands?: unknown;
-            message?: { content?: Array<{ type?: string; name?: string; input?: unknown }> };
+            message?: { content?: Array<{ type?: string; id?: string; name?: string; input?: unknown; tool_use_id?: string; is_error?: boolean; content?: unknown }> };
             /** E39 — only present on the terminal `result` event. */
             total_cost_usd?: number;
             usage?: { input_tokens?: number; output_tokens?: number };
@@ -449,7 +706,7 @@ class HeadlessInstance {
             onSessionId?.(event.session_id);
           }
 
-          // E58: remember which slash commands this CLI accepts headless, so
+          // E71: remember which slash commands this CLI accepts headless, so
           // the bus can refuse to forward one it doesn't.
           if (event.type === 'system' && event.subtype === 'init' && Array.isArray(event.slash_commands)) {
             this.knownSlashCommands = event.slash_commands
@@ -468,6 +725,36 @@ class HeadlessInstance {
           const wasDelivered = deliveredViaTool;
           const { reportable, delivered } = selectReportableCalls(extractToolCalls(event), deliveredViaTool);
           deliveredViaTool = delivered;
+          if (event.type === 'assistant') {
+            for (const block of event.message?.content ?? []) {
+              if (block.type === 'tool_use' && block.id && block.name) toolNames.set(block.id, block.name);
+              if (block.type === 'tool_use' && block.id && block.name && DELIVERY_TOOL_NAMES.has(block.name)) {
+                pendingDeliveryIds.add(block.id);
+              }
+            }
+          }
+          if (event.type === 'user' && opts?.onToolError) {
+            for (const block of event.message?.content ?? []) {
+              if (block.type !== 'tool_result' || !block.is_error || !block.tool_use_id) continue;
+              const name = toolNames.get(block.tool_use_id) ?? 'unknown tool';
+              try {
+                opts.onToolError(name, toolResultText(block.content), DELIVERY_TOOL_NAMES.has(name));
+              } catch (err) {
+                console.error(`[${this.label}] onToolError failed:`, err);
+              }
+            }
+          }
+          if (event.type === 'user') {
+            for (const block of event.message?.content ?? []) {
+              if (block.type !== 'tool_result' || !block.tool_use_id || !pendingDeliveryIds.delete(block.tool_use_id)) continue;
+              if (block.is_error) {
+                console.error(`[${this.label}] delivery tool failed: ${String(block.content).slice(0, ERROR_DETAIL_MAX_LENGTH)}`);
+                if (!completedDelivery && pendingDeliveryIds.size === 0) deliveredViaTool = false;
+              } else if (!block.is_error) {
+                completedDelivery = true;
+              }
+            }
+          }
           for (const call of reportable) {
             onToolCall?.({ name: call.name, input: call.input });
           }
@@ -504,10 +791,19 @@ class HeadlessInstance {
 
       child.on('close', (code) => {
         rl.close();
+        if (journalTimer) clearTimeout(journalTimer);
+        journal?.signal?.removeEventListener('abort', stopJournal);
         if (this.activeChildren.get(trackingId) === child) this.activeChildren.delete(trackingId);
         const wasStopped = this.stoppedByUser.delete(trackingId);
 
-        if (wasStopped) {
+        if (timedOut) {
+          resolvePromise({
+            claudeSessionId, resultText: null, deliveredViaTool, stoppedByUser: false,
+            error: journal?.signal?.aborted ? 'journaling turn aborted; process group killed'
+              : `journaling turn timed out after ${journal?.timeoutMs} ms; process group killed`,
+            totalCostUsd, inputTokens, outputTokens, numTurns, timedOut: true,
+          });
+        } else if (wasStopped) {
           resolvePromise({
             claudeSessionId, resultText: null, deliveredViaTool, error: null, stoppedByUser: true,
             totalCostUsd, inputTokens, outputTokens, numTurns,
@@ -541,12 +837,12 @@ class HeadlessInstance {
    * Email channels have no typing indicator, so skip the call entirely. `topic`
    * (E28) further targets a specific Telegram forum topic within a group.
    */
-  private startTyping(channel: string, contactId: string, topic?: string): void {
+  private startTyping(channel: string, contactId: string, topic?: string, conversationId?: string): void {
     if (channel === 'email' || channel.startsWith('email:')) return;
-    fetch(`${this.busBaseUrl}/api/v1/adapters/${channel}/typing`, {
+    this.busFetch(`${this.busBaseUrl}/api/v1/adapters/${channel}/typing`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contact_id: contactId, topic }),
+      body: JSON.stringify({ contact_id: contactId, topic, conversation_id: conversationId }),
     }).catch(() => {});
   }
 
@@ -557,18 +853,18 @@ class HeadlessInstance {
    * skip the call entirely, matching startTyping's existing email skip.
    * `topic` (E28) further targets a specific Telegram forum topic.
    */
-  private reportToolCall(channel: string, contactId: string, text: string, topic?: string): void {
+  private reportToolCall(channel: string, contactId: string, text: string, topic?: string, conversationId?: string): void {
     if (channel === 'email' || channel.startsWith('email:')) return;
-    fetch(`${this.busBaseUrl}/api/v1/adapters/${channel}/tool-status`, {
+    this.busFetch(`${this.busBaseUrl}/api/v1/adapters/${channel}/tool-status`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contact_id: contactId, text, topic }),
+      body: JSON.stringify({ contact_id: contactId, text, topic, conversation_id: conversationId }),
     }).catch(() => {});
   }
 
   /**
-   * Kill the in-flight `claude -p` turn for `contactId`, if one is running
-   * (`/stop`). Marks the contact as user-stopped first so the turn's own
+   * Kill the in-flight `claude -p` turn for `conversationId`, if one is running
+   * (`/stop`). Marks the conversation as user-stopped first so the turn's own
    * close handler resolves with `stoppedByUser: true` instead of treating
    * the kill as a crash needing an error reply.
    *
@@ -579,12 +875,16 @@ class HeadlessInstance {
    * be caught, so the whole turn dies outright and the user, not the agent,
    * decides what happens next.
    */
-  stopTurn(contactId: string): boolean {
-    const trackingId = normalizeContactId(contactId);
-    const child = this.activeChildren.get(trackingId);
-    if (!child) return false;
-    this.stoppedByUser.add(trackingId);
-    child.kill('SIGKILL');
+  stopTurn(conversationId: string): boolean {
+    const child = this.activeChildren.get(conversationId);
+    if (child) {
+      this.stoppedByUser.add(conversationId);
+      child.kill('SIGKILL');
+      return true;
+    }
+    const waiting = this.waiting.get(conversationId);
+    if (!waiting?.length) return false;
+    waiting[0]!.abort();
     return true;
   }
 
@@ -600,7 +900,7 @@ class HeadlessInstance {
       metadata: {},
     };
 
-    const res = await fetch(`${this.busBaseUrl}/api/v1/messages`, {
+    const res = await this.busFetch(`${this.busBaseUrl}/api/v1/messages`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -625,13 +925,14 @@ class HeadlessInstance {
   /**
    * Render the system prompt, write temp files, invoke claude -p, and persist any
    * new claude_session_id. Shared by normal turns (processBatch) and silent
-   * journaling turns (runJournalingTurn). The memory context block is assembled
+   * journaling turns (journalSession). The memory context block is assembled
    * fresh from the agent's files on every call.
    */
   private async runClaudeTurn(opts: {
     db: Database.Database;
     session: SessionRow | null;
     contactId: string;
+    conversationId: string;
     channel: string;
     prompt: string;
     resumeId: string | null;
@@ -645,8 +946,10 @@ class HeadlessInstance {
      * model. See `resolveModel` in model-override-loader.ts.
      */
     scheduleModel?: string | null;
+    /** E66 — set for silent journaling turns. */
+    journal?: JournalTurnOptions;
     /**
-     * E58 — send `prompt` exactly as given, with no memory-block prefix. The
+     * E71 — send `prompt` exactly as given, with no memory-block prefix. The
      * CLI only treats a prompt as a slash command when it starts with "/".
      */
     rawPrompt?: boolean;
@@ -656,13 +959,17 @@ class HeadlessInstance {
     // Context-block ledger (migration 017 / src/adapters/context-ledger.ts):
     // only meaningful when there's a real, resumable session to track it
     // against — mirrors the `!opts.session` guard `persistSessionId` uses
-    // below. `opts.session` is null for /clear's journalResumeId (the DB
+    // below. `opts.session` is null for a closed (/clear) session's journaling turn (the DB
     // session row is already closed), so that path keeps sending the full,
     // unfiltered memory context every time via the fallback below.
     let promptForClaude = opts.prompt;
     let blocksSentThisTurn: Array<{ key: string; hash: string }> = [];
 
-    if (opts.session && !opts.rawPrompt) {
+    // E67: with native memory there are no memory blocks and nothing for the
+    // ledger to track; Claude Code reloads CLAUDE.md, its imports (recent.md)
+    // and auto memory from disk on every invocation, --resume included.
+    // E71: a forwarded provider command goes out bare so the CLI runs it.
+    if (opts.session && !this.nativeMemory && !opts.rawPrompt) {
       // Sharp input-token drop since the last turn: Claude Code's own
       // auto-compaction likely summarized the resumed transcript, so the
       // ledger's record of "this session already has block X in context" no
@@ -671,7 +978,7 @@ class HeadlessInstance {
         clearLedger(opts.db, opts.session.id);
       }
 
-      const hashedBlocks = assembleMemoryBlocks(this.workingDir, this.cfg.memory, now).map((b) => ({
+      const hashedBlocks = assembleMemoryBlocks(this.memory).map((b) => ({
         block: b,
         hash: hashBlock(b.content),
       }));
@@ -700,7 +1007,7 @@ class HeadlessInstance {
       // `promptForClaude` instead. When there's no session to track a ledger
       // against, fall back to the old behavior of inlining the full context
       // via {{memories}}.
-      memories: opts.session ? '' : assembleMemoryContext(this.workingDir, this.cfg.memory, now),
+      memories: opts.session || this.nativeMemory ? '' : assembleMemoryContext(this.memory),
       // E20: structured DB summaries are retired; files are the source of truth.
       session_summary: '',
       agent_id: this.agentId,
@@ -713,15 +1020,10 @@ class HeadlessInstance {
     );
 
     const spPath = writeTmp(systemPromptText, '.txt');
-    const mcpPath = writeTmp(JSON.stringify(buildMcpConfig()), '.json');
+    const mcpPath = writeTmp(JSON.stringify(buildMcpConfig(this.cfg.agent_id)), '.json');
 
-    // E30 (S30.4): persist claude_session_id as soon as it's known, not just
-    // at the end. Once the queue can advance to the next message at delivery
-    // (before this process exits — see onDelivered below), a rapid-fire
-    // second message on a brand-new conversation must be able to --resume
-    // the session the first message just created rather than reading a
-    // stale/null value. Idempotent: the same value is written again (a
-    // no-op) once the turn actually completes.
+    // Persist claude_session_id as soon as known so session observers have it
+    // before child exit. The final write below is idempotent.
     const persistSessionId = (id: string): void => {
       if (!opts.session) return;
       try {
@@ -755,7 +1057,7 @@ class HeadlessInstance {
         spPath,
         mcpPath,
         opts.resumeId,
-        opts.contactId,
+        opts.conversationId,
         opts.onToolCall,
         opts.onDelivered,
         persistSessionId,
@@ -763,6 +1065,15 @@ class HeadlessInstance {
           db: opts.db,
           agentId: this.agentId,
           scheduleModel: opts.scheduleModel,
+          journal: opts.journal,
+          // E68: tool errors in normal turns become feedback events; journaling turns are bus internals.
+          ...(!opts.journal && this.hooks.onToolError
+            ? {
+                onToolError: (toolName: string, error: string, delivery: boolean) => this.hooks.onToolError!({
+                  agentId: this.agentId, conversationId: opts.conversationId, sessionId: opts.session?.id ?? null, toolName, error, delivery,
+                }),
+              }
+            : {}),
         },
       );
       // Final persist covers the case where the session id changed (rare) or
@@ -789,7 +1100,7 @@ class HeadlessInstance {
 
   // ── Batch processor ──────────────────────────────────────────────────────
 
-  private async processBatch(envelopes: MessageEnvelope[], db: Database.Database): Promise<void> {
+  private async processBatch(envelopes: MessageEnvelope[], db: Database.Database, conversationId: string): Promise<void> {
     const first = envelopes[0]!;
     const contactId = first.sender; // contact:alice after pipeline resolution
     const channel = first.channel;
@@ -797,16 +1108,13 @@ class HeadlessInstance {
 
     // Show activity on the source channel (and forum topic, if any — E28)
     // while the (cold-start) claude -p runs.
-    this.startTyping(channel, contactId, topic);
+    this.startTyping(channel, contactId, topic, conversationId);
 
     // E20: key resume on conversation_id (per-thread sessions, long-lived).
-    const conversationId = resolveConversationId(db, first);
     const session = getActiveSession(db, conversationId);
     const resumeId = session?.claude_session_id ?? null;
 
-    // Memory is injected via the system prompt (assembleMemoryContext), so suppress
-    // the Stage-85 <memory> block in the user message to avoid double injection.
-    const prompt = formatMessagesForSampling(envelopes, { includeMemoryContext: false });
+    const prompt = formatMessagesForSampling(envelopes);
 
     // E53: the scheduler stamps metadata.schedule_model on the fired envelope
     // when the schedule that triggered this batch has its own `model`. Only
@@ -815,103 +1123,57 @@ class HeadlessInstance {
     const rawScheduleModel = first.metadata?.['schedule_model'];
     const scheduleModel = typeof rawScheduleModel === 'string' && rawScheduleModel.trim().length > 0 ? rawScheduleModel : undefined;
 
-    // E30 (S30.4): the per-contact queue (`enqueue`) should advance as soon
-    // as the user has their answer, not after the whole claude -p process
-    // exits — S30.1 already stops the *agent* from doing real work after
-    // replying, but nothing previously stopped this adapter from blocking
-    // the next queued message on the process's trailing teardown regardless.
-    // `delivered` resolves at the earlier of: (a) `onDelivered` firing mid-
-    // stream the moment a reply/send_message tool call is seen, or (b) the
-    // whole run settling — which covers the stdout-fallback, error, and
-    // stopped-by-user paths, none of which have anything for the queue to
-    // gain by waiting on since they have no delivery tool call to race.
-    let resolveDelivered: () => void;
-    const delivered = new Promise<void>((resolve) => {
-      resolveDelivered = resolve;
-    });
-
-    const runPromise = this.runClaudeTurn({
+    // Delivery can happen before child exit. Keep conversation ownership until
+    // both exit and fallback delivery settle, so no two children ever resume
+    // the same claude session concurrently.
+    const { resultText, deliveredViaTool, error, stoppedByUser } = await this.runClaudeTurn({
       db,
       session,
       contactId,
+      conversationId,
       channel,
       prompt,
       resumeId,
       onToolCall: (call) =>
-        this.reportToolCall(channel, contactId, formatToolCallSummary(call.name, call.input), topic),
-      onDelivered: () => resolveDelivered(),
+        this.reportToolCall(channel, contactId, formatToolCallSummary(call.name, call.input), topic, conversationId),
       scheduleModel,
     });
-    // Settle `delivered` on any outcome so a run that never calls a delivery
-    // tool doesn't block the queue past its own completion. The rejection
-    // itself is handled below, not surfaced through `delivered`.
-    runPromise.then(
-      () => resolveDelivered(),
-      () => resolveDelivered(),
-    );
-
-    await delivered;
-
-    // Everything past this point — stdout-fallback delivery, error handling,
-    // and (inside runClaudeTurn) final session-id persistence — runs in the
-    // background and no longer blocks the next queued message for this
-    // contact. Errors here are logged, matching enqueue()'s own top-level
-    // catch for the pre-E30 behavior.
-    void runPromise
-      .then(async ({ resultText, deliveredViaTool, error, stoppedByUser }) => {
-        if (stoppedByUser) {
-          // `/stop` killed this turn. The source adapter (Telegram) has
-          // already finalized any open draft with a "Stopped by user" note —
-          // nothing further to deliver, and definitely not the normal error
-          // reply.
-          return;
-        }
-
-        // The agent owns delivery via the reply/send_message tools. Only the
-        // adapter steps in when the agent delivered nothing through a tool:
-        //   - on failure / no result → send the configured error_reply (no silence)
-        //   - otherwise → fall back to delivering the stdout result text
-        if (deliveredViaTool) {
-          if (error) {
-            console.error(`[${this.label}] claude reported an error for ${contactId} after delivering via tool: ${error}`);
-          }
-          return;
-        }
-
-        if (error || !resultText) {
-          const detail = error ?? 'no result';
-          console.error(`[${this.label}] claude invocation failed for ${contactId}: ${detail}`);
-          await this.deliverResponse(first, this.buildErrorReply(detail));
-          return;
-        }
-
-        await this.deliverResponse(first, resultText);
-      })
-      .catch((err: unknown) => {
-        console.error(`[${this.label}] Error finishing batch for ${contactId}:`, err);
-      });
+    if (stoppedByUser) return;
+    if (deliveredViaTool) {
+      if (error) console.error(`[${this.label}] claude reported an error for ${conversationId.slice(0, 8)} after delivery: ${error}`);
+      return;
+    }
+    if (error || !resultText) {
+      const detail = error ?? 'no result';
+      console.error(`[${this.label}] claude invocation failed for ${conversationId.slice(0, 8)}: ${detail}`);
+      await this.deliverResponse(first, this.buildErrorReply(detail));
+      return;
+    }
+    await this.deliverResponse(first, resultText);
   }
 
-  // ── Forwarded provider command (E58) ─────────────────────────────────────
+  // ── Forwarded provider command (E71) ─────────────────────────────────────
 
   /**
    * Run a forwarded slash command as its own turn: the prompt is the bare
    * "/name args" line (resuming the conversation's session), and the
-   * command's own output is delivered as the reply. Runs on the per-contact
-   * queue, so it never races a normal turn on the same session.
+   * command's own output is delivered as the reply. Runs on the
+   * per-conversation queue, so it never races a normal turn on the same
+   * session.
    */
-  private async processProviderCommand(env: MessageEnvelope, db: Database.Database): Promise<void> {
+  private async processProviderCommand(env: MessageEnvelope, db: Database.Database, conversationId: string): Promise<void> {
     const pc = providerCommandOf(env)!;
     const line = pc.args_raw ? `/${pc.command} ${pc.args_raw}` : `/${pc.command}`;
     const contactId = env.sender;
 
-    this.startTyping(env.channel, contactId, env.topic);
+    this.startTyping(env.channel, contactId, env.topic, conversationId);
 
-    const session = getActiveSession(db, resolveConversationId(db, env));
+    const session = getActiveSession(db, conversationId);
     const result = await this.runClaudeTurn({
       db,
       session,
       contactId,
+      conversationId,
       channel: env.channel,
       prompt: line,
       resumeId: session?.claude_session_id ?? null,
@@ -920,7 +1182,7 @@ class HeadlessInstance {
 
     if (result.stoppedByUser) return;
     if (result.error) {
-      console.error(`[${this.label}] ${line} failed for ${contactId}: ${result.error}`);
+      console.error(`[${this.label}] ${line} failed for ${conversationId.slice(0, 8)}: ${result.error}`);
       await this.deliverResponse(env, `${line} failed: ${result.error.slice(0, ERROR_DETAIL_MAX_LENGTH)}`);
       return;
     }
@@ -935,74 +1197,88 @@ class HeadlessInstance {
     await this.deliverResponse(env, result.resultText?.trim() ? result.resultText : `Ran ${line}.`);
   }
 
-  // ── Silent journaling turn (E20) ─────────────────────────────────────────
+  // ── Silent journaling turn (E20, E66) ──────────────────────────────────
 
   /**
-   * Fire a silent `--resume` journaling turn for a paused conversation: the agent
-   * reviews the conversation and updates its own memory files. Nothing is
-   * delivered to the user (no deliverResponse, no stdout fallback, no typing
-   * indicator). Serialized through the same per-contact queue as normal turns so
-   * a journaling turn never races a live reply on the same claude_session_id.
-   *
-   * Resolves `{ skipped: true }` when the session has no claude_session_id yet
-   * (the agent never spoke — nothing to journal); the dispatcher stamps it
-   * journaled anyway. Rejects on invocation error so the dispatcher leaves
-   * last_journaled_at unchanged and retries on a later tick.
+   * E66 — one silent `--resume` journaling turn, resolved with its outcome
+   * instead of rejecting. Serialized through the conversation queue, the
+   * Claude-session lane and the instance-wide journal lane like every
+   * journaling turn, so it never races a live reply on the same
+   * claude_session_id. Silent: never delivers, and the delivery tools are
+   * disallowed for the turn. `model`, `timeoutMs` and `signal` come from the
+   * journaler; a timeout or abort kills the turn's process group.
    */
-  runJournalingTurn(conversationId: string, db: Database.Database): Promise<{ skipped?: boolean }> {
-    const session = getActiveSession(db, conversationId);
-    if (!session || !session.claude_session_id) {
-      return Promise.resolve({ skipped: true });
-    }
-
-    const queueKey = `contact:${session.contact_id}`;
-    return new Promise((resolvePromise, rejectPromise) => {
-      this.enqueue(queueKey, async () => {
-        const result = await this.runClaudeTurn({
-          db,
-          session,
-          contactId: session.contact_id,
-          channel: session.channel,
-          prompt: this.cfg.journaling.prompt,
-          resumeId: session.claude_session_id,
-        });
-        // Silent: never deliver. Any reply/send_message the agent chose to call
-        // already went through the MCP tool — the adapter posts nothing here.
-        if (result.error) {
-          rejectPromise(new Error(result.error));
+  journalSession(db: Database.Database, opts: JournalSessionRequest): Promise<JournalSessionResult> {
+    const active = getActiveSession(db, opts.conversationId);
+    const session = active && active.claude_session_id === opts.claudeSessionId ? active : null;
+    return new Promise((resolvePromise) => {
+      const fail = (err: unknown) => resolvePromise({
+        error: err instanceof Error ? err.message : String(err), costUsd: null, inputTokens: null, outputTokens: null,
+      });
+      void this.enqueue(opts.conversationId, session?.id, 'system', true, async () => {
+        if (opts.signal?.aborted) {
+          resolvePromise({ error: 'journaling turn aborted before it started', costUsd: null, inputTokens: null, outputTokens: null, timedOut: true });
           return;
         }
-        resolvePromise({});
-      });
+        try {
+          const result = await this.runClaudeTurn({
+            db,
+            session,
+            contactId: opts.contactId,
+            conversationId: opts.conversationId,
+            channel: opts.channel,
+            prompt: opts.prompt ?? this.cfg.journaling.prompt,
+            resumeId: opts.claudeSessionId,
+            journal: { model: opts.model ?? null, timeoutMs: opts.timeoutMs, signal: opts.signal, denyTools: opts.denyTools },
+          });
+          resolvePromise({
+            error: result.error, costUsd: result.totalCostUsd, inputTokens: result.inputTokens, outputTokens: result.outputTokens,
+            resultText: result.resultText,
+            ...(result.timedOut ? { timedOut: true } : {}),
+          });
+        } catch (err) {
+          fail(err);
+        }
+      }, opts.claudeSessionId).catch(fail);
     });
   }
 
   /**
-   * Fire a silent background journaling turn for an explicit claude session id,
-   * independent of the DB session row. Used by the `/clear` command: the bus has
-   * already set `ended_at` on the session (so the next message starts fresh), but
-   * the underlying claude session still exists on disk and can be resumed for one
-   * final memory pass. Serialized through the same per-contact queue so it never
-   * races a live turn. Failures are logged, not surfaced — journaling is silent.
+   * E68 S68.1 — one silent consolidation turn (see `HeadlessHandle.consolidate`).
+   * Keyed on its own queue (`consolidate:<agent>`), in the system turn class
+   * and the instance-wide journal lane.
    */
-  journalResumeId(db: Database.Database, opts: { claudeSessionId: string; contactId: string; channel: string }): void {
-    const queueKey = `contact:${opts.contactId}`;
-    this.enqueue(queueKey, async () => {
-      try {
-        const result = await this.runClaudeTurn({
-          db,
-          session: null, // session already closed; nothing to persist back
-          contactId: opts.contactId,
-          channel: opts.channel,
-          prompt: this.cfg.journaling.prompt,
-          resumeId: opts.claudeSessionId,
-        });
-        if (result.error) {
-          console.error(`[${this.label}] /clear journaling failed for ${opts.contactId}: ${result.error}`);
+  consolidate(db: Database.Database, opts: ConsolidationTurnRequest): Promise<JournalSessionResult> {
+    const key = `consolidate:${this.agentId}`;
+    return new Promise((resolvePromise) => {
+      const fail = (err: unknown) => resolvePromise({
+        error: err instanceof Error ? err.message : String(err), costUsd: null, inputTokens: null, outputTokens: null,
+      });
+      void this.enqueue(key, undefined, 'system', true, async () => {
+        if (opts.signal?.aborted) {
+          resolvePromise({ error: 'consolidation turn aborted before it started', costUsd: null, inputTokens: null, outputTokens: null, timedOut: true });
+          return;
         }
-      } catch (err) {
-        console.error(`[${this.label}] /clear journaling threw for ${opts.contactId}:`, err);
-      }
+        try {
+          const result = await this.runClaudeTurn({
+            db,
+            session: null,
+            contactId: 'system:bus',
+            conversationId: key,
+            channel: 'system',
+            prompt: opts.prompt,
+            resumeId: null,
+            journal: { model: opts.model ?? null, timeoutMs: opts.timeoutMs, signal: opts.signal, denyTools: opts.denyTools },
+          });
+          resolvePromise({
+            error: result.error, costUsd: result.totalCostUsd, inputTokens: result.inputTokens, outputTokens: result.outputTokens,
+            resultText: result.resultText,
+            ...(result.timedOut ? { timedOut: true } : {}),
+          });
+        } catch (err) {
+          fail(err);
+        }
+      }).catch(fail);
     });
   }
 
@@ -1012,7 +1288,7 @@ class HeadlessInstance {
     if (this.shuttingDown) return;
 
     try {
-      const res = await fetch(
+      const res = await this.busFetch(
         `${this.busBaseUrl}/api/v1/messages/pending?agent=${this.cfg.agent_id}&limit=20`,
       );
 
@@ -1024,36 +1300,47 @@ class HeadlessInstance {
       };
 
       // Ack all messages upfront, then group survivors by sender
-      const acked: MessageEnvelope[] = [];
-      await Promise.all(
-        data.messages.map(async (env) => {
+      const ackResults = await Promise.all(
+        data.messages.map(async (env): Promise<MessageEnvelope | null> => {
           try {
-            const ackRes = await fetch(`${this.busBaseUrl}/api/v1/messages/${env.id}/ack`, {
+            const ackRes = await this.busFetch(`${this.busBaseUrl}/api/v1/messages/${env.id}/ack`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ status: 'delivered' }),
             });
-            if (ackRes.ok) acked.push(env);
+            if (ackRes.ok) return env;
             else console.error(`[${this.label}] ack rejected for ${env.id}: HTTP ${ackRes.status}`);
           } catch (err) {
             console.error(`[${this.label}] ack failed for ${env.id}:`, err);
           }
+          return null;
         }),
       );
+      const acked = ackResults.filter((env): env is MessageEnvelope => env !== null);
 
-      // Group by sender and enqueue per-contact
-      const bySender = new Map<string, MessageEnvelope[]>();
+      // Group by logical conversation, preserving dequeue order within it.
+      const byConversation = new Map<string, MessageEnvelope[]>();
       for (const env of acked) {
-        const group = bySender.get(env.sender) ?? [];
+        const conversationId = resolveConversationId(db, env);
+        const group = byConversation.get(conversationId) ?? [];
         group.push(env);
-        bySender.set(env.sender, group);
+        byConversation.set(conversationId, group);
       }
 
-      for (const [contactId, batch] of bySender) {
+      for (const [conversationId, batch] of byConversation) {
+        const session = getActiveSession(db, conversationId);
+        // E71: a forwarded provider command is always a turn of its own;
+        // ordinary messages between commands stay batched together.
         for (const turn of splitProviderCommands(batch)) {
-          this.enqueue(contactId, () =>
-            providerCommandOf(turn[0]!) ? this.processProviderCommand(turn[0]!, db) : this.processBatch(turn, db),
-          );
+          // Scheduled, `system:` and E65 system-only (advisory) batches run in the system turn class.
+          const system = turn.every((env) => env.metadata?.['scheduled'] === true || env.sender.startsWith('system:')
+            || isSystemOnly(env.metadata));
+          const providerCommand = providerCommandOf(turn[0]!) !== null;
+          void this.enqueue(conversationId, session?.id, system ? 'system' : 'user', false,
+            () => providerCommand
+              ? this.processProviderCommand(turn[0]!, db, conversationId)
+              : this.processBatch(turn, db, conversationId),
+            session?.claude_session_id);
         }
       }
     } catch (err) {
@@ -1071,9 +1358,11 @@ class HeadlessInstance {
     console.log(`[${this.label}] Starting — polling ${this.busBaseUrl} for ${this.agentId} every ${this.cfg.poll_interval_ms}ms`);
     void this.poll(db);
     return {
-      runJournalingTurn: (conversationId: string) => this.runJournalingTurn(conversationId, db),
-      journalResumeId: (opts) => this.journalResumeId(db, opts),
-      stopTurn: (contactId: string) => this.stopTurn(contactId),
+      journalSession: (opts) => this.journalSession(db, opts),
+      consolidate: (opts) => this.consolidate(db, opts),
+      stopTurn: (conversationId: string) => this.stopTurn(conversationId),
+      subscribeActivity: (listener) => this.subscribeActivity(listener),
+      snapshot: () => this.snapshot(),
       slashCommands: () => this.knownSlashCommands,
     };
   }
@@ -1092,13 +1381,13 @@ const instances = new Map<string, HeadlessInstance>();
  * Start every configured `cc-headless` instance as part of the in-process bus.
  * Each entry in `getCcHeadlessInstances(config)` (legacy single-instance or
  * named record) gets its own `HeadlessInstance` with isolated state — poll
- * loop, per-contact queue, claude -p invocation.
+ * loop, per-conversation queue, claude -p invocation.
  *
  * Returns a map of `HeadlessHandle`s keyed by `agent:<agent_id>` the
  * SessionTracker uses to dispatch journaling turns to the right instance, or
  * an empty map when no `cc-headless` config is present.
  */
-export function startHeadless(db: Database.Database): Map<string, HeadlessHandle> {
+export function startHeadless(db: Database.Database, hooks: HeadlessHooks = {}): Map<string, HeadlessHandle> {
   const handles = new Map<string, HeadlessHandle>();
   const configs = getCcHeadlessInstances(config);
   if (configs.length === 0) {
@@ -1108,7 +1397,7 @@ export function startHeadless(db: Database.Database): Map<string, HeadlessHandle
 
   const busBaseUrl = `http://127.0.0.1:${config.bus.http_port}`;
   for (const instCfg of configs) {
-    const instance = new HeadlessInstance(instCfg, busBaseUrl);
+    const instance = new HeadlessInstance(instCfg, busBaseUrl, hooks);
     instances.set(`agent:${instCfg.agent_id}`, instance);
     handles.set(`agent:${instCfg.agent_id}`, instance.start(db));
   }
@@ -1118,4 +1407,9 @@ export function startHeadless(db: Database.Database): Map<string, HeadlessHandle
 export function stopHeadless(): void {
   for (const instance of instances.values()) instance.stop();
   instances.clear();
+}
+
+/** Current per-instance capacity for /status, health, and app reconnects. */
+export function getHeadlessSnapshots(): HeadlessCapacitySnapshot[] {
+  return [...instances.values()].map((instance) => instance.snapshot());
 }

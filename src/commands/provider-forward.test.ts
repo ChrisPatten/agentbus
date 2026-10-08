@@ -146,7 +146,6 @@ describe('cc-pool forwarder', () => {
 
 describe('cc-headless forwarder', () => {
   const control = (names: string[] | null | undefined) => ({
-    journalResumeId: new Map(),
     stopTurn: new Map(),
     slashCommands: new Map(names === undefined ? [] : [['agent:peggy', () => names]]),
   });

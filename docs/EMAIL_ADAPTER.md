@@ -23,6 +23,17 @@ The adapter class implements `AdapterInstance` and provides:
   sender allowlist and an authentication (anti-spoofing) check, mapped to a stable
   per-thread topic, and submitted to the pipeline via `processInbound()` (no HTTP
   hop). The connection is supervised: an unexpected drop reconnects with backoff.
+- **Catch-up on connect** — the highest processed IMAP UID is saved per
+  `(adapter id, mailbox)` in `email_imap_state` (migration 030,
+  `src/adapters/email-imap-state.ts`), together with the mailbox's UIDVALIDITY.
+  On every connect or reconnect the adapter resumes from that UID and fetches
+  anything newer, so mail that arrived while the bus was down or reconnecting
+  is processed. The cursor is saved before each message is handled
+  (at-most-once), so a crash never replays mail. With no saved cursor (first
+  setup, or upgrading from a version without it) or a UIDVALIDITY change, the
+  adapter starts after the mail already in the mailbox, as before, so old mail
+  isn't replayed. There's no cap on catch-up after a long outage: every newer
+  message is processed in UID order.
 - **`send(envelope)`** — called by the delivery worker. Looks the thread up by
   `(channel, topic)` and sends a properly-threaded SMTP reply (`In-Reply-To`,
   `References`, `Re:` subject, original `To`).

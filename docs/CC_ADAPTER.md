@@ -19,9 +19,13 @@ AgentBus has three ways to run a Claude Code agent behind a channel:
 | [`cc-headless`](CC_HEADLESS_ADAPTER.md) | One `claude -p` spawn per message batch, resumed per conversation | No | High-volume or multi-tenant agents; nothing to attach to or type into |
 | [`cc-pool`](CC_POOL_ADAPTER.md) | N leased interactive sessions, one pane per active conversation | Yes | You want `cc-headless`'s per-conversation isolation but need a real session you can attach to |
 
-All three can run against the same `working_dir`/`CLAUDE.md` and register the same MCP tool set; they differ only in how a conversation gets a Claude process, and whether that process is one you can watch.
+All three can run against the same `working_dir`/`CLAUDE.md` and register the same MCP tool set; they differ only in how a conversation gets a Claude process, and whether that process is one you can watch. [RUNTIME_CAPABILITIES.md](RUNTIME_CAPABILITIES.md) lists what the bus can do with each one. A `claude-code` agent resolves only through an explicit route with `adapterId: claude-code`.
 
 All logging goes to stderr. stdout is the MCP protocol stream.
+
+Config loading also silences dotenv's startup banner. If an MCP client reports
+`CONNECTION_CLOSED` during initialize, run the configured command with stdout
+and stderr captured separately: stdout must contain only MCP JSON frames.
 
 ## Environment variables
 
@@ -31,7 +35,7 @@ All logging goes to stderr. stdout is the MCP protocol stream.
 | `AGENTBUS_AGENT_ID` | `claude` | Recipient to poll for (`agent:<id>`). Polling mode only |
 | `AGENTBUS_TOOLS_ONLY` | unset | `true` selects tools-only mode |
 
-The only config field this process reads is `adapters.claude-code.poll_interval_ms` (default `1000`). The schema also accepts `sampling_max_tokens` and `plugin`, but nothing reads them.
+The only config field this process reads is `adapters.claude-code.poll_interval_ms` (default `1000`). An `AGENTBUS_POLL_INTERVAL_MS` environment variable overrides it; cc-pool sets that from the pool's own `poll_interval_ms`. The schema also accepts `sampling_max_tokens` and `plugin`, but nothing reads them.
 
 ## Polling mode
 
@@ -57,7 +61,6 @@ Here is the document
 - A quoted reply renders as a `[Replying to <name>: "<text>"]` line before the body.
 - Attachments append `[Image: <path>]` and `[File: <path> — <name>]` lines; inline email images append a `fetch_attachment` hint. See [ATTACHMENTS.md](ATTACHMENTS.md).
 - One-shot context from `create_telegram_topic` is prepended to a topic's first message.
-- In polling mode only, the legacy `<memory>` block from the memory-inject stage is prepended when a new session starts and summaries exist.
 
 The agent replies with `reply(message_id="<id>", body="...")`. The tool resolves channel and recipient from the original message.
 

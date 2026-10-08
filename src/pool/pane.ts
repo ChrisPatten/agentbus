@@ -29,6 +29,7 @@
  * for — rather than inventing an order `--help` never confirmed. See this
  * story's report for the full flag-by-flag verification.
  */
+import { DISABLE_AUTO_MEMORY_ENV, autoMemorySettings, hasSettingsArg } from '../memory/native.js';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -36,6 +37,7 @@ import type { TmuxController } from './tmux.js';
 import type { CcPoolInstanceConfig } from '../config/schema.js';
 import { writePaneMcpConfig, cleanupPaneMcpConfig } from './mcp-config.js';
 import { renderSystemPrompt, expandFileReferences, type PromptContext } from '../adapters/prompt-renderer.js';
+import { busTokenEnv, withBusToken } from '../core/bus-auth.js';
 
 /**
  * Overall bound (ms) on one `launch()` call, measured from `launchStartedAt`
@@ -69,14 +71,17 @@ const RELEASE_KILL_PAUSE_MS = 300;
 /**
  * Foreground commands that mean a pane is sitting at a shell prompt, ready to
  * take a launch line. Matched against tmux's `pane_current_command` with any
- * login-shell `-` prefix stripped. An allowlist of shells, not a denylist of
- * `claude`: the CLI's process name varies by install (`claude`, `node`, a
- * bare version number).
+ * login-shell `-` prefix and directory stripped. An allowlist of shells, not
+ * a denylist of `claude`: the CLI's process name varies by install
+ * (`claude`, `node`, a bare version number).
  */
 const SHELL_COMMANDS = new Set(['sh', 'bash', 'zsh', 'fish', 'dash', 'ksh', 'csh', 'tcsh', 'nu']);
 
-function isShellCommand(command: string | null): boolean {
-  return command !== null && SHELL_COMMANDS.has(command.replace(/^-/, ''));
+/** True when `command` (tmux `pane_current_command`) is a shell. `null` (unknown) is not a shell. */
+export function isShellCommand(command: string | null): boolean {
+  if (command === null) return false;
+  const name = command.trim().replace(/^-/, '').split('/').pop() ?? '';
+  return SHELL_COMMANDS.has(name);
 }
 
 export interface PaneLifecycleDeps {
@@ -88,6 +93,19 @@ export interface PaneLifecycleDeps {
   scratchDir: string;
   /** Injectable fetch for tests — defaults to global fetch. */
   fetchFn?: typeof fetch;
+  /**
+   * `bus.auth_token`, when set. Added as `X-Bus-Token` to the readiness poll,
+   * and exported into each new pane window as `AGENTBUS_BUS_TOKEN` so the
+   * pane's `claude`, its cc.ts MCP server and its hook scripts all inherit it.
+   */
+  busToken?: string;
+  /**
+   * E67 — the pool's memory dir when it loads memory natively. The launch
+   * line adds `--settings '{"autoMemoryDirectory":…}'` (unless the
+   * operator's `launch_args` already pass `--settings`) and unsets an
+   * inherited `CLAUDE_CODE_DISABLE_AUTO_MEMORY`.
+   */
+  autoMemoryDir?: string;
   /**
    * Injectable delay for tests (ack-handshake waits, the readiness poll
    * interval, and the kill-release pause in `release()`) — defaults to a
@@ -200,6 +218,34 @@ function shellQuoteArg(s: string): string {
   return `'${s.split("'").join("'\\''")}'`;
 }
 
+const DEV_CHANNELS_FLAG = '--dangerously-load-development-channels';
+const AGENTBUS_CHANNEL = 'server:agentbus';
+
+/**
+ * Drop `--dangerously-load-development-channels` (and a following
+ * `server:agentbus`, or the `=server:agentbus` form) from operator
+ * `launch_args`: `buildLaunchLine` always adds that pair itself, and older
+ * example configs told operators to add the flag too. The flag followed by a
+ * different channel value (e.g. `server:other`) is left alone.
+ */
+export function dedupeDevChannelsArgs(launchArgs: readonly string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < launchArgs.length; i++) {
+    const arg = launchArgs[i]!;
+    if (arg === `${DEV_CHANNELS_FLAG}=${AGENTBUS_CHANNEL}`) continue;
+    if (arg === DEV_CHANNELS_FLAG) {
+      const next = launchArgs[i + 1];
+      if (next === AGENTBUS_CHANNEL) {
+        i++;
+        continue;
+      }
+      if (next === undefined || next.startsWith('-')) continue;
+    }
+    out.push(arg);
+  }
+  return out;
+}
+
 /** "session:window" -> ["session", "window"]. */
 function splitPaneTarget(paneId: string): [session: string, window: string] {
   const idx = paneId.indexOf(':');
@@ -215,6 +261,8 @@ export class PaneLifecycle {
   private readonly cfg: CcPoolInstanceConfig;
   private readonly scratchDir: string;
   private readonly fetchFn: typeof fetch;
+  private readonly busToken: string | undefined;
+  private readonly autoMemoryDir: string | undefined;
   private readonly sleepFn: (ms: number) => Promise<void>;
   /** Resolved once, mirroring cc-headless.ts's module-level `configPath`: same env var, same fallback. */
   private readonly agentbusConfigPath: string;
@@ -224,7 +272,9 @@ export class PaneLifecycle {
     this.busBaseUrl = deps.busBaseUrl;
     this.cfg = deps.cfg;
     this.scratchDir = deps.scratchDir;
-    this.fetchFn = deps.fetchFn ?? fetch;
+    this.busToken = deps.busToken || undefined;
+    this.autoMemoryDir = deps.autoMemoryDir || undefined;
+    this.fetchFn = withBusToken(deps.busBaseUrl, this.busToken, deps.fetchFn);
     this.sleepFn = deps.sleepFn ?? defaultSleep;
     this.agentbusConfigPath = process.env['AGENTBUS_CONFIG'] ?? resolve(process.cwd(), 'config.yaml');
   }
@@ -254,6 +304,7 @@ export class PaneLifecycle {
         agentbusConfigPath: this.agentbusConfigPath,
         workingDir: params.ensureWindow.cwd,
         outDir: this.scratchDir,
+        pollIntervalMs: this.cfg.poll_interval_ms,
       });
 
       if (this.cfg.system_prompt) {
@@ -292,11 +343,20 @@ export class PaneLifecycle {
   // ── Launch steps ──────────────────────────────────────────────────────────
 
   /**
-   * Leaves the pane at a shell prompt in a live window. A live window is
-   * reused only when a shell is in its foreground. Anything else is a session
-   * left behind by `on_evict: 'clear'` or by a bus restart, and typing the
-   * launch line there would submit it to that session as a chat message — so
-   * the window is killed and recreated.
+   * Make sure the target window exists AND is sitting at a shell prompt, so
+   * the launch line about to be typed into it reaches the shell.
+   *
+   * A live window is reused only when a shell is in its foreground. Anything
+   * else is a session left behind by `on_evict: 'clear'` (eviction or the
+   * hard-idle sweep; `/clear` only resets that session's context) or by a bus
+   * restart. Typing the launch line there would submit it to the old session
+   * as a chat message, and since that session's cc.ts still polls under the
+   * same pane agent id, the readiness poll would pass and the new
+   * conversation would be served by the wrong session. So the old session is
+   * stopped the way a `kill` release does it and the window is recreated. An
+   * unknown foreground command (`null`) can't be confirmed as a shell either,
+   * so that window is recreated too (killed without the `C-c`, which would
+   * throw if the window vanished between the two tmux calls).
    */
   private async ensureWindowExists(params: LaunchParams): Promise<void> {
     const alreadyAlive = await this.tmux.paneAlive(params.paneId);
@@ -304,9 +364,11 @@ export class PaneLifecycle {
       const command = await this.tmux.paneCommand(params.paneId);
       if (isShellCommand(command)) return;
       console.warn(
-        `[pane:${params.paneId}] Foreground command is "${command ?? 'unknown'}", not a shell — recreating the window before launch`,
+        `[pane:${params.paneId}] Foreground command is "${command ?? 'unknown'}", not a shell — ` +
+          `recreating the window before launching session ${params.sessionId}`,
       );
-      await this.release(params.paneId, 'kill');
+      if (command === null) await this.tmux.killWindow(params.paneId);
+      else await this.release(params.paneId, 'kill');
     }
 
     const [session, windowName] = splitPaneTarget(params.paneId);
@@ -319,8 +381,9 @@ export class PaneLifecycle {
   }
 
   /**
-   * Merge order: `cfg.pane_env` (operator config) < the caller's own
-   * `ensureWindow.env` < TERM/COLORTERM, which win unconditionally. Per
+   * Merge order: `AGENTBUS_BUS_TOKEN` (when `bus.auth_token` is set) <
+   * `cfg.pane_env` (operator config) < the caller's own `ensureWindow.env` <
+   * TERM/COLORTERM, which win unconditionally. Per
    * `CcPoolAdapterSchema.pane_env`'s own doc comment ("TERM/COLORTERM are
    * added unconditionally by later launch code, not defaulted here") — this
    * is that later code. E48's "Prior Art" gotcha 2: these are load-bearing
@@ -330,6 +393,7 @@ export class PaneLifecycle {
    */
   private buildWindowEnv(callerEnv?: Record<string, string>): Record<string, string> {
     return {
+      ...busTokenEnv(this.busToken),
       ...this.cfg.pane_env,
       ...callerEnv,
       TERM: 'xterm-256color',
@@ -342,10 +406,9 @@ export class PaneLifecycle {
       contact_id: params.promptContext?.contact_id ?? '',
       channel: params.promptContext?.channel ?? '',
       date: new Date().toISOString().slice(0, 10),
-      // Pool sessions rely on native CLAUDE.md auto-loading, not per-turn
-      // injection — unlike cc-headless, which assembles {{memories}} /
-      // {{session_summary}} from the DB/agent files on every turn. Deliberate
-      // difference for interactive pool sessions, not an oversight.
+      // Pool sessions load memory natively (CLAUDE.md, its @memory/recent.md
+      // import, and auto memory pointed at the memory dir via --settings;
+      // E67), never through {{memories}}.
       memories: '',
       session_summary: '',
       agent_id: params.paneAgentId,
@@ -389,14 +452,20 @@ export class PaneLifecycle {
 
     args.push('--dangerously-load-development-channels', 'server:agentbus');
 
-    for (const extra of this.cfg.launch_args) {
+    const extras = dedupeDevChannelsArgs(this.cfg.launch_args);
+    // E67 — native memory: auto memory loads the pool's memory dir.
+    if (this.autoMemoryDir && !hasSettingsArg(extras)) {
+      args.push('--settings', autoMemorySettings(this.autoMemoryDir));
+    }
+    for (const extra of extras) {
       args.push(extra);
     }
 
     const quoted = args.map(shellQuoteArg).join(' ');
     // Pool panes are resumed by session id, so the transcript must persist
     // even if some other inherited marker would turn saving off.
-    return `unset TMUX ${INHERITED_CLAUDE_SESSION_VARS.join(' ')}; export CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1; ${quoted}`;
+    const unset = [...INHERITED_CLAUDE_SESSION_VARS, ...(this.autoMemoryDir ? [DISABLE_AUTO_MEMORY_ENV] : [])];
+    return `unset TMUX ${unset.join(' ')}; export CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1; ${quoted}`;
   }
 
   /**

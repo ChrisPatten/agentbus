@@ -8,7 +8,8 @@ bus-core
         ├── polls GET /api/v1/messages/pending?agent=<agent_id>
         ├── serializes work per contact
         ├── spawns: claude -p <prompt> --output-format stream-json --verbose
-        │           --allowedTools all --mcp-config <tmp> --system-prompt-file <tmp>
+        │           --allowedTools mcp__agentbus__reply,mcp__agentbus__send_message
+        │           --mcp-config <tmp> --system-prompt-file <tmp>
         │           [--model <model>] [--resume <claude_session_id>]
         │     └── MCP subprocess: src/adapters/cc.ts with AGENTBUS_TOOLS_ONLY=true
         └── watches the stream for reply/send_message tool calls; falls back to stdout
@@ -16,11 +17,17 @@ bus-core
 
 Compared with a persistent session, headless gives per-contact isolation (each contact has its own Claude conversation), no session to keep alive by hand, and memory injection that the bus controls. The trade-off is that the agent cannot see another contact's conversation. See [Cross-contact isolation](#cross-contact-isolation).
 
+For what the bus can do with a headless agent compared with the other runtimes (system turns, resume, fork, hooks), see [RUNTIME_CAPABILITIES.md](RUNTIME_CAPABILITIES.md).
+
 ## Session continuity (long-lived sessions)
 
 `sessions.claude_session_id` (migration 008) stores the session ID that `claude -p` reports in its stream-json events. Later turns pass `--resume <id>`.
 
 Resume is keyed on `conversation_id`. The adapter resolves the batch's `conversation_id` from the first message's transcript row, falling back to `sha256(sorted([contact_id, channel, topic]))` if the row is missing, and looks up the open session for that conversation. Each email thread or Telegram forum topic therefore resumes its own session, and a plain Telegram conversation resumes the same one every time.
+
+For a Mac app message bound to a listed foreign session, the transcript supplies that session's conversation ID while the arrival channel remains `app`. The prompt header says `via app (in your <original channel> session)`. A `reply` to that message returns through `app` into the selected session; use `send_message` explicitly to reach another channel. A resumed Earlier session gets a separate app conversation with the old Claude transcript ID, leaving any active session in the original channel alone. Turns that resume the same Claude ID serialize even when their conversation IDs differ, and they wait for that ID before consuming a process slot.
+
+Include app guidance in the agent's `system_prompt` when app is configured: app replies support full Markdown with no platform length limit, and inbound attachments appear as local `[Image: path]` or `[File: path — name]` lines. Read those files by path. The source channel's chat does not receive an automatic copy of an app reply.
 
 Headless sessions are never closed on idle. `claude_session_id` is set only by this adapter, so it also marks a session as headless-managed: the transcript-log stage and the `SessionTracker` extend such sessions across any gap instead of closing them. Sessions from the polling MCP adapter (`claude_session_id IS NULL`) still close on idle and fire `on_session_close`. If you want this same per-conversation session model backed by a real interactive session instead of `claude -p` batches, see [CC_POOL_ADAPTER.md](CC_POOL_ADAPTER.md).
 
@@ -29,13 +36,14 @@ Nothing in AgentBus bounds a long-lived transcript; Claude Code's auto-compactio
 ## `claude -p` invocation
 
 - `--output-format stream-json --verbose`: the CLI requires `--verbose` with stream-json in print mode. It does not change the event stream.
-- `--allowedTools all`.
+- `--allowedTools mcp__agentbus__reply,mcp__agentbus__send_message`: permit delivery in noninteractive turns. Claude treats `all` as a literal tool name, so it does not grant these tools. Other tools continue under the working directory's normal permission settings.
 - `--mcp-config <tmp>`: a temporary file that launches `src/adapters/cc.ts` in tools-only mode with the same `AGENTBUS_CONFIG`.
 - `--system-prompt-file <tmp>`: replaces the default coding-agent prompt. `CLAUDE.md` auto-loading is unaffected.
 - `--model <model>`: only when a model resolves. See [Runtime model overrides](#runtime-model-overrides).
 - `--resume <id>`: when the session has a `claude_session_id`.
+- `--settings '{"autoMemoryDirectory":"<memory dir>"}'` (E67): when the agent loads memory natively (the default), so Claude Code's auto memory loads the agent's `MEMORY.md` and topic files. See [AGENT_MEMORY.md](AGENT_MEMORY.md#loading).
 
-Temp files are written immediately before the spawn and deleted after the result is captured. The process runs with `cwd` set to `working_dir` and with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, because the adapter already injects the agent's memory files through `{{memories}}` and the CLI's own auto-memory would load `MEMORY.md` a second time.
+Temp files are written immediately before the spawn and deleted after the result is captured. The process runs with `cwd` set to `working_dir`. With native memory an inherited `CLAUDE_CODE_DISABLE_AUTO_MEMORY` is removed from its environment; an agent with `agents.<id>.memory.native: false` gets `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` instead, because the bus injects its memory files and auto memory would load `MEMORY.md` a second time.
 
 ### Runtime model overrides
 
@@ -60,13 +68,14 @@ The resolved model and its source are logged on every spawn (`Resolved model: <m
       "type": "stdio",
       "command": "npx",
       "args": ["tsx", "/abs/path/to/agentbus/src/adapters/cc.js"],
-      "env": { "AGENTBUS_TOOLS_ONLY": "true", "AGENTBUS_CONFIG": "/path/to/config.yaml" }
+      "env": { "AGENTBUS_TOOLS_ONLY": "true", "AGENTBUS_CONFIG": "/path/to/config.yaml", "AGENTBUS_AGENT_ID": "baxter" }
     }
   }
 }
 ```
 
 The path is resolved from the bus-core working directory; `tsx` maps the `.js` extension to the `.ts` source. Tools-only mode skips the polling loop and only serves tool calls. See [CC_ADAPTER.md](CC_ADAPTER.md).
+The generated config and the Claude process environment both carry an absolute `AGENTBUS_CONFIG` path and the bare routed agent ID. This matters when bus-core starts with `AGENTBUS_CONFIG=config.yaml`: Claude changes to the agent's working directory before launching its MCP subprocess.
 
 ## Tools available to Claude
 
@@ -81,7 +90,6 @@ Every tool except `get_adapter_status`, which has no meaning without a poll loop
 | `list_channels`, `get_session`, `list_sessions`, `get_transcript`, `search_transcripts`, `fetch_attachment` | Discovery and history |
 | `schedule_message`, `list_schedules`, `cancel_schedule` | Scheduling |
 | `set_model_override`, `get_model_override`, `list_model_overrides`, `delete_model_override` | Model overrides. `set_headless_model`/`get_headless_model`/`list_headless_model`/`delete_headless_model` are deprecated aliases |
-| `recall_memory`, `log_memory` | Legacy. Read and write your memory files instead |
 
 ## Response delivery
 
@@ -93,12 +101,12 @@ Each turn's `total_cost_usd`, token usage, and turn count from the terminal `res
 
 ## Forwarded slash commands
 
-`//name`, or a `/name` the bus doesn't define, arrives as a message with `metadata.provider_command`. The instance runs it as its own turn on the per-contact queue:
+`//name`, or a `/name` the bus doesn't define, arrives as a message with `metadata.provider_command`. The instance runs it as its own turn on the conversation's queue, in the user turn class, so it waits behind any in-flight turn in that conversation and never overlaps one on the same Claude session:
 
 - The prompt is the bare `/name args` line, with no message formatting and no memory-block prefix. The CLI only treats a prompt as a command when it starts with `/`.
 - The turn resumes the conversation's session, so `/compact` and `/context` act on it.
 - The `result` text is delivered as the reply, or `Ran /name.` when it's empty. A failure delivers `/name failed: <detail>`.
-- `compact` and `clear` wipe the session's context-block ledger, so memory blocks are sent again on the next turn.
+- `compact` and `clear` wipe the session's context-block ledger, so memory blocks are sent again on the next turn. This only matters with `agents.<id>.memory.native: false`; with native memory (the default) there is no ledger.
 
 The instance records `slash_commands` from each `init` event. The bus refuses to forward a command that isn't in the latest list. See [SLASH_COMMANDS.md#provider-commands](SLASH_COMMANDS.md#provider-commands).
 
@@ -123,13 +131,13 @@ A turn killed by `/stop` sends nothing. See [SLASH_COMMANDS.md](SLASH_COMMANDS.m
 | `{{contact_id}}` | For example `contact:alice` |
 | `{{channel}}` | For example `telegram:peggy` |
 | `{{date}}` | Local date, `YYYY-MM-DD` |
-| `{{memories}}` | Empty for a turn with a real, resumable session — memory blocks go into the user turn instead. Falls back to the assembled memory files when there's no session to track. See [Context assembly](#context-assembly-memory-files) |
+| `{{memories}}` | Always empty with native memory (E67 default). With `memory.native: false`: empty for a turn with a real, resumable session (memory blocks go into the user turn instead), the assembled memory files when there's no session to track. See [Context assembly](#context-assembly-memory-files) |
 | `{{agent_id}}` | For example `agent:claude` |
 | `{{session_summary}}` | Deprecated. Always empty |
 
 After variable substitution, `@<path>` tokens are replaced with the referenced file's contents, resolved relative to `working_dir` (`expandFileReferences` in `src/adapters/prompt-renderer.ts`). Unknown variables and unreadable paths are left verbatim so mistakes are visible. Expansion runs only on this operator-authored template, never on user messages.
 
-The user message is formatted by `formatMessagesForSampling` (`src/adapters/cc.ts`) with `includeMemoryContext: false`, so the legacy `<memory>` block is not also prepended.
+The user message is formatted by `formatMessagesForSampling` (`src/adapters/cc.ts`).
 
 ## Context loading (`CLAUDE.md` and file references)
 
@@ -137,12 +145,14 @@ The user message is formatted by `formatMessagesForSampling` (`src/adapters/cc.t
 
 ## Context assembly (memory files)
 
-The agent's memory files are read fresh on every turn by `assembleMemoryBlocks` (`src/adapters/memory-context.ts`):
+**Native memory (E67, the default).** The bus injects no memory. Every `claude -p`, `--resume` included, rebuilds its context from the files on disk: the `CLAUDE.md` hierarchy and its `@import`s (the agent's `CLAUDE.md` imports `@memory/recent.md`, the bus-generated digest of recent dailies) and auto memory pointed at the agent's memory dir (`--settings autoMemoryDirectory`), which loads the first 200 lines / 25KB of `MEMORY.md` and reads topic files on demand. A journaling update is therefore visible on the next turn. Verified with the real CLI in the E67 spike: an edited `@import` and an edited `MEMORY.md` both show up in the next `--resume` turn. No memory blocks are assembled and the context ledger below records nothing. See [AGENT_MEMORY.md](AGENT_MEMORY.md#loading).
 
-1. `<working_dir>/<memory.dir>/<memory.index_file>` (default `memory/MEMORY.md`).
-2. Daily journal files for today and the previous `journal_lookback_days - 1` days at `<memory.dir>/<memory.daily_subdir>/YYYY-MM-DD.md`, newest first.
+**Bus injection (`agents.<id>.memory.native: false`).** The agent's memory files are read fresh on every turn by `assembleMemoryBlocks` (`src/adapters/memory-context.ts`):
 
-Each file becomes a block wrapped in a `=== <relative path> ===` marker. Missing files are skipped. `journal_lookback_days: 0` loads the index only. Daily file names use the local date. `assembleMemoryContext` joins all blocks into one string and remains for callers (and the no-session fallback below) that want that; it is no longer what fills the system prompt on a resumed session. Because the blocks are read fresh every turn, a journaling update is visible on the next turn.
+1. The index, `<memory dir>/<index_file>` (default `memory/MEMORY.md`).
+2. `<memory dir>/recent.md`, which already carries the last `lookback_days` of dailies within `recent_budget_chars` ([AGENT_MEMORY.md](AGENT_MEMORY.md#recentmd)). Before E67 the adapter read the dailies itself.
+
+Each file becomes a block wrapped in a `=== <relative path> ===` marker. Missing files are skipped. `assembleMemoryContext` joins all blocks into one string for the no-session fallback below.
 
 ### Per-session context-block ledger
 
@@ -150,11 +160,11 @@ Each file becomes a block wrapped in a `=== <relative path> ===` marker. Missing
 
 `context_blocks` (migration 017) and `src/adapters/context-ledger.ts` fix the resend problem for real, resumable sessions:
 
-- Each memory file from `assembleMemoryBlocks` is hashed (`hashBlock`, sha256) and keyed as `memory:<dir>/<index_file>` or `memory:<dir>/<daily_subdir>/<YYYY-MM-DD>.md`.
+- Only used with `memory.native: false`. Each memory file from `assembleMemoryBlocks` is hashed (`hashBlock`, sha256) and keyed as `memory:<dir>/<index_file>` or `memory:<dir>/recent.md` (before E67: one key per daily file; those old rows are simply never matched again).
 - `runClaudeTurn` (`cc-headless.ts`) only prepends a block to the **user turn** (not the system prompt) when `shouldSendBlock` says its hash is new or has changed for that session — so each block's content is sent at most once per session, not once per turn.
 - Once the turn completes successfully, `markBlockSent` records the hash for every block that was sent, in the same success path as `persistSessionId`/`recordCost`.
 - The system prompt no longer carries `{{memories}}` for a session with a real, resumable session row (`opts.session !== null`): it renders with `memories: ''`, the same way `src/pool/pane.ts`'s `renderAndWriteSystemPrompt` already does for pool sessions (for a different reason — pool sessions rely on native `CLAUDE.md` auto-loading). The system prompt is now a frozen cache prefix instead of changing every turn.
-- **No-session fallback.** When there's no session row to track a ledger against (`opts.session === null`, e.g. `/clear`'s `journalResumeId`), the adapter falls back to the pre-ledger behavior: the full `assembleMemoryContext` string goes into `{{memories}}` on the system prompt, every turn, same as before this change.
+- **No-session fallback.** When there's no session row to track a ledger against (`opts.session === null`, e.g. a journaling turn for a session `/clear` already closed), the adapter falls back to the pre-ledger behavior: the full `assembleMemoryContext` string goes into `{{memories}}` on the system prompt, every turn, same as before this change.
 
 **Compaction detection.** `--resume` transcripts are subject to Claude Code's own auto-compaction (see [Session continuity](#session-continuity-long-lived-sessions)), which can summarize away content the ledger believes is already in context. `detectCompaction` reads the two most recent `turn_costs` rows for the session (`input_tokens IS NOT NULL`, most recent first) and calls it a compaction when the more recent row's `input_tokens` is under `COMPACTION_DROP_THRESHOLD` (0.6) times the older row's — auto-compaction summarization produces a sharp drop that ordinary conversation growth does not. When true, `runClaudeTurn` calls `clearLedger` before assembling blocks for that turn, so everything is resent from scratch. The threshold is deliberately biased toward false positives: a false positive just costs one redundant resend, while a false negative would silently leave the ledger believing content is in context that compaction actually removed.
 
@@ -164,19 +174,18 @@ Each file becomes a block wrapped in a `=== <relative path> ===` marker. Missing
 
 When a conversation goes idle past a per-channel threshold, or too long has passed since its last sweep, the bus fires a silent journaling turn: the agent reviews the conversation and updates its memory files. Nothing is delivered to the user, and the session stays open.
 
-- **Dispatcher.** `SessionTracker.dispatchJournaling()` runs on the tracker tick. It selects open headless sessions not journaled since their last activity (`last_journaled_at IS NULL OR last_journaled_at < last_activity`) and fires when either leg trips:
-  - **Idle debounce.** `last_activity` is older than `journaling.threshold_ms` for the session's channel. A short value (3 to 5 minutes) catches a real pause without journaling after every reply.
-  - **Hard ceiling.** Time since `last_journaled_at` (or `started_at`) exceeds `journaling.ceiling_ms`, regardless of idle state, so a continuously active conversation still flushes. Unset disables this leg.
-- **Overlap suppression.** A conversation with a journaling turn in flight is skipped on later ticks.
-- **Turn.** `runJournalingTurn(conversationId)` spawns `claude -p <journaling.prompt> --resume <id>` with the same working directory, MCP config, and memory context as a normal turn, serialized through the same per-contact queue so it never races a live reply. A session with no `claude_session_id` yet is skipped and stamped as journaled.
-- **Failure.** A failed turn leaves `last_journaled_at` unchanged so a later tick retries, bounded by an in-memory attempt cap that new activity resets.
-- **Ownership.** Each session is routed to the instance recorded in `sessions.agent_id`. See [Multi-instance deployments](#multi-instance-deployments).
+Since E66 the triggers, eligibility and fallback chain live in the journaling engine, shared by every runtime: see [JOURNALING.md](JOURNALING.md). What is specific to this adapter:
+
+- **Turn.** The `cc-headless` journaler runs `claude -p <prompt> --resume <claude_session_id>` with the same working directory, system prompt, MCP config, and memory context as a normal turn (`HeadlessHandle.journalSession`), serialized through its conversation queue, its Claude-session lane and the instance-wide journal lane. The prompt is the journaler prompt plus what is new since the last journal and any transcript snapshots. The turn uses the journaler `model` (`agents.<id>.journaling.cc-headless.model`, else `journaling.model`, else the instance `model`) instead of the usual model resolution, disallows the delivery tools (`reply`, `send_message`, `send_email`), and runs in its own process group: when it outlives `timeout_ms`, or the chain runner gives up on it, the whole group is killed (SIGTERM, then SIGKILL after 5 s). Cost and tokens from the result event are recorded on the `journal_runs` row and in `turn_costs`. It is `unavailable` when the session has no `claude_session_id` yet or its transcript is gone from disk (Claude Code's `cleanupPeriodDays`), and the chain moves on. A reply ending in `NOTHING_TO_RECORD` is recorded as `nothing-to-do`.
+- **Triggers.** Pause (`threshold_ms`, measured from the latest inbound or agent message), ceiling (`ceiling_ms`), `/clear`, and bus shutdown. With the defaults, a conversation needs two human messages before a pause or ceiling journals it; `/clear` and shutdown journal any human content.
+- **`system-message` never runs here** (no live agent between turns), so a chain such as `[system-message, cc-headless, script]` starts at `cc-headless`.
+- **Ownership.** Each session belongs to the instance recorded in `sessions.agent_id`. See [Multi-instance deployments](#multi-instance-deployments).
 
 The silent turn appends an assistant turn to the resumed transcript; auto-compaction absorbs the cost. If the journaling agent crashes mid-write, the transcript in the bus is unaffected and the next trigger retries.
 
-If no `cc-headless` instance is configured or registered, the dispatcher is a no-op for every session and logs a one-time warning. Set `journaling.enabled: false` to disable it deliberately.
+**Config.** Prefer `agents.<id>.journaling`. The `journaling` block below is a **deprecated alias** used when the agent has no `agents.<id>.journaling`: it maps to `chain: [cc-headless]` and the new defaults for `min_human_messages` (2) and `timeout_ms`. Set `journaling.enabled: false` to disable journaling for the agent.
 
-`/clear` forces the same journaling turn immediately after closing the active session. See [SLASH_COMMANDS.md](SLASH_COMMANDS.md#clear).
+`/clear` closes the active session and fires the journaling `clear` trigger for it. See [SLASH_COMMANDS.md](SLASH_COMMANDS.md#clear).
 
 ## Memory logging
 
@@ -185,7 +194,7 @@ Memory-logging work (daily journal, `MEMORY.md`, topic files) belongs to the jou
 1. **The reply-producing turn does not journal.** Do not instruct the agent to update memory files after calling `reply`. The process exits sooner once it stops calling tools.
 2. **The debounced sweep journals.** This is the [journaling mechanism](#journaling-on-pause-or-ceiling) above.
 3. **Why this is safe.** `--resume` keeps the full conversation, so a delayed sweep risks brief staleness in the files, never data loss. The raw conversation is always recoverable with `get_transcript` and `search_transcripts`.
-4. **Queue responsiveness follows.** Because the turn stops at delivery, the per-contact queue advances as soon as the reply is sent. See [Per-contact serialization](#per-contact-serialization).
+4. **Queue safety follows.** The agent should stop work at delivery. The conversation queue starts its next child once the prior process exits and delivery handling settles. See [Per-conversation serialization and capacity](#per-conversation-serialization-and-capacity).
 
 ### High-stakes immediate-logging exception
 
@@ -198,16 +207,15 @@ Some content should never wait on a debounce window. If the turn involves any of
 
 State this directly in the `system_prompt`. See the example in [Configuration schema](#configuration-schema).
 
-## Per-contact serialization
+## Per-conversation serialization and capacity
 
-An in-memory `Map<contactId, Promise<void>>` chains each new batch after the previous one for that contact. Different contacts run concurrently; the same contact's messages run in order.
+An in-memory queue chains each batch after the previous one for its `conversation_id`. Different topics or threads for one contact can run together; turns in one conversation run in arrival order. Delivery may happen before process exit, but the next child for that conversation waits until the prior child exits and fallback delivery settles.
 
-The queue advances at delivery, not at process exit. `processBatch()` resolves as soon as the turn calls `reply` or `send_message`; stdout fallback, error handling, and final session-ID persistence continue in the background. Two consequences:
+Each instance permits up to `max_concurrent_turns` live children (default 5). User turns may use at most `max_concurrent_turns - reserved_system_slots` (default 4); scheduled and journaling turns may use any free slot. A wholly scheduled/system batch is a system turn (this includes `system:` senders and bus advisory turns flagged `system_only`, see [ADVISORIES.md](ADVISORIES.md)); a mixed batch is a user turn. The oldest eligible waiter starts when capacity frees. `/stop` can remove a waiting turn or kill the running child in its conversation.
 
-- A turn that never calls a delivery tool (stdout fallback, spawn error, `/stop`) holds the queue until the whole run settles.
-- `claude_session_id` is persisted as soon as it first appears in the stream, so a rapid second message on a brand-new conversation can `--resume` the session the first turn just created.
+Journaling turns also share an agent-wide lane, so two journals never write the same memory files at once. An immediate high-stakes memory write made inside a user turn can still race with another turn; that exception remains accepted.
 
-Two `claude -p` processes for the same `claude_session_id` can overlap briefly if the first keeps calling tools after delivering. This is why the system prompt must stop the agent at delivery.
+Activity subscriptions report `queued`, `running`, and `idle` per conversation, with `session_id` when available. Capacity snapshots expose running user/system turns, waiting turns, the limit, and reserved system slots. `/status` and health expose these counts without message content.
 
 ## Configuration schema
 
@@ -262,20 +270,22 @@ adapters:
 |---|---|---|
 | `agent_id` | `claude` | Which `agent:<id>` queue to dequeue |
 | `poll_interval_ms` | `1000` | Bus poll cadence |
+| `max_concurrent_turns` | `5` | Maximum live `claude -p` children per instance |
+| `reserved_system_slots` | `1` | Slots unavailable to user turns; must be less than the limit |
 | `system_prompt` | required | Persona template with `{{vars}}` and `@path` references |
 | `claude_bin` | `claude` | Path to the `claude` binary |
 | `model` | unset | `--model` for `claude -p`; unset defers to the CLI or `.claude/settings.json` |
 | `working_dir` | bus cwd | `cwd` for `claude -p`; selects the `CLAUDE.md` hierarchy and the `@path` base |
 | `error_reply` | see above | Sent to the user on invocation failure |
 | `error_passthrough` | `false` | Append the raw failure detail (500 characters max) to `error_reply` |
-| `memory.dir` | `memory` | Memory directory, relative to `working_dir` |
-| `memory.index_file` | `MEMORY.md` | Loaded into every turn |
-| `memory.daily_subdir` | `daily` | Daily journal files `YYYY-MM-DD.md` |
-| `memory.journal_lookback_days` | `3` | Days of journal to load (today plus N-1) |
-| `journaling.enabled` | `true` | Master switch |
-| `journaling.threshold_ms` | `{ default: 1800000 }` | Per-channel idle debounce; a number, or a map with a required `default` |
-| `journaling.ceiling_ms` | unset | Hard ceiling since the last sweep, regardless of idle state |
-| `journaling.prompt` | see schema | Prompt for the silent journaling turn |
+| `memory.dir` | `memory` | Deprecated (E67): use `agents.<id>.memory.dir` ([AGENT_MEMORY.md](AGENT_MEMORY.md)). Still the fallback |
+| `memory.index_file` | `MEMORY.md` | Deprecated: `agents.<id>.memory.index_file` |
+| `memory.daily_subdir` | `daily` | Deprecated: `agents.<id>.memory.daily_subdir` |
+| `memory.journal_lookback_days` | `3` | Deprecated: `agents.<id>.memory.lookback_days` |
+| `journaling.enabled` | `true` | Deprecated alias (use `agents.<id>.journaling`). Master switch |
+| `journaling.threshold_ms` | `{ default: 1800000 }` | Deprecated alias. Per-channel idle debounce; a number, or a map with a required `default` |
+| `journaling.ceiling_ms` | unset | Deprecated alias. Hard ceiling since the last sweep, regardless of idle state |
+| `journaling.prompt` | see schema | Deprecated alias. Prompt for the silent journaling turn |
 
 ## Multi-instance deployments
 
@@ -298,9 +308,9 @@ adapters:
 
 Instance names must match `^[a-z0-9_-]+$` and `agent_id` must be unique. `getCcHeadlessInstances()` (`src/config/schema.ts`) rejects duplicates at startup and normalizes both forms into one list.
 
-**Runtime isolation.** Each entry is its own `HeadlessInstance` with a private poll timer, per-contact queue, working directory, and config. `startHeadless(db)` starts one poller per instance and returns a `Map<string, HeadlessHandle>` keyed by `agent:<agent_id>`; `stopHeadless()` stops them all.
+**Runtime isolation.** Each entry is its own `HeadlessInstance` with a private poll timer, per-conversation queue, capacity limiter, working directory, and config. `startHeadless(db)` starts one poller per instance and returns a `Map<string, HeadlessHandle>` keyed by `agent:<agent_id>`; `stopHeadless()` stops them all.
 
-**Session ownership.** Migration 011 adds `sessions.agent_id`, set by the transcript-log stage from the route that created the session. The journaling dispatcher, `/clear`, `/stop`, and `/cost` use it to find the owning instance. Sessions with `agent_id IS NULL` (created before migration 011, or by a single-instance deployment) fall back to the sole configured instance when there is exactly one. With several instances, such a session is skipped rather than guessed.
+**Session ownership.** Migration 011 adds `sessions.agent_id`, set by the transcript-log stage from the route that created the session. The journaling engine, `/stop`, and `/cost` use it to find the owning instance. Sessions with `agent_id IS NULL` (created before migration 011, or by a single-instance deployment) fall back to the sole configured instance when there is exactly one. With several instances, such a session is skipped rather than guessed.
 
 ## Cross-contact isolation
 
@@ -312,5 +322,5 @@ Each contact gets an isolated Claude conversation, because `--resume` is keyed t
 ## What does not change
 
 - Platform adapters are unaffected.
-- Sessions from the polling MCP adapter (`claude_session_id IS NULL`) keep their idle teardown, the `on_session_close` hook, and, with `memory.structured_extraction: true`, the summarizer.
+- Sessions from the polling MCP adapter (`claude_session_id IS NULL`) keep their idle teardown, the `on_session_close` hook.
 - Every MCP tool stays registered. The structured memory tools are marked legacy, not removed.

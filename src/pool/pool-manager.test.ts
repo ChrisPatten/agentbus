@@ -964,10 +964,80 @@ describe('PoolManager', () => {
     });
   });
 
-  describe('journalingRunner', () => {
-    it('resolves to { skipped: true }', async () => {
+  describe('journaling release hook (E66 S66.9)', () => {
+    it('evict: fires the hook, then releases and seats the new conversation without waiting for it', async () => {
+      const db = makeDb();
+      const paneLauncher = makeFakeLauncher();
+      const manager = new PoolManager({ transcriptExists: () => true, cfg: makeCfg({ panes: 1 }), db, busBaseUrl: 'http://127.0.0.1:3000', paneLauncher });
+      const order: string[] = [];
+      let finishJournal: () => void = () => {};
+      manager.setReleaseHook((e) => {
+        order.push(`hook:${e.reason}:${e.conversationId}`);
+        return new Promise<void>((resolve) => { finishJournal = resolve; }); // a journal run that never ends here
+      });
+      paneLauncher.release.mockImplementation(async () => { order.push('release'); });
+      await manager.ensureStarted();
+      await manager.resolveRoute('conv-old', { contact_id: 'alice', channel: 'telegram' });
+      const pane = manager.leaseStore.findByConversation(manager.poolId, 'conv-old')!;
+      manager.leaseStore.touch(manager.poolId, pane.pane_id, new Date('2000-01-01T00:00:00.000Z'));
+      expect(await manager.resolveRoute('conv-new', { contact_id: 'bob', channel: 'telegram' })).toBe('agent:peggy-pool-1');
+      expect(order).toEqual(['hook:evict:conv-old', 'release']);
+      expect(paneLauncher.release).toHaveBeenCalledWith(pane.pane_id, 'clear');
+      finishJournal();
+    });
+
+    it('hard-idle: keeps the pane when the conversation came back while the hook waited', async () => {
+      const { manager, paneLauncher, db } = makeManager({
+        panes: 1, lease: { idle_evict_ms: 1_800_000, hard_idle_ms: 5_000, park_timeout_ms: 300_000 },
+      });
+      await manager.ensureStarted();
+      await manager.resolveRoute('conv-1', { contact_id: 'alice', channel: 'telegram' });
+      const pane = manager.leaseStore.findByConversation(manager.poolId, 'conv-1')!;
+      manager.leaseStore.touch(manager.poolId, pane.pane_id, new Date(Date.now() - 10_000));
+      paneLauncher.release.mockClear();
+      db.prepare(`INSERT INTO sessions (id, conversation_id, channel, contact_id, started_at, last_activity) VALUES ('s-1','conv-1','telegram','alice','x','x')`).run();
+      manager.setReleaseHook(async (e) => {
+        expect(e.reason).toBe('release');
+        db.prepare(`INSERT INTO transcripts (id, message_id, conversation_id, session_id, created_at, channel, contact_id, direction, body, metadata)
+          VALUES ('t1','m1','conv-1','s-1',?, 'telegram','alice','inbound','back again','{}')`).run(new Date(Date.now() + 5).toISOString());
+      });
+
+      await manager.sweepHardIdle();
+
+      expect(paneLauncher.release).not.toHaveBeenCalled();
+      expect(manager.leaseStore.findByConversation(manager.poolId, 'conv-1')?.state).toBe('leased');
+    });
+  });
+
+  describe('clearConversation (E66 S66.9, /clear)', () => {
+    it('detaches the pane at once, then clears and frees it; the next message gets a fresh session', async () => {
+      const { manager, paneLauncher } = makeManager({ panes: 1 });
+      await manager.ensureStarted();
+      await manager.resolveRoute('conv-1', { contact_id: 'alice', channel: 'telegram' });
+      const pane = manager.leaseStore.findByConversation(manager.poolId, 'conv-1')!;
+      let finishRelease: () => void = () => {};
+      paneLauncher.release.mockImplementation(() => new Promise<void>((resolve) => { finishRelease = resolve; }));
+
+      const cleared = manager.clearConversation('conv-1');
+      expect(cleared?.paneId).toBe(pane.pane_id);
+      // Detached immediately: the conversation no longer owns the pane.
+      expect(manager.leaseStore.findByConversation(manager.poolId, 'conv-1')).toBeNull();
+      expect(manager.leaseStore.findByPane(manager.poolId, pane.pane_id)?.state).toBe('draining');
+      await new Promise((r) => setTimeout(r, 0));
+      expect(paneLauncher.release).toHaveBeenCalledWith(pane.pane_id, 'clear');
+      finishRelease();
+      await cleared!.done;
+      expect(manager.leaseStore.findByPane(manager.poolId, pane.pane_id)?.state).toBe('free');
+
+      paneLauncher.launch.mockClear();
+      expect(await manager.resolveRoute('conv-1', { contact_id: 'alice', channel: 'telegram' })).toBe('agent:peggy-pool-1');
+      const params = paneLauncher.launch.mock.calls[0]![0];
+      expect(params.resume).toBe(false); // no open session row: a fresh Claude session
+    });
+
+    it('returns null when no pane is leased to the conversation', () => {
       const { manager } = makeManager();
-      await expect(manager.journalingRunner('some-conversation-id')).resolves.toEqual({ skipped: true });
+      expect(manager.clearConversation('nope')).toBeNull();
     });
   });
 

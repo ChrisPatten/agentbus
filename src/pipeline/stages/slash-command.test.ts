@@ -18,7 +18,7 @@ const stubConfig = {
   adapters: {},
   contacts: {},
   topics: ['general'],
-  memory: { summarizer_interval_ms: 60000, session_idle_threshold_ms: 1800000, context_window_hours: 48, claude_api_model: 'claude-opus-4-6' },
+  memory: { summarizer_interval_ms: 60000, session_idle_threshold_ms: 1800000, claude_api_model: 'claude-opus-4-6' },
   pipeline: { dedup_window_ms: 30000, drop_unrouted: false, topic_rules: [], priority_weights: { base_score: 0, topic_bonus: 40, vip_sender_bonus: 20, urgency_keyword_bonus: 15 }, urgency_keywords: [], vip_contacts: [], routes: [] },
 } as unknown as AppConfig;
 
@@ -130,7 +130,7 @@ describe('slash-command stage', () => {
     expect(result!.slashCommand?.args).toEqual(['this', 'is', 'a', 'longer', 'message']);
   });
 
-  it('parses //name as a forced provider command (E58)', async () => {
+  it('parses //name as a forced provider command (E71)', async () => {
     const ctx = makeCtx({ payload: { type: 'text', body: '//clear now' } });
     const result = await slashCommandDetect(ctx);
     expect(result!.slashCommand).toEqual({ name: 'clear', args: ['now'], argsRaw: 'now', forceProvider: true });

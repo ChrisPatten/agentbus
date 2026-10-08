@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# DEPRECATED (E66). Use scripts/hooks/agentbus_journal_hook.sh for PreCompact
+# (and Stop, SessionEnd) instead: it snapshots the transcript before
+# compaction or /clear and registers the snapshot with the bus, so the next
+# journal run reads it. This script is kept for installs that still rely on
+# its pointer line in the daily journal; it will be removed in a later release.
+#
 # Deployed into a pool agent's own project directory as
 # scripts/hooks/agentbus_precompact_snapshot.sh (a symlink back to this file
 # is the recommended setup) and wired into that project's

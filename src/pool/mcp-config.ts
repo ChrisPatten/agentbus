@@ -57,6 +57,12 @@ export interface PaneMcpConfigOptions {
   workingDir: string;
   /** Directory to write the generated per-pane config file into (a tmp/scratch dir is fine). */
   outDir: string;
+  /**
+   * The pool's `poll_interval_ms`. Passed to the pane's cc.ts as
+   * `AGENTBUS_POLL_INTERVAL_MS`, which it prefers over the `claude-code`
+   * adapter's own setting.
+   */
+  pollIntervalMs?: number;
 }
 
 /**
@@ -76,6 +82,7 @@ export function writePaneMcpConfig(opts: PaneMcpConfigOptions): string {
     env: {
       AGENTBUS_CONFIG: opts.agentbusConfigPath,
       AGENTBUS_AGENT_ID: opts.paneAgentId,
+      ...(opts.pollIntervalMs !== undefined ? { AGENTBUS_POLL_INTERVAL_MS: String(opts.pollIntervalMs) } : {}),
     },
   };
 

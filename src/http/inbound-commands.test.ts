@@ -18,6 +18,8 @@ import { AdapterRegistry, type AdapterInstance } from '../core/registry.js';
 import { createCommandSystem } from '../commands/index.js';
 import type { AppConfig } from '../config/schema.js';
 import type { ProviderCommandForwarder } from '../commands/provider-forward.js';
+import { createJournalCommand } from '../commands/journal.js';
+import { createFeedbackCommand } from '../commands/feedback.js';
 
 function makeDb() {
   const db = new Database(':memory:');
@@ -31,7 +33,7 @@ const stubConfig = {
   adapters: {},
   contacts: { chris: { display_name: 'Chris', platforms: { telegram: { user_id: '123' } } } },
   topics: ['general'],
-  memory: { summarizer_interval_ms: 60000, session_idle_threshold_ms: 1800000, context_window_hours: 48, claude_api_model: 'claude-opus-4-6' },
+  memory: { summarizer_interval_ms: 60000, session_idle_threshold_ms: 1800000, claude_api_model: 'claude-opus-4-6' },
   pipeline: {
     dedup_window_ms: 30000,
     drop_unrouted: false,
@@ -273,7 +275,9 @@ describe('processInbound — slash command dispatch', () => {
     expect(rows[0]!.contact_id).toBe('chris');
     expect(rows[0]!.channel).toBe('telegram');
     expect(rows[0]!.body).toContain('AgentBus status');
-    expect(JSON.parse(rows[0]!.metadata)).toEqual({ command_response: true, command: 'status' });
+    expect(JSON.parse(rows[0]!.metadata)).toEqual(expect.objectContaining({
+      command_response: true, command: 'status', command_source_message_id: expect.any(String),
+    }));
   });
 
   it('routes a matching follow-up message straight to the target command, short-circuiting fan-out (E36)', async () => {
@@ -489,7 +493,7 @@ describe('processInbound — command image replies', () => {
   });
 });
 
-describe('processInbound — provider command forwarding (E58)', () => {
+describe('processInbound — provider command forwarding (E71)', () => {
   let db: Database.Database;
   let queue: MessageQueue;
   let adapterRegistry: AdapterRegistry;
@@ -603,5 +607,52 @@ describe('processInbound — provider command forwarding (E58)', () => {
       throw new Error('boom');
     });
     expect(sent()[0]).toContain('boom');
+  });
+
+  // Bus commands always win over forwarding: only `//name` reaches the
+  // provider for a name the bus defines.
+  it('never forwards a bus command — /journal (and subcommands), /feedback, and every registered builtin', async () => {
+    const forward = vi.fn(async () => ({ kind: 'enqueue' as const }));
+    const { registry: commandRegistry, pauseSet } = createCommandSystem({
+      adapterRegistry, queue, db, config: stubConfig,
+    });
+    // Stub engine: handlers may answer "not set up" or throw — either way the
+    // bus replies and nothing is forwarded or enqueued.
+    const engine = {
+      sessionForConversation: () => null,
+      agentForSession: () => null,
+      allSettings: () => [],
+      settingsFor: () => undefined,
+      feedback: { record: vi.fn() },
+    } as unknown as Parameters<typeof createJournalCommand>[0]['engine'];
+    commandRegistry.register(createFeedbackCommand({ db, engine }));
+    commandRegistry.register(createJournalCommand({ db, engine, resolver: { resolve: () => undefined } }));
+    commandRegistry.registerProvider('cc', { forward });
+
+    const lines = [
+      '/journal',
+      '/journal runs',
+      '/journal runs 3',
+      '/journal now',
+      '/journal consolidate',
+      '/feedback Use 24-hour time',
+      ...commandRegistry
+        .list()
+        .map((c) => `/${c.name}`)
+        .filter((l) => l !== '/journal' && l !== '/feedback'),
+    ];
+    expect(lines).toEqual(expect.arrayContaining(['/clear', '/stop', '/schedule', '/status', '/help']));
+
+    for (const body of lines) {
+      const result = await processInbound(
+        { channel: 'telegram', sender: 'contact:chris', payload: { type: 'text', body } },
+        { queue, pipeline, config: stubConfig, db, registry: adapterRegistry, commandRegistry, pauseSet },
+      );
+      expect({ body, reason: 'reason' in result ? result.reason : undefined }).toEqual({ body, reason: 'command_handled' });
+    }
+
+    expect(forward).not.toHaveBeenCalled();
+    expect(queue.dequeue('agent:claude', undefined, 10)).toHaveLength(0);
+    expect(sent().length).toBeGreaterThanOrEqual(lines.length);
   });
 });

@@ -6,9 +6,9 @@
  * /api/v1/knowledge/search — see src/http/api.ts's "Knowledge store
  * endpoints" section and src/knowledge/store.ts). This is a new, always-on
  * store (Phase 1: FTS5 keyword search, no embeddings yet — see
- * docs/KNOWLEDGE_STORE.md) with no config flag gating it, so unlike
- * recall_memory/log_memory these tools have no `available: false` path —
- * bus-side failures surface as ordinary tool errors.
+ * docs/KNOWLEDGE_STORE.md) with no config flag gating it, so these tools
+ * have no `available: false` path — bus-side failures surface as ordinary
+ * tool errors.
  */
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -78,8 +78,8 @@ export function registerKnowledgeTools(server: McpServer, busBaseUrl: string): v
       description:
         'Write a structured knowledge row: an arbitrary JSON payload under a kind/schema you choose, ' +
         'searchable later by keyword, kind, tags, facets, or event time. Use this to build up your own ' +
-        'durable, queryable record store (e.g. "contact", "project", "decision", "preference") — unlike ' +
-        'log_memory, there is no fixed schema and no config flag gating it. Pass `supersedes` when this ' +
+        'durable, queryable record store (e.g. "contact", "project", "decision", "preference") — there is ' +
+        'no fixed schema and no config flag gating it. Pass `supersedes` when this ' +
         'write replaces an existing row (e.g. an updated fact) so the old one stops showing up in search.',
       inputSchema: {
         agent_id: z.string().min(1).describe('Agent this knowledge belongs to'),

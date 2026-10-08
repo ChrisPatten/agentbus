@@ -91,7 +91,7 @@ export class CommandRegistry {
     { command: string; validate: (body: string) => boolean; expiresAt: number }
   >();
 
-  /** Provider command forwarders, keyed by route `adapterId` (E58). */
+  /** Provider command forwarders, keyed by route `adapterId` (E71). */
   private readonly providers = new Map<string, ProviderCommandForwarder>();
 
   /**

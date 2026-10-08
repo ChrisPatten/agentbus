@@ -10,6 +10,13 @@ import type { CommandDefinition, CommandHandler, CommandResponse, SlashCommandCo
 import type { CommandRegistry } from './registry.js';
 import type { AdapterRegistry } from '../core/registry.js';
 import type { MessageQueue } from '../core/queue.js';
+import { computeConversationId } from '../pipeline/conversation-id.js';
+import type { HeadlessCapacitySnapshot } from '../adapters/cc-headless.js';
+import type { RuntimeResolver } from '../core/runtime-resolver.js';
+import { formatCapabilities } from '../core/runtime-capabilities.js';
+import type { AdvisoryService } from '../advisories/service.js';
+import type { JournalEngine } from '../journaling/engine.js';
+import { formatInZone } from '../scheduler/time.js';
 
 /**
  * Mutable holder for the headless adapter's control hooks. Populated by
@@ -18,23 +25,16 @@ import type { MessageQueue } from '../core/queue.js';
  */
 export interface HeadlessControl {
   /**
-   * Fire a silent background journaling turn for a claude session whose DB row
-   * has already been closed. Used by /clear to journal the old session after
-   * starting a fresh one. Keyed by the owning cc-headless agent_id (e.g.
-   * "agent:peggy") so /clear journals the right agent's session when more
-   * than one headless instance is running (E23).
-   */
-  journalResumeId: Map<string, (opts: { claudeSessionId: string; contactId: string; channel: string }) => void>;
-  /**
    * Kill the in-flight `claude -p` turn for a contact, keyed by the owning
    * cc-headless agent_id (e.g. "agent:peggy"). Used by `/stop`. Returns true
    * if a turn was found and killed.
    */
-  stopTurn: Map<string, (contactId: string) => boolean>;
+  stopTurn: Map<string, (conversationId: string) => boolean>;
+  snapshots?: Map<string, () => HeadlessCapacitySnapshot>;
   /**
    * The slash commands a cc-headless instance's last `init` event listed
    * (null before its first turn), keyed by agent_id. Used to decide whether
-   * a command can be forwarded to the provider (E58).
+   * a command can be forwarded to the provider (E71).
    */
   slashCommands: Map<string, () => string[] | null>;
 }
@@ -54,6 +54,31 @@ export interface HandlerDeps {
    * adapters are configured.
    */
   poolManagers?: Map<string, import('../pool/pool-manager.js').PoolManager>;
+  /** E64 — agent runtime lookup for the /status Runtimes section. Omitted → section omitted. */
+  runtimeResolver?: Pick<RuntimeResolver, 'list'>;
+  /** E65 — active advisories for the /status Advisories section. Omitted or none → section omitted. */
+  advisories?: Pick<AdvisoryService, 'listActive'>;
+  /** E66 — the journaling engine; /clear fires its `clear` trigger. Omitted → /clear closes without journaling. */
+  journal?: Pick<JournalEngine, 'trigger'>;
+}
+
+/** "3m", "2h", "4d" since `iso`. */
+function ago(iso: string, now = Date.now()): string {
+  const s = Math.max(0, Math.round((now - new Date(iso).getTime()) / 1000));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.round(s / 60)}m`;
+  if (s < 86_400) return `${Math.round(s / 3600)}h`;
+  return `${Math.round(s / 86_400)}d`;
+}
+
+export function commandConversationId(ctx: SlashCommandContext, db: Database.Database, contactId: string): string {
+  const boundId = ctx.channel === 'app' ? ctx.envelope.metadata?.['bound_session_id'] : undefined;
+  if (typeof boundId === 'string') {
+    const row = db.prepare(`SELECT conversation_id FROM sessions
+      WHERE id = ? AND contact_id = ? AND ended_at IS NULL`).get(boundId, contactId) as {conversation_id:string}|undefined;
+    if (row) return row.conversation_id;
+  }
+  return computeConversationId(contactId, ctx.channel, ctx.envelope.topic);
 }
 
 // ── /status ──────────────────────────────────────────────────────────────────
@@ -101,6 +126,21 @@ async function statusHandler(
     `  delivered:  ${counts['delivered'] ?? 0}`,
     `  dead_letter: ${counts['dead_letter'] ?? 0}`,
     ...(poolLines.length > 0 ? ['', 'Pool:', ...poolLines] : []),
+    ...(() => {
+      const runtimes = deps.runtimeResolver?.list() ?? [];
+      return runtimes.length > 0 ? ['', 'Runtimes:', ...runtimes.map((r) =>
+        `  ${r.agentId}: ${r.kind} (${formatCapabilities(r.capabilities)})`)] : [];
+    })(),
+    ...(() => {
+      const active = deps.advisories?.listActive() ?? [];
+      return active.length > 0 ? ['', 'Advisories:', ...active.map((a) =>
+        `  ${a.agent_id} [${a.severity}] ${a.title} (${a.state}, raised ${ago(a.raised_at)} ago) id:${a.id.slice(0, 8)}`)] : [];
+    })(),
+    ...(() => {
+      const snapshots = [...(deps.headlessControl?.snapshots?.values() ?? [])].map((read) => read());
+      return snapshots.length > 0 ? ['', 'Headless:', ...snapshots.map((s) =>
+        `  ${s.agent_id}: ${s.running_user} user, ${s.running_system} system, ${s.waiting} waiting, limit ${s.limit} (${s.reserved_system_slots} reserved)`)] : [];
+    })(),
   ];
 
   return { body: lines.join('\n') };
@@ -294,8 +334,10 @@ async function scheduleHandler(
     for (const row of rows) {
       const shortId = row.id.slice(0, 8);
       const name = row.label ?? (row.type === 'cron' ? row.cron_expr! : 'one-shot');
-      const nextFire = row.fire_at.slice(0, 16).replace('T', ' ');
-      const tz = row.timezone && row.timezone !== 'UTC' ? ` (${row.timezone})` : ' UTC';
+      // fire_at is stored in UTC; show it in the schedule's own zone (the one
+      // its cron is evaluated in), labelled with that zone.
+      const { text: nextFire, zone } = formatInZone(row.fire_at, row.timezone || 'UTC');
+      const tz = zone !== 'UTC' ? ` (${zone})` : ' UTC';
       const fires =
         row.max_fires !== null ? `${row.fire_count}/${row.max_fires}` : `${row.fire_count} fired`;
       const model = row.model ? `  [${row.model}]` : '';
@@ -358,12 +400,14 @@ async function scheduleHandler(
 // ── /clear ────────────────────────────────────────────────────────────────────
 
 /**
- * Start a fresh headless session for the sender on this channel. Closes the
- * current active session immediately (so the next message spawns a fresh
- * `claude -p` with no `--resume`), then journals the now-closed session in the
- * background — the agent reviews the conversation one last time and updates its
- * memory files. The close is atomic; journaling runs against the captured
- * `claude_session_id`, which persists on disk independent of the DB `ended_at`.
+ * Start a fresh session for the sender on this channel. Closes the current
+ * active session immediately (so the next message starts with no
+ * `--resume`), then fires the journaling engine's `clear` trigger (E66) for
+ * the closed session. The trigger is persisted, bypasses
+ * `min_human_messages`, and runs the agent's journaler chain in the
+ * background; the closed session's Claude transcript stays resumable on disk.
+ * On cc-pool the conversation's pane is detached and cleared (or killed,
+ * per `on_evict`), so the next message starts a fresh Claude session.
  */
 async function clearHandler(
   _args: string[],
@@ -373,16 +417,17 @@ async function clearHandler(
   const contactId = ctx.sender.startsWith('contact:')
     ? ctx.sender.slice('contact:'.length)
     : ctx.sender;
+  const conversationId = commandConversationId(ctx, deps.db, contactId);
 
   const session = deps.db
     .prepare(
-      `SELECT id, claude_session_id, agent_id FROM sessions
-       WHERE contact_id = ? AND channel = ? AND ended_at IS NULL
+      `SELECT id, claude_session_id, agent_id, channel FROM sessions
+       WHERE conversation_id = ? AND ended_at IS NULL
          AND claude_session_id IS NOT NULL
        ORDER BY last_activity DESC LIMIT 1`,
     )
-    .get(contactId, ctx.channel) as
-    | { id: string; claude_session_id: string; agent_id: string | null }
+    .get(conversationId) as
+    | { id: string; claude_session_id: string; agent_id: string | null; channel: string }
     | undefined;
 
   if (!session) {
@@ -394,26 +439,28 @@ async function clearHandler(
     .prepare(`UPDATE sessions SET ended_at = ? WHERE id = ?`)
     .run(new Date().toISOString(), session.id);
 
-  // Journal the now-closed session in the background, if the owning headless
-  // instance is running. The claude session is resumable on disk regardless of
-  // the DB flag. Sessions with no agent_id (created before migration 011, or by
-  // a single-instance deployment) fall back to the sole registered instance —
-  // mirrors SessionTracker.dispatchJournaling (E23).
-  const runners = deps.headlessControl?.journalResumeId;
-  const journal = session.agent_id
-    ? runners?.get(session.agent_id)
-    : runners?.size === 1
-      ? [...runners.values()][0]
-      : undefined;
-  if (journal) {
-    journal({ claudeSessionId: session.claude_session_id, contactId, channel: ctx.channel });
+  const journal = deps.journal?.trigger({ reason: 'clear', sessionId: session.id });
+
+  // E66 S66.9 — on cc-pool the leased pane still holds the old Claude
+  // context. Detach it now (the next message gets a fresh pane and session)
+  // and clear or free it in the background. Journalers read the closed
+  // session's transcript on disk, which /clear does not remove.
+  for (const pool of deps.poolManagers?.values() ?? []) {
+    const cleared = pool.clearConversation(conversationId);
+    if (cleared) {
+      void cleared.done.catch((err: unknown) => console.error(`[commands] /clear: releasing ${cleared.paneId} failed:`, err));
+      break;
+    }
+  }
+
+  if (journal && (journal.status === 'queued' || journal.status === 'merged')) {
     return {
       body: 'Context cleared — your next message starts a fresh session. Journaling the previous session in the background.',
     };
   }
 
   return {
-    body: 'Context cleared — your next message starts a fresh session. (No headless journaling agent available for this session; closed without a memory pass.)',
+    body: 'Context cleared — your next message starts a fresh session. (Journaling is not set up for this agent; closed without a memory pass.)',
   };
 }
 
@@ -435,14 +482,15 @@ async function stopHandler(
   deps: HandlerDeps,
 ): Promise<CommandResponse> {
   const contactId = ctx.sender.startsWith('contact:') ? ctx.sender.slice('contact:'.length) : ctx.sender;
+  const conversationId = commandConversationId(ctx, deps.db, contactId);
 
   const session = deps.db
     .prepare(
       `SELECT agent_id FROM sessions
-       WHERE contact_id = ? AND channel = ? AND ended_at IS NULL
+       WHERE conversation_id = ? AND ended_at IS NULL
        ORDER BY last_activity DESC LIMIT 1`,
     )
-    .get(contactId, ctx.channel) as { agent_id: string | null } | undefined;
+    .get(conversationId) as { agent_id: string | null } | undefined;
 
   const runners = deps.headlessControl?.stopTurn;
   const stop = session?.agent_id
@@ -451,7 +499,7 @@ async function stopHandler(
       ? [...runners.values()][0]
       : undefined;
 
-  const stopped = stop ? stop(ctx.sender) : false;
+  const stopped = stop ? stop(conversationId) : false;
 
   if (!stopped) {
     return { body: 'No active turn to stop.' };

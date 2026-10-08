@@ -1,5 +1,13 @@
 # Thread-scoped sessions
 
+## App continuation of another channel's session
+
+The authenticated Mac app can send to a listed Telegram, email, or Siri session by its `session_id`. The bus checks the app token's contact and routed agent, then uses that session's stored conversation, topic, and owner. The new transcript row stays in that session with `arrival_channel: app`; `reply` returns to the app in the same session. An explicit `send_message` to Telegram or another channel still goes there, and its transcript is mirrored in the app. The original channel's own chat may therefore have gaps where the conversation continued in the app.
+
+An Earlier session with a discoverable Claude transcript is resumed through a new app topic named `<original title> (resumed)`. The original row stays in Earlier with its history intact, and a concurrent active session in the original channel is untouched. The send ack names the new session. If the transcript is unavailable, the Earlier row is read-only and the send receives `not_resumable`.
+
+The app's session binding is server-authorized. General inbound HTTP callers cannot set `bound_session_id`; commands, typing, tool activity, journaling, and context use the selected session's conversation ID.
+
 Some channels have a native notion of a **thread** — a persistent
 sub-conversation distinct from the channel's main conversation (an email
 thread, a Telegram forum topic, …). AgentBus gives each thread its own

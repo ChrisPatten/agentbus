@@ -144,6 +144,19 @@ describe('send_message tool', () => {
     await client.close();
   });
 
+  it('sends a topicless app message to Main', async () => {
+    fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ ok: true, exists: true }) });
+    fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ ok: true, id: 'app-main-msg' }) });
+    const client = await makeClient();
+    const result = await client.callTool({ name: 'send_message', arguments: {
+      to: 'contact:chris', channel: 'app', body: 'Ready',
+    } });
+    expect(result.isError).toBeFalsy();
+    const posted = JSON.parse((fetchMock.mock.calls[1]![1] as {body:string}).body) as {topic:string};
+    expect(posted.topic).toBe('general');
+    await client.close();
+  });
+
   it('passes an explicit topic (e.g. a Telegram forum thread) through to the bus unmodified', async () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,

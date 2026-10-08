@@ -308,11 +308,8 @@ history for the new topic to inherit.
   attaches `metadata.injected_topic_context` to that one `InboundMessage`.
   `formatMessagesForSampling` (`src/adapters/cc.ts`) renders it as
   `[Context for this new topic, provided when it was created]\n<context>`
-  before the first message body — applied unconditionally (unlike
-  `memory_context`, which cc-headless suppresses in favor of system-prompt
-  injection; there's no equivalent alternate path for agent-supplied topic
-  context, so it always flows through here for both the polling and headless
-  adapters).
+  before the first message body, for both the polling and headless
+  adapters.
 - Implemented as a thin MCP tool (`src/mcp/tools/telegram.ts`) over
   `POST /api/v1/adapters/:id/topics`; only registered when a Telegram adapter
   is configured.

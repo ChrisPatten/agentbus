@@ -56,6 +56,15 @@ describe('writePaneMcpConfig', () => {
     });
   });
 
+  it('passes the pool poll interval to cc.ts as AGENTBUS_POLL_INTERVAL_MS', () => {
+    const { workingDir, outDir } = setupFixture();
+
+    const outPath = writePaneMcpConfig(baseOpts({ workingDir, outDir, pollIntervalMs: 250 }));
+    const written = JSON.parse(readFileSync(outPath, 'utf-8'));
+
+    expect(written.mcpServers.agentbus.env.AGENTBUS_POLL_INTERVAL_MS).toBe('250');
+  });
+
   it('preserves an unrelated "bmp" server from the project .mcp.json and still sets agentbus correctly', () => {
     const { workingDir, outDir } = setupFixture();
     const projectConfig = {

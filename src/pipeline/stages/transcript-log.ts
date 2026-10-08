@@ -51,6 +51,8 @@ export function createTranscriptLog(db: Database.Database, config: AppConfig): P
       return ctx;
     }
     const conversationId = ctx.conversationId;
+    const boundSessionId = e.channel === 'app' && typeof e.metadata?.['bound_session_id'] === 'string'
+      ? e.metadata['bound_session_id'] : null;
 
     // The owning agent's route target recipientId (e.g. "agent:pokeclaude",
     // "agent:peggy-pool-3"), if this batch is headed to a cc-headless or
@@ -67,7 +69,7 @@ export function createTranscriptLog(db: Database.Database, config: AppConfig): P
         ?.recipientId ?? null;
 
     // Find active session for this conversation
-    const activeSession = db
+    const activeSession = boundSessionId ? undefined : db
       .prepare(
         `SELECT id, last_activity, claude_session_id FROM sessions
          WHERE conversation_id = ? AND ended_at IS NULL
@@ -80,7 +82,13 @@ export function createTranscriptLog(db: Database.Database, config: AppConfig): P
 
     let sessionId: string;
 
-    if (!activeSession) {
+    if (boundSessionId) {
+      const bound = db.prepare(`SELECT id FROM sessions WHERE id = ? AND conversation_id = ? AND contact_id = ? AND ended_at IS NULL`)
+        .get(boundSessionId, conversationId, contactId);
+      if (!bound) return null;
+      sessionId = boundSessionId;
+      db.prepare(`UPDATE sessions SET last_activity = ?, message_count = message_count + 1 WHERE id = ?`).run(now, sessionId);
+    } else if (!activeSession) {
       // No active session — create one, counting this first message
       sessionId = randomUUID();
       db.prepare(
@@ -119,11 +127,15 @@ export function createTranscriptLog(db: Database.Database, config: AppConfig): P
     ctx.sessionId = sessionId;
 
     // Upsert conversation_registry
-    db.prepare(
-      `INSERT INTO conversation_registry (id, contact_id, channel, topic, first_seen, last_seen)
-       VALUES (?, ?, ?, ?, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET last_seen = excluded.last_seen`,
-    ).run(conversationId, contactId, e.channel, e.topic, now, now);
+    if (boundSessionId) {
+      db.prepare(`UPDATE conversation_registry SET last_seen = ? WHERE id = ?`).run(now, conversationId);
+    } else {
+      db.prepare(
+        `INSERT INTO conversation_registry (id, contact_id, channel, topic, first_seen, last_seen)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET last_seen = excluded.last_seen`,
+      ).run(conversationId, contactId, e.channel, e.topic, now, now);
+    }
 
     // Insert transcript row
     db.prepare(

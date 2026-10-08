@@ -25,6 +25,7 @@
 import { randomUUID } from 'node:crypto';
 import { Cron } from 'croner';
 import type Database from 'better-sqlite3';
+import { parseFireAt } from './time.js';
 import type { AppConfig } from '../config/schema.js';
 import type { MessageQueue } from '../core/queue.js';
 import type { AdapterRegistry } from '../core/registry.js';
@@ -141,16 +142,14 @@ export class Scheduler {
     try {
       due = this.db
         .prepare(
-          // Use strftime ISO format so the comparison is lexicographically
-          // correct against fire_at values stored as 'YYYY-MM-DDTHH:MM:SS.sssZ'.
-          // datetime('now') returns 'YYYY-MM-DD HH:MM:SS' (space separator);
-          // 'T' (0x54) > ' ' (0x20) so same-day past items would be skipped.
+          // Compare full ISO timestamps using the same clock as staleness and
+          // next-fire calculations. This also preserves millisecond precision.
           `SELECT * FROM scheduled_items
            WHERE status = 'active'
-             AND fire_at <= strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+             AND fire_at <= ?
            ORDER BY fire_at ASC LIMIT ${TICK_ITEM_LIMIT}`,
         )
-        .all() as ScheduledItem[];
+        .all(new Date().toISOString()) as ScheduledItem[];
     } catch (err) {
       console.error('[scheduler] Failed to query due items:', err);
       return;
@@ -286,8 +285,11 @@ export class Scheduler {
   /**
    * Upsert all schedules from config.yaml into the DB.
    *
-   * ON CONFLICT: update payload/label/cron_expr but NOT fire_at for existing
-   * active items — overwriting fire_at would cause an immediate re-fire.
+   * ON CONFLICT: update payload/label/cron_expr/max_fires but NOT fire_at for existing
+   * cron items — overwriting fire_at would cause an immediate re-fire. An
+   * unfired one-off item does take the (UTC-normalised) fire_at from config,
+   * so editing its time works and rows stored before offsets were normalised
+   * are corrected.
    *
    * Important: once a config schedule is manually cancelled (via /schedule cancel
    * or DELETE /api/v1/schedules/:id), the WHERE status != 'cancelled' guard
@@ -325,7 +327,19 @@ export class Scheduler {
         }
         initialFireAt = next;
       } else {
-        initialFireAt = entry.fire_at!;
+        // Normalise to UTC: the tick query compares fire_at as text against
+        // the current UTC ISO time, so an offset left in the string would be
+        // compared as if it were UTC. An offset-less value is a wall-clock
+        // time in entry.timezone.
+        try {
+          initialFireAt = parseFireAt(entry.fire_at!, entry.timezone).toISOString();
+        } catch (err) {
+          console.warn(
+            `[scheduler] Config schedule "${entry.id}" has an invalid fire_at/timezone` +
+              ` "${entry.fire_at}" (${entry.timezone}): ${String(err)} — skipping`,
+          );
+          continue;
+        }
       }
 
       // D1: a schedule with no explicit topic in config gets its own
@@ -339,10 +353,16 @@ export class Scheduler {
         .prepare(
           `INSERT INTO scheduled_items
              (id, type, cron_expr, timezone, fire_at, channel, sender, payload_body,
-              topic, priority, label, model, created_at, created_by, fire_count, status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'config', 0, 'active')
+              topic, priority, label, model, max_fires, created_at, created_by, fire_count, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'config', 0, 'active')
            ON CONFLICT(id) DO UPDATE SET
              cron_expr    = excluded.cron_expr,
+             max_fires    = excluded.max_fires,
+             fire_at      = CASE
+                              WHEN scheduled_items.type = 'once' AND scheduled_items.fire_count = 0
+                              THEN excluded.fire_at
+                              ELSE scheduled_items.fire_at
+                            END,
              timezone     = excluded.timezone,
              payload_body = excluded.payload_body,
              topic        = excluded.topic,
@@ -364,6 +384,7 @@ export class Scheduler {
           entry.priority,
           entry.label ?? null,
           entry.model ?? null,
+          entry.max_fires ?? null,
           now,
         );
     }

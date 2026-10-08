@@ -19,7 +19,7 @@ function makeConfig(overrides: Partial<AppConfig['pipeline']> = {}): AppConfig {
     adapters: {},
     contacts: {},
     topics: ['general', 'code', 'health', 'urgent'],
-    memory: { summarizer_interval_ms: 60000, session_idle_threshold_ms: 1800000, context_window_hours: 48, claude_api_model: 'claude-opus-4-6' },
+    memory: { summarizer_interval_ms: 60000, session_idle_threshold_ms: 1800000, claude_api_model: 'claude-opus-4-6' },
     pipeline: {
       dedup_window_ms: 30000,
       drop_unrouted: false,
@@ -64,6 +64,14 @@ function makeCtx(envelope: Partial<MessageEnvelope> = {}, config?: AppConfig): P
 }
 
 describe('topic-classify stage', () => {
+  it('preserves an authorized app binding to a foreign ordinary topic', async () => {
+    const config = makeConfig({ topic_rules: [{ topic: 'code', keywords: ['bug'] }] });
+    const ctx = makeCtx({ channel: 'app', topic: 'foreign-topic', payload: { type: 'text', body: 'bug' },
+      metadata: { bound_session_id: 'session-id' } }, config);
+    const result = await createTopicClassify(config)(ctx);
+    expect(result!.envelope.topic).toBe('foreign-topic');
+    expect(result!.topics).toEqual(['foreign-topic']);
+  });
   it('defaults to general when no rules and topic is general', async () => {
     const stage = createTopicClassify(makeConfig());
     const ctx = makeCtx({ topic: 'general' });

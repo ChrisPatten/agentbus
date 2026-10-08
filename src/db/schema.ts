@@ -129,6 +129,51 @@ function loadMigrations(): Migration[] {
       description: 'Pool leases model column (E53 S53.4)',
       sql: readFileSync(join(migrationsDir, '023_pool_leases_model.sql'), 'utf-8'),
     },
+    {
+      version: 24,
+      description: 'Durable app events and read state (E59)',
+      sql: readFileSync(join(migrationsDir, '024_app_events.sql'), 'utf-8'),
+    },
+    {
+      version: 25,
+      description: 'Bus advisories (E65)',
+      sql: readFileSync(join(migrationsDir, '025_advisories.sql'), 'utf-8'),
+    },
+    {
+      version: 26,
+      description: 'Pluggable journaling: cursor, state, snapshots, runs (E66)',
+      sql: readFileSync(join(migrationsDir, '026_journaling.sql'), 'utf-8'),
+    },
+    {
+      version: 27,
+      description: 'Recent-memory freshness per harness session (E67)',
+      sql: readFileSync(join(migrationsDir, '027_memory_recent_seen.sql'), 'utf-8'),
+    },
+    {
+      version: 30,
+      description: 'Email IMAP catch-up state',
+      sql: readFileSync(join(migrationsDir, '030_email_imap_state.sql'), 'utf-8'),
+    },
+    {
+      version: 31,
+      description: 'Drop the legacy structured memory store (memories, session_summaries)',
+      sql: readFileSync(join(migrationsDir, '031_drop_legacy_memory.sql'), 'utf-8'),
+    },
+    {
+      version: 32,
+      description: 'Feedback events for agent learning (E68)',
+      sql: readFileSync(join(migrationsDir, '032_feedback_events.sql'), 'utf-8'),
+    },
+    {
+      version: 33,
+      description: 'Self-edit proposals (E68)',
+      sql: readFileSync(join(migrationsDir, '033_self_edit_proposals.sql'), 'utf-8'),
+    },
+    {
+      version: 34,
+      description: 'Feedback kind lapsed-proposal (E68)',
+      sql: readFileSync(join(migrationsDir, '034_feedback_lapsed_proposal.sql'), 'utf-8'),
+    },
   ];
 }
 
@@ -194,11 +239,4 @@ export function runMigrations(db: Database.Database): void {
  */
 export function rebuildFts(db: Database.Database): void {
   db.exec(`INSERT INTO transcripts_fts (transcripts_fts) VALUES ('rebuild')`);
-  // Rebuild memories FTS if the table exists (post-migration 003)
-  const exists = db
-    .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='memories_fts'`)
-    .get();
-  if (exists) {
-    db.exec(`INSERT INTO memories_fts (memories_fts) VALUES ('rebuild')`);
-  }
 }

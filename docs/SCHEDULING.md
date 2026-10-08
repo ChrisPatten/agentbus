@@ -31,14 +31,16 @@ schedules:
     max_fires: 52                 # optional; stop after 52 fires (one year)
 
   - id: onboarding_reminder
-    fire_at: "2026-05-01T09:00:00-05:00"   # one-shot; converted to UTC on load
+    fire_at: "2026-05-01T09:00:00-05:00"   # one-shot; converted to UTC on load (see below)
     channel: telegram
     sender: contact:chris
     prompt: "Remind me about the onboarding meeting with the new team member today."
     label: Onboarding reminder
 ```
 
-Config schedules are upserted by `id` on every startup — safe to restart with. Removing an entry from config.yaml cancels the schedule on the next startup.
+Config schedules are upserted by `id` on every startup — safe to restart with. An existing row picks up changes to `prompt`, `cron`, `timezone`, `label`, `topic`, `priority`, `model` and `max_fires` (removing `max_fires` makes it unlimited again). Removing an entry from config.yaml cancels the schedule on the next startup.
+
+`fire_at` is normalised to a UTC ISO string (`src/scheduler/time.ts`'s `parseFireAt`) before it's stored, since the tick query compares `fire_at` as text against the current UTC time. A value with an offset (`Z`, `-05:00`, `+0200`) uses that offset; a value without one (`2026-05-01T09:00`, `2026-05-01`) is wall-clock time in the entry's `timezone` (default UTC), DST-aware. An invalid value or unknown time zone fails config validation. On reload, an unfired one-off row takes the normalised `fire_at` from config, so editing the time works and rows stored raw by older versions are corrected; cron rows keep their computed next fire.
 
 > **Cancelling a config schedule manually** (via `/schedule cancel` or `DELETE /api/v1/schedules/:id`) marks it cancelled permanently. Subsequent restarts will **not** revive it, even if the entry is still present in config.yaml. To reset it, change its `id` in config.yaml so a fresh row is inserted, then remove the old id.
 
@@ -91,6 +93,14 @@ Scheduled messages are logged to transcripts with `metadata.scheduled = true` an
 ### Delivery semantics
 
 The scheduler uses **at-least-once** delivery. `processInbound()` is called before the database is updated. If the process is killed between those two steps, the item retains its old `fire_at` and will fire again on the next restart.
+
+After a laptop sleeps or the bus is stopped, the first tick on wake or restart
+checks every active item whose `fire_at` is due. A cron item runs **once** on
+that tick, even if several cron occurrences were missed, then computes its next
+`fire_at` from the current time. It does not run a catch-up burst. A one-off
+item also runs once, unless its optional `stale_after_ms` ceiling has elapsed;
+then it is dead-lettered. The scheduler runs an immediate tick at startup and
+subsequent ticks at `scheduler.tick_interval_ms`.
 
 - **Once schedules** (`type: once`): best-effort-once. A crash during firing may cause a duplicate. If exact-once semantics are critical, design prompts to be idempotent.
 - **Cron schedules** (`type: cron`): intended to be periodic; the occasional duplicate is benign for most use cases.
@@ -264,14 +274,14 @@ List active schedules for the current channel:
 ```
 Active schedules for telegram (2):
 
-  a1b2c3d4  Morning briefing  next: 2026-04-17 12:00 UTC  (3 fired)
-  e5f6g7h8  Weekly review     next: 2026-04-18 21:00 UTC  (0 fired)
+  a1b2c3d4  Morning briefing  next: 2026-04-17 08:00 (America/New_York)  (3 fired)
+  e5f6g7h8  Weekly review     next: 2026-04-18 17:00 (America/New_York)  (0 fired)
   i9j0k1l2  Email Watch       next: 2026-04-17 12:15 UTC  (12 fired)  [haiku]
 
 Use /schedule cancel <id> to cancel a schedule.
 ```
 
-A `[model]` suffix appears only when the job has its own `model` set.
+Next-fire times are converted from the stored UTC `fire_at` into each schedule's own `timezone` (the zone its cron is evaluated in) and labelled with it; `UTC` schedules, or an unknown zone, show UTC. A `[model]` suffix appears only when the job has its own `model` set.
 
 ### `/schedule cancel <id>`
 
