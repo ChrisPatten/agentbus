@@ -71,7 +71,7 @@ function makeTmux(overrides: Record<string, any> = {}) {
     sendKeys: vi.fn(async (_target: string, _keys: string) => {}),
     sendCommand: vi.fn(async (_target: string, _line: string) => {}),
     paneAlive: vi.fn(async (_target: string) => false),
-    paneCommand: vi.fn(async (_target: string) => null),
+    paneCommand: vi.fn(async (_target: string): Promise<string | null> => 'zsh'),
     capturePane: vi.fn(async (_target: string, _lines?: number) => ''),
     ...overrides,
   };
@@ -162,7 +162,7 @@ describe('PaneLifecycle.launch — fresh vs resume', () => {
     expect(line).toContain(`${q('--dangerously-load-development-channels')} ${q('server:agentbus')}`);
   });
 
-  it('resume launch (window already alive) skips window creation and uses --resume', async () => {
+  it('resume launch (window already alive at a shell) skips window creation and uses --resume', async () => {
     const tmux = makeTmux({ paneAlive: vi.fn(async () => true), capturePane: makeNoAckCapture() });
     const fetchFn = makeReadyFetch();
     const pl = new PaneLifecycle({ tmux, busBaseUrl: 'http://127.0.0.1:3000', cfg: makeCfg(), scratchDir, fetchFn });
@@ -173,11 +173,59 @@ describe('PaneLifecycle.launch — fresh vs resume', () => {
 
     expect(tmux.createWindow).not.toHaveBeenCalled();
     expect(tmux.ensureSession).not.toHaveBeenCalled();
+    expect(tmux.killWindow).not.toHaveBeenCalled();
 
     const line = tmux.sendCommand.mock.calls[0]![1] as string;
     expect(line).toContain(`${q('--resume')} ${q('abc-resume-id')}`);
     expect(line).not.toContain(q('--session-id'));
   });
+
+  it('treats a login shell ("-zsh") as a shell and reuses the window', async () => {
+    const tmux = makeTmux({
+      paneAlive: vi.fn(async () => true),
+      paneCommand: vi.fn(async () => '-zsh'),
+      capturePane: makeNoAckCapture(),
+    });
+    const pl = new PaneLifecycle({ tmux, busBaseUrl: 'http://127.0.0.1:3000', cfg: makeCfg(), scratchDir, fetchFn: makeReadyFetch() });
+
+    const launchPromise = pl.launch(makeLaunchParams());
+    await vi.advanceTimersByTimeAsync(600);
+    await launchPromise;
+
+    expect(tmux.killWindow).not.toHaveBeenCalled();
+    expect(tmux.createWindow).not.toHaveBeenCalled();
+  });
+
+  // The launch line typed into a running Claude TUI is submitted as a chat
+  // message, so a live window is only reused when it sits at a shell.
+  it.each(['claude', 'node', '2.1.274', null])(
+    'recreates a live window whose foreground command is %s before sending the launch line',
+    async (command) => {
+      const tmux = makeTmux({
+        paneAlive: vi.fn(async () => true),
+        paneCommand: vi.fn(async () => command),
+        capturePane: makeNoAckCapture(),
+      });
+      const pl = new PaneLifecycle({ tmux, busBaseUrl: 'http://127.0.0.1:3000', cfg: makeCfg(), scratchDir, fetchFn: makeReadyFetch() });
+
+      const launchPromise = pl.launch(makeLaunchParams({ resume: true, sessionId: 'abc-resume-id' }));
+      await vi.advanceTimersByTimeAsync(1000);
+      await launchPromise;
+
+      expect(tmux.killWindow).toHaveBeenCalledWith('peggy-pool:1');
+      expect(tmux.createWindow).toHaveBeenCalledWith('peggy-pool', '1', '/work/dir', {
+        TERM: 'xterm-256color',
+        COLORTERM: 'truecolor',
+      });
+      expect(tmux.sendCommand).toHaveBeenCalledTimes(1);
+
+      const killOrder = tmux.killWindow.mock.invocationCallOrder[0]!;
+      const createOrder = tmux.createWindow.mock.invocationCallOrder[0]!;
+      const sendOrder = tmux.sendCommand.mock.invocationCallOrder[0]!;
+      expect(killOrder).toBeLessThan(createOrder);
+      expect(createOrder).toBeLessThan(sendOrder);
+    },
+  );
 });
 
 // ── launch(): optional flags ─────────────────────────────────────────────────
@@ -719,6 +767,27 @@ describe('PaneLifecycle.launch — pane still running claude (after on_evict: cl
     expect(isShellCommand('-bash')).toBe(true);
     expect(isShellCommand('claude')).toBe(false);
     expect(isShellCommand('node')).toBe(false);
+    expect(isShellCommand('/bin/zsh')).toBe(true);
+    expect(isShellCommand(' bash ')).toBe(true);
+    expect(isShellCommand(null)).toBe(false);
+  });
+
+  it('kills a window whose foreground command is unknown without sending C-c first', async () => {
+    const tmux = makeTmux({
+      paneAlive: vi.fn(async () => true),
+      paneCommand: vi.fn(async () => null),
+      capturePane: makeNoAckCapture(),
+    });
+    const pl = new PaneLifecycle({ tmux, busBaseUrl: 'http://x', cfg: makeCfg(), scratchDir, fetchFn: makeReadyFetch() });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const launchPromise = pl.launch(makeLaunchParams());
+    await vi.advanceTimersByTimeAsync(1000);
+    await launchPromise;
+
+    expect(tmux.sendKeys).not.toHaveBeenCalledWith('peggy-pool:1', 'C-c');
+    expect(tmux.killWindow).toHaveBeenCalledWith('peggy-pool:1');
+    expect(tmux.createWindow).toHaveBeenCalledTimes(1);
   });
 });
 

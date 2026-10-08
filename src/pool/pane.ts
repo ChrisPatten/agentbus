@@ -68,6 +68,22 @@ const READINESS_POLL_INTERVAL_MS = 500;
 /** Pause between `C-c` and killing the window on a 'kill' release, so the interrupt has a moment to land. */
 const RELEASE_KILL_PAUSE_MS = 300;
 
+/**
+ * Foreground commands that mean a pane is sitting at a shell prompt, ready to
+ * take a launch line. Matched against tmux's `pane_current_command` with any
+ * login-shell `-` prefix and directory stripped. An allowlist of shells, not
+ * a denylist of `claude`: the CLI's process name varies by install
+ * (`claude`, `node`, a bare version number).
+ */
+const SHELL_COMMANDS = new Set(['sh', 'bash', 'zsh', 'fish', 'dash', 'ksh', 'csh', 'tcsh', 'nu']);
+
+/** True when `command` (tmux `pane_current_command`) is a shell. `null` (unknown) is not a shell. */
+export function isShellCommand(command: string | null): boolean {
+  if (command === null) return false;
+  const name = command.trim().replace(/^-/, '').split('/').pop() ?? '';
+  return SHELL_COMMANDS.has(name);
+}
+
 export interface PaneLifecycleDeps {
   tmux: TmuxController;
   /** Base URL of bus-core's HTTP API, e.g. "http://127.0.0.1:3000" — used only for the readiness poll. */
@@ -134,9 +150,9 @@ export interface LaunchParams {
    * If the target window doesn't exist yet, create it with this cwd/env
    * before launching (covers both a pool's initial panes on first-ever
    * launch and a `growth: dynamic` pane that has no window at all). When the
-   * target window already exists (the common case — a pre-seeded pane being
-   * (re)launched), this is skipped automatically (checked via
-   * `tmux.paneAlive`).
+   * target window already exists at a shell prompt, this is skipped. A
+   * window with anything else in its foreground is killed and recreated
+   * with this cwd/env.
    */
   ensureWindow: { cwd: string; env?: Record<string, string> };
 }
@@ -202,14 +218,6 @@ function shellQuoteArg(s: string): string {
   return `'${s.split("'").join("'\\''")}'`;
 }
 
-/** Foreground commands that mean "the pane is at a shell prompt", per tmux's `pane_current_command`. */
-const SHELL_COMMANDS = new Set(['bash', 'zsh', 'sh', 'fish', 'dash', 'ksh', 'tcsh', 'csh', 'nu']);
-
-export function isShellCommand(command: string): boolean {
-  const name = command.trim().replace(/^-/, '').split('/').pop() ?? '';
-  return SHELL_COMMANDS.has(name);
-}
-
 const DEV_CHANNELS_FLAG = '--dangerously-load-development-channels';
 const AGENTBUS_CHANNEL = 'server:agentbus';
 
@@ -272,7 +280,7 @@ export class PaneLifecycle {
   }
 
   /**
-   * Full sequence: ensure window exists -> write per-pane mcp config (+
+   * Full sequence: ensure window exists at a shell prompt -> write per-pane mcp config (+
    * optional rendered system-prompt file if `cfg.system_prompt` is set) ->
    * build and send the launch/resume command line -> ack handshake -> poll
    * readiness -> clean up temp files. Throws `PaneLaunchError` on any
@@ -338,28 +346,29 @@ export class PaneLifecycle {
    * Make sure the target window exists AND is sitting at a shell prompt, so
    * the launch line about to be typed into it reaches the shell.
    *
-   * A pane released with `on_evict: 'clear'` (eviction or the hard-idle
-   * sweep) still has its old `claude` running in the foreground — `/clear`
-   * only resets that session's context. Typing the launch line into it would
-   * send it to the old session as a prompt, and since that session's cc.ts
-   * still polls under the same pane agent id, the readiness poll would pass
-   * and the new conversation would be served by the wrong session. So when
-   * the foreground process isn't a shell, stop it the same way a `kill`
-   * release does and recreate the window. (An unknown foreground command,
-   * `null`, is left alone.)
+   * A live window is reused only when a shell is in its foreground. Anything
+   * else is a session left behind by `on_evict: 'clear'` (eviction or the
+   * hard-idle sweep; `/clear` only resets that session's context) or by a bus
+   * restart. Typing the launch line there would submit it to the old session
+   * as a chat message, and since that session's cc.ts still polls under the
+   * same pane agent id, the readiness poll would pass and the new
+   * conversation would be served by the wrong session. So the old session is
+   * stopped the way a `kill` release does it and the window is recreated. An
+   * unknown foreground command (`null`) can't be confirmed as a shell either,
+   * so that window is recreated too (killed without the `C-c`, which would
+   * throw if the window vanished between the two tmux calls).
    */
   private async ensureWindowExists(params: LaunchParams): Promise<void> {
     const alreadyAlive = await this.tmux.paneAlive(params.paneId);
     if (alreadyAlive) {
-      const foreground = await this.tmux.paneCommand(params.paneId);
-      if (foreground === null || isShellCommand(foreground)) return;
+      const command = await this.tmux.paneCommand(params.paneId);
+      if (isShellCommand(command)) return;
       console.warn(
-        `[pool] Pane ${params.paneId} is still running "${foreground}" — stopping it before launching ` +
-          `session ${params.sessionId}`,
+        `[pane:${params.paneId}] Foreground command is "${command ?? 'unknown'}", not a shell — ` +
+          `recreating the window before launching session ${params.sessionId}`,
       );
-      await this.tmux.sendKeys(params.paneId, 'C-c');
-      await this.sleepFn(RELEASE_KILL_PAUSE_MS);
-      await this.tmux.killWindow(params.paneId);
+      if (command === null) await this.tmux.killWindow(params.paneId);
+      else await this.release(params.paneId, 'kill');
     }
 
     const [session, windowName] = splitPaneTarget(params.paneId);

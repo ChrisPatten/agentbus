@@ -53,6 +53,8 @@ import { createPoolCommand } from './commands/pool.js';
 import { createPaneCommand } from './commands/pane.js';
 import { createRcCommand } from './commands/rc.js';
 import { createJournalCommand } from './commands/journal.js';
+import { createKeysCommand } from './commands/keys.js';
+import { createHeadlessForwarder, createPoolForwarder } from './commands/provider-forward.js';
 import { SessionTracker } from './memory/session-tracker.js';
 import { Scheduler } from './scheduler/scheduler.js';
 import { AttachmentSweeper } from './media/attachment-sweeper.js';
@@ -279,6 +281,14 @@ commandRegistry.register(createJournalCommand({
   db, engine: journalEngine, resolver: runtimeResolver, advisories, gate: journalGate, memorySetup, consolidation: consolidationScheduler,
   protectedPaths: (agentId) => protectedPaths.paths(agentId).entries.map((e) => e.spec),
 }));
+commandRegistry.register(createKeysCommand({ poolManagers }));
+
+// ── Provider command forwarding (E71) ─────────────────────────────────────────
+// `//name`, or a `/name` no bus command claims, is forwarded to the provider
+// behind the conversation's route. A provider with no forwarder here (the
+// plain claude-code MCP adapter) doesn't accept forwarded commands.
+commandRegistry.registerProvider('cc-pool', createPoolForwarder({ poolManagers }));
+commandRegistry.registerProvider('cc-headless', createHeadlessForwarder({ headlessControl }));
 
 const pipeline = new PipelineEngine();
 pipeline.use({ slot: 10, name: 'normalize',        stage: normalize });
@@ -536,6 +546,8 @@ for (const [agentId, headless] of startHeadless(db, {
   headlessControl.stopTurn.set(agentId, headless.stopTurn);
   headlessControl.snapshots?.set(agentId, headless.snapshot);
   if (app) headless.subscribeActivity(app.publishActivity.bind(app));
+  // Let provider command forwarding check what the instance's CLI accepts.
+  headlessControl.slashCommands.set(agentId, headless.slashCommands);
 }
 
 // Start every configured cc-pool instance (E48): seed pane rows (idempotent

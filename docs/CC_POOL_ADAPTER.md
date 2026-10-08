@@ -55,7 +55,7 @@ Every field of `adapters.cc-pool`:
 | `lease.idle_evict_ms` | number (ms) | `1800000` (30 min) | Idle time after which a leased pane becomes evictable by a new conversation. |
 | `lease.hard_idle_ms` | number (ms) | `21600000` (6 h) | Time since a lease started after which it's proactively released, regardless of activity. |
 | `lease.park_timeout_ms` | number (ms) | `300000` (5 min) | How long a parked message waits for a free pane before it's dead-lettered. |
-| `on_evict` | `clear` \| `kill` | `clear` | What happens to a pane on release: type `/clear` (keep the window, drop context) or send `Ctrl-C` and kill the window (the next launch recreates it). |
+| `on_evict` | `clear` \| `kill` | `clear` | What happens to a pane on release: type `/clear` (drop context, leave the session running until the pane is next claimed) or send `Ctrl-C` and kill the window. Either way, the next launch starts from a fresh window: a launch reuses a live window only when it's at a shell prompt, and otherwise kills and recreates it. |
 | `launch_ack_delay_ms` | number (ms) | `5000` | Total time to poll `capture-pane` output for the `--dangerously-load-development-channels` confirmation prompt to actually appear, before concluding there's nothing to dismiss. `Enter` is only ever sent once the prompt is confirmed showing — this is not a blind pre-Enter delay. |
 | `launch_ack_max_attempts` | number | `3` | Maximum `Enter` presses to dismiss the ack prompt, once it's confirmed showing, before giving up. |
 | `launch_ack_pattern` | string | `"loading development channels"` | Text matched (case-insensitively) in pane output to detect the ack prompt — the real prompt's header reads "WARNING: Loading development channels". Override if a CLI update rewords it. |
@@ -264,6 +264,14 @@ The renderer needs a monospace font. It looks for Menlo, DejaVu Sans Mono, Liber
 
 `/rc [n]` sends `/remote-control` plus Enter to a pane through the tmux controller (`sendCommand`), using the pane id from `pool_leases`. It targets the caller's leased pane, or pane index `n`, and refuses panes that aren't `leased` or `free`. See [SLASH_COMMANDS.md#rc-n](SLASH_COMMANDS.md#rc-n).
 
+### `/keys` command
+
+`/keys [@n] <key> [key...]` runs `tmux send-keys -t <pane> -- <keys>` against the caller's leased pane, or pane index `n`, and replies with a pane snapshot. It reaches any pane that isn't `dead`. See [SLASH_COMMANDS.md#keys-n-key-key](SLASH_COMMANDS.md#keys-n-key-key).
+
+### Forwarded slash commands
+
+A pane receives messages as MCP channel notifications, which Claude Code doesn't parse as slash commands. So `//name`, or a `/name` the bus doesn't define, is typed into the conversation's leased pane with `sendCommand`, and the reply is a snapshot of the pane taken 1.5 s later (`createPoolForwarder` in `src/commands/provider-forward.ts`). Nothing is typed when the conversation has no leased pane, when the pane shows a permission dialog, or when the command spans several lines. See [SLASH_COMMANDS.md#provider-commands](SLASH_COMMANDS.md#provider-commands).
+
 ### `GET /api/v1/pool`
 
 The same data as JSON, optionally filtered with `?pool=<agent id>`:
@@ -375,6 +383,7 @@ tmux attach -t peggy-pool:1
 | A pane is frozen on a permission dialog and messages routed to it go unanswered | An interactive permission prompt is waiting for a keypress and nobody is at the terminal. | Whether the `PermissionRequest` hook is registered and the pane relaunched since — see [APPROVALS.md](APPROVALS.md#setup). With it, the pane's contact gets a Telegram message with Approve/Deny buttons. `tmux capture-pane -t <pane> -p` shows the dialog. |
 | A pane's UI and its session JSONL stop at an old turn; recent turns vanish after a relaunch. The pane shows `Transcript saving is off — inherited CLAUDE_CODE_CHILD_SESSION marker` | bus-core, and the tmux server it spawned, inherited Claude Code session markers from the shell that started it. Builds before the fix passed them to every pane. | `pm2 env <id> \| grep CLAUDE`. Upgrade, then relaunch the panes. To clear the markers from the tmux server too, run `pm2 restart bus-core --update-env` from a plain shell and kill the pool's tmux session. |
 | `send_message` from a pool pane fails with `stale sender` although the pane is healthy | Builds before the fix guarded proactive sends too, deriving the target conversation from recipient, channel, and topic. | Upgrade. On a current build only `reply` (or a send with `reply_to`/`metadata.conversation_id`) can hit the guard. |
+| A pane receives its own launch line (`unset TMUX … claude --resume <id> …`) as a chat message | Builds before the fix typed the launch line into a window that still had a Claude session running, left there by `on_evict: clear` or a bus restart. | Upgrade. The bus logs `Foreground command is "…", not a shell — recreating the window before launch` each time it replaces such a window. |
 | A pane shows `dead` in `/pool` | Launch failed (ack handshake or readiness timeout). `reconcileLiveness()` revives a `dead` pane back to `free` on the next sweep tick (at most `sweepIntervalMs`, 60 seconds by default), so this should be transient — a pane stuck `dead` for longer than that points at a repeated launch failure, not a one-off. | Pane output around the failure (`tmux capture-pane -t <pane> -p`); whether `launch_ack_pattern` still matches the installed CLI's actual prompt wording (see below); bus-core logs for repeated `[pool:<id>] reconcileLiveness` lines against the same pane, which mean it's failing to launch again each time it's retried. |
 | A lease seems stuck past when you'd expect it to idle out | `lease.idle_evict_ms` only makes a pane evictable by a new conversation — it doesn't release anything by itself. Proactive release only happens at `lease.hard_idle_ms`, on the sweep tick. | `/pool`'s `idle=` value against both `lease.idle_evict_ms` and `lease.hard_idle_ms`; whether any new conversation has actually tried to claim a pane, since eviction below the hard-idle ceiling is demand-driven, not time-driven. |
 | `/pool` shows a growing `parked` count | Every pane is leased and none are evict-eligible yet. | Whether `panes`/`max_panes` matches expected concurrent-conversation load; whether existing conversations are idling out as expected; raise `growth: dynamic` and `max_panes` if the pool is legitimately undersized. |

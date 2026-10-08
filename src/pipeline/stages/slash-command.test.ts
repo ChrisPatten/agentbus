@@ -129,4 +129,25 @@ describe('slash-command stage', () => {
     expect(result!.slashCommand?.argsRaw).toBe('this is a longer message');
     expect(result!.slashCommand?.args).toEqual(['this', 'is', 'a', 'longer', 'message']);
   });
+
+  it('parses //name as a forced provider command (E71)', async () => {
+    const ctx = makeCtx({ payload: { type: 'text', body: '//clear now' } });
+    const result = await slashCommandDetect(ctx);
+    expect(result!.slashCommand).toEqual({ name: 'clear', args: ['now'], argsRaw: 'now', forceProvider: true });
+    expect(result!.envelope.payload).toMatchObject({ type: 'slash_command', body: '//clear now', command: 'clear' });
+  });
+
+  it('does not set forceProvider for a single slash', async () => {
+    const ctx = makeCtx({ payload: { type: 'text', body: '/clear' } });
+    const result = await slashCommandDetect(ctx);
+    expect(result!.slashCommand?.forceProvider).toBeUndefined();
+  });
+
+  it('leaves a bare // or a "// text" line as plain text', async () => {
+    for (const body of ['//', '// a comment']) {
+      const result = await slashCommandDetect(makeCtx({ payload: { type: 'text', body } }));
+      expect(result!.isSlashCommand).toBe(false);
+      expect(result!.envelope.payload.type).toBe('text');
+    }
+  });
 });
