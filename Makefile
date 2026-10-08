@@ -1,5 +1,5 @@
 .PHONY: help dev debug-payloads kill start stop restart safe-restart status logs logs-err \
-	health test test-one typecheck check pool pool-attach pool-capture approvals
+	health test test-one typecheck check pool pool-attach pool-capture pool-kill approvals
 
 .DEFAULT_GOAL := help
 
@@ -119,6 +119,12 @@ pool-attach:
 pool-capture:
 	$(if $(or $(N),$(PANE)),,$(error N or PANE is required, e.g. make pool-capture N=1))
 	@tmux capture-pane -t "$(or $(PANE),$(POOL_SESSION):$(N))" -p -S -$(LINES)
+
+## Kill every pool pane by ending the tmux session (POOL_SESSION); the pool recreates it on the next launch
+pool-kill:
+	@if tmux has-session -t "$(POOL_SESSION)" 2>/dev/null; then \
+		tmux kill-session -t "$(POOL_SESSION)" && echo "Killed tmux session $(POOL_SESSION)"; \
+	else echo "No tmux session $(POOL_SESSION)"; fi
 
 ## List approval requests (STATUS=pending|approved|denied|expired|stale)
 approvals:

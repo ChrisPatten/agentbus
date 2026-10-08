@@ -109,6 +109,7 @@ bus-core runs as one pm2-managed process. Platform adapters (Telegram, email, th
 | `make pool` | Print `GET /api/v1/pool`: pane states and parked-queue depth |
 | `make pool-capture N=1` | Print pane 1's screen. `LINES=` sets how far back (default 60) |
 | `make pool-attach N=1` | Attach to pane 1, or switch to it when already inside tmux |
+| `make pool-kill` | Kill every pool pane by ending the `POOL_SESSION` tmux session. The pool recreates the session and panes on the next launch; running conversations lose their live `claude` process |
 | `make approvals` | List pending [approval requests](APPROVALS.md). `STATUS=` picks another status |
 
 `pool-capture` and `pool-attach` address `<POOL_SESSION>:<N>`. `POOL_SESSION` defaults to `peggy-pool`; set it to your `tmux_session`. `PANE=<tmux target>` replaces `N` for a pane outside that session, such as a grown pane.
