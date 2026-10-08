@@ -30,7 +30,7 @@
  * story's report for the full flag-by-flag verification.
  */
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type { TmuxController } from './tmux.js';
 import type { CcPoolInstanceConfig } from '../config/schema.js';
@@ -62,6 +62,20 @@ const ACK_RETRY_BACKOFF_MS = 500;
 
 /** Poll interval for the post-ack readiness check against `/last-poll`. */
 const READINESS_POLL_INTERVAL_MS = 500;
+
+/**
+ * A freshly created window's shell keeps printing after `pane_current_command`
+ * already says it is a shell (direnv, rc files). The launch line is typed only
+ * once the pane output has been unchanged for `SHELL_SETTLE_QUIET_MS`, or
+ * `SHELL_SETTLE_MAX_MS` has passed — a pane that stays blank still gets the
+ * line, just late.
+ */
+const SHELL_SETTLE_POLL_MS = 250;
+const SHELL_SETTLE_QUIET_MS = 750;
+const SHELL_SETTLE_MAX_MS = 10_000;
+
+/** Scratch files (`pool-mcp-*`, `pool-prompt-*`) older than this are pruned at the start of a launch. */
+const SCRATCH_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 /** Pause between `C-c` and killing the window on a 'kill' release, so the interrupt has a moment to land. */
 const RELEASE_KILL_PAUSE_MS = 300;
@@ -241,13 +255,16 @@ export class PaneLifecycle {
    * `src/adapters/cc-headless.ts`.
    */
   async launch(params: LaunchParams): Promise<void> {
-    const launchStartedAt = new Date();
-
     let mcpConfigPath: string | null = null;
     let systemPromptPath: string | null = null;
+    let launchSucceeded = false;
 
     try {
       await this.ensureWindowExists(params);
+      // Starts once the shell can take input, so a slow shell startup doesn't
+      // eat the budget meant for `claude` to start.
+      const launchStartedAt = new Date();
+      this.pruneStaleScratch();
 
       mcpConfigPath = writePaneMcpConfig({
         paneAgentId: params.paneAgentId,
@@ -263,14 +280,19 @@ export class PaneLifecycle {
       const line = this.buildLaunchLine(params, mcpConfigPath, systemPromptPath);
       await this.tmux.sendCommand(params.paneId, line);
 
-      await this.ackHandshake(params.paneId, launchStartedAt);
+      await this.ackHandshake(params.paneId, params.paneAgentId, launchStartedAt);
       await this.pollReadiness(params.paneAgentId, launchStartedAt);
+      launchSucceeded = true;
     } catch (err) {
       if (err instanceof PaneLaunchError) throw err;
       throw new PaneLaunchError(`Pane launch failed for ${params.paneId}: ${String(err)}`, err);
     } finally {
-      if (mcpConfigPath) cleanupPaneMcpConfig(mcpConfigPath);
-      if (systemPromptPath) cleanTmpFile(systemPromptPath);
+      // On failure the typed launch line may still run later (a slow shell),
+      // and it needs these files. They're pruned by age instead.
+      if (launchSucceeded) {
+        if (mcpConfigPath) cleanupPaneMcpConfig(mcpConfigPath);
+        if (systemPromptPath) cleanTmpFile(systemPromptPath);
+      }
     }
   }
 
@@ -316,6 +338,37 @@ export class PaneLifecycle {
     // cheap no-op otherwise.
     await this.tmux.ensureSession(session, params.ensureWindow.cwd);
     await this.tmux.createWindow(session, windowName, params.ensureWindow.cwd, env);
+    await this.waitForShellSettled(params.paneId);
+  }
+
+  /**
+   * Returns once the pane output has been unchanged for `SHELL_SETTLE_QUIET_MS`
+   * (and non-empty), or after `SHELL_SETTLE_MAX_MS`.
+   */
+  private async waitForShellSettled(paneId: string): Promise<void> {
+    let last: string | null = null;
+    let unchangedMs = 0;
+    for (let waitedMs = 0; waitedMs < SHELL_SETTLE_MAX_MS; waitedMs += SHELL_SETTLE_POLL_MS) {
+      const captured = await this.tmux.capturePane(paneId, 30);
+      unchangedMs = captured === last ? unchangedMs + SHELL_SETTLE_POLL_MS : 0;
+      if (captured.trim() !== '' && unchangedMs >= SHELL_SETTLE_QUIET_MS) return;
+      last = captured;
+      await this.sleepFn(SHELL_SETTLE_POLL_MS);
+    }
+  }
+
+  /** Best-effort removal of scratch files left behind by failed launches. */
+  private pruneStaleScratch(): void {
+    try {
+      const cutoff = Date.now() - SCRATCH_MAX_AGE_MS;
+      for (const name of readdirSync(this.scratchDir)) {
+        if (!/^pool-(mcp|prompt)-/.test(name)) continue;
+        const path = join(this.scratchDir, name);
+        if (statSync(path).mtimeMs < cutoff) unlinkSync(path);
+      }
+    } catch {
+      /* best-effort — scratch dir may not exist yet */
+    }
   }
 
   /**
@@ -446,10 +499,10 @@ export class PaneLifecycle {
    * `cfg.launch_ack_max_attempts` times (backing off `ACK_RETRY_BACKOFF_MS`
    * between retries) if a press doesn't clear it.
    */
-  private async ackHandshake(paneId: string, launchStartedAt: Date): Promise<void> {
+  private async ackHandshake(paneId: string, paneAgentId: string, launchStartedAt: Date): Promise<void> {
     const pattern = this.cfg.launch_ack_pattern.toLowerCase();
 
-    const promptShowing = await this.waitForAckPrompt(paneId, pattern, launchStartedAt);
+    const promptShowing = await this.waitForAckPrompt(paneId, paneAgentId, pattern, launchStartedAt);
     if (!promptShowing) return; // never rendered within the budget -- nothing to dismiss
 
     const maxAttempts = this.cfg.launch_ack_max_attempts;
@@ -478,20 +531,22 @@ export class PaneLifecycle {
 
   /**
    * Polls `capturePane` for `pattern` to appear, checking immediately and
-   * then every `ACK_RETRY_BACKOFF_MS` until either it shows up (returns
-   * `true`) or `cfg.launch_ack_delay_ms` of budget elapses without ever
-   * seeing it (returns `false` — nothing to dismiss). Also bounded by the
-   * shared `LAUNCH_READY_TIMEOUT_MS` deadline like the rest of `launch()`.
+   * then every `ACK_RETRY_BACKOFF_MS`. Returns `true` once it shows up, or
+   * `false` once the agent is already polling the bus (nothing to dismiss).
+   * Bounded by the shared `LAUNCH_READY_TIMEOUT_MS` deadline. It doesn't stop
+   * at `cfg.launch_ack_delay_ms`: a slow start can render the prompt well
+   * after that, and a prompt nobody dismisses stalls the launch.
    */
-  private async waitForAckPrompt(paneId: string, pattern: string, launchStartedAt: Date): Promise<boolean> {
-    const budgetMs = this.cfg.launch_ack_delay_ms;
-    const waitStartedAt = Date.now();
-
+  private async waitForAckPrompt(paneId: string, paneAgentId: string, pattern: string, launchStartedAt: Date): Promise<boolean> {
     for (;;) {
       const captured = await this.tmux.capturePane(paneId, 30);
       if (captured.toLowerCase().includes(pattern)) return true;
 
-      if (Date.now() - waitStartedAt >= budgetMs) return false;
+      // Already polling the bus: the session is up and no prompt is coming.
+      // Raced against a sleep so a stalled request can't outlast the deadline.
+      const readyCheck = this.isReady(paneAgentId, launchStartedAt).catch(() => false);
+      const pacingSleep = this.sleepFn(ACK_RETRY_BACKOFF_MS);
+      if (await Promise.race([readyCheck, pacingSleep.then(() => false as const)])) return false;
 
       if (this.elapsedSince(launchStartedAt) >= LAUNCH_READY_TIMEOUT_MS) {
         throw new PaneLaunchError(
@@ -499,7 +554,7 @@ export class PaneLifecycle {
         );
       }
 
-      await this.sleepFn(ACK_RETRY_BACKOFF_MS);
+      await pacingSleep;
     }
   }
 

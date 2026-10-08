@@ -127,7 +127,7 @@ adapters:
   #   launch_args:                   # appended verbatim to every launch/resume invocation
   #     - --dangerously-load-development-channels
   #   poll_interval_ms: 1000         # passed through to each pane's cc.ts
-  #   launch_ack_delay_ms: 5000       # how long to poll for the "loading development channels" prompt before sending Enter to dismiss it
+  #   launch_ack_delay_ms: 5000       # deprecated, ignored: the prompt is now polled for until the launch deadline
   #   launch_ack_max_attempts: 3     # re-send Enter if capture-pane still shows the prompt after a dismiss attempt
   #   launch_ack_pattern: "loading development channels"  # prompt text to match; override if the CLI rewords it
   #   pane_env:                      # set via `tmux new-window -e` (TERM/COLORTERM always added)

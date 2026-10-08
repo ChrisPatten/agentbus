@@ -11,6 +11,7 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 ## [Unreleased]
 
 ### Added
+- **`make pool-kill`** ends the cc-pool tmux session, killing every pool pane.
 - **Slash commands are forwarded to the provider.** A `/name` the bus doesn't
   define now goes to the provider that runs the conversation (`cc-pool` or
   `cc-headless`) instead of replying `Unknown command`. `//name` forwards a
@@ -29,6 +30,8 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
   CLI.** A mistyped bus command is reported by the provider, not the bus.
 
 ### Fixed
+- **A `cc-pool` pane no longer fails to launch when its shell or `claude` starts slowly.** The pane waits for a new window's shell to finish its startup output before typing the launch line, and polls for the development-channels prompt until the launch deadline instead of giving up after `launch_ack_delay_ms` (now deprecated and ignored). A prompt that rendered late was never dismissed, so readiness timed out and the pool relaunched the pane in a loop.
+- **A failed pane launch no longer deletes the MCP config and system-prompt files its launch line points to.** A shell that ran the line late failed with `MCP config file not found`. Scratch files older than a day are pruned at the start of each launch.
 - **Pool panes no longer receive their own launch line as a chat message.** A
   pane claimed while a Claude session was still running in its window (left by
   `on_evict: clear` or a bus restart) had the `claude --resume …` line typed

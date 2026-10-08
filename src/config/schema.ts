@@ -351,16 +351,10 @@ const CcPoolAdapterSchema = z.object({
   /** What happens to a pane on lease release: clear its screen/context, or kill and relaunch it. */
   on_evict: z.enum(['clear', 'kill']).default('clear'),
   /**
-   * Total time (ms) `ackHandshake` polls capture-pane output for the
-   * "loading development channels" launch confirmation prompt to actually
-   * appear before concluding there is nothing to dismiss. NOT a blind delay
-   * before pressing Enter — Enter is only ever sent once the prompt is
-   * confirmed showing (see `src/pool/pane.ts`'s `ackHandshake`/
-   * `waitForAckPrompt`). Bumped from the original 500ms: measured against
-   * the real CLI (v2.1.274-276) across several runs, the prompt first
-   * renders roughly 1.0-1.6s after the launch line is sent, so 500ms was
-   * consistently too short to ever observe it — see docs/CC_POOL_ADAPTER.md's
-   * Troubleshooting section for the resulting bug and fix.
+   * Deprecated and ignored. The ack handshake used to give up on the prompt
+   * after this long; it now polls until the prompt appears, the pane starts
+   * polling the bus, or the 30s launch deadline passes. Kept so existing
+   * configs still load.
    */
   launch_ack_delay_ms: z.number().int().nonnegative().default(5000),
   /** Max Enter presses to dismiss the ack prompt once it's confirmed showing, before giving up. */
