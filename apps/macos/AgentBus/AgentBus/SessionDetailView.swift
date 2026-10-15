@@ -8,8 +8,11 @@ struct SessionActions {
     var canStop: Bool
     var canRename: Bool
     var canClear: Bool
+    /// A selection exists in the transcript and the session accepts messages.
+    var canReply: Bool
     var inspectorShown: Bool
     var stop: () -> Void
+    var reply: () -> Void
     var clear: () -> Void
     var rename: () -> Void
     var attach: () -> Void
@@ -38,6 +41,7 @@ struct SessionDetail: View {
     let newConversation: () -> Void
     @Environment(\.openWindow) private var openWindow
     @State private var composer = ComposerModel()
+    @State private var transcriptSelection = TranscriptSelection()
     @State private var importing = false
     @State private var dropTargeted = false
     @State private var confirmClear = false
@@ -66,6 +70,12 @@ struct SessionDetail: View {
             .frame(maxWidth: 760)
             .padding(.horizontal, 20).padding(.bottom, 18)
             .frame(maxWidth: .infinity)
+        }
+        .environment(\.transcriptSelection, transcriptSelection)
+        .onChange(of: ReplyContext(draftKey: draftKey, writable: writable), initial: true) { _, context in
+            transcriptSelection.canReply = context.writable
+            transcriptSelection.onReply = { markdown in replyToSelection(markdown, draftKey: context.draftKey) }
+            transcriptSelection.onReplyToMessage = { target in replyToMessage(target, draftKey: context.draftKey) }
         }
         .overlay {
             if dropTargeted && writable {
@@ -127,13 +137,32 @@ struct SessionDetail: View {
             canStop: activity != "idle" && session != nil,
             canRename: session?.isAppTopic == true && session?.isEarlier == false,
             canClear: canClear,
+            canReply: writable && transcriptSelection.hasSelection,
             inspectorShown: showInspector,
             stop: { command("/stop") },
+            reply: { transcriptSelection.reply() },
             clear: { confirmClear = true },
             rename: { renameText = title; renaming = true },
             attach: { if writable { importing = true } },
             openInNewWindow: { if let id = session?.id { openWindow(value: id) } },
             toggleInspector: { showInspector.toggle() })
+    }
+
+    /// What the transcript's Reply closure depends on; the closure is refreshed when either changes.
+    private struct ReplyContext: Equatable { let draftKey: String; let writable: Bool }
+    private var draftKey: String { session?.id ?? "main" }
+
+    /// Quotes the selection into this session's draft, then puts the insertion point at its end.
+    private func replyToSelection(_ markdown: String, draftKey: String) {
+        guard connection.appendQuote(markdown, toDraft: draftKey) else { return }
+        transcriptSelection.clear()
+        composer.focusRequest += 1
+    }
+
+    /// Makes the message the draft's reply target (shown as a bar above the composer) and focuses the composer.
+    private func replyToMessage(_ target: ReplyRef, draftKey: String) {
+        connection.replyTargets[draftKey] = target
+        composer.focusRequest += 1
     }
 
     private func command(_ text: String) {

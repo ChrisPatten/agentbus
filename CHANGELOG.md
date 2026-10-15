@@ -11,9 +11,16 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 ## [Unreleased]
 
 ### Added
+- **The app protocol's `send` frame accepts `reply_to` (E72, bus half).** A client can reply to a whole message by id. The bus resolves it to a visible transcript message for the same contact and agent and gives the agent a `[Replying to you|agent: "…"]` line (first 200 characters). History and `message` events carry an optional `reply_to {message_id, sender_name, text}` on such messages. An unknown or foreign id is rejected with `reply_target_not_found`. Additive protocol-v1 field; an older bus silently drops it.
+- **Reply to a selection in the Mac app (E72).** Select text in any message, then right-click → **Reply** or press ⇧⌘R. The selection is added to your draft as a Markdown quote (`> ` before each line), keeping bold, italic, code, links, headings, and lists, and the cursor lands after it so you can type your answer. Quote several messages in one draft by replying again. The agent sees the quote as part of your message.
+- **Reply to a whole message in the Mac app (E72).** Right-click a message with nothing selected and choose **Reply**. A "Replying to…" bar appears above the composer (✕ or Esc cancels), and the agent sees what you replied to above your message. Your sent bubble shows a "Replying to…" note that scrolls to the original when you click it, loading older history if needed. Retrying a rejected reply keeps it; if the original is no longer available, Retry sends your message without it. Needs the bus from this release to carry the reference.
 - **`make pool-kill`** ends the cc-pool tmux session, killing every pool pane.
 
+### Changed
+- **Mac app messages are selectable as a whole (E72).** Agent replies and your own messages are now drawn in a native text view, so you can drag-select across paragraphs, headings, quotes, and list items (including bullets and numbers), extend a selection with Shift-click, and double-click-drag by word, instead of one block at a time. A selection stops at a fenced code block, which keeps its own Copy button. Your own bubbles now render block quotes, lists, and headings.
+
 ### Fixed
+- **The Mac app's Copy button on agent replies is reachable (E72).** The hover area now covers the whole message, so moving the pointer from the timestamp to **Copy** no longer hides the button first. **Copy Message** is also in the right-click menu of agent replies and your own messages, and is available as a VoiceOver action. Hovering a message no longer re-parses and rebuilds its text.
 - **A `cc-pool` pane no longer fails to launch when its shell or `claude` starts slowly.** The pane waits for a new window's shell to finish its startup output before typing the launch line, and polls for the development-channels prompt until the launch deadline instead of giving up after `launch_ack_delay_ms` (now deprecated and ignored). A prompt that rendered late was never dismissed, so readiness timed out and the pool relaunched the pane in a loop.
 - **A failed pane launch no longer deletes the MCP config and system-prompt files its launch line points to.** A shell that ran the line late failed with `MCP config file not found`. Scratch files older than a day are pruned at the start of each launch.
 

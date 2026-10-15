@@ -80,6 +80,15 @@ struct BusAttachment: Codable, Identifiable {
     }
 }
 
+/// The message a send replied to, as the bus resolved it: who said it and its first 200 characters.
+struct ReplyRef: Codable, Equatable {
+    let messageID: String
+    /// "you" for an operator message, "agent" for an agent message.
+    let senderName: String
+    let text: String
+    enum CodingKeys: String, CodingKey { case messageID = "message_id", senderName = "sender_name", text }
+}
+
 struct BusMessage: Codable, Identifiable {
     let messageID: String
     let sessionID: String
@@ -91,11 +100,31 @@ struct BusMessage: Codable, Identifiable {
     let createdAt: String
     let scheduled: Bool
     let attachments: [BusAttachment]
+    /// Present when the operator sent this message as a reply to another one (app protocol `reply_to`).
+    var replyTo: ReplyRef? = nil
     var id: String { messageID }
     enum CodingKeys: String, CodingKey {
         case messageID = "message_id", sessionID = "session_id", seq, cursor
         case direction, arrivalChannel = "arrival_channel", body
-        case createdAt = "created_at", scheduled, attachments
+        case createdAt = "created_at", scheduled, attachments, replyTo = "reply_to"
+    }
+}
+
+extension BusMessage {
+    /// A malformed `reply_to` must not cost the whole message, so it decodes to nil instead of throwing.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        messageID = try c.decode(String.self, forKey: .messageID)
+        sessionID = try c.decode(String.self, forKey: .sessionID)
+        seq = try c.decode(Int.self, forKey: .seq)
+        cursor = try c.decode(String.self, forKey: .cursor)
+        direction = try c.decode(String.self, forKey: .direction)
+        arrivalChannel = try c.decode(String.self, forKey: .arrivalChannel)
+        body = try c.decode(String.self, forKey: .body)
+        createdAt = try c.decode(String.self, forKey: .createdAt)
+        scheduled = try c.decode(Bool.self, forKey: .scheduled)
+        attachments = try c.decode([BusAttachment].self, forKey: .attachments)
+        replyTo = try? c.decodeIfPresent(ReplyRef.self, forKey: .replyTo)
     }
 }
 
@@ -137,14 +166,15 @@ struct ClientFrame: Encodable {
     var title: String? = nil
     var seq: Int? = nil
     var requestID: String? = nil
+    var replyTo: String? = nil
     enum CodingKeys: String, CodingKey {
         case type, cursor, clientMsgID = "client_msg_id", target, body
         case attachmentIDs = "attachment_ids", sessionID = "session_id"
-        case title, seq, requestID = "request_id"
+        case title, seq, requestID = "request_id", replyTo = "reply_to"
     }
     static func hello(_ cursor: Int) -> Self { Self(type: "hello", cursor: cursor) }
-    static func send(_ id: String, target: BusTarget, body: String, attachments: [String]) -> Self {
-        Self(type: "send", clientMsgID: id, target: target, body: body, attachmentIDs: attachments)
+    static func send(_ id: String, target: BusTarget, body: String, attachments: [String], replyTo: String? = nil) -> Self {
+        Self(type: "send", clientMsgID: id, target: target, body: body, attachmentIDs: attachments, replyTo: replyTo)
     }
 }
 

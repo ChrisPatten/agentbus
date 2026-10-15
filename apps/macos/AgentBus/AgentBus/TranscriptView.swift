@@ -73,6 +73,8 @@ struct TranscriptView<Bar: View>: View {
     @State private var position = ScrollPosition(edge: .bottom)
     /// True while the user is at (or near) the bottom; new content then keeps the view pinned there.
     @State private var following = true
+    /// The message a reply note just scrolled to, highlighted for a moment.
+    @State private var highlightedID: String?
     private let originID: String?
 
     init(connection: BusConnection, session: CachedSession?, @ViewBuilder bar: () -> Bar) {
@@ -105,6 +107,27 @@ struct TranscriptView<Bar: View>: View {
         return TranscriptItem.build(earlier, pending: [], session: original, activity: "idle") + [note] + current
     }
 
+    /// Scrolls to a replied-to message and highlights it, first paging in older history until it is cached
+    /// (in this session, then in the one it was resumed from).
+    private func reveal(_ id: String) {
+        let sessionIDs = [session?.id, originID].compactMap { $0 }
+        Task {
+            for sessionID in sessionIDs where !connection.store.hasMessage(id) {
+                while !connection.store.hasMessage(id), connection.store.session(sessionID)?.historyComplete == false {
+                    let before = connection.store.session(sessionID)?.oldestCursor
+                    try? await connection.loadHistory(sessionID, older: true)
+                    if connection.store.session(sessionID)?.oldestCursor == before { break }
+                }
+            }
+            guard connection.store.hasMessage(id) else { return }
+            following = false
+            withAnimation(.easeInOut(duration: 0.3)) { position.scrollTo(id: id, anchor: .center) }
+            highlightedID = id
+            try? await Task.sleep(for: .seconds(1.6))
+            if highlightedID == id { highlightedID = nil }
+        }
+    }
+
     private var followToken: String {
         let live = session.flatMap { connection.live[$0.id] }
         return "\(messages.count)-\(pending.count)-\(live?.state ?? "")-\(live?.lines.count ?? 0)"
@@ -128,13 +151,18 @@ struct TranscriptView<Bar: View>: View {
                             ProgressView().controlSize(.small).frame(maxWidth: .infinity)
                                 .onAppear { Task { try? await connection.loadHistory(session.id, older: true) } }
                         }
-                        ForEach(items) { item in TranscriptRow(item: item, connection: connection, sessionChannel: sessionChannel) }
+                        ForEach(items) { item in
+                            TranscriptRow(item: item, connection: connection, sessionChannel: sessionChannel,
+                                          highlighted: highlightedID == item.id)
+                        }
                         if let session { LiveActivityView(live: connection.live[session.id], capacity: connection.capacity, sessionActivity: session.activity) }
                     }
+                    .scrollTargetLayout()
                     .frame(maxWidth: 760)
                     .padding(.horizontal, 28).padding(.top, 16).padding(.bottom, 12)
                     .frame(maxWidth: .infinity)
                 }
+                .environment(\.revealMessage, reveal)
                 .scrollPosition($position)
                 .defaultScrollAnchor(.bottom)
                 .safeAreaInset(edge: .bottom, spacing: 0) { bar }
@@ -170,8 +198,19 @@ struct TranscriptRow: View {
     let item: TranscriptItem
     let connection: BusConnection
     let sessionChannel: String
+    var highlighted = false
 
     var body: some View {
+        content
+            .background {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color.accentColor.opacity(highlighted ? 0.14 : 0))
+                    .padding(-8)
+            }
+            .animation(.easeInOut(duration: 0.25), value: highlighted)
+    }
+
+    @ViewBuilder private var content: some View {
         switch item {
         case .day(let label, _):
             Text(label).font(.caption.weight(.semibold)).foregroundStyle(.secondary).frame(maxWidth: .infinity)
@@ -181,7 +220,7 @@ struct TranscriptRow: View {
             if message.isOperator {
                 OperatorMessageView(text: message.body, attachments: message.attachments.map { AttachmentInfo($0, local: connection.localFile($0.id)) },
                                     status: status.map { .label($0) }, source: sourceLabel(message.arrivalChannel),
-                                    date: message.date)
+                                    date: message.date, replyTarget: ReplyRef(message), replyNote: message.replyTo)
             } else {
                 AgentMessageView(message: message)
             }
@@ -190,7 +229,7 @@ struct TranscriptRow: View {
                                 status: row.failure == nil ? .sending : .failed(row.failure ?? "Rejected", retry: {
                                     Task { try? await connection.retry(row.id) }
                                 }),
-                                source: sourceLabel("app"), date: row.createdAt)
+                                source: sourceLabel("app"), date: row.createdAt, replyNote: row.replyTo)
         }
     }
 
@@ -206,10 +245,13 @@ enum SendStatus {
     case sending
     case failed(String, retry: () -> Void)
 
+    static let replyTargetNotFound = "reply_target_not_found"
+
     /// Plain wording for the bus's rejection reasons.
     static func explain(_ reason: String) -> String {
         switch reason {
         case let text where text.contains("dedup"): "same text was just sent"
+        case replyTargetNotFound: "the message you replied to is no longer available. Retry sends it without the reply"
         case "not_resumable": "this session can't be resumed"
         case "session_not_found": "session not found"
         case let text where text.localizedCaseInsensitiveContains("attachment"): "attachment expired"
@@ -224,15 +266,19 @@ struct OperatorMessageView: View {
     let status: SendStatus?
     let source: String?
     let date: Date?
+    /// This message as a reply target; nil for a send that hasn't been acknowledged yet.
+    var replyTarget: ReplyRef? = nil
+    /// The message this one replied to, shown above the bubble.
+    var replyNote: ReplyRef? = nil
+    @Environment(\.transcriptSelection) private var transcriptSelection
 
     var body: some View {
         VStack(alignment: .trailing, spacing: 6) {
+            if let replyNote { ReplyNote(reply: replyNote) }
             if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 FractionalWidth(fraction: 0.7, trailing: true) {
-                    Text(MarkdownParser.inline(text))
-                        .foregroundStyle(.white)
-                        .tint(.white)
-                        .textSelection(.enabled)
+                    MessageTextView(blocks: MarkdownParser.parse(text), kind: .operatorBubble,
+                                    copyMessage: { copyToPasteboard(text) }, replyTarget: replyTarget)
                         .padding(.vertical, 8).padding(.horizontal, 13)
                         .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                 }
@@ -241,6 +287,14 @@ struct OperatorMessageView: View {
             meta
         }
         .frame(maxWidth: .infinity, alignment: .trailing)
+        .contextMenu {
+            if let replyTarget, transcriptSelection?.canReply == true {
+                Button("Reply") { transcriptSelection?.replyToMessage(replyTarget) }
+                Divider()
+            }
+            Button("Copy Message") { copyToPasteboard(text) }
+        }
+        .accessibilityAction(named: "Copy Message") { copyToPasteboard(text) }
     }
 
     @ViewBuilder private var meta: some View {
@@ -262,9 +316,36 @@ struct OperatorMessageView: View {
     }
 }
 
+/// "↩ Replying to you: first line", above a sent bubble. Click to scroll to the original.
+struct ReplyNote: View {
+    let reply: ReplyRef
+    @Environment(\.revealMessage) private var reveal
+
+    var body: some View {
+        let firstLine = reply.text.split(separator: "\n", omittingEmptySubsequences: true).first.map(String.init) ?? ""
+        Button { reveal?(reply.messageID) } label: {
+            Label("Replying to \(reply.senderName): \(firstLine)", systemImage: "arrowshape.turn.up.left")
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+        .buttonStyle(.plain)
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .frame(maxWidth: 380, alignment: .trailing)
+        .help("Show the original message")
+        .accessibilityLabel("Replying to \(reply.senderName): \(firstLine). Show the original message")
+    }
+}
+
+extension EnvironmentValues {
+    /// Scrolls the transcript to a message by ID and highlights it. Set by `TranscriptView`.
+    @Entry var revealMessage: ((String) -> Void)?
+}
+
 struct AgentMessageView: View {
     let message: CachedMessage
     @State private var hovering = false
+    @Environment(\.transcriptSelection) private var transcriptSelection
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -286,12 +367,23 @@ struct AgentMessageView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
-            if !message.body.isEmpty { MarkdownView(message.body) }
+            if !message.body.isEmpty { MarkdownView(message.body, replyTarget: ReplyRef(message)).equatable() }
             ForEach(message.attachments.map { AttachmentInfo($0) }) { AttachmentCard(info: $0) }
         }
         .frame(maxWidth: 680, alignment: .leading)
         .frame(maxWidth: .infinity, alignment: .leading)
+        // Without a content shape only drawn content counts as the hover region, so the gap between the
+        // timestamp and the copy button ended the hover before the button could be clicked.
+        .contentShape(Rectangle())
         .onHover { hovering = $0 }
+        .contextMenu {
+            if transcriptSelection?.canReply == true {
+                Button("Reply") { transcriptSelection?.replyToMessage(ReplyRef(message)) }
+                Divider()
+            }
+            Button("Copy Message") { copyToPasteboard(message.body) }
+        }
+        .accessibilityAction(named: "Copy Message") { copyToPasteboard(message.body) }
     }
 }
 

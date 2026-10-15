@@ -46,6 +46,25 @@ export function visibleSession(db: Database.Database, contactId: string, agentId
   return row ?? null;
 }
 
+export interface QuotedMessage { message_id: string; sender_name: 'you' | 'agent'; text: string }
+
+/**
+ * Resolve a whole-message reply reference (E72) from a client-supplied
+ * message id. The message must be a visible transcript row in a session this
+ * contact can see for this agent; the client never supplies quote text.
+ * `message_id` is not unique in transcripts, so the newest match wins.
+ */
+export function quotableMessage(db: Database.Database, contactId: string, agentId: string, messageId: string): QuotedMessage | null {
+  const row = db.prepare(`SELECT t.session_id, t.direction, t.body FROM transcripts t
+    JOIN sessions s ON s.id = t.session_id
+    WHERE t.message_id = ? AND s.contact_id = ? AND s.agent_id = ? AND ${VISIBLE_TRANSCRIPT}
+    ORDER BY t.rowid DESC LIMIT 1`).get(messageId, contactId, agentId) as
+    { session_id: string; direction: string; body: string | null } | undefined;
+  if (!row || !visibleSession(db, contactId, agentId, row.session_id)) return null;
+  return { message_id: messageId, sender_name: row.direction === 'inbound' ? 'you' : 'agent',
+    text: (row.body ?? '').slice(0, 200) };
+}
+
 export function eventBounds(db: Database.Database, contactId: string): { first: number; latest: number } {
   const latest = (db.prepare('SELECT seq FROM app_event_counters WHERE contact_id = ?').get(contactId) as { seq: number } | undefined)?.seq ?? 0;
   const first = (db.prepare('SELECT MIN(seq) AS seq FROM app_events WHERE contact_id = ?').get(contactId) as { seq: number | null }).seq ?? latest + 1;
@@ -103,8 +122,14 @@ export function readEvents(db: Database.Database, contactId: string, agentId: st
 export function messageInfo(db: Database.Database, row: Record<string, unknown>, seq: number): Record<string, unknown> {
   const meta = JSON.parse(String(row['metadata'] ?? '{}')) as Record<string, unknown>;
   const attachments = Array.isArray(meta['attachments']) ? meta['attachments'] as Record<string, unknown>[] : [];
+  // Only app whole-message references (E72) carry a string message_id;
+  // Telegram quotes use platform_message_id and must not produce reply_to.
+  const quoted = meta['quoted_message'] as Record<string, unknown> | undefined;
+  const replyTo = quoted && typeof quoted['message_id'] === 'string'
+    ? { message_id: quoted['message_id'], sender_name: quoted['sender_name'], text: quoted['text'] } : undefined;
   return { message_id: row['message_id'], session_id: row['session_id'], seq, direction: row['direction'],
     cursor: row['id'],
+    ...(replyTo ? { reply_to: replyTo } : {}),
     arrival_channel: row['channel'], body: row['body'], created_at: row['created_at'],
     scheduled: meta['scheduled'] === true,
     attachments: attachments.map(a => ({ id: a['id'] ?? null, type: a['type'],

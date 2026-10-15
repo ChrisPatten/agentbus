@@ -285,6 +285,10 @@ struct AgentBusCommands: Commands {
             Button("Rename…") { session?.rename() }
                 .keyboardShortcut("r")
                 .disabled(session?.canRename != true)
+            Divider()
+            Button("Reply") { session?.reply() }
+                .keyboardShortcut("r", modifiers: [.command, .shift])
+                .disabled(session?.canReply != true)
         }
         CommandGroup(after: .sidebar) {
             Button(session?.inspectorShown == true ? "Hide Inspector" : "Show Inspector") { session?.toggleInspector() }

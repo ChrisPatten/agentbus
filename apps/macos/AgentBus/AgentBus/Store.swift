@@ -55,6 +55,8 @@ import SwiftData
     /// The live tool trail that preceded this reply. Local only: the bus does not store trails.
     var toolTrailJSON: Data? = nil
     var toolSeconds: Double = 0
+    /// The message this one replied to, as the bus quoted it. Kept as JSON so the store needs no migration.
+    var replyToJSON: Data? = nil
 
     init(_ value: BusMessage) {
         id = value.messageID; sessionID = value.sessionID; seq = value.seq
@@ -62,9 +64,11 @@ import SwiftData
         arrivalChannel = value.arrivalChannel; body = value.body
         createdAt = value.createdAt; scheduled = value.scheduled
         attachmentJSON = (try? JSONEncoder().encode(value.attachments)) ?? Data()
+        replyToJSON = value.replyTo.flatMap { try? JSONEncoder().encode($0) }
         sendState = "sent"; clientMsgID = nil
     }
     var attachments: [BusAttachment] { (try? JSONDecoder().decode([BusAttachment].self, from: attachmentJSON)) ?? [] }
+    var replyTo: ReplyRef? { replyToJSON.flatMap { try? JSONDecoder().decode(ReplyRef.self, from: $0) } }
     var toolTrail: [String] { toolTrailJSON.flatMap { try? JSONDecoder().decode([String].self, from: $0) } ?? [] }
 }
 
@@ -85,10 +89,14 @@ import SwiftData
     var failure: String?
     /// Names and sizes of the uploads, so the pending bubble can show attachment cards.
     var filesJSON: Data? = nil
-    init(id: String = UUID().uuidString, target: BusTarget, body: String, attachments: [String], files: [UploadedFile] = []) {
+    /// The message being replied to, kept whole so the pending bubble can show its note and a retry keeps it.
+    var replyToJSON: Data? = nil
+    init(id: String = UUID().uuidString, target: BusTarget, body: String, attachments: [String],
+         files: [UploadedFile] = [], replyTo: ReplyRef? = nil) {
         self.id = id; self.body = body
         attachmentJSON = (try? JSONEncoder().encode(attachments)) ?? Data()
         filesJSON = files.isEmpty ? nil : try? JSONEncoder().encode(files)
+        replyToJSON = replyTo.flatMap { try? JSONEncoder().encode($0) }
         createdAt = .now; failure = nil
         switch target {
         case .main: targetKind = "main"; targetID = nil; title = nil
@@ -105,6 +113,14 @@ import SwiftData
     }
     var attachmentIDs: [String] { (try? JSONDecoder().decode([String].self, from: attachmentJSON)) ?? [] }
     var files: [UploadedFile] { filesJSON.flatMap { try? JSONDecoder().decode([UploadedFile].self, from: $0) } ?? [] }
+    var replyTo: ReplyRef? { replyToJSON.flatMap { try? JSONDecoder().decode(ReplyRef.self, from: $0) } }
+}
+
+extension ReplyRef {
+    /// A reference to a message in the transcript, worded as the bus words it: "you" or "agent", 200 characters.
+    init(_ message: CachedMessage) {
+        self.init(messageID: message.id, senderName: message.isOperator ? "you" : "agent", text: String(message.body.prefix(200)))
+    }
 }
 
 /// What a pending send was aimed at, captured before its row is deleted on ack.
@@ -120,6 +136,11 @@ struct AckedTarget: Equatable { let kind: String; let sessionID: String? }
     var cursor: Int { state.cursor }
     var sessions: [CachedSession] { (try? context.fetch(FetchDescriptor<CachedSession>())) ?? [] }
     var pending: [PendingSend] { (try? context.fetch(FetchDescriptor<PendingSend>())) ?? [] }
+    func hasMessage(_ id: String) -> Bool {
+        var descriptor = FetchDescriptor<CachedMessage>(predicate: #Predicate { $0.id == id })
+        descriptor.fetchLimit = 1
+        return ((try? context.fetchCount(descriptor)) ?? 0) > 0
+    }
     func messages(_ sessionID: String) -> [CachedMessage] {
         let descriptor = FetchDescriptor<CachedMessage>(predicate: #Predicate { $0.sessionID == sessionID },
             sortBy: [SortDescriptor(\.createdAt)])

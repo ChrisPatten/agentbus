@@ -97,6 +97,21 @@ An Earlier session is read-only unless its Claude transcript is still available 
 
 The bus durably records a send intent before passing it to the inbound pipeline. It recovers unfinished intents on startup or when the client retries. If the bus crashes after a slash command has a side effect but before its response is correlated, recovery can return `rejected` with an ambiguous-outcome reason. Inspect session history before sending that command again with a new UUID.
 
+### Replying to a message (`reply_to`)
+
+`send` accepts an optional `reply_to`: the `message_id` (UUID) of a transcript message to reply to as a whole. The client never supplies quote text. The bus resolves the id to a visible transcript message for the same contact and agent (any of that contact's visible sessions, so a reply can point at the earlier portion of a resumed conversation; it does not have to be in the target session). It then builds `metadata.quoted_message = {message_id, sender_name, text}` on the inbound message, where `sender_name` is `you` for an operator (inbound) message and `agent` for an agent (outbound) message, and `text` is the first 200 characters of the body.
+
+```json
+{"type":"send","client_msg_id":"2f93a416-08a2-4df4-a821-48759a4c15a4","target":{"kind":"main"},"body":"Can you expand on that?","reply_to":"8c1f0e5e-5a38-4a0f-b3b5-6d1f2a6d8b10"}
+```
+
+- An unknown id, a message from another contact or agent, or a system-only message gets `status: "rejected", reason: "reply_target_not_found"`. Like `session_not_found`, no send intent is recorded, so the client may retry with the same `client_msg_id` after dropping `reply_to`. A malformed (non-UUID) `reply_to` is an `invalid_send` error.
+- The resolved quote is stored with the send intent, so crash recovery and idempotent retries carry the same quote without re-resolving it.
+- The inbound envelope's own `reply_to` stays `null`. On the app channel that field drives outbound reply binding, and a whole-message reference must not change which session the message routes to.
+- The agent sees a context line above the message body, the same line Telegram quote-replies produce (`cc-pool` and `cc-headless`): `[Replying to you: "<first 200 characters>"]` or `[Replying to agent: "…"]`.
+- Message events and history entries for a message that carries an app reference include an optional `reply_to` object, `{"message_id":"…","sender_name":"you|agent","text":"…"}`. It is omitted otherwise, including for Telegram quote-replies (their quote has `platform_message_id`, not `message_id`).
+- Older buses ignore unknown frame keys, so a client that sends `reply_to` to an older bus sends the message without the reference and gets no `reply_to` on events. Clients and bus should be upgraded together.
+
 Other client frames:
 
 ```json

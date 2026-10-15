@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { runMigrations } from '../db/schema.js';
 import { ensureOutboundAppSession } from './outbound.js';
-import { createAppSession, eventBounds, history, listSessions, readEvents, recordSessionEvent, sessionInfo, visibleSession } from './store.js';
+import { createAppSession, eventBounds, history, listSessions, quotableMessage, readEvents, recordSessionEvent, sessionInfo, visibleSession } from './store.js';
 import { upsertThread } from '../pipeline/thread-store.js';
 
 const when = '2026-09-30T12:00:00.000Z';
@@ -169,6 +169,61 @@ describe('bus-originated turns are hidden (E65/E66)', () => {
       expect(messages.map((e) => e.data['message_id'])).toEqual(['hello', 'reply']);
       // Still in the DB for debugging.
       expect(f.db.prepare(`SELECT COUNT(*) AS n FROM transcripts WHERE json_extract(metadata,'$.system_only') = 1`).get()).toEqual({ n: 2 });
+    } finally { f.db.close(); }
+  });
+});
+
+describe('app reply references (E72)', () => {
+  it('resolves quotable messages by contact and agent, newest row first, and truncates', () => {
+    const f = fixture();
+    try {
+      const own = f.addSession('alice', 'agent:work', 'app', 'general', 'own');
+      f.addMessage('alice', 'own', own, 'dup', 'inbound', 'old copy');
+      // message_id is not unique in transcripts; the newest row (by rowid) wins.
+      f.db.prepare(`INSERT INTO transcripts(id,message_id,conversation_id,session_id,created_at,channel,contact_id,direction,body,metadata)
+        VALUES ('row:dup2','dup',?,?,?,'app','alice','outbound','newest copy','{}')`).run(own, 'own', when);
+      f.addMessage('alice', 'own', own, 'long', 'outbound', 'y'.repeat(250));
+      f.addMessage('alice', 'own', own, 'hidden', 'outbound', 'internal', { system_only: true });
+      const other = f.addSession('bob', 'agent:work', 'app', 'general', 'bobs');
+      f.addMessage('bob', 'bobs', other, 'bob-msg', 'outbound', 'private');
+      const otherAgent = f.addSession('alice', 'agent:other', 'app', 'other-topic', 'others');
+      f.addMessage('alice', 'others', otherAgent, 'agent-msg', 'outbound', 'private');
+      expect(quotableMessage(f.db, 'alice', 'agent:work', 'dup')).toEqual({ message_id: 'dup', sender_name: 'agent', text: 'newest copy' });
+      expect(quotableMessage(f.db, 'alice', 'agent:work', 'long')!.text).toHaveLength(200);
+      expect(quotableMessage(f.db, 'alice', 'agent:work', 'hidden')).toBeNull();
+      expect(quotableMessage(f.db, 'alice', 'agent:work', 'bob-msg')).toBeNull();
+      expect(quotableMessage(f.db, 'alice', 'agent:work', 'agent-msg')).toBeNull();
+      expect(quotableMessage(f.db, 'alice', 'agent:work', 'nope')).toBeNull();
+    } finally { f.db.close(); }
+  });
+
+  it('names an inbound target "you"', () => {
+    const f = fixture();
+    try {
+      const own = f.addSession('alice', 'agent:work', 'telegram', 'general', 'own');
+      f.addMessage('alice', 'own', own, 'mine', 'inbound', 'hello');
+      expect(quotableMessage(f.db, 'alice', 'agent:work', 'mine')).toMatchObject({ sender_name: 'you', text: 'hello' });
+    } finally { f.db.close(); }
+  });
+
+  it('emits reply_to on history and message events only for app-style quotes', () => {
+    const f = fixture();
+    try {
+      const conv = f.addSession('alice', 'agent:work', 'app', 'general', 's1');
+      f.addMessage('alice', 's1', conv, 'plain', 'inbound', 'No quote');
+      f.addMessage('alice', 's1', conv, 'app-reply', 'inbound', 'About that',
+        { quoted_message: { message_id: 'plain', sender_name: 'you', text: 'No quote' } });
+      f.addMessage('alice', 's1', conv, 'tg-reply', 'inbound', 'Telegram style',
+        { quoted_message: { platform_message_id: '555:1', sender_name: 'Peggy', text: 'Original' } });
+      const page = history(f.db, 'alice', 'agent:work', 's1', 50)!;
+      const byId = (id: string) => page.find((m) => m['message_id'] === id)!;
+      expect(byId('app-reply')['reply_to']).toEqual({ message_id: 'plain', sender_name: 'you', text: 'No quote' });
+      expect('reply_to' in byId('plain')).toBe(false);
+      expect('reply_to' in byId('tg-reply')).toBe(false);
+      const events = readEvents(f.db, 'alice', 'agent:work', 0, eventBounds(f.db, 'alice').latest).filter((e) => e.event === 'message');
+      expect(events.find((e) => e.data['message_id'] === 'app-reply')!.data['reply_to'])
+        .toEqual({ message_id: 'plain', sender_name: 'you', text: 'No quote' });
+      expect('reply_to' in events.find((e) => e.data['message_id'] === 'tg-reply')!.data).toBe(false);
     } finally { f.db.close(); }
   });
 });

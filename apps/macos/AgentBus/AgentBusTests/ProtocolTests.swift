@@ -35,6 +35,35 @@ final class ProtocolTests: XCTestCase {
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
         XCTAssertEqual(object["target"] as? [String: String], ["kind": "new"])
     }
+    func testSendFrameCarriesReplyToOnlyWhenSet() throws {
+        let id = "2f93a416-08a2-4df4-a821-48759a4c15a1"
+        let plain = try XCTUnwrap(JSONSerialization.jsonObject(with: ProtocolCodec.encode(.send(id, target: .main, body: "Hi", attachments: []))) as? [String: Any])
+        XCTAssertNil(plain["reply_to"])
+        let reply = try XCTUnwrap(JSONSerialization.jsonObject(with: ProtocolCodec.encode(
+            .send(id, target: .main, body: "Hi", attachments: [], replyTo: "8c1f0e5e-5a38-4a0f-b3b5-6d1f2a6d8b10"))) as? [String: Any])
+        XCTAssertEqual(reply["reply_to"] as? String, "8c1f0e5e-5a38-4a0f-b3b5-6d1f2a6d8b10")
+    }
+    func testMessageDecodesReplyToWithAndWithout() throws {
+        func event(_ extra: String) -> Data {
+            Data((#"{"type":"event","seq":7,"event":"message","data":{"message_id":"m1","session_id":"s1","seq":7,"cursor":"row-1","direction":"inbound","arrival_channel":"app","body":"Sure","created_at":"2026-09-30T12:00:00Z","scheduled":false,"attachments":[]"# + extra + "}}").utf8)
+        }
+        let with = try XCTUnwrap(ProtocolCodec.frame(event(#","reply_to":{"message_id":"m0","sender_name":"agent","text":"Which one?"}"#)).data?.message)
+        XCTAssertEqual(with.replyTo, ReplyRef(messageID: "m0", senderName: "agent", text: "Which one?"))
+        XCTAssertNil(try XCTUnwrap(ProtocolCodec.frame(event("")).data?.message).replyTo)
+        // A malformed reference costs only the reference, not the message.
+        let malformed = try XCTUnwrap(ProtocolCodec.frame(event(#","reply_to":"nonsense""#)).data?.message)
+        XCTAssertEqual(malformed.body, "Sure")
+        XCTAssertNil(malformed.replyTo)
+    }
+    func testReplyRefWordsASenderAndCutsTheText() throws {
+        func cached(_ direction: String, body: String) throws -> CachedMessage {
+            let json = #"{"message_id":"m1","session_id":"s1","seq":1,"cursor":"c","direction":"\#(direction)","arrival_channel":"app","body":"\#(body)","created_at":"2026-09-30T12:00:00Z","scheduled":false,"attachments":[]}"#
+            return CachedMessage(try JSONDecoder().decode(BusMessage.self, from: Data(json.utf8)))
+        }
+        XCTAssertEqual(ReplyRef(try cached("inbound", body: "mine")), ReplyRef(messageID: "m1", senderName: "you", text: "mine"))
+        XCTAssertEqual(ReplyRef(try cached("outbound", body: String(repeating: "x", count: 300))).text.count, 200)
+        XCTAssertEqual(ReplyRef(try cached("outbound", body: "hi")).senderName, "agent")
+    }
     func testBusDateParsesBusFormats() {
         XCTAssertNotNil(BusDate.parse("2026-09-30T12:00:00.123Z"))
         XCTAssertNotNil(BusDate.parse("2026-09-30T12:00:00Z"))

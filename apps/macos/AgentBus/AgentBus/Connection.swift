@@ -209,6 +209,8 @@ struct SelectionRequest: Equatable {
     private(set) var maxUploadBytes = 26_214_400
     /// Unsent composer text per session, kept while the app runs.
     var drafts: [String: String] = [:]
+    /// The message each session's draft replies to, keyed like `drafts`. Cleared by sending or cancelling.
+    var replyTargets: [String: ReplyRef] = [:]
     /// Local files chosen on this Mac, by uploaded file ID, for Quick Look. Persisted across launches.
     @ObservationIgnored private var localFiles: [String: String] =
         UserDefaults.standard.dictionary(forKey: "localFiles") as? [String: String] ?? [:]
@@ -291,11 +293,13 @@ struct SelectionRequest: Equatable {
         }
     }
     private func sendPending(_ row: PendingSend) async throws {
-        try await socket.send(ProtocolCodec.encode(.send(row.id, target: row.target, body: row.body, attachments: row.attachmentIDs)))
+        try await socket.send(ProtocolCodec.encode(.send(row.id, target: row.target, body: row.body,
+                                                         attachments: row.attachmentIDs, replyTo: row.replyTo?.messageID)))
     }
-    func send(_ body: String, target: BusTarget, attachments: [String] = [], files: [UploadedFile] = []) async throws {
+    func send(_ body: String, target: BusTarget, attachments: [String] = [], files: [UploadedFile] = [],
+              replyTo: ReplyRef? = nil) async throws {
         guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty else { return }
-        let row = PendingSend(target: target, body: body, attachments: attachments, files: files)
+        let row = PendingSend(target: target, body: body, attachments: attachments, files: files, replyTo: replyTo)
         try store.addPending(row)
         if state == .connected { try await sendPending(row) }
     }
@@ -307,9 +311,11 @@ struct SelectionRequest: Equatable {
             if state == .connected { try await sendPending(row) }
             return
         }
+        // A rejected reference would be rejected again, so that retry sends the message without it.
         let target = row.target, body = row.body, ids = row.attachmentIDs, files = row.files
+        let replyTo = row.failure == SendStatus.replyTargetNotFound ? nil : row.replyTo
         try store.discard(id)
-        try await send(body, target: target, attachments: ids, files: files)
+        try await send(body, target: target, attachments: ids, files: files, replyTo: replyTo)
     }
     func createSession(title: String) async throws {
         let frame = ClientFrame(type: "create_session", title: title, requestID: UUID().uuidString)

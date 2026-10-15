@@ -388,6 +388,156 @@ describe('app routes', () => {
   });
 });
 
+describe('app routes: reply_to (E72)', () => {
+  const AGENT_MSG = '0a1b2c3d-0000-4000-8000-000000000001';
+  const OPERATOR_MSG = '0a1b2c3d-0000-4000-8000-000000000002';
+  const LONG_MSG = '0a1b2c3d-0000-4000-8000-000000000003';
+  const FOREIGN_MSG = '0a1b2c3d-0000-4000-8000-000000000004';
+  const OTHER_AGENT_MSG = '0a1b2c3d-0000-4000-8000-000000000005';
+  const cid = (n: number) => `c269dbf0-286f-4b8b-9446-${String(n).padStart(12, '0')}`;
+
+  async function seeded(withPipeline = true) {
+    const { server, db } = await fixture(withPipeline);
+    const { conversationId, sessionId } = ensureOutboundAppSession(db, 'alice', 'agent:work', 'general');
+    const now = new Date().toISOString();
+    const add = (id: string, conv: string, session: string, contact: string, direction: string, body: string, metadata = '{}') =>
+      db.prepare(`INSERT INTO transcripts(id,message_id,conversation_id,session_id,created_at,channel,contact_id,direction,body,metadata)
+        VALUES (?,?,?,?,?,'app',?,?,?,?)`).run(`row-${id}`, id, conv, session, now, contact, direction, body, metadata);
+    add(AGENT_MSG, conversationId, sessionId, 'alice', 'outbound', 'Here is the plan');
+    add(OPERATOR_MSG, conversationId, sessionId, 'alice', 'inbound', 'Please draft a plan');
+    add(LONG_MSG, conversationId, sessionId, 'alice', 'outbound', 'x'.repeat(300));
+    for (const [id, contact, agent, msg] of [['bob-session', 'bob', 'agent:work', FOREIGN_MSG],
+      ['other-agent-session', 'alice', 'agent:other', OTHER_AGENT_MSG]] as const) {
+      db.prepare(`INSERT INTO conversation_registry(id,contact_id,channel,topic,first_seen,last_seen) VALUES (?,?,'app','general',?,?)`)
+        .run(`conv-${id}`, contact, now, now);
+      db.prepare(`INSERT INTO sessions(id,conversation_id,channel,contact_id,started_at,last_activity,agent_id)
+        VALUES (?,?,'app',?,?,?,?)`).run(id, `conv-${id}`, contact, now, now, agent);
+      add(msg, `conv-${id}`, id, contact, 'outbound', 'secret', '{}');
+    }
+    await server.listen({ host: '127.0.0.1', port: 0 });
+    const address = server.server.address(); if (!address || typeof address === 'string') throw new Error('No address');
+    const client = await connect(`ws://127.0.0.1:${address.port}/api/v1/app/ws`);
+    client.socket.send(JSON.stringify({ type: 'hello', cursor: 0 }));
+    await until(() => client.frames.some(f => f['type'] === 'welcome'));
+    const sendReply = async (n: number, replyTo?: string) => {
+      client.socket.send(JSON.stringify({ type: 'send', client_msg_id: cid(n), target: { kind: 'main' }, body: 'About that',
+        ...(replyTo ? { reply_to: replyTo } : {}) }));
+      await until(() => client.frames.some(f => f['type'] === 'ack' && f['client_msg_id'] === cid(n)));
+      return client.frames.find(f => f['type'] === 'ack' && f['client_msg_id'] === cid(n))!;
+    };
+    return { server, db, client, sessionId, conversationId, sendReply };
+  }
+
+  it('quotes an agent message and an operator message into metadata without binding the envelope', async () => {
+    const { db, client, sendReply } = await seeded();
+    const toAgent = await sendReply(1, AGENT_MSG);
+    expect(toAgent['status']).toBe('queued');
+    const queued = new MessageQueue(db).getById(String(toAgent['message_id']))!;
+    expect(queued.envelope.metadata['quoted_message']).toEqual({ message_id: AGENT_MSG, sender_name: 'agent', text: 'Here is the plan' });
+    expect(queued.envelope.reply_to).toBeNull();
+    const row = db.prepare('SELECT metadata FROM transcripts WHERE message_id = ?').get(toAgent['message_id']) as {metadata:string};
+    expect(JSON.parse(row.metadata)['quoted_message']).toEqual({ message_id: AGENT_MSG, sender_name: 'agent', text: 'Here is the plan' });
+    const stored = db.prepare('SELECT intent_json FROM app_sends WHERE client_msg_id = ?').get(cid(1)) as {intent_json:string};
+    expect(JSON.parse(stored.intent_json)).toMatchObject({ reply_to: AGENT_MSG, quoted_message: { sender_name: 'agent' } });
+
+    const toOperator = await sendReply(2, OPERATOR_MSG);
+    expect(toOperator['status']).toBe('queued');
+    expect(new MessageQueue(db).getById(String(toOperator['message_id']))!.envelope.metadata['quoted_message'])
+      .toEqual({ message_id: OPERATOR_MSG, sender_name: 'you', text: 'Please draft a plan' });
+    client.socket.close();
+  });
+
+  it('cuts the quoted text to 200 characters', async () => {
+    const { db, client, sendReply } = await seeded();
+    const ack = await sendReply(1, LONG_MSG);
+    const quoted = new MessageQueue(db).getById(String(ack['message_id']))!.envelope.metadata['quoted_message'] as {text:string};
+    expect(quoted.text).toBe('x'.repeat(200));
+    client.socket.close();
+  });
+
+  it('leaves metadata untouched when reply_to is absent', async () => {
+    const { db, client, sendReply } = await seeded();
+    const ack = await sendReply(1);
+    expect(new MessageQueue(db).getById(String(ack['message_id']))!.envelope.metadata['quoted_message']).toBeUndefined();
+    client.socket.close();
+  });
+
+  it('rejects an unknown, foreign-contact or foreign-agent reply target without recording a send', async () => {
+    const { db, client, sendReply } = await seeded();
+    const unknown = '0a1b2c3d-0000-4000-8000-0000000000ff';
+    for (const [n, target] of [[1, unknown], [2, FOREIGN_MSG], [3, OTHER_AGENT_MSG]] as const) {
+      expect(await sendReply(n, target)).toMatchObject({ status: 'rejected', reason: 'reply_target_not_found' });
+    }
+    expect((db.prepare('SELECT COUNT(*) AS n FROM app_sends').get() as {n:number}).n).toBe(0);
+    expect((db.prepare("SELECT COUNT(*) AS n FROM transcripts WHERE direction = 'inbound' AND body = 'About that'").get() as {n:number}).n).toBe(0);
+    client.socket.close();
+  });
+
+  it('rejects a system-only message as a reply target', async () => {
+    const { db, client, sessionId, conversationId, sendReply } = await seeded();
+    const hidden = '0a1b2c3d-0000-4000-8000-0000000000aa';
+    db.prepare(`INSERT INTO transcripts(id,message_id,conversation_id,session_id,created_at,channel,contact_id,direction,body,metadata)
+      VALUES ('row-hidden',?,?,?,?,'app','alice','outbound','internal',?)`)
+      .run(hidden, conversationId, sessionId, new Date().toISOString(), JSON.stringify({ system_only: true }));
+    expect(await sendReply(1, hidden)).toMatchObject({ status: 'rejected', reason: 'reply_target_not_found' });
+    client.socket.close();
+  });
+
+  it('answers a malformed reply_to with invalid_send', async () => {
+    const { client } = await seeded();
+    client.socket.send(JSON.stringify({ type: 'send', client_msg_id: cid(1), target: { kind: 'main' }, body: 'x', reply_to: 'not-a-uuid' }));
+    await until(() => client.frames.some(f => f['code'] === 'invalid_send'));
+    client.socket.close();
+  });
+
+  it('replays a retried reply once with the original ack', async () => {
+    const { db, client, sendReply } = await seeded();
+    const first = await sendReply(1, AGENT_MSG);
+    client.socket.send(JSON.stringify({ type: 'send', client_msg_id: cid(1), target: { kind: 'main' }, body: 'About that', reply_to: AGENT_MSG }));
+    await until(() => client.frames.filter(f => f['type'] === 'ack').length === 2);
+    expect(client.frames.filter(f => f['type'] === 'ack')[1]).toEqual(first);
+    expect((db.prepare("SELECT COUNT(*) AS n FROM transcripts WHERE direction = 'inbound' AND body = 'About that'").get() as {n:number}).n).toBe(1);
+    expect((db.prepare('SELECT COUNT(*) AS n FROM message_queue WHERE id = ?').get(first['message_id']) as {n:number}).n).toBe(1);
+    client.socket.close();
+  });
+
+  it('carries the quote through crash recovery when the transcript already exists', async () => {
+    const { db, client, sessionId, conversationId } = await seeded();
+    const clientId = cid(7); const messageId = 'd566559c-c3f5-4011-8271-f8385f987613'; const now = new Date().toISOString();
+    db.prepare(`INSERT INTO transcripts(id,message_id,conversation_id,session_id,created_at,channel,contact_id,direction,body,metadata)
+      VALUES ('crash-row',?,?,?,?,'app','alice','inbound','Recover me','{}')`).run(messageId, conversationId, sessionId, now);
+    const quoted = { message_id: AGENT_MSG, sender_name: 'agent', text: 'Here is the plan' };
+    const intent = { message_id: messageId, topic: 'general', session_id: sessionId, body: 'Recover me', attachments: [],
+      agent_id: 'agent:work', adapter_id: 'cc-headless', reply_to: AGENT_MSG, quoted_message: quoted };
+    db.prepare(`INSERT INTO app_sends(contact_id,client_msg_id,ack_json,intent_json,created_at) VALUES (?,?,?,?,?)`)
+      .run('alice', clientId, JSON.stringify({ type: 'ack', status: 'pending', client_msg_id: clientId, message_id: messageId }), JSON.stringify(intent), now);
+    client.socket.send(JSON.stringify({ type: 'send', client_msg_id: clientId, target: { kind: 'main' }, body: 'Recover me', reply_to: AGENT_MSG }));
+    await until(() => client.frames.some(f => f['type'] === 'ack' && f['client_msg_id'] === clientId));
+    expect(client.frames.find(f => f['client_msg_id'] === clientId)).toMatchObject({ status: 'queued' });
+    const envelope = new MessageQueue(db).getById(messageId)!.envelope;
+    expect(envelope.metadata['quoted_message']).toEqual(quoted);
+    expect(envelope.reply_to).toBeNull();
+    client.socket.close();
+  });
+
+  it('carries the quote through crash recovery when the transcript was never written', async () => {
+    const { db, client, sessionId } = await seeded();
+    const clientId = cid(8); const messageId = 'd566559c-c3f5-4011-8271-f8385f987614'; const now = new Date().toISOString();
+    const quoted = { message_id: OPERATOR_MSG, sender_name: 'you', text: 'Please draft a plan' };
+    const intent = { message_id: messageId, topic: 'general', session_id: sessionId, body: 'Recover me too', attachments: [],
+      agent_id: 'agent:work', adapter_id: 'cc-headless', reply_to: OPERATOR_MSG, quoted_message: quoted };
+    db.prepare(`INSERT INTO app_sends(contact_id,client_msg_id,ack_json,intent_json,created_at) VALUES (?,?,?,?,?)`)
+      .run('alice', clientId, JSON.stringify({ type: 'ack', status: 'pending', client_msg_id: clientId, message_id: messageId }), JSON.stringify(intent), now);
+    client.socket.send(JSON.stringify({ type: 'send', client_msg_id: clientId, target: { kind: 'main' }, body: 'Recover me too', reply_to: OPERATOR_MSG }));
+    await until(() => client.frames.some(f => f['type'] === 'ack' && f['client_msg_id'] === clientId));
+    expect(client.frames.find(f => f['client_msg_id'] === clientId)).toMatchObject({ status: 'queued' });
+    expect(new MessageQueue(db).getById(messageId)!.envelope.metadata['quoted_message']).toEqual(quoted);
+    const row = db.prepare('SELECT metadata FROM transcripts WHERE message_id = ?').get(messageId) as {metadata:string};
+    expect(JSON.parse(row.metadata)['quoted_message']).toEqual(quoted);
+    client.socket.close();
+  });
+});
+
 async function connect(url: string): Promise<{ socket: WebSocket; frames: Record<string, unknown>[] }> {
   const socket = new WebSocket(url, { headers: { authorization: `Bearer ${TOKEN}` } });
   const frames: Record<string, unknown>[] = [];
