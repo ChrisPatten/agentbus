@@ -10,6 +10,13 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+### Added
+- **`make pool-kill`** ends the cc-pool tmux session, killing every pool pane.
+
+### Fixed
+- **A `cc-pool` pane no longer fails to launch when its shell or `claude` starts slowly.** The pane waits for a new window's shell to finish its startup output before typing the launch line, and polls for the development-channels prompt until the launch deadline instead of giving up after `launch_ack_delay_ms` (now deprecated and ignored). A prompt that rendered late was never dismissed, so readiness timed out and the pool relaunched the pane in a loop.
+- **A failed pane launch no longer deletes the MCP config and system-prompt files its launch line points to.** A shell that ran the line late failed with `MCP config file not found`. Scratch files older than a day are pruned at the start of each launch.
+
 ## [0.15.0] - 2026-10-06
 
 Pre-1.0 minor release **with breaking changes**: the legacy structured memory store is removed (migration 031 drops its tables), the Anthropic-API summarizer and its config keys are retired, and the sessions API no longer returns a `summary` field. See Removed.
