@@ -15,9 +15,10 @@
  *    or a `compact` start gets the whole file; every other check returns
  *    nothing or only what is new.
  *
- * What is new is, per day, the lines appended to that day's journal (the whole
- * day when it is new or was rewritten), not the whole file. A day that a budget
- * cut keeps only the end of is compared by overlap, so a moving cut isn't a rewrite.
+ * What is new is, per day, the lines added to that day's journal (the whole
+ * day when it is new or was edited), not the whole file. Days are compared line
+ * by line, so an entry inserted mid-day is sent alone, and a day that a budget
+ * cut keeps only the end of isn't a rewrite when the cut moves.
  */
 import type Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
@@ -104,8 +105,14 @@ export function parseRecentDays(content: string): Array<{ date: string; body: st
   return days.map((d) => ({ date: d.date, body: d.lines.join('\n').trim().replace(CUT_NOTE, '').trim() }));
 }
 
-/** An overlap shorter than this (after trimming) is too likely to be a repeated stock line ("- Nothing actionable."). */
+/** A shared stretch shorter than this (after trimming) is too likely to be a repeated stock line ("- Nothing actionable."). */
 const MIN_OVERLAP_CHARS = 40;
+
+/** Above this many cells (old lines x new lines) the LCS table is not built; the append/tail/overlap rules decide instead. */
+const MAX_LCS_CELLS = 4_000_000;
+
+/** What changed in one day: nothing, text the session lacks, or an edit of text it already has. */
+type DayChange = { added: string } | 'none' | 'rewritten';
 
 /**
  * Where `next` (a day's body) picks up after what the session already has
@@ -128,18 +135,110 @@ function overlapLength(old: string, next: string): number | null {
 }
 
 /**
- * What a session that has `prev` is missing from `next`: per day, the lines
- * appended since (the dailies are append-only), or the whole day when it is
- * new or was rewritten. Empty when nothing new.
- *
- * Over the budget, the oldest included day is a tail of its journal whose cut
- * point moves later as newer days grow, so its text is no longer an extension
- * of what the session saw. That day is not rewritten: when the new text is a
- * line-aligned tail of the old (the cut moved, nothing was added) nothing is
- * sent, and when the old tail overlaps the start of the new text on whole lines
- * (cut moved and lines were appended) only the lines after the overlap are sent.
+ * Fallback for days too large for the line diff: the new text extends the old
+ * (append), is a line-aligned tail of it (the budget cut moved), or starts with
+ * a line-aligned tail of it (cut moved and lines were appended). Anything else,
+ * including an entry inserted mid-day, is a rewrite.
  */
-export function recentDelta(prev: string, next: string): string {
+function appendOnlyChange(old: string, body: string): DayChange {
+  if (body.startsWith(`${old}\n`)) return { added: body.slice(old.length).trim() };
+  if (body === '') return 'rewritten';
+  if (old.endsWith(`\n${body}`)) return 'none';
+  const overlap = overlapLength(old, body);
+  if (overlap === null) return 'rewritten';
+  const added = body.slice(overlap).trim();
+  return added === '' ? 'none' : { added };
+}
+
+/**
+ * Line-level diff of one day (old and new both non-empty and different): the
+ * longest common subsequence of the non-blank lines pairs up what the session
+ * already has with the new text. Blank lines never take part in the alignment,
+ * so whitespace-only changes are invisible.
+ *
+ *  - An old line that is not in the LCS and comes after the first matched old
+ *    line is an edit or removal: the day is rewritten. Old lines before the first
+ *    match are what a budget cut dropped from the start of the day: ignored.
+ *  - Otherwise the new lines outside the LCS are the additions, one block per
+ *    contiguous run (blank lines inside a run stay, at its edges they are dropped).
+ *  - If almost nothing matched (under `MIN_OVERLAP_CHARS`) while the old text was
+ *    longer, the match is a coincidence of stock lines: rewritten.
+ */
+function lineDiffChange(old: string, body: string): DayChange {
+  const oldLines = old.split('\n').filter((l) => l.trim() !== '');
+  const newLines = body.split('\n');
+  const a = oldLines.map((l) => l.trimEnd());
+  const bLines = newLines.filter((l) => l.trim() !== '');
+  const b = bLines.map((l) => l.trimEnd());
+  const n = a.length;
+  const m = b.length;
+  if (n === 0 || m === 0) return 'rewritten';
+
+  // lcs[i][j]: length of the LCS of a[i..] and b[j..].
+  const w = m + 1;
+  const lcs = new Int32Array((n + 1) * w);
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      lcs[i * w + j] = a[i] === b[j] ? lcs[(i + 1) * w + j + 1]! + 1 : Math.max(lcs[(i + 1) * w + j]!, lcs[i * w + j + 1]!);
+    }
+  }
+  const oldMatched = new Array<boolean>(n).fill(false);
+  const newMatched = new Array<boolean>(m).fill(false);
+  for (let i = 0, j = 0; i < n && j < m; ) {
+    if (a[i] === b[j]) {
+      oldMatched[i] = true;
+      newMatched[j] = true;
+      i++;
+      j++;
+    } else if (lcs[(i + 1) * w + j]! >= lcs[i * w + j + 1]!) i++;
+    else j++;
+  }
+
+  const firstMatch = oldMatched.indexOf(true);
+  if (firstMatch < 0) return 'rewritten';
+  for (let i = firstMatch + 1; i < n; i++) if (!oldMatched[i]) return 'rewritten';
+  let matchedChars = 0;
+  for (let i = 0; i < n; i++) if (oldMatched[i]) matchedChars += a[i]!.trim().length;
+  if (matchedChars < MIN_OVERLAP_CHARS && old.trim().length > MIN_OVERLAP_CHARS) return 'rewritten';
+
+  const blocks: string[] = [];
+  let run: string[] = [];
+  const flush = (): void => {
+    while (run.length > 0 && run[run.length - 1]!.trim() === '') run.pop();
+    if (run.length > 0) blocks.push(run.join('\n'));
+    run = [];
+  };
+  let k = 0;
+  for (const line of newLines) {
+    if (line.trim() === '') {
+      if (run.length > 0) run.push(line);
+    } else if (newMatched[k++]) flush();
+    else run.push(line);
+  }
+  flush();
+  return blocks.length === 0 ? 'none' : { added: blocks.join('\n\n') };
+}
+
+export interface RecentDeltaOptions {
+  /** Largest old lines x new lines product the line diff is run for (default 4,000,000); bigger days use the append/tail/overlap rules. */
+  maxLcsCells?: number;
+}
+
+/**
+ * What a session that has `prev` is missing from `next`: per day, the lines
+ * added since, or the whole day when it is new or was edited. Empty when
+ * nothing new.
+ *
+ * Days are compared line by line (see `lineDiffChange`): lines added anywhere
+ * in the day, at the end or between entries, are sent as new entries; a changed
+ * or removed line the session already has makes the day a rewrite. Over the
+ * budget, the oldest included day is a tail of its journal whose cut point
+ * moves later as newer days grow; lines gone from the start of the day are not
+ * an edit, so a moving cut sends nothing by itself. Days too large for the line
+ * diff fall back to `appendOnlyChange`.
+ */
+export function recentDelta(prev: string, next: string, opts: RecentDeltaOptions = {}): string {
+  const maxCells = opts.maxLcsCells ?? MAX_LCS_CELLS;
   const before = new Map(parseRecentDays(prev).map((d) => [d.date, d.body]));
   const parts: string[] = [];
   for (const { date, body } of parseRecentDays(next)) {
@@ -149,21 +248,11 @@ export function recentDelta(prev: string, next: string): string {
       parts.push(`## ${date}\n\n${body}`);
       continue;
     }
-    if (body.startsWith(`${old}\n`)) {
-      parts.push(`## ${date} (new entries only)\n\n${body.slice(old.length).trim()}`);
-      continue;
-    }
-    if (body !== '') {
-      // The cut moved later and nothing was added: the new text is the end of the old, from a line start.
-      if (old.endsWith(`\n${body}`)) continue;
-      const overlap = overlapLength(old, body);
-      if (overlap !== null) {
-        const added = body.slice(overlap).trim();
-        if (added !== '') parts.push(`## ${date} (new entries only)\n\n${added}`);
-        continue;
-      }
-    }
-    parts.push(`## ${date} (rewritten; replaces the earlier version of this day)\n\n${body}`);
+    const tooBig = old.split('\n').length * body.split('\n').length > maxCells;
+    const change = body === '' ? 'rewritten' : tooBig ? appendOnlyChange(old, body) : lineDiffChange(old, body);
+    if (change === 'none') continue;
+    if (change === 'rewritten') parts.push(`## ${date} (rewritten; replaces the earlier version of this day)\n\n${body}`);
+    else if (change.added !== '') parts.push(`## ${date} (new entries only)\n\n${change.added}`);
   }
   return parts.join('\n\n');
 }

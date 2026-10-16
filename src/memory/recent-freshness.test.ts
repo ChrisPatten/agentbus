@@ -219,6 +219,81 @@ describe('RecentFreshness, import mode (E67 S67.4)', () => {
       const cutLater = file('- a', `middle line of the old tail\n${rep}\nnew line one`, true);
       expect(recentDelta(prev, cutLater)).toBe('## 2026-10-05 (new entries only)\n\nnew line one');
     });
+
+    describe('line diff: entries added anywhere in a day', () => {
+      const added = (date: string, text: string) => `## ${date} (new entries only)\n\n${text}`;
+      const live = entry('15:12', 'scan (bus)', 22);
+      const inserted = entry('15:35', 'change log: routines table', 99);
+
+      it('an entry inserted above the last entry sends only that entry', () => {
+        const prev = file(`${entries(20, 21)}\n\n${live}`, entries(1, 4), false);
+        const next = file(`${entries(20, 21)}\n\n${inserted}\n\n${live}`, entries(1, 4), false);
+        const delta = recentDelta(prev, next);
+        expect(delta).toBe(added('2026-10-06', inserted));
+        expect(delta).not.toContain('rewritten');
+      });
+
+      it('two separate insertions in one day come as two blocks, nothing else', () => {
+        const a = entry('09:45', 'chat: Chris', 50);
+        const b = entry('16:00', 'chat: Chris', 51);
+        const prev = file(entries(20, 22), entries(1, 4), false);
+        const next = file(`${entries(20, 20)}\n\n${a}\n\n${entries(21, 22)}\n\n${b}`, entries(1, 4), false);
+        expect(recentDelta(prev, next)).toBe(added('2026-10-06', `${a}\n\n${b}`));
+      });
+
+      it('an inserted entry that has a blank line inside it stays one block', () => {
+        const multi = `${entry('15:35', 'notes', 60)}\n\n- A second paragraph of the same entry, after a blank line.`;
+        const prev = file(`${entries(20, 21)}`, entries(1, 4), false);
+        const next = file(`${entries(20, 20)}\n\n${multi}\n\n${entries(21, 21)}`, entries(1, 4), false);
+        expect(recentDelta(prev, next)).toBe(added('2026-10-06', multi));
+      });
+
+      it('an insertion in a day whose budget cut also moved sends only the inserted lines', () => {
+        const mid = entry('10:30', 'chat: Chris', 70);
+        const prev = file('- a', entries(3, 8), true);
+        const next = file('- a', `${entries(5, 6)}\n\n${mid}\n\n${entries(7, 8)}`, true);
+        const delta = recentDelta(prev, next);
+        expect(delta).toBe(added('2026-10-05', mid));
+        expect(delta).not.toContain('rewritten');
+      });
+
+      it('whitespace-only changes send nothing', () => {
+        const prev = file(entries(20, 22), entries(1, 4), false);
+        const next = file(entries(20, 22).replace('\n\n## [09:31]', '\n\n\n## [09:31]').replace('owner to reply.', 'owner to reply.  ').replace(/$/, '\n\n   '), entries(1, 4), false);
+        expect(next).not.toBe(prev);
+        expect(recentDelta(prev, next)).toBe('');
+      });
+
+      it('an inserted line plus a real edit elsewhere resends the day', () => {
+        const prev = file(entries(20, 22), entries(1, 4), false);
+        const next = file(`${entries(20, 21)}\n\n${inserted}\n\n${entries(22, 22)}`.replace('Checked item 20', 'Rechecked item 20'), entries(1, 4), false);
+        const delta = recentDelta(prev, next);
+        expect(delta).toContain('## 2026-10-06 (rewritten; replaces the earlier version of this day)');
+        expect(delta).toContain('Rechecked item 20');
+        expect(delta).toContain('change log: routines table');
+      });
+
+      it('a removed entry resends the day', () => {
+        const prev = file(entries(20, 22), entries(1, 4), false);
+        const next = file(`${entries(20, 20)}\n\n${entries(22, 22)}`, entries(1, 4), false);
+        expect(recentDelta(prev, next)).toContain('rewritten');
+      });
+
+      it('a day too large for the line diff falls back to the append, tail and overlap rules', () => {
+        const prev = file(`${entries(20, 21)}\n\n${live}`, entries(3, 8), true);
+        const insertedAbove = file(`${entries(20, 21)}\n\n${inserted}\n\n${live}`, entries(3, 8), true);
+        const opts = { maxLcsCells: 1 };
+        expect(recentDelta(prev, insertedAbove, opts)).toContain('## 2026-10-06 (rewritten; replaces the earlier version of this day)');
+        expect(recentDelta(prev, insertedAbove)).toBe(added('2026-10-06', inserted));
+        // Append, cut-moved-later and cut-moved-and-grew still work without the table.
+        const appended = file(`${entries(20, 21)}\n\n${live}\n\n${inserted}`, entries(3, 8), true);
+        expect(recentDelta(prev, appended, opts)).toBe(added('2026-10-06', inserted));
+        const cutLater = file(`${entries(20, 21)}\n\n${live}`, entries(5, 8), true);
+        expect(recentDelta(prev, cutLater, opts)).toBe('');
+        const cutAndGrown = file(`${entries(20, 21)}\n\n${live}`, `${entries(5, 8)}\n\n${inserted}`, true);
+        expect(recentDelta(prev, cutAndGrown, opts)).toBe(added('2026-10-05', inserted));
+      });
+    });
   });
 
   it('end to end: a day cut to the budget is not resent when the cut moves as today grows', () => {

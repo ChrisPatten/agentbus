@@ -105,7 +105,7 @@ Then remove the `@memory/recent.md` line from the agent's `CLAUDE.md`, so the fi
 |---|---|
 | A session starts for the first time (including after `/clear`) | The whole file |
 | After `/compact` | The whole file again, because compaction summarized away what the session had |
-| Each later message, when journals changed | Only the new entries (the lines added to each day's journal since the session last saw it, or a whole day if it's new or was rewritten) |
+| Each later message, when journals changed | Only the new entries (the lines added to each day's journal since the session last saw it, wherever in the day they were added, or a whole day if it's new or a line the session already has was edited or removed) |
 | Each later message, when nothing changed | Nothing |
 
 In an agent that keeps the import, a session start gets nothing from the hook, because Claude Code has just loaded the file. Later messages still get new entries.
