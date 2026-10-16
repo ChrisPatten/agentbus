@@ -103,7 +103,13 @@ export function memoryLines(m: MemorySetupStatus): string[] {
     : m.autoMemorySource === 'settings-file' ? 'from .claude/settings.local.json'
     : 'not set by the bus';
   lines.push(`  loading: ${m.loading === 'native' ? `native (auto memory, ${source})` : m.loading === 'injected' ? 'bus injection (memory.native: false)' : 'none on this runtime'}`);
-  if (m.importsRecent !== null) lines.push(`  CLAUDE.md imports recent.md: ${m.importsRecent ? 'yes' : 'no'}`);
+  if (m.recentDelivery !== null) {
+    const how = m.recentDelivery === 'import' ? 'import (CLAUDE.md imports it)'
+      : m.recentDelivery === 'hook' ? 'hook (SessionStart freshness hook)'
+      : m.recentDelivery === 'both' ? 'import, hook sends updates'
+      : 'none';
+    lines.push(`  recent.md delivery: ${how}`);
+  }
   for (const w of m.warnings) lines.push(`  warning: ${w}`);
   return lines;
 }

@@ -1,11 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AppConfigSchema, type AppConfig } from '../config/schema.js';
 import { RuntimeResolver } from '../core/runtime-resolver.js';
 import { resolveMemoryLayout } from './layout.js';
-import { checkMemorySetup, importClosure, parseImports } from './setup-check.js';
+import { checkMemorySetup, importClosure, parseImports, settingsRegisterRecentHook } from './setup-check.js';
 import { memoryLines } from '../commands/journal.js';
 
 let dir: string;
@@ -53,9 +53,75 @@ describe('memory setup checks (E67 S67.5)', () => {
     writeFileSync(join(dir, 'baxter', 'CLAUDE.md'), '# Baxter\n');
     const s = check('baxter');
     expect(s).toMatchObject({ loading: 'native', autoMemorySource: 'bus', importsRecent: false, memoryDirExists: true });
-    expect(s.warnings).toEqual(['CLAUDE.md does not import @memory/recent.md; add that line so the agent sees its recent journals']);
+    expect(s).toMatchObject({ hooksRecent: false, recentDelivery: 'none' });
+    expect(s.warnings).toEqual([
+      'CLAUDE.md does not import @memory/recent.md and no SessionStart hook runs agentbus_recent_memory_hook.sh, ' +
+      'so the agent never sees its recent journals; register the hook in .claude/settings.json (or add the import)',
+    ]);
     writeFileSync(join(dir, 'baxter', 'CLAUDE.md'), '# Baxter\n@memory/recent.md\n');
-    expect(check('baxter')).toMatchObject({ importsRecent: true, warnings: [] });
+    expect(check('baxter')).toMatchObject({ importsRecent: true, hooksRecent: false, recentDelivery: 'import', warnings: [] });
+  });
+
+  function writeSettings(agent: string, file: string, body: unknown) {
+    mkdirSync(join(dir, agent, '.claude'), { recursive: true });
+    writeFileSync(join(dir, agent, '.claude', file), typeof body === 'string' ? body : JSON.stringify(body));
+  }
+  const hookSettings = (command: string, event = 'SessionStart') => ({ hooks: { [event]: [{ hooks: [{ type: 'command', command }] }] } });
+
+  it('hook delivery (E73): the SessionStart hook replaces the import, with no warning', () => {
+    writeFileSync(join(dir, 'baxter', 'CLAUDE.md'), '# Baxter\n');
+    writeSettings('baxter', 'settings.json', hookSettings('AGENTBUS_AGENT_ID=baxter /opt/agentbus/scripts/hooks/agentbus_recent_memory_hook.sh'));
+    expect(check('baxter')).toMatchObject({ importsRecent: false, hooksRecent: true, recentDelivery: 'hook', warnings: [] });
+  });
+
+  it('hook delivery is also found in settings.local.json', () => {
+    writeFileSync(join(dir, 'baxter', 'CLAUDE.md'), '# Baxter\n');
+    writeSettings('baxter', 'settings.local.json', hookSettings('scripts/hooks/agentbus_recent_memory_hook.sh'));
+    expect(check('baxter')).toMatchObject({ hooksRecent: true, recentDelivery: 'hook', warnings: [] });
+  });
+
+  it('import plus hook is a recommendation: the hook only sends updates', () => {
+    writeFileSync(join(dir, 'baxter', 'CLAUDE.md'), '@memory/recent.md');
+    writeSettings('baxter', 'settings.json', hookSettings('/x/agentbus_recent_memory_hook.sh'));
+    const s = check('baxter');
+    expect(s.recentDelivery).toBe('both');
+    expect(s.warnings).toEqual(['CLAUDE.md imports @memory/recent.md, so the freshness hook agentbus_recent_memory_hook.sh only sends updates; Claude Code re-reads the whole file whenever it changes. Remove the import to let the hook deliver it (full on session start, new entries after)']);
+  });
+
+  it('bus injection with the hook registered would also load it twice', () => {
+    writeFileSync(join(dir, 'baxter', 'CLAUDE.md'), '# Baxter\n');
+    writeSettings('baxter', 'settings.json', hookSettings('/x/agentbus_recent_memory_hook.sh'));
+    const s = check('baxter', config({ agents: { baxter: { memory: { native: false } } } }));
+    expect(s.warnings).toEqual(['the SessionStart hook agentbus_recent_memory_hook.sh delivers recent.md and the bus injects it too (memory.native: false); remove one']);
+  });
+
+  it('detects the hook script through quotes, relative paths and symlinks; ignores other events and bad JSON', () => {
+    const wd = join(dir, 'baxter');
+    const reg = (body: unknown) => { writeSettings('baxter', 'settings.json', body); return settingsRegisterRecentHook(join(wd, '.claude', 'settings.json'), wd); };
+    expect(reg(hookSettings('"/a b/../agentbus_recent_memory_hook.sh"'))).toBe(true);
+    expect(reg(hookSettings('AGENTBUS_AGENT_ID=baxter FOO=1 ./hooks/agentbus_recent_memory_hook.sh'))).toBe(true);
+    expect(reg(hookSettings('AGENTBUS_RECENT_FILE=/x/y bash -c agentbus_recent_memory_hook.sh'))).toBe(true);
+    expect(reg(hookSettings('/x/agentbus_recent_memory_hook.sh', 'UserPromptSubmit'))).toBe(false);
+    expect(reg(hookSettings('/x/other_hook.sh'))).toBe(false);
+    expect(reg(hookSettings('/x/not_agentbus_recent_memory_hook.sh.bak'))).toBe(false);
+    expect(reg({ disableAllHooks: true, ...hookSettings('/x/agentbus_recent_memory_hook.sh') })).toBe(false);
+    expect(reg({ hooks: { SessionStart: 'nope' } })).toBe(false);
+    expect(reg('{ not json')).toBe(false);
+    // A symlink under another name that points at the script.
+    mkdirSync(join(dir, 'real'));
+    writeFileSync(join(dir, 'real', 'agentbus_recent_memory_hook.sh'), '#!/bin/sh\n');
+    symlinkSync(join(dir, 'real', 'agentbus_recent_memory_hook.sh'), join(wd, 'recent-hook'));
+    expect(reg(hookSettings('./recent-hook'))).toBe(true);
+    expect(settingsRegisterRecentHook(join(wd, '.claude', 'missing.json'), wd)).toBe(false);
+  });
+
+  it('no working dir cannot tell how recent.md is delivered', () => {
+    const cfg = config();
+    const resolver = new RuntimeResolver(cfg);
+    const layout = { ...resolveMemoryLayout(cfg, resolver, 'baxter'), workingDir: null };
+    const s = checkMemorySetup(layout, resolver.resolve(layout.agentId));
+    expect(s).toMatchObject({ importsRecent: null, hooksRecent: null, recentDelivery: null });
+    expect(s.warnings.join()).toContain("can't check how recent.md is delivered");
   });
 
   it('flags autoMemoryDirectory in checked-in settings, and an overridden local one', () => {
@@ -94,7 +160,15 @@ describe('memory setup checks (E67 S67.5)', () => {
     const lines = memoryLines(check('baxter'));
     expect(lines[0]).toBe(`Memory (${join(dir, 'baxter', 'memory')}):`);
     expect(lines).toContain('  loading: native (auto memory, set by the bus)');
-    expect(lines).toContain('  CLAUDE.md imports recent.md: no');
+    expect(lines).toContain('  recent.md delivery: none');
     expect(lines.some((l) => l.startsWith('  warning: CLAUDE.md does not import'))).toBe(true);
+
+    writeFileSync(join(dir, 'baxter', 'CLAUDE.md'), '@memory/recent.md');
+    expect(memoryLines(check('baxter'))).toContain('  recent.md delivery: import (CLAUDE.md imports it)');
+    mkdirSync(join(dir, 'baxter', '.claude'));
+    writeFileSync(join(dir, 'baxter', '.claude', 'settings.json'), JSON.stringify(hookSettings('/x/agentbus_recent_memory_hook.sh')));
+    expect(memoryLines(check('baxter'))).toContain('  recent.md delivery: import, hook sends updates');
+    writeFileSync(join(dir, 'baxter', 'CLAUDE.md'), '# nothing');
+    expect(memoryLines(check('baxter'))).toContain('  recent.md delivery: hook (SessionStart freshness hook)');
   });
 });

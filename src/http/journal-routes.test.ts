@@ -188,16 +188,17 @@ describe('GET /api/v1/memory/recent (E67 S67.4)', () => {
       check: (req: { harnessSessionId: string }) => {
         calls.push(req);
         return req.harnessSessionId === 'known'
-          ? { ok: true as const, agent_id: 'agent:peggy', changed: true, hash: 'h', context: 'ctx' }
+          ? { ok: true as const, agent_id: 'agent:peggy', changed: true, hash: 'h', mode: 'hook' as const, context: 'ctx' }
           : { ok: false as const, status: 404, error: 'no agent for this harness_session_id' };
       },
     };
     const s = await createHttpServer({ queue, registry: new AdapterRegistry(), config, pipeline, db, memoryRecent });
     try {
-      const ok = await s.inject({ method: 'GET', url: '/api/v1/memory/recent?harness_session_id=known&event=prompt&agent=peggy' });
+      const ok = await s.inject({ method: 'GET', url: '/api/v1/memory/recent?harness_session_id=known&event=session-start&source=compact&agent=peggy' });
       expect(ok.statusCode).toBe(200);
-      expect(ok.json()).toMatchObject({ ok: true, changed: true, context: 'ctx' });
-      expect(calls[0]).toEqual({ harnessSessionId: 'known', event: 'prompt', agentId: 'peggy' });
+      expect(ok.json()).toMatchObject({ ok: true, changed: true, mode: 'hook', context: 'ctx' });
+      expect(calls[0]).toEqual({ harnessSessionId: 'known', event: 'session-start', source: 'compact', agentId: 'peggy' });
+      expect((await s.inject({ method: 'GET', url: '/api/v1/memory/recent?harness_session_id=known&source=bogus' })).statusCode).toBe(400);
       expect((await s.inject({ method: 'GET', url: '/api/v1/memory/recent?harness_session_id=nope' })).statusCode).toBe(404);
       expect((await s.inject({ method: 'GET', url: '/api/v1/memory/recent' })).statusCode).toBe(400);
     } finally {

@@ -174,6 +174,11 @@ function loadMigrations(): Migration[] {
       description: 'Feedback kind lapsed-proposal (E68)',
       sql: readFileSync(join(migrationsDir, '034_feedback_lapsed_proposal.sql'), 'utf-8'),
     },
+    {
+      version: 35,
+      description: 'memory_recent_seen.content for recent.md delta injection',
+      sql: readFileSync(join(migrationsDir, '035_memory_recent_seen_content.sql'), 'utf-8'),
+    },
   ];
 }
 

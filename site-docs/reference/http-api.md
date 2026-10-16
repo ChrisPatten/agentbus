@@ -101,7 +101,7 @@ See [Approve improvements to the agent's instructions](/features/journaling-and-
 |---|---|
 | `GET /api/v1/journal/runs` | Journal runs, newest first: which journaler ran, the trigger, the outcome, what it could see, files changed, notes and cost. Filters: `agent` (for example `agent:assistant`), `conversation`, `session`, `limit` (default 50, up to 500). Kept for 90 days. |
 
-| `GET /api/v1/memory/recent` | Used by the recent-memory hook: the agent's `recent.md` for one Claude session (`harness_session_id`), but only when it changed since that session last saw it. |
+| `GET /api/v1/memory/recent` | Used by the recent-memory hook: the agent's `recent.md` for one Claude session (`harness_session_id`). The first time a session is seen, and after `/compact`, it returns the whole file (unless the agent imports `recent.md` itself); after that, only entries added since the session last saw it. |
 
 See [Journaling and memory](/features/journaling-and-memory).
 

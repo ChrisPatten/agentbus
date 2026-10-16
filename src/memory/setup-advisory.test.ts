@@ -11,7 +11,7 @@ import { AdvisoryStore } from '../advisories/store.js';
 import { AdvisoryService } from '../advisories/service.js';
 import { resolveMemoryLayout } from './layout.js';
 import { checkMemorySetup } from './setup-check.js';
-import { missesRecentImport, RECENT_NOT_IMPORTED_CONDITION, syncMemorySetupAdvisory } from './setup-advisory.js';
+import { missesRecentDelivery, RECENT_NOT_IMPORTED_CONDITION, syncMemorySetupAdvisory } from './setup-advisory.js';
 
 let dir: string;
 
@@ -76,11 +76,41 @@ describe('memory:recent-not-imported advisory', () => {
     expect(active()).toHaveLength(0);
   });
 
-  it('missesRecentImport only for native loading with importsRecent false', () => {
-    expect(missesRecentImport({ loading: 'native', importsRecent: false })).toBe(true);
-    expect(missesRecentImport({ loading: 'native', importsRecent: null })).toBe(false);
-    expect(missesRecentImport({ loading: 'native', importsRecent: true })).toBe(false);
-    expect(missesRecentImport({ loading: 'injected', importsRecent: false })).toBe(false);
+  it('is not raised when the SessionStart hook delivers recent.md (E73), and raises again if it goes', () => {
+    writeFileSync(join(dir, 'baxter', 'CLAUDE.md'), '# Baxter\n');
+    const { check, active } = setup();
+    expect(check().outcome).toBe('raised');
+    expect(active()[0]!.remediation).toContain('agentbus_recent_memory_hook.sh');
+
+    mkdirSync(join(dir, 'baxter', '.claude'));
+    const settings = join(dir, 'baxter', '.claude', 'settings.json');
+    writeFileSync(settings, JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'AGENTBUS_AGENT_ID=baxter /x/agentbus_recent_memory_hook.sh' }] }] } }));
+    expect(check()).toMatchObject({ outcome: 'resolved', status: { recentDelivery: 'hook' } });
+    expect(active()).toHaveLength(0);
+
+    writeFileSync(settings, '{}');
+    expect(check().outcome).toBe('raised');
+    expect(active()).toHaveLength(1);
+  });
+
+  it('import plus hook is a setup recommendation, not an advisory', () => {
+    writeFileSync(join(dir, 'baxter', 'CLAUDE.md'), '@memory/recent.md');
+    mkdirSync(join(dir, 'baxter', '.claude'));
+    writeFileSync(join(dir, 'baxter', '.claude', 'settings.json'), JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ command: '/x/agentbus_recent_memory_hook.sh' }] }] } }));
+    const { check, active } = setup();
+    const r = check();
+    expect(r.outcome).toBe('resolved');
+    expect(r.status.warnings[0]).toContain('only sends updates');
+    expect(active()).toHaveLength(0);
+  });
+
+  it('missesRecentDelivery only for native loading with neither import nor hook', () => {
+    expect(missesRecentDelivery({ loading: 'native', importsRecent: false })).toBe(true);
+    expect(missesRecentDelivery({ loading: 'native', importsRecent: false, hooksRecent: false })).toBe(true);
+    expect(missesRecentDelivery({ loading: 'native', importsRecent: false, hooksRecent: true })).toBe(false);
+    expect(missesRecentDelivery({ loading: 'native', importsRecent: null, hooksRecent: null })).toBe(false);
+    expect(missesRecentDelivery({ loading: 'native', importsRecent: true, hooksRecent: false })).toBe(false);
+    expect(missesRecentDelivery({ loading: 'injected', importsRecent: false, hooksRecent: false })).toBe(false);
   });
 
   it('works without an advisory service', () => {

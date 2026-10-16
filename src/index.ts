@@ -209,7 +209,9 @@ const approvalHooks: ApprovalResolveHooks = {
 };
 // E67 S67.5 — memory setup checks: /journal shows them; startup logs them.
 // Every check also raises/resolves the memory:recent-not-imported advisory
-// (src/memory/setup-advisory.ts), so it clears on its own once fixed.
+// (src/memory/setup-advisory.ts; since E73 it means "recent.md not delivered",
+// by neither the CLAUDE.md import nor the SessionStart hook), so it clears on
+// its own once fixed.
 function memorySetup(agentId: string) {
   const layout = recentMemory.layoutFor(agentId);
   const status = checkMemorySetup(layout, runtimeResolver.resolve(layout.agentId));
