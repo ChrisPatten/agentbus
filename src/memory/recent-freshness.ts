@@ -16,7 +16,8 @@
  *    nothing or only what is new.
  *
  * What is new is, per day, the lines appended to that day's journal (the whole
- * day when it is new or was rewritten), not the whole file.
+ * day when it is new or was rewritten), not the whole file. A day that a budget
+ * cut keeps only the end of is compared by overlap, so a moving cut isn't a rewrite.
  */
 import type Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
@@ -103,10 +104,40 @@ export function parseRecentDays(content: string): Array<{ date: string; body: st
   return days.map((d) => ({ date: d.date, body: d.lines.join('\n').trim().replace(CUT_NOTE, '').trim() }));
 }
 
+/** An overlap shorter than this (after trimming) is too likely to be a repeated stock line ("- Nothing actionable."). */
+const MIN_OVERLAP_CHARS = 40;
+
+/**
+ * Where `next` (a day's body) picks up after what the session already has
+ * (`old`), when a budget cut moved the start of the day: the length of the
+ * longest suffix of `old`, starting at a line boundary of `old`, that equals a
+ * prefix of `next` ending at a line boundary of `next`. Null when no such
+ * overlap of at least `MIN_OVERLAP_CHARS` exists. O(lines x length).
+ */
+function overlapLength(old: string, next: string): number | null {
+  let start = 0;
+  // Candidate starts in increasing order, so the first match is the longest overlap.
+  for (;;) {
+    const tail = old.slice(start);
+    if (tail.trim().length < MIN_OVERLAP_CHARS) return null; // shorter from here on
+    if (tail.length <= next.length && (tail.length === next.length || next[tail.length] === '\n') && next.startsWith(tail)) return tail.length;
+    const nl = old.indexOf('\n', start);
+    if (nl < 0) return null;
+    start = nl + 1;
+  }
+}
+
 /**
  * What a session that has `prev` is missing from `next`: per day, the lines
  * appended since (the dailies are append-only), or the whole day when it is
  * new or was rewritten. Empty when nothing new.
+ *
+ * Over the budget, the oldest included day is a tail of its journal whose cut
+ * point moves later as newer days grow, so its text is no longer an extension
+ * of what the session saw. That day is not rewritten: when the new text is a
+ * line-aligned tail of the old (the cut moved, nothing was added) nothing is
+ * sent, and when the old tail overlaps the start of the new text on whole lines
+ * (cut moved and lines were appended) only the lines after the overlap are sent.
  */
 export function recentDelta(prev: string, next: string): string {
   const before = new Map(parseRecentDays(prev).map((d) => [d.date, d.body]));
@@ -114,9 +145,25 @@ export function recentDelta(prev: string, next: string): string {
   for (const { date, body } of parseRecentDays(next)) {
     const old = before.get(date);
     if (old === body) continue;
-    if (old === undefined || old === '') parts.push(`## ${date}\n\n${body}`);
-    else if (body.startsWith(`${old}\n`)) parts.push(`## ${date} (new entries only)\n\n${body.slice(old.length).trim()}`);
-    else parts.push(`## ${date} (rewritten; replaces the earlier version of this day)\n\n${body}`);
+    if (old === undefined || old === '') {
+      parts.push(`## ${date}\n\n${body}`);
+      continue;
+    }
+    if (body.startsWith(`${old}\n`)) {
+      parts.push(`## ${date} (new entries only)\n\n${body.slice(old.length).trim()}`);
+      continue;
+    }
+    if (body !== '') {
+      // The cut moved later and nothing was added: the new text is the end of the old, from a line start.
+      if (old.endsWith(`\n${body}`)) continue;
+      const overlap = overlapLength(old, body);
+      if (overlap !== null) {
+        const added = body.slice(overlap).trim();
+        if (added !== '') parts.push(`## ${date} (new entries only)\n\n${added}`);
+        continue;
+      }
+    }
+    parts.push(`## ${date} (rewritten; replaces the earlier version of this day)\n\n${body}`);
   }
   return parts.join('\n\n');
 }
