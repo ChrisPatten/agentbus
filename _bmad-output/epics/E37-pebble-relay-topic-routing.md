@@ -3,6 +3,7 @@
 | Field | Value |
 |---|---|
 | Epic ID | E37 |
+| Status | Pending (not started) |
 | Dependencies | E27 (Generic Thread Store), E28 (Telegram Group Topics) — both live |
 | Story Count | 2 |
 | Complexity | S |
