@@ -66,6 +66,16 @@ const ContactPlatformsSchema = z.object({
     })
     .optional(),
   app: z.object({ token: z.string().min(16) }).optional(),
+  slack: z
+    .object({
+      /**
+       * Slack member id (`U…`, or `W…` on Enterprise Grid) that the slack
+       * channel DMs for this contact (E76). Copy it from the Slack profile's
+       * "Copy member ID".
+       */
+      user_id: z.string().regex(/^[UW][A-Z0-9]{2,}$/, 'must be a Slack member id like U012ABCDEF'),
+    })
+    .optional(),
 });
 
 /** A named contact that can send messages to the bus. */
@@ -488,6 +498,23 @@ export const SiriAdapterSchema = z.object({
 
 export type SiriAdapterConfig = z.infer<typeof SiriAdapterSchema>;
 
+/**
+ * Slack channel adapter (E76, S76.0 POC) — outbound only. `send()` POSTs
+ * `{slack_user_id, message}` to an n8n webhook, authenticated with an HS256
+ * JWT, and n8n posts the DM. See docs/SLACK_ADAPTER.md.
+ */
+export const SlackAdapterSchema = z.object({
+  enabled: z.boolean().default(true),
+  /** The n8n webhook's production URL, e.g. https://n8n.example.com/webhook/agentbus/slack-dm. */
+  webhook_url: z.string().url().refine((u) => /^https?:\/\//.test(u), 'must be an http(s) URL'),
+  /** HS256 passphrase shared with n8n's JWT credential, used as raw UTF-8 bytes. */
+  jwt_secret: z.string().min(32),
+  /** Lifetime of each per-request token. */
+  jwt_ttl_seconds: z.number().int().min(10).max(3600).default(60),
+  request_timeout_ms: z.number().int().min(1000).max(60000).default(10000),
+});
+export type SlackAdapterConfig = z.infer<typeof SlackAdapterSchema>;
+
 export const AppAdapterSchema = z.object({
   enabled: z.boolean().default(true),
   event_retention_days: z.number().int().positive().default(30),
@@ -506,6 +533,7 @@ const AdaptersConfigSchema = z.object({
   pebble: PebbleAdapterSchema.optional(),
   siri: SiriAdapterSchema.optional(),
   app: AppAdapterSchema.optional(),
+  slack: SlackAdapterSchema.optional(),
 });
 
 const MemoryConfigSchema = z.object({
@@ -921,6 +949,24 @@ export const AppConfigSchema = z.object({
         } else {
           byToken.set(token, key);
         }
+      }
+    }
+
+    // A Slack member id maps outbound DMs to one contact; two contacts on the
+    // same id would make delivery and the transcript ambiguous.
+    const bySlackId = new Map<string, string>();
+    for (const [key, contact] of Object.entries(contacts)) {
+      const userId = contact.platforms.slack?.user_id;
+      if (!userId) continue;
+      const owner = bySlackId.get(userId);
+      if (owner) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Duplicate slack user_id — also used by contact "${owner}"`,
+          path: [key, 'platforms', 'slack', 'user_id'],
+        });
+      } else {
+        bySlackId.set(userId, key);
       }
     }
   }),

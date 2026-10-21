@@ -34,6 +34,7 @@ Technical reference for operators and contributors. The public landing page live
 | [TELEGRAM_ADAPTER.md](TELEGRAM_ADAPTER.md) | Bots, groups and forum topics, reactions, live tool-call status, command menus |
 | [EMAIL_ADAPTER.md](EMAIL_ADAPTER.md) | IMAP IDLE, SMTP replies, anti-spoofing, threading, Markdown rendering |
 | [PEBBLE_ADAPTER.md](PEBBLE_ADAPTER.md) | Pebble Ring voice-memo webhook |
+| [SLACK_ADAPTER.md](SLACK_ADAPTER.md) | Slack channel (outbound POC): DMs through a JWT-authenticated n8n webhook |
 | [SIRI_ADAPTER.md](SIRI_ADAPTER.md) | Siri channel: the Peggy iOS app's ask endpoint, prompt contract, tailnet exposure, latency probe |
 | [ATTACHMENTS.md](ATTACHMENTS.md) | Inbound images and files, per-agent media config, TTL sweep |
 | [THREADING.md](THREADING.md) | Thread-scoped sessions shared by email and Telegram topics |
