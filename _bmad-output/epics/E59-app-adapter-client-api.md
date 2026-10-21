@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Epic ID | E59 |
-| Status | Implemented; live scripted walkthrough pending |
+| Status | Complete (live walkthrough confirmed 2026-10-21) |
 | Dependencies | E58 activity bridge; E27 thread store; transcript logging (E8/E31); attachments (E17); command registry (E6); Fastify server |
 | Story Count | 8 |
 | Estimated Complexity | XL |
