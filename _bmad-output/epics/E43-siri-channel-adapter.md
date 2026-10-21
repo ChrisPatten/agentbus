@@ -3,6 +3,7 @@
 | Field | Value |
 |---|---|
 | Epic ID | E43 |
+| Status | Pending (not started; E42 spike shipped the adapter and `/api/v1/siri` routes) |
 | Dependencies | E42 (spike code + Gate 1 pass or async-first pivot). Runs in parallel with / before E45. |
 | Story Count | 7 |
 | Estimated Complexity | L |
