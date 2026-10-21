@@ -61,6 +61,15 @@ adapters:
   #   reply_timeout_ms: 25000        # server-side cap on how long an ask waits (1000-60000)
   #   max_body_bytes: 8192
   #   debug_delay_ms: 0              # device testing only; refused when NODE_ENV=production
+  # ── Slack (outbound POC, E76) — docs/SLACK_ADAPTER.md ───────────────────────
+  # send() POSTs {slack_user_id, message} to an n8n webhook with an HS256 JWT;
+  # n8n posts the DM. Setup: integrations/n8n/slack-relay/README.md.
+  # slack:
+  #   enabled: true
+  #   webhook_url: https://n8n.example.com/webhook/agentbus/slack-dm
+  #   jwt_secret: ${SLACK_JWT_SECRET}  # >= 32 chars, same text as n8n's JWT credential passphrase
+  #   jwt_ttl_seconds: 60
+  #   request_timeout_ms: 10000
   # app:                            # Mac app; local Fastify listener, no extra port
   #   enabled: true
   #   event_retention_days: 30
@@ -163,6 +172,8 @@ contacts:
       #   token: ${SIRI_TOKEN_ALICE}          # identifies this contact on /api/v1/siri; >= 16 chars, `openssl rand -hex 24`
       # app:
       #   token: ${APP_TOKEN_ALICE}           # identifies this contact on /api/v1/app; >= 16 chars
+      # slack:
+      #   user_id: U012ABCDEF                 # Slack member id the slack channel DMs; unique across contacts
 
 topics:
   - general

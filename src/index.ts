@@ -39,6 +39,7 @@ import { createTranscriptLog } from './pipeline/stages/transcript-log.js';
 import { TelegramAdapter } from './adapters/telegram.js';
 import { EmailAdapter } from './adapters/email.js';
 import { SiriAdapter } from './adapters/siri.js';
+import { SlackAdapter } from './adapters/slack.js';
 import { AppAdapter } from './adapters/app.js';
 import { routedAgent } from './app/store.js';
 import { startHeadless, stopHeadless, getHeadlessSnapshots, buildMcpConfig } from './adapters/cc-headless.js';
@@ -321,6 +322,8 @@ pipeline.use({ slot: 87, name: 'journal-hold',     stage: createJournalHoldNotic
 // with the other platform adapters below.
 const siri = config.adapters.siri?.enabled ? new SiriAdapter(config.adapters.siri) : undefined;
 if (siri) registry.register(siri);
+// E76 (S76.0) — outbound-only Slack DMs through an n8n webhook.
+if (config.adapters.slack?.enabled) registry.register(new SlackAdapter(config.adapters.slack, config.contacts));
 const app = config.adapters.app?.enabled
   ? new AppAdapter(db, (contactId) => routedAgent(config, contactId), getHeadlessSnapshots) : undefined;
 if (app) registry.register(app);
