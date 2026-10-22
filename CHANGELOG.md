@@ -11,6 +11,7 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 ## [Unreleased]
 
 ### Added
+- **Useful jobs: copyable scheduled jobs with skills and scripts.** `examples/jobs/` holds nightly commit, memory review and email watch, each a skill, its helper scripts and a sample schedule (`schedules.example.yaml`). See `docs/USEFUL_JOBS.md` and the new Useful jobs page in the user docs.
 - **Telegram forum topics now give a new session the topic's name and pinned message.** The bus records `pinned_message` / topic create and rename service updates, and the first message of each new session carries a `[Topic context]` block. Telegram offers no per-topic pin lookup, so pins made while the bus wasn't running are picked up on the next pin. See `docs/TELEGRAM_ADAPTER.md`.
 - **`make pool-kill`** ends the cc-pool tmux session, killing every pool pane.
 

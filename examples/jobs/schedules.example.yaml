@@ -1,0 +1,44 @@
+# Paste into the `schedules:` list in config.yaml, then adjust `sender`,
+# `channel` and `timezone`. Copy the matching skill folders into the agent's
+# working directory first (see README.md).
+#
+# `sender` must be a contact from your config. The agent's final message for a
+# quiet run is silence: each skill only sends a message when there is something
+# to report.
+
+schedules:
+  # Midnight: commit the day's changes in the agent's repo. Never pushes.
+  - id: nightly_commit
+    label: Nightly commit
+    cron: "0 0 * * *"
+    timezone: America/New_York
+    channel: telegram
+    sender: contact:me
+    model: sonnet
+    prompt: |
+      Scheduled run. Run the `nightly-commit` skill and follow it exactly.
+      If the tree is clean, finish without sending anything.
+
+  # 3 AM: prune stale memory, promote durable facts, fix the index.
+  - id: memory_review
+    label: Memory review
+    cron: "0 3 * * *"
+    timezone: America/New_York
+    channel: telegram
+    sender: contact:me
+    model: sonnet
+    prompt: |
+      Scheduled run. Run the `memory-review` skill and follow it exactly.
+      Do not message me unless something needs my attention.
+
+  # Every 3 hours from 8 AM to 8 PM: scan the inbox.
+  - id: email_watch
+    label: Email watch
+    cron: "0 8-20/3 * * *"
+    timezone: America/New_York
+    channel: telegram
+    sender: contact:me
+    model: haiku
+    prompt: |
+      Scheduled run. Run the `email-watch` skill and follow it exactly.
+      If nothing needs my attention, send nothing.

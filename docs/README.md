@@ -48,3 +48,4 @@ Technical reference for operators and contributors. The public landing page live
 | [MCP_TOOLS.md](MCP_TOOLS.md) | Every tool the agent can call |
 | [SLASH_COMMANDS.md](SLASH_COMMANDS.md) | Built-in commands and the command registry |
 | [SCHEDULING.md](SCHEDULING.md) | Cron and one-shot scheduled messages |
+| [USEFUL_JOBS.md](USEFUL_JOBS.md) | Copyable scheduled jobs: nightly commit, memory review, email watch |

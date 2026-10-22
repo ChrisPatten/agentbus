@@ -65,6 +65,7 @@ export default defineConfig({
         items: [
           { text: 'Slash commands', link: '/features/slash-commands' },
           { text: 'Scheduling', link: '/features/scheduling' },
+          { text: 'Useful jobs', link: '/features/useful-jobs' },
           { text: 'Attachments', link: '/features/attachments' },
           { text: 'Approvals', link: '/features/approvals' },
           { text: 'Threads and topics', link: '/features/threads-and-topics' },
