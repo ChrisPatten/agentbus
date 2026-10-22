@@ -66,6 +66,7 @@ import { OwnerDirectory } from './core/owners.js';
 import { AdvisoryStore } from './advisories/store.js';
 import { AdvisoryService } from './advisories/service.js';
 import { createBusAdvisoryTransport } from './advisories/transport.js';
+import { createTopicContextInject } from './pipeline/stages/topic-context-inject.js';
 import { createAdvisoryInject } from './pipeline/stages/advisory-inject.js';
 import { resolveJournalingSettings } from './journaling/config.js';
 import { reviewChains } from './journaling/advisories.js';
@@ -306,6 +307,8 @@ pipeline.use({ slot: 70, name: 'route-resolve',    stage: createRouteResolve(con
 // route targets (e.g. an also_notify entry).
 pipeline.use({ slot: 72, name: 'pool-route-resolve', stage: createPoolRouteResolve(poolManagers), critical: false });
 pipeline.use({ slot: 80, name: 'transcript-log',   stage: createTranscriptLog(db, config), critical: false });
+// A new session on a forum topic starts with the topic's name + pinned message.
+pipeline.use({ slot: 85, name: 'topic-context-inject', stage: createTopicContextInject(registry), critical: false });
 // E65 — open advisories ride along with an owner's next message, as a
 // bus-originated system block for the owned agent's route only.
 pipeline.use({ slot: 86, name: 'advisory-inject',  stage: createAdvisoryInject(advisories), critical: false });

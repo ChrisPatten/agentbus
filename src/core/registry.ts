@@ -79,6 +79,12 @@ export interface AdapterInstance {
    */
   ownsChannel?(channel: string): boolean;
   /**
+   * Context text describing a thread-scoped topic (e.g. a Telegram forum
+   * topic's name and pinned message), injected once before the first message
+   * of a new session. Synchronous and local; null when there is nothing to say.
+   */
+  getTopicContext?(channel: string, topic: string): string | null;
+  /**
    * Start a typing indicator for a contact. Called when the agent confirms
    * receipt. `channel` disambiguates which chat to target when a single
    * adapter instance serves more than one chat per contact (e.g. a Telegram
