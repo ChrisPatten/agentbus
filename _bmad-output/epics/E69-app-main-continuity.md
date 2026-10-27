@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Epic ID | E69 |
-| Status | Planned (draft) |
+| Status | Implemented (live check pending) |
 | Dependencies | E58, E59, E60, E61 (`feat/e58-e59-mac-client-foundation`); coordinates with E63 and E66 |
 | Story Count | 6 |
 | Estimated Complexity | M |
@@ -91,7 +91,7 @@ Main behaves like a Telegram DM. The operator sees one continuous conversation w
 ### S69.5 — Reply to a specific message in the app
 
 - Swift client: a reply action on any message (context menu), a quoted preview in the composer, and the quote rendered on the sent message.
-- Protocol: the `send` frame gains `reply_to: message_id`. The bus rejects a `reply_to` outside the target conversation or contact.
+- Protocol: the `send` frame gains `reply_to: message_id`. The bus rejects a `reply_to` outside the target conversation or contact. *(Not adopted for the conversation; see Implementation. The contact and agent check from E72 stands.)*
 - The agent's prompt shows which message is being answered (time, source, excerpt). If it's one of the pending messages, the injected block marks it.
 - Agent outbound `reply_to` on `app` renders as a quote in the client. Check against `boundAppReply`, which already reads `envelope.reply_to` on outbound app sends for session binding, so the two uses don't collide.
 - Share the reply-target prompt rendering with Telegram's existing native-reply path where practical.
@@ -161,3 +161,14 @@ type Origin =
 - `QuotedMessage` gains optional `created_at` and `source` (the target's `origin.label`, or `"you"` / `"agent"`). The shared formatter in `src/adapters/cc.ts` renders them when present; Telegram's quotes stay as they are.
 - If the operator's reply target is one of the injected pending messages, that item is marked in the block.
 - An agent outbound app message whose `reply_to` resolves to a quotable message other than the newest inbound in that conversation gets `metadata.quoted_message`, so the client renders a quote. Replies to the newest inbound (every fallback reply) stay unquoted.
+
+## Implementation (2026-10-27)
+
+S69.1–S69.5 are implemented on `feat/e69-app-main-continuity` as the notes above describe; S69.6 docs are done and the live check on `baxter-mac-test` is pending. Deviations from the plan:
+
+- **Unstamped sends are never pending.** The epic said any send without a turn stamp is foreign. Only `origin.kind = 'external'`, or a `turn` origin from another conversation, is; rows with no origin (bus command responses, advisories, rows from before E69) are never injected.
+- **A turn origin carries a label only when given explicitly** (`source`, else `AGENTBUS_SOURCE_LABEL`). The generic "another agent session" applies to `external` origins only, so a quote of the agent's own message isn't attributed to it.
+- **Rotation journals through SessionTracker's close path.** `rotateIdleMainSessions` runs in the tracker tick without a journal engine; it sets `ended_at` and `end_reason = 'idle'`, and the tracker's mid-flight pass reports the close (`close` trigger) on the same tick. `/clear` in Main passes the engine and fires `clear` directly. The rotation `session` event is flagged by `app_events.rotation` (migration 037), and replay adds `rotated` to it.
+- **`send.reply_to` is not narrowed to the target conversation.** S69.5's "rejects a `reply_to` outside the target conversation" was not adopted: E72's check (a visible message for this contact and agent, in any session) already covers it, and narrowing broke replies from a resumed Earlier copy to its original session's messages. Any Main row's messages are valid targets, and `new` targets may carry `reply_to`.
+- **Agent quote rule.** An agent outbound app message gets `metadata.quoted_message` when its `reply_to` names an agent message, or an operator message the agent has since moved on from (a later agent message answers something else). Replies to the operator's latest message(s), including several messages from one turn answering the same thing and every fallback reply, stay unquoted.
+- **Not guarded:** a Main turn running longer than the whole rotation period can be rotated mid-turn. Rotation doesn't go through the conversation queue; with the 12 h default this is unlikely.

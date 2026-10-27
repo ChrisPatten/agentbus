@@ -55,6 +55,8 @@ How long a session lasts depends on the runtime:
 | `cc-pool` | Sessions are long-lived here too. A conversation that's idle long enough gives up its pane and resumes its Claude session when it next gets one. See [cc-pool](/runtimes/cc-pool#clearing-a-conversation) for how `/clear` behaves. |
 | `claude-code` | The conversation is idle for `memory.session_idle_threshold_ms` (30 minutes by default), or you send `/clear`. |
 
+**The Mac app's Main is the exception.** Main is one conversation with all its history, but its Claude session is refreshed after 12 hours with no messages from you or the agent (`adapters.app.main_idle_rotation_ms`), and on `/clear`. The old session is journaled, the next message starts a new one, and the app marks the spot with a "New context" divider. See [Mac app](/channels/mac-app#main).
+
 **Long sessions don't overflow.** Claude Code compacts a session's context automatically as it grows, so you don't need to clear a long-running conversation. Use `/clear` when you want the agent to start fresh.
 
 ### Seeing your sessions

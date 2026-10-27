@@ -186,7 +186,7 @@ function loadMigrations(): Migration[] {
     },
     {
       version: 37,
-      description: 'sessions.end_reason for E69 Main rotation dividers',
+      description: 'sessions.end_reason and app_events.rotation for E69 Main rotation dividers',
       sql: readFileSync(join(migrationsDir, '037_session_end_reason.sql'), 'utf-8'),
     },
   ];

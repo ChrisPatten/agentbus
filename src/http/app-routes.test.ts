@@ -17,8 +17,9 @@ import WebSocket from 'ws';
 import { normalize } from '../pipeline/stages/normalize.js';
 import { createRouteResolve } from '../pipeline/stages/route-resolve.js';
 import { createTranscriptLog } from '../pipeline/stages/transcript-log.js';
-import { eventBounds } from '../app/store.js';
+import { createAppSession, eventBounds } from '../app/store.js';
 import { ensureOutboundAppSession } from '../app/outbound.js';
+import { rotateMainSession } from '../app/main.js';
 import { slashCommandDetect } from '../pipeline/stages/slash-command.js';
 import { CommandRegistry } from '../commands/registry.js';
 import { createBuiltinCommands } from '../commands/handlers.js';
@@ -433,17 +434,18 @@ describe('app routes: reply_to (E72)', () => {
     const toAgent = await sendReply(1, AGENT_MSG);
     expect(toAgent['status']).toBe('queued');
     const queued = new MessageQueue(db).getById(String(toAgent['message_id']))!;
-    expect(queued.envelope.metadata['quoted_message']).toEqual({ message_id: AGENT_MSG, sender_name: 'agent', text: 'Here is the plan' });
+    const agentQuote = { message_id: AGENT_MSG, sender_name: 'agent', text: 'Here is the plan', created_at: expect.any(String), source: 'agent' };
+    expect(queued.envelope.metadata['quoted_message']).toEqual(agentQuote);
     expect(queued.envelope.reply_to).toBeNull();
     const row = db.prepare('SELECT metadata FROM transcripts WHERE message_id = ?').get(toAgent['message_id']) as {metadata:string};
-    expect(JSON.parse(row.metadata)['quoted_message']).toEqual({ message_id: AGENT_MSG, sender_name: 'agent', text: 'Here is the plan' });
+    expect(JSON.parse(row.metadata)['quoted_message']).toEqual(agentQuote);
     const stored = db.prepare('SELECT intent_json FROM app_sends WHERE client_msg_id = ?').get(cid(1)) as {intent_json:string};
     expect(JSON.parse(stored.intent_json)).toMatchObject({ reply_to: AGENT_MSG, quoted_message: { sender_name: 'agent' } });
 
     const toOperator = await sendReply(2, OPERATOR_MSG);
     expect(toOperator['status']).toBe('queued');
     expect(new MessageQueue(db).getById(String(toOperator['message_id']))!.envelope.metadata['quoted_message'])
-      .toEqual({ message_id: OPERATOR_MSG, sender_name: 'you', text: 'Please draft a plan' });
+      .toEqual({ message_id: OPERATOR_MSG, sender_name: 'you', text: 'Please draft a plan', created_at: expect.any(String), source: 'you' });
     client.socket.close();
   });
 
@@ -459,6 +461,30 @@ describe('app routes: reply_to (E72)', () => {
     const { db, client, sendReply } = await seeded();
     const ack = await sendReply(1);
     expect(new MessageQueue(db).getById(String(ack['message_id']))!.envelope.metadata['quoted_message']).toBeUndefined();
+    client.socket.close();
+  });
+
+  it('accepts a reply target from another session of the same contact and agent (resumed copy, new topic)', async () => {
+    const { db, client } = await seeded();
+    // The original Earlier session, and the resumed copy (a topic session) the operator is typing in.
+    const now = new Date().toISOString();
+    db.prepare(`INSERT INTO conversation_registry(id,contact_id,channel,topic,first_seen,last_seen) VALUES ('conv-orig','alice','telegram','general',?,?)`).run(now, now);
+    db.prepare(`INSERT INTO sessions(id,conversation_id,channel,contact_id,started_at,last_activity,ended_at,agent_id)
+      VALUES ('orig','conv-orig','telegram','alice',?,?,?,'agent:work')`).run(now, now, now);
+    const ORIGINAL_MSG = '0a1b2c3d-0000-4000-8000-000000000010';
+    db.prepare(`INSERT INTO transcripts(id,message_id,conversation_id,session_id,created_at,channel,contact_id,direction,body,metadata)
+      VALUES ('row-orig',?,'conv-orig','orig',?,'telegram','alice','outbound','Original answer','{}')`).run(ORIGINAL_MSG, now);
+    db.prepare(`INSERT INTO transcripts(id,message_id,conversation_id,session_id,created_at,channel,contact_id,direction,body,metadata)
+      VALUES ('row-orig-q','orig-question','conv-orig','orig',?,'telegram','alice','inbound','Original question','{}')`).run(now);
+    const copy = createAppSession(db, 'alice', 'agent:work', 'Original (resumed)');
+    for (const [n, target] of [[1, { kind: 'session', session_id: copy.sessionId }], [2, { kind: 'new' }]] as const) {
+      client.socket.send(JSON.stringify({ type: 'send', client_msg_id: cid(n), target, body: 'About that', reply_to: ORIGINAL_MSG }));
+      await until(() => client.frames.some(f => f['type'] === 'ack' && f['client_msg_id'] === cid(n)));
+      const ack = client.frames.find(f => f['type'] === 'ack' && f['client_msg_id'] === cid(n))!;
+      expect(ack['status']).toBe('queued');
+      expect(new MessageQueue(db).getById(String(ack['message_id']))!.envelope.metadata['quoted_message'])
+        .toMatchObject({ message_id: ORIGINAL_MSG, sender_name: 'agent', text: 'Original answer' });
+    }
     client.socket.close();
   });
 
@@ -534,6 +560,81 @@ describe('app routes: reply_to (E72)', () => {
     expect(new MessageQueue(db).getById(messageId)!.envelope.metadata['quoted_message']).toEqual(quoted);
     const row = db.prepare('SELECT metadata FROM transcripts WHERE message_id = ?').get(messageId) as {metadata:string};
     expect(JSON.parse(row.metadata)['quoted_message']).toEqual(quoted);
+    client.socket.close();
+  });
+});
+
+describe('app routes: Main continuity (E69)', () => {
+  const cid = (n: number) => `c269dbf0-286f-4b8b-9446-e69${String(n).padStart(9, '0')}`;
+  async function rotated() {
+    const { server, db } = await fixture(true);
+    const old = ensureOutboundAppSession(db, 'alice', 'agent:work', 'general');
+    const put = (id: string, session: string, direction: string, body: string) => db.prepare(`INSERT INTO transcripts
+      (id,message_id,conversation_id,session_id,created_at,channel,contact_id,direction,body,metadata)
+      VALUES (?,?,?,?,?,'app','alice',?,?,'{}')`).run(`row-${id}`, id, old.conversationId, session, new Date().toISOString(), direction, body);
+    put('0a1b2c3d-0000-4000-8000-0000000000a1', old.sessionId, 'outbound', 'Scan one');
+    db.prepare('UPDATE sessions SET claude_session_id = ? WHERE id = ?').run('claude-old', old.sessionId);
+    rotateMainSession(db, old.sessionId, 'idle');
+    const current = ensureOutboundAppSession(db, 'alice', 'agent:work', 'general');
+    put('0a1b2c3d-0000-4000-8000-0000000000a2', current.sessionId, 'outbound', 'Scan two');
+    const topic = createAppSession(db, 'alice', 'agent:work', 'Trip');
+    const topicConversation = (db.prepare('SELECT conversation_id FROM sessions WHERE id = ?').get(topic.sessionId) as {conversation_id:string}).conversation_id;
+    db.prepare(`INSERT INTO transcripts(id,message_id,conversation_id,session_id,created_at,channel,contact_id,direction,body,metadata)
+      VALUES ('row-topic','0a1b2c3d-0000-4000-8000-0000000000a3',?,?,?,'app','alice','outbound','Trip plan','{}')`)
+      .run(topicConversation, topic.sessionId, new Date().toISOString());
+    return { server, db, old, current };
+  }
+  const headers = { authorization: `Bearer ${TOKEN}` };
+
+  it('lists Main once at its active row and pages its history across rows with boundaries', async () => {
+    const { server, old, current } = await rotated();
+    const all = (await server.inject({ url: '/api/v1/app/sessions', headers })).json().sessions as Record<string, unknown>[];
+    expect(all.filter(s => s['is_main'])).toEqual([expect.objectContaining({ session_id: current.sessionId,
+      conversation_id: current.conversationId, ended_at: null, unread_count: 2, activity: 'idle' })]);
+    expect((await server.inject({ url: '/api/v1/app/sessions?state=earlier', headers })).json().sessions).toEqual([]);
+    const page = (await server.inject({ url: `/api/v1/app/sessions/${old.sessionId}/messages`, headers })).json();
+    expect(page.messages.map((m: Record<string, unknown>) => m['body'])).toEqual(['Scan one', 'Scan two']);
+    expect(page.boundaries).toEqual([{ session_id: old.sessionId, ended_at: expect.any(String), reason: 'idle' }]);
+    const topic = all.find(s => s['title'] === 'Trip')!;
+    expect('boundaries' in (await server.inject({ url: `/api/v1/app/sessions/${topic['session_id']}/messages`, headers })).json()).toBe(false);
+  });
+
+  it('sends to an ended Main row id into Main and marks read across rows', async () => {
+    const { server, db, old, current } = await rotated();
+    await server.listen({ host: '127.0.0.1', port: 0 });
+    const address = server.server.address(); if (!address || typeof address === 'string') throw new Error('No address');
+    const client = await connect(`ws://127.0.0.1:${address.port}/api/v1/app/ws`);
+    client.socket.send(JSON.stringify({ type: 'hello', cursor: 0 }));
+    await until(() => client.frames.some(f => f['type'] === 'welcome'));
+    const ackFor = async (n: number) => {
+      await until(() => client.frames.some(f => f['type'] === 'ack' && f['client_msg_id'] === cid(n)));
+      return client.frames.find(f => f['type'] === 'ack' && f['client_msg_id'] === cid(n))!;
+    };
+    const sessionsBefore = (db.prepare('SELECT COUNT(*) AS n FROM sessions').get() as {n:number}).n;
+    client.socket.send(JSON.stringify({ type: 'send', client_msg_id: cid(1), target: { kind: 'session', session_id: old.sessionId },
+      body: 'Replying in Main', reply_to: '0a1b2c3d-0000-4000-8000-0000000000a1' }));
+    const ack = await ackFor(1);
+    expect(ack).toMatchObject({ status: 'queued', session_id: current.sessionId });
+    expect((db.prepare('SELECT COUNT(*) AS n FROM sessions').get() as {n:number}).n).toBe(sessionsBefore);
+    expect(db.prepare('SELECT session_id FROM transcripts WHERE message_id = ?').get(ack['message_id'])).toEqual({ session_id: current.sessionId });
+    expect(new MessageQueue(db).getById(String(ack['message_id']))!.envelope.metadata['quoted_message'])
+      .toMatchObject({ message_id: '0a1b2c3d-0000-4000-8000-0000000000a1', source: 'agent' });
+
+    // Marking read on the current row with an old row's event seq is accepted.
+    const oldSeq = (db.prepare(`SELECT e.seq FROM app_events e JOIN transcripts t ON t.id = e.transcript_id
+      WHERE t.message_id = '0a1b2c3d-0000-4000-8000-0000000000a1'`).get() as {seq:number}).seq;
+    client.socket.send(JSON.stringify({ type: 'mark_read', session_id: current.sessionId, seq: oldSeq, request_id: 'r1' }));
+    await until(() => client.frames.some(f => f['type'] === 'ack' && f['request_id'] === 'r1'));
+    expect(client.frames.find(f => f['request_id'] === 'r1')).toMatchObject({ status: 'read', seq: oldSeq });
+    const main = (await server.inject({ url: '/api/v1/app/sessions', headers })).json().sessions.find((s: Record<string, unknown>) => s['is_main']);
+    expect(main).toMatchObject({ session_id: current.sessionId, unread_count: 1 });
+
+    // Replayed session events for Main all name one item; the end carries `rotated`.
+    const sessionEvents = client.frames.filter(f => f['type'] === 'event' && f['event'] === 'session'
+      && (f['data'] as Record<string, unknown>)['is_main']).map(f => f['data'] as Record<string, unknown>);
+    expect(sessionEvents.filter(d => d['rotated'])).toEqual([expect.objectContaining({
+      rotated: { previous_session_id: old.sessionId, ended_at: expect.any(String), reason: 'idle' } })]);
+    expect(sessionEvents.every(d => d['ended_at'] === null)).toBe(true);
     client.socket.close();
   });
 });

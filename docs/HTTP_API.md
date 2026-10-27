@@ -2,7 +2,7 @@
 
 ## Mac app API
 
-When `adapters.app.enabled` is true, `/api/v1/app/*` uses `Authorization: Bearer <contacts.*.platforms.app.token>` and also `X-Bus-Token` when `bus.auth_token` is set. `GET /api/v1/app/ws` upgrades to the durable JSON WebSocket protocol. `GET /api/v1/app/sessions` lists the routed agent's visible sessions; `GET /api/v1/app/sessions/:id/messages` pages transcript history; `POST /api/v1/app/attachments` uploads one multipart file; `GET /api/v1/app/commands` returns the command manifest; `GET /api/v1/app/health` reports routing and capacity. See [APP_ADAPTER.md](APP_ADAPTER.md) for frame shapes and cursor semantics.
+When `adapters.app.enabled` is true, `/api/v1/app/*` uses `Authorization: Bearer <contacts.*.platforms.app.token>` and also `X-Bus-Token` when `bus.auth_token` is set. `GET /api/v1/app/ws` upgrades to the durable JSON WebSocket protocol. `GET /api/v1/app/sessions` lists the routed agent's visible sessions; `GET /api/v1/app/sessions/:id/messages` pages transcript history; `POST /api/v1/app/attachments` uploads one multipart file; `GET /api/v1/app/commands` returns the command manifest; `GET /api/v1/app/health` reports routing and capacity. Main is listed once, aggregated over its rotating session rows, and its history pages across them with `boundaries` (E69). See [APP_ADAPTER.md](APP_ADAPTER.md) for frame shapes and cursor semantics.
 
 bus-core serves a JSON API on `bus.host:bus.http_port` (default `127.0.0.1:3000`). The MCP tools and agent connectors use it; in-process adapters call the pipeline directly. It is not designed for the public internet.
 
@@ -330,8 +330,10 @@ Enqueues an outbound message for the delivery worker. The `reply`, `send_message
 | `topic` | no | Default `general`. Use a `thread:<hash>` value to target a thread |
 | `reply_to` | no | Bus message ID. Resolved to the platform message ID so Telegram can quote it, unless it is the latest inbound message in the conversation |
 | `priority` | no | `normal` (default), `high`, or `urgent` |
-| `metadata` | no | Free-form object. The reserved keys `system_blocks`, `system_only` and `journal_run_id` are dropped |
+| `metadata` | no | Free-form object. The reserved keys `system_blocks`, `system_only` and `journal_run_id` are dropped. `origin` is stamped by the MCP tools and cc-headless's fallback delivery ([MCP_TOOLS.md → Origin metadata](MCP_TOOLS.md#origin-metadata)); the route stores it on the outbound transcript row as given |
 | `expires_at` | no | ISO 8601, in the future. Expired pending messages are dead-lettered by the sweep |
+
+On the `app` channel, a `reply_to` that names an earlier message rather than the operator's latest one makes the stored message carry a quote ([APP_ADAPTER.md](APP_ADAPTER.md#replying-to-a-message-reply_to)).
 
 Returns `201 { "ok": true, "id": "<uuid>", "queued": true }`. While a System Message journal run is open for the sending agent (E66), returns `409 { ok: false, error: "journal_run_in_progress", reason }` and enqueues nothing.
 

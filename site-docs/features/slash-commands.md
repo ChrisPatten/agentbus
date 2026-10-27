@@ -119,4 +119,4 @@ Things to know:
 
 ## What `/clear` and `/stop` act on
 
-Both act on **this conversation**: the chat, thread or topic you send them from. `/clear` in a Telegram forum topic clears that topic's session and leaves your DM alone. In the Mac app, they act on the session you have open, even when it's a conversation from another channel.
+Both act on **this conversation**: the chat, thread or topic you send them from. `/clear` in a Telegram forum topic clears that topic's session and leaves your DM alone. In the Mac app, they act on the session you have open, even when it's a conversation from another channel. `/clear` in the app's Main starts a fresh Claude session but keeps Main's scrollback in place, with a "New context · /clear" divider; see [Mac app](/channels/mac-app#main).

@@ -15,6 +15,10 @@ adapters:
     max_upload_bytes: 26214400
     event_retention_days: 30
     ping_interval_ms: 30000
+    main_idle_rotation_ms: 43200000   # E69; 0 disables Main's idle rotation
+    pending_context:                  # E69; foreign messages injected into the next Main turn
+      max_items: 10
+      max_chars: 4000
   cc-headless:
     agent_id: work
     system_prompt: "You are the work agent."
@@ -41,6 +45,18 @@ pipeline:
       target: { adapterId: cc-headless, recipientId: agent:work }
 ```
 
+| Key | Default | Purpose |
+|---|---|---|
+| `enabled` | `true` | Turns the channel on |
+| `max_upload_bytes` | `26214400` | Largest upload (`413` above it) |
+| `event_retention_days` | `30` | Replay window for durable events |
+| `ping_interval_ms` | `30000` | WebSocket ping interval (minimum 1000) |
+| `main_idle_rotation_ms` | `43200000` (12 h) | Retire Main's Claude session after this long with no operator message and no send from a Main turn. `0` disables rotation. See [Main](#main-one-continuous-conversation) |
+| `pending_context.max_items` | `10` | Most foreign messages injected into one Main turn; older ones are counted as omitted |
+| `pending_context.max_chars` | `4000` | Character budget for the injected item lines (the intro line doesn't count) |
+
+When `adapters.app` is absent, code that needs these values uses the schema defaults.
+
 Set `APP_TOKEN_ME` in the bus environment to a unique token of at least 16 characters. Each token identifies exactly one contact. Keep it in the client's Keychain or environment, never in a URL or log. When `bus.auth_token` is configured, clients also send `X-Bus-Token`. Leaving out `adapters.app` disables the channel.
 
 The adapter uses the bus listener and defaults to `127.0.0.1`; it opens no separate port. Uploads require `media` on the routed **agent** under `agents.agent:work`, as shown. A missing media configuration makes upload return `422` with an explanation. Remote exposure is outside the tested MVP; a path-scoped proxy such as `tailscale serve --set-path /api/v1/app` can be configured separately, with both tokens kept private.
@@ -58,9 +74,9 @@ Every `/api/v1/app/*` request and WebSocket upgrade requires `Authorization: Bea
 | `POST /api/v1/app/attachments` | One multipart file; returns `id`, `type`, `mime_type`, `original_filename`, and `size` |
 | `GET /api/v1/app/ws` | WebSocket protocol v1 |
 
-Session lists and history are restricted to the authenticated contact and the app route's agent. A hidden or unknown session ID returns `404`. Session entries include title, channel, topic, timestamps, unread count, Main/Earlier state, resumability, and activity. Main is `app` topic `general` with the title “Main”; app topics have editable titles. A topic created without a title is named from the first 60 characters of its first message, and is “New Conversation” until then. Visible Telegram, email, and Siri sessions for the same agent are mirrored in the list. Scheduler-only sessions stay hidden. Bus-originated turns (a critical advisory's system-only turn, a journal run's instruction) are logged to the transcript as inbound messages from the owner, flagged `system_only`; they never appear in history, replay events, topic titles, or the session list, and stay in the database for debugging. The agent's replies to them are shown.
+Session lists and history are restricted to the authenticated contact and the app route's agent. A hidden or unknown session ID returns `404`. Session entries include `session_id`, `conversation_id`, title, channel, topic, timestamps, unread count, Main/Earlier state, resumability, and activity. Main is `app` topic `general` with the title “Main”, listed once as an aggregate over all its session rows (see [Main](#main-one-continuous-conversation)); app topics have editable titles. A topic created without a title is named from the first 60 characters of its first message, and is “New Conversation” until then. Visible Telegram, email, and Siri sessions for the same agent are mirrored in the list. Scheduler-only sessions stay hidden. Bus-originated turns (a critical advisory's system-only turn, a journal run's instruction) are logged to the transcript as inbound messages from the owner, flagged `system_only`; they never appear in history, replay events, topic titles, or the session list, and stay in the database for debugging. The agent's replies to them are shown.
 
-Each paginated response includes `next_before`. For sessions it is the last returned `session_id`; for history it is the oldest returned message's `cursor` (the transcript row ID). Pass that value as the next request's `before`. These stable cursors avoid skipping rows that share a timestamp.
+Each paginated response includes `next_before`. For sessions it is the last returned `session_id`; for history it is the oldest returned message's `cursor` (the transcript row ID). Pass that value as the next request's `before`. These stable cursors avoid skipping rows that share a timestamp. Every message entry carries its `conversation_id`, so a client can map messages from any of Main's rows to the one Main item. A Main history page also carries `boundaries`; other sessions' pages omit the field.
 
 The upload request must use `multipart/form-data` with one file. `max_upload_bytes` defaults to 25 MB; an oversized file gets `413`. Reference the returned UUID in a later `send.attachment_ids`. The bus checks that each ID belongs to this contact and agent and has not expired. The agent receives the normal `[Image: …]` or `[File: … — name]` prompt line. History keeps attachment metadata and marks expired files.
 
@@ -93,13 +109,15 @@ The body or attachment list must be nonempty. Ack status is `queued`, `command`,
 
 An active Telegram, email, or Siri session listed for this contact and agent can also be a `session` target. The bus keeps its session and agent identity, records the new message with `app` as its arrival channel, and delivers a direct reply to the app in that session. It does not copy the app exchange back to the original channel; that channel's chat may have gaps. `/clear`, `/stop`, and `/cost` act on the selected session. An unknown or hidden session is rejected.
 
+A `session` target naming one of Main's ended rows is a send to Main (topic `general`), never an Earlier fork: Main's rows never appear in Earlier, and the next turn runs in Main's current row.
+
 An Earlier session is read-only unless its Claude transcript is still available to the owning headless agent. Sending to a resumable Earlier session creates a new app topic titled `<original title> (resumed)` and returns the **new** `session_id` in the ack. The original remains in Earlier, and any current active session stays intact. An unavailable transcript returns `status: "rejected", reason: "not_resumable"`. A later Claude resume failure appears as an agent error in the new topic.
 
 The bus durably records a send intent before passing it to the inbound pipeline. It recovers unfinished intents on startup or when the client retries. If the bus crashes after a slash command has a side effect but before its response is correlated, recovery can return `rejected` with an ambiguous-outcome reason. Inspect session history before sending that command again with a new UUID.
 
 ### Replying to a message (`reply_to`)
 
-`send` accepts an optional `reply_to`: the `message_id` (UUID) of a transcript message to reply to as a whole. The client never supplies quote text. The bus resolves the id to a visible transcript message for the same contact and agent (any of that contact's visible sessions, so a reply can point at the earlier portion of a resumed conversation; it does not have to be in the target session). It then builds `metadata.quoted_message = {message_id, sender_name, text}` on the inbound message, where `sender_name` is `you` for an operator (inbound) message and `agent` for an agent (outbound) message, and `text` is the first 200 characters of the body.
+`send` accepts an optional `reply_to`: the `message_id` (UUID) of a transcript message to reply to as a whole. The client never supplies quote text. The bus resolves the id to a visible transcript message for the same contact and agent (any of that contact's visible sessions, including any of Main's rows and the original session of a resumed Earlier copy; it does not have to be in the target session, and a `new` target may carry it too). It then builds `metadata.quoted_message = {message_id, sender_name, text, created_at, source}` on the inbound message, where `sender_name` is `you` for an operator (inbound) message and `agent` for an agent (outbound) message, `text` is the first 200 characters of the body, `created_at` is the target's transcript time, and `source` is the target's `origin.label` when it has one (for example `Ambient scan`), else `you` or `agent`.
 
 ```json
 {"type":"send","client_msg_id":"2f93a416-08a2-4df4-a821-48759a4c15a4","target":{"kind":"main"},"body":"Can you expand on that?","reply_to":"8c1f0e5e-5a38-4a0f-b3b5-6d1f2a6d8b10"}
@@ -108,8 +126,9 @@ The bus durably records a send intent before passing it to the inbound pipeline.
 - An unknown id, a message from another contact or agent, or a system-only message gets `status: "rejected", reason: "reply_target_not_found"`. Like `session_not_found`, no send intent is recorded, so the client may retry with the same `client_msg_id` after dropping `reply_to`. A malformed (non-UUID) `reply_to` is an `invalid_send` error.
 - The resolved quote is stored with the send intent, so crash recovery and idempotent retries carry the same quote without re-resolving it.
 - The inbound envelope's own `reply_to` stays `null`. On the app channel that field drives outbound reply binding, and a whole-message reference must not change which session the message routes to.
-- The agent sees a context line above the message body, the same line Telegram quote-replies produce (`cc-pool` and `cc-headless`): `[Replying to you: "<first 200 characters>"]` or `[Replying to agent: "…"]`.
-- Message events and history entries for a message that carries an app reference include an optional `reply_to` object, `{"message_id":"…","sender_name":"you|agent","text":"…"}`. It is omitted otherwise, including for Telegram quote-replies (their quote has `platform_message_id`, not `message_id`).
+- The agent sees a context line above the message body (`cc-pool` and `cc-headless`). With the target's time and source it reads `[Replying to your message sent 2026-10-05 11:06 EDT: "…"]` (an agent message), `[Replying to the user's own message sent …: "…"]` (an operator message), or `[Replying to a message from Ambient scan sent …: "…"]` (a labelled send). A quote stored before E69, with no time or source, keeps the older `[Replying to you|agent: "…"]` line, which Telegram quote-replies still use. When the target is one of the pending messages injected into a Main turn, that item is also marked in the [pending-context block](CC_HEADLESS_ADAPTER.md#pending-context-main).
+- Message events and history entries for a message that carries an app reference include an optional `reply_to` object, `{"message_id":"…","sender_name":"you|agent","text":"…","created_at":"…","source":"…"}` (`created_at` and `source` only when stored). It is omitted otherwise, including for Telegram quote-replies (their quote has `platform_message_id`, not `message_id`).
+- **Agent replies can carry a quote too (E69).** When an agent's outbound app message has an envelope `reply_to` that resolves in the same conversation, the adapter stores `metadata.quoted_message` on it, so its events and history carry `reply_to`, unless the reply answers the operator's latest message(s). A `reply_to` naming an agent message, or an operator message the agent has since moved on from (a later visible agent message in the conversation has a different `reply_to`, or none), gets the quote. A reply to the operator's latest message(s) stays unquoted; that covers every fallback reply, a reply to the first message of a batch, and several messages from one turn answering the same thing. Outbound app rows keep their envelope `reply_to` in `metadata.reply_to` for this check. Session binding (`boundAppReply`) still reads the envelope `reply_to` as before.
 - Older buses ignore unknown frame keys, so a client that sends `reply_to` to an older bus sends the message without the reference and gets no `reply_to` on events. Clients and bus should be upgraded together.
 
 Other client frames:
@@ -124,7 +143,34 @@ Other client frames:
 {"type":"error","code":"invalid_send"}
 ```
 
-Only app topic sessions can be renamed; Main and foreign sessions cannot. `mark_read` updates the per-contact read marker and sends a `session` event so other open clients update their unread count. `ping` is an optional application-level check in addition to WebSocket protocol pings.
+Only app topic sessions can be renamed; Main and foreign sessions cannot. `mark_read` updates the per-contact read marker and sends a `session` event so other open clients update their unread count. For Main, `mark_read` accepts any Main row id and a `seq` of an event on any Main row; the effective marker is the highest one across Main's rows, so rotation never resets it. `ping` is an optional application-level check in addition to WebSocket protocol pings.
+
+## Main: one continuous conversation
+
+Main (E69) behaves like a Telegram DM. The operator sees one conversation with all its scrollback, while the bus manages Claude sessions underneath it. Each Claude session is still its own `sessions` row ("one row = one context window = one `claude_session_id`"); all of Main's rows share the conversation `appConversationId(contact, 'general')` (`mainConversationId` in `src/app/main.ts`). Helpers there: `isMainConversation`, `isMainSession`, `rotateMainSession`, `mainActivityClock`, `rotateIdleMainSessions`.
+
+**In the protocol:**
+
+- `GET /api/v1/app/sessions` lists Main once, under `state=active` and `state=all`, never under `state=earlier`. The item is aggregated over every Main row: `session_id` is the active row, else the newest; `conversation_id`; `ended_at: null`; `is_main: true`; `resumable: true`; `started_at` is the oldest row's; `message_count` and `unread_count` span all rows. `sessionInfo` returns this item for any Main row id.
+- History for any Main row id pages across every row of the conversation, in the usual `created_at`, `id` order with the same cursor. The page adds `boundaries: [{ session_id, ended_at, reason }]` for each ended Main row whose `ended_at` falls in the page's time range (from the page's oldest message, open-ended on a short last page, up to the `before` cursor, open-ended on the newest page), so pages tile. `reason` is `idle`, `clear`, or `null` for rows ended before migration 037.
+- When Main's active row changes, a `session` event carries the aggregated Main item. The event recorded when a row ends through rotation is flagged by `app_events.rotation = 1` (migration 037), and replay adds `rotated: { previous_session_id, ended_at, reason }` to that event only.
+
+```json
+{"type":"event","seq":41,"event":"session","data":{"session_id":"…current Main row…","conversation_id":"…","title":"Main","is_main":true,"ended_at":null,"unread_count":0,"rotated":{"previous_session_id":"…old row…","ended_at":"2026-10-27T08:20:00.000Z","reason":"idle"}}}
+```
+
+- Read markers and sends to an ended Main row are covered above. Rows fragmented before E69 (the 30-minute teardown used to end Main rows that had only proactive sends) share the conversation, so they merge into the one Main item automatically.
+
+**Lifecycle.** Main rows are exempt from both 30-minute teardowns: `SessionTracker.closeIdleSessions` and Stage 80's gap rule for rows with no `claude_session_id`. A Main row that has only received proactive sends therefore stays open, and repeated proactive sends land in it. Instead, every `SessionTracker` tick (`memory.summarizer_interval_ms`) calls `rotateIdleMainSessions`. It ends each active Main row that has a `claude_session_id` and whose activity clock is older than `main_idle_rotation_ms`:
+
+- The activity clock is derived from transcripts, with no new column: the later of the newest visible inbound row in the conversation and the newest outbound row stamped `origin.kind = 'turn'` with this `conversation_id`. Proactive sends from elsewhere don't move it. With neither, the row's `started_at` is used.
+- A row with no `claude_session_id` never rotates; there is nothing to journal.
+- Rotation sets `ended_at` and `end_reason = 'idle'`, then the tracker's mid-flight pass on the same tick marks it closed, reports it to the journaling engine (`close` trigger) and runs `memory.on_session_close` if configured, as for any session ended outside the tracker. The next turn creates a new row and starts a fresh Claude session; the pending-context watermark is per conversation, so unseen foreign messages still carry over.
+- `/clear` in Main goes through `rotateMainSession` with `end_reason = 'clear'` and fires the journaling `clear` trigger, as `/clear` does elsewhere. Scrollback is unchanged by either.
+
+Not guarded: a single Main turn that runs longer than the whole rotation period can be rotated mid-turn.
+
+**Pending context.** On each `cc-headless` turn in Main, foreign messages that landed in Main since the agent last saw them are prepended to the prompt as a dated context block. See [CC_HEADLESS_ADAPTER.md → Pending context](CC_HEADLESS_ADAPTER.md#pending-context-main) for the rules and an example, and [MCP_TOOLS.md → Origin metadata](MCP_TOOLS.md#origin-metadata) for how sends are classified.
 
 ## Agent guidance and proactive delivery
 
@@ -134,7 +180,7 @@ The agent's `system_prompt` can include this channel guidance:
 ### App channel
 The app accepts full Markdown without a message length limit. Uploaded attachments arrive as local file paths; read those files before answering questions about them. A message may arrive via app inside a Telegram, email, or Siri session. Use the arrival channel for a direct reply; the session channel describes the existing conversation, not where to send that reply. Explicit `send_message` calls to another channel remain available when the operator asks for them.
 
-For scheduled work, stay in the scheduler session. Send a short update with `send_message(channel: app)` when the operator needs a result. An omitted topic goes to Main. Use `list_sessions` to find the title and `thread:<hash>` topic of a named app session before targeting it. The app can be closed: delivery and replay remain durable.
+For scheduled work, stay in the scheduler session. Send a short update with `send_message(channel: app)` when the operator needs a result. An omitted topic goes to Main. Pass `source` (for example `"Ambient scan"`) so the Main agent sees where the message came from if the operator replies to it. Use `list_sessions` to find the title and `thread:<hash>` topic of a named app session before targeting it. The app can be closed: delivery and replay remain durable.
 ```
 
 Named app topics must already exist and be active. An unknown topic returns a clear error rather than creating an unintended conversation. [Proactive delivery](APP_PROACTIVE_DELIVERY.md) has Main and named-topic examples; [scheduling](SCHEDULING.md) describes wake behavior.

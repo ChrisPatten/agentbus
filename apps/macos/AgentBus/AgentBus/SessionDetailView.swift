@@ -49,9 +49,9 @@ struct SessionDetail: View {
     @State private var renameText = ""
 
     private var title: String { session?.title ?? "Main" }
-    /// Active Main goes to `main`; everything else, including a resumable Earlier Main, by ID.
+    /// Main goes to `main` whichever row is current; everything else by ID.
     private var target: BusTarget {
-        guard let session, !(session.isMain && !session.isEarlier) else { return .main }
+        guard let session, !session.isMain else { return .main }
         return .session(session.id)
     }
     private var activity: String { session.map { connection.activityState($0.id) } ?? "idle" }
@@ -117,7 +117,8 @@ struct SessionDetail: View {
         .confirmationDialog("Clear \(title)?", isPresented: $confirmClear) {
             Button("Clear Session", role: .destructive) { command("/clear") }
         } message: {
-            Text("The agent starts a fresh Claude session. This conversation moves to Earlier.")
+            Text(session?.isMain == true ? "The agent starts a fresh Claude session. Main keeps its scrollback."
+                 : "The agent starts a fresh Claude session. This conversation moves to Earlier.")
         }
         .alert("Rename Conversation", isPresented: $renaming) {
             TextField("Title", text: $renameText)
@@ -150,7 +151,7 @@ struct SessionDetail: View {
 
     /// What the transcript's Reply closure depends on; the closure is refreshed when either changes.
     private struct ReplyContext: Equatable { let draftKey: String; let writable: Bool }
-    private var draftKey: String { session?.id ?? "main" }
+    private var draftKey: String { session?.draftKey ?? "main" }
 
     /// Quotes the selection into this session's draft, then puts the insertion point at its end.
     private func replyToSelection(_ markdown: String, draftKey: String) {

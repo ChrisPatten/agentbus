@@ -75,6 +75,10 @@ adapters:
   #   event_retention_days: 30
   #   max_upload_bytes: 26214400
   #   ping_interval_ms: 30000
+  #   main_idle_rotation_ms: 43200000  # retire Main's Claude session after 12 h without operator/agent activity; 0 = never
+  #   pending_context:                 # foreign messages shown to the next Main turn as dated context
+  #     max_items: 10
+  #     max_chars: 4000
   #   # Scheduled work can notify this contact through send_message(channel: app).
   #   # An omitted topic lands in Main and remains available while the client is offline.
 

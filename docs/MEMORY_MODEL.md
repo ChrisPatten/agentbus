@@ -43,6 +43,8 @@ Headless sessions are never force-closed on idle (`ended_at` stays `NULL`); the 
 
 This is scoped to headless sessions via the `claude_session_id IS NOT NULL` discriminator — a column set only by `cc-headless`. The MCP `cc.ts` path keeps its idle teardown and `on_session_close` hook.
 
+**Opt-in exception: the Mac app's Main (E69).** Main is one continuous conversation in the app, so its Claude sessions rotate underneath it instead of living forever. A Main row with a `claude_session_id` is ended after `adapters.app.main_idle_rotation_ms` (default 12 h; `0` turns it off and restores never-close-on-idle) with no operator message and no send from a Main turn; proactive sends from elsewhere don't count. The close is journaled like any other (`close` trigger), and the next turn starts a fresh Claude session. Main rows are also exempt from the 30-minute teardown, even before a turn has run in them. Unseen foreign messages are carried into the next turn as [pending context](CC_HEADLESS_ADAPTER.md#pending-context-main), keyed by conversation, so they survive rotation. The app's scrollback spans every row. See [APP_ADAPTER.md → Main](APP_ADAPTER.md#main-one-continuous-conversation).
+
 ## Cross-channel continuity is free
 
 Because every channel's `claude -p` runs in the same `working_dir` and auto-loads the same files, a fact the agent journaled from a Telegram conversation is already in context for a later email turn. There is **no** "widen DB recall across channels" machinery — files are the source of truth, so cross-channel continuity falls out for free.

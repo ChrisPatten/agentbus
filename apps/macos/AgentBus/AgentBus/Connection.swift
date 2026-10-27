@@ -326,7 +326,8 @@ struct SelectionRequest: Equatable {
         try await socket.send(ProtocolCodec.encode(frame))
     }
     func markRead(_ id: String) async throws {
-        let seq = store.messages(id).filter { $0.direction == "outbound" }.map(\.seq).max() ?? 0
+        let id = store.canonicalID(id)
+        let seq = store.transcript(id).filter { $0.direction == "outbound" }.map(\.seq).max() ?? 0
         guard seq > 0 else { return }
         try store.setRead(id, seq: seq)
         onUnreadChange?()
@@ -346,14 +347,17 @@ struct SelectionRequest: Equatable {
         guard let id, let path = localFiles[id], FileManager.default.fileExists(atPath: path) else { return nil }
         return URL(fileURLWithPath: path)
     }
-    /// The Earlier session a resumed copy was forked from on this Mac.
-    func origin(of id: String) -> String? { resumedFrom[id] }
-    func requestSelection(_ id: String) { selectionRequest = SelectionRequest(sessionID: id) }
+    /// The Earlier session a resumed copy was forked from on this Mac. Main has none: it shows every row.
+    func origin(of id: String) -> String? { store.session(id)?.isMain == true ? nil : resumedFrom[id] }
+    func requestSelection(_ id: String) { selectionRequest = SelectionRequest(sessionID: store.canonicalID(id)) }
     /// Records which session a window shows, so alerts and read markers skip it.
     func setViewing(_ window: UUID, session: String?) {
         viewing[window] = session
     }
-    func isViewing(_ id: String) -> Bool { viewing.values.contains(id) }
+    func isViewing(_ id: String) -> Bool {
+        let id = store.canonicalID(id)
+        return viewing.values.contains { store.canonicalID($0) == id }
+    }
     /// The effective turn state: the live frame if any, else the session list's value.
     func activityState(_ id: String) -> String {
         live[id]?.state ?? store.session(id)?.activity ?? "idle"
@@ -373,7 +377,9 @@ struct SelectionRequest: Equatable {
         if let snapshot = data.capacity, snapshot.limit > 0 { capacity = snapshot }
         if let session = data.sessionID, let conversation = data.conversationID { sessionByConversation[conversation] = session }
         guard let state = data.state,
-              let id = data.sessionID ?? data.conversationID.flatMap({ sessionByConversation[$0] }) else { return }
+              let row = data.sessionID ?? data.conversationID.flatMap({ sessionByConversation[$0] }) else { return }
+        // Main's turns can run in a row the cache hasn't seen yet; its conversation still finds Main.
+        let id = store.canonicalID(row, conversation: data.conversationID)
         // Session events carry a snapshot of activity too; keep the cache in step so it never outlives the turn.
         try? store.setActivity(id, state)
         let previous = live[id]
@@ -392,7 +398,7 @@ struct SelectionRequest: Equatable {
     /// Moves the trail so far onto the delivered message. The turn itself ends only on an idle frame,
     /// because a headless turn can deliver several messages.
     private func finishTurn(_ message: BusMessage) {
-        let id = message.sessionID
+        let id = store.item(for: message)?.id ?? message.sessionID
         let current = live[id].flatMap { $0.lines.isEmpty ? nil : ($0.lines, $0.startedAt.map { Date().timeIntervalSince($0) } ?? 0) }
         let trail = current ?? finishedTrails[id]
         finishedTrails[id] = nil
@@ -401,13 +407,24 @@ struct SelectionRequest: Equatable {
     }
     func loadSessions() async throws {
         var before: String? = nil
+        let main = store.main?.id
         repeat {
             let page = try await http.sessions(before: before)
             for session in page.sessions { try store.upsert(session) }
             before = page.sessions.count == 100 ? page.nextBefore : nil
         } while before != nil
+        followMain(from: main)
+    }
+    /// Main's current row changed (E69 rotation): moves state keyed by the old row ID onto the new one.
+    private func followMain(from old: String?) {
+        guard let old, let new = store.main?.id, new != old else { return }
+        if let value = live.removeValue(forKey: old), live[new] == nil { live[new] = value }
+        if let value = finishedTrails.removeValue(forKey: old), finishedTrails[new] == nil { finishedTrails[new] = value }
+        for (key, value) in sessionByConversation where value == old { sessionByConversation[key] = new }
+        for (key, value) in viewing where value == old { viewing[key] = new }
     }
     func loadHistory(_ id: String, older: Bool = false) async throws {
+        let id = store.canonicalID(id)
         let before = older ? store.session(id)?.oldestCursor : nil
         if older && (store.session(id)?.historyComplete ?? true) { return }
         let page = try await http.messages(id, before: before)
@@ -441,7 +458,9 @@ struct SelectionRequest: Equatable {
                 if let data = frame.data { applyActivity(data) }
                 return
             }
+            let main = store.main?.id
             let inserted = try store.apply(frame)
+            followMain(from: main)
             if frame.data?.session != nil { onUnreadChange?() }
             if inserted, let message = frame.data?.message, message.direction == "outbound" {
                 finishTurn(message)
@@ -451,7 +470,9 @@ struct SelectionRequest: Equatable {
             if let id = frame.clientMsgID {
                 let target = try store.acknowledge(id, status: frame.status ?? "rejected", reason: frame.reason)
                 // Follow a new topic, or the copy a resumed Earlier session forks into.
-                if frame.status != "rejected", let session = frame.sessionID, let target,
+                // A send to one of Main's rows is a send to Main, never a fork (E69).
+                let toMain = target?.sessionID.flatMap { store.session($0) }?.isMain == true
+                if frame.status != "rejected", let session = frame.sessionID, let target, !toMain,
                    target.kind == "new" || (target.kind == "session" && target.sessionID != session) {
                     if target.kind == "session", let original = target.sessionID {
                         resumedFrom[session] = original
@@ -474,8 +495,17 @@ struct SelectionRequest: Equatable {
             before = page.sessions.count == 100 ? page.nextBefore : nil
         } while before != nil
         var history: [String: [BusMessage]] = [:]
-        for session in all { history[session.id] = try await http.messages(session.id, before: nil).messages }
+        var boundaries: [SessionBoundary] = []
+        for session in all {
+            let page = try await http.messages(session.id, before: nil)
+            history[session.id] = page.messages
+            if session.isMain { boundaries += page.boundaries ?? [] }
+        }
+        let main = store.main?.id
         try store.replace(sessions: all, history: history, cursor: cursor)
+        for boundary in boundaries { store.record(boundary) }
+        try store.context.save()
+        followMain(from: main)
         onUnreadChange?()
     }
 }

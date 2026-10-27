@@ -5,6 +5,7 @@ import type Database from 'better-sqlite3';
 import type { HeadlessActivityEvent, HeadlessCapacitySnapshot } from './cc-headless.js';
 import { ensureOutboundAppSession, validateAppDestination } from '../app/outbound.js';
 import { boundAppReply } from '../app/binding.js';
+import { quotableMessage, VISIBLE_TRANSCRIPT } from '../app/store.js';
 import { logOutboundTranscript, renderOutboundBody } from '../pipeline/outbound-transcript.js';
 import { computeConversationId } from '../pipeline/conversation-id.js';
 
@@ -66,7 +67,8 @@ export class AppAdapter implements AdapterInstance {
           channel: 'app',
           contactId,
           body: renderOutboundBody(envelope.payload),
-          metadata: envelope.metadata,
+          // E69: the envelope's reply_to is kept on the row; the quote rule reads it.
+          metadata: { ...this.withQuote(envelope, contactId, agentId, conversationId), reply_to: envelope.reply_to ?? null },
         });
       })();
       this.lastActivity = new Date().toISOString();
@@ -75,6 +77,31 @@ export class AppAdapter implements AdapterInstance {
     } catch (error) {
       return { success: false, error: `Could not persist app message: ${String(error)}`, retryable: true };
     }
+  }
+  /**
+   * E69: an agent reply to a specific earlier message renders as a quote.
+   * It quotes when `reply_to` names an outbound row, or an inbound row that
+   * a later visible outbound in the conversation answered with some other
+   * `reply_to` (null counts), i.e. the conversation has moved on since. So
+   * fallback replies, a reply to the first message of a batch, and several
+   * sends in one turn answering the same message all stay unquoted. Outbound
+   * rows keep their `reply_to` in `metadata.reply_to` (set in persist).
+   * Session binding (boundAppReply) is unaffected.
+   */
+  private withQuote(envelope: MessageEnvelope, contactId: string, agentId: string, conversationId: string): Record<string, unknown> {
+    if (!envelope.reply_to) return envelope.metadata;
+    const quote = quotableMessage(this.db, contactId, agentId, envelope.reply_to, conversationId);
+    if (!quote) return envelope.metadata;
+    const target = this.db.prepare(`SELECT t.direction, (t.direction = 'outbound' OR EXISTS (
+        SELECT 1 FROM transcripts o JOIN sessions os ON os.id = o.session_id
+        WHERE os.conversation_id = s.conversation_id AND o.direction = 'outbound'
+          AND ${VISIBLE_TRANSCRIPT.replace(/\bt\./g, 'o.')}
+          AND (o.created_at > t.created_at OR (o.created_at = t.created_at AND o.rowid > t.rowid))
+          AND COALESCE(json_extract(o.metadata, '$.reply_to'), '') <> t.message_id)) AS moved_on
+      FROM transcripts t JOIN sessions s ON s.id = t.session_id
+      WHERE t.message_id = ? AND s.conversation_id = ? AND ${VISIBLE_TRANSCRIPT}
+      ORDER BY t.rowid DESC LIMIT 1`).get(quote.message_id, conversationId) as {moved_on:number}|undefined;
+    return target?.moved_on ? { ...envelope.metadata, quoted_message: quote } : envelope.metadata;
   }
   async registerCommands(commands: CommandManifest[]): Promise<void> { this.commands = commands; }
   commandManifest(): CommandManifest[] { return this.commands; }
