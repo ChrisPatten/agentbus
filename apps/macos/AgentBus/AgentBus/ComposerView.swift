@@ -62,21 +62,9 @@ struct DraftFile: Identifiable, Equatable {
     func startPasteMonitor(_ connection: BusConnection) {
         guard monitor == nil else { return }
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            // TEMP E75 DIAGNOSTIC (PgUp/PgDn focus): remove before commit.
-            if event.keyCode == 116 || event.keyCode == 121, let window = event.window {
-                Self.log("key \(event.keyCode) before: \(type(of: window.firstResponder as Any)) composerFocused=\(self?.focused ?? false)")
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                    Self.log("key \(event.keyCode) after: \(type(of: window.firstResponder as Any))")
-                }
-            }
             let handled = MainActor.assumeIsolated { self?.paste(event, connection: connection) ?? false }
             return handled ? nil : event
         }
-    }
-    nonisolated static func log(_ text: String) {
-        let line = "\(Date().timeIntervalSince1970) \(text)\n"
-        if let h = FileHandle(forWritingAtPath: "/tmp/agentbus-scroll.log") { h.seekToEndOfFile(); h.write(Data(line.utf8)); try? h.close() }
-        else { try? line.write(toFile: "/tmp/agentbus-scroll.log", atomically: false, encoding: .utf8) }
     }
     func stopPasteMonitor() {
         if let monitor { NSEvent.removeMonitor(monitor) }

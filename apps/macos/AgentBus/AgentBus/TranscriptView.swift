@@ -197,14 +197,6 @@ struct TranscriptView<Bar: View>: View {
                 }
                 .environment(\.revealMessage, reveal)
                 .scrollPosition($position)
-                // TEMP E75 DIAGNOSTIC: remove before commit.
-                .onScrollGeometryChange(for: String.self) { g in
-                    "offY=\(g.contentOffset.y) content=\(g.contentSize.height) container=\(g.containerSize.height) insetTop=\(g.contentInsets.top) insetBottom=\(g.contentInsets.bottom) visibleH=\(g.visibleRect.height)"
-                } action: { _, new in
-                    let line = "\(Date().timeIntervalSince1970) \(new)\n"
-                    if let h = FileHandle(forWritingAtPath: "/tmp/agentbus-scroll.log") { h.seekToEndOfFile(); h.write(Data(line.utf8)); try? h.close() }
-                    else { try? line.write(toFile: "/tmp/agentbus-scroll.log", atomically: false, encoding: .utf8) }
-                }
                 .defaultScrollAnchor(.bottom)
                 .safeAreaInset(edge: .bottom, spacing: 0) { bar }
                 .environment(\.pageTranscript, page)
