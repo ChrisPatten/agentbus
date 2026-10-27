@@ -10,6 +10,8 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-10-27
+
 ### Added
 - **The Mac app's Main is one continuous conversation (E69).** Main is listed once, never under Earlier, with all its history across Claude sessions. The bus refreshes Main's Claude session after `adapters.app.main_idle_rotation_ms` (default 12 hours; `0` turns it off) with no message from you and no reply from Main's agent, journaling the old one; `/clear` does the same at once. Scrollback, unread count and draft carry over, and the app shows a "New context" divider ("after 12 h idle", "/clear") where each new session starts. In Main, that divider replaces the separate "Cleared with /clear" line; other conversations keep it. Protocol: sessions and messages carry `conversation_id`, Main's history pages across its rows and returns `boundaries`, the rotation `session` event carries `rotated`, Main's read marker is per conversation, and a send naming an ended Main row goes to Main. Migrations 036 and 037.
 - **Main's agent catches up on messages sent from elsewhere (E69).** When you reply in Main, a `cc-headless` agent first gets every message a scheduled routine or another agent session sent to Main since its last turn, as a dated context block (time, age, source; capped by `adapters.app.pending_context.max_items`, default 10, and `max_chars`, default 4000). The message you replied to is marked.
@@ -1006,7 +1008,8 @@ Baseline release. Core bus, pipeline, adapters, memory, scheduling.
 - Built-in slash commands + plugin command registry. (E6)
 - Scheduled messages (cron + one-shot) via background scheduler. (E18)
 
-[Unreleased]: https://github.com/ChrisPatten/agentbus/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/ChrisPatten/agentbus/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/ChrisPatten/agentbus/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/ChrisPatten/agentbus/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/ChrisPatten/agentbus/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/ChrisPatten/agentbus/compare/v0.11.0...v0.13.0

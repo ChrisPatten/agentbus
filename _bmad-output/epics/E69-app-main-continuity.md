@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Epic ID | E69 |
-| Status | Implemented (live check pending) |
+| Status | Complete (2026-10-27, released in 0.16.0) |
 | Dependencies | E58, E59, E60, E61 (`feat/e58-e59-mac-client-foundation`); coordinates with E63 and E66 |
 | Story Count | 6 |
 | Estimated Complexity | M |
@@ -164,7 +164,7 @@ type Origin =
 
 ## Implementation (2026-10-27)
 
-S69.1–S69.5 are implemented on `feat/e69-app-main-continuity` as the notes above describe; S69.6 docs are done and the live check on `baxter-mac-test` is pending. Deviations from the plan:
+S69.1–S69.5 are implemented on `feat/e69-app-main-continuity` as the notes above describe; S69.6 docs are done, and the live check on `baxter-mac-test` passed on 2026-10-27 (see Live check below). Deviations from the plan:
 
 - **Unstamped sends are never pending.** The epic said any send without a turn stamp is foreign. Only `origin.kind = 'external'`, or a `turn` origin from another conversation, is; rows with no origin (bus command responses, advisories, rows from before E69) are never injected.
 - **A turn origin carries a label only when given explicitly** (`source`, else `AGENTBUS_SOURCE_LABEL`). The generic "another agent session" applies to `external` origins only, so a quote of the agent's own message isn't attributed to it.
@@ -172,3 +172,15 @@ S69.1–S69.5 are implemented on `feat/e69-app-main-continuity` as the notes abo
 - **`send.reply_to` is not narrowed to the target conversation.** S69.5's "rejects a `reply_to` outside the target conversation" was not adopted: E72's check (a visible message for this contact and agent, in any session) already covers it, and narrowing broke replies from a resumed Earlier copy to its original session's messages. Any Main row's messages are valid targets, and `new` targets may carry `reply_to`.
 - **Agent quote rule.** An agent outbound app message gets `metadata.quoted_message` when its `reply_to` names an agent message, or an operator message the agent has since moved on from (a later agent message answers something else). Replies to the operator's latest message(s), including several messages from one turn answering the same thing and every fallback reply, stay unquoted.
 - **Not guarded:** a Main turn running longer than the whole rotation period can be rotated mid-turn. Rotation doesn't go through the conversation queue; with the 12 h default this is unlikely.
+
+### Live check (2026-10-27, `baxter-mac-test`)
+
+Run with `main_idle_rotation_ms: 180000` and `session_idle_threshold_ms: 60000`. All exit criteria passed:
+
+- Three proactive scans with no reply landed in one Main row, stamped `external` / "Ambient scan"; the row outlived the 1-minute legacy teardown; nothing new appeared under Earlier.
+- A reply to scan 2 opened with the pending block (all three scans with time, age and source; scan 2 marked) and the reply line carried scan 2's time and source. The watermark advanced to scan 3. The next turn had no block.
+- Idle rotation fired three times, about 3 minutes after the last activity, each journaled (`close`, `done`), with a new Claude session on the next message. A scan sent before a rotation reached the next session's first turn.
+- `/clear` set `end_reason = clear`, journaled with trigger `clear`, and started a new session; scrollback stayed continuous.
+- The real hourly ambient scan (a bus schedule in its own conversation, not a separate Claude Code session as the Decisions section assumed) was stamped as a foreign turn and injected.
+
+Fixed during the check: the Mac client didn't fold Main items cached before E69 (fold now runs at launch and on every welcome, and Main learns its rows from history), and XCTest runs no longer open the real app cache. Follow-ups made in the same branch: scheduled turns default their origin label to the schedule's label or id, and Main hides the old "Cleared with /clear" note in favor of the divider.
