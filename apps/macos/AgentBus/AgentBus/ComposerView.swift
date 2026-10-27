@@ -48,9 +48,21 @@ struct DraftFile: Identifiable, Equatable {
     func startPasteMonitor(_ connection: BusConnection) {
         guard monitor == nil else { return }
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            // TEMP E75 DIAGNOSTIC (PgUp/PgDn focus): remove before commit.
+            if event.keyCode == 116 || event.keyCode == 121, let window = event.window {
+                Self.log("key \(event.keyCode) before: \(type(of: window.firstResponder as Any)) composerFocused=\(self?.focused ?? false)")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    Self.log("key \(event.keyCode) after: \(type(of: window.firstResponder as Any))")
+                }
+            }
             let handled = MainActor.assumeIsolated { self?.paste(event, connection: connection) ?? false }
             return handled ? nil : event
         }
+    }
+    nonisolated static func log(_ text: String) {
+        let line = "\(Date().timeIntervalSince1970) \(text)\n"
+        if let h = FileHandle(forWritingAtPath: "/tmp/agentbus-scroll.log") { h.seekToEndOfFile(); h.write(Data(line.utf8)); try? h.close() }
+        else { try? line.write(toFile: "/tmp/agentbus-scroll.log", atomically: false, encoding: .utf8) }
     }
     func stopPasteMonitor() {
         if let monitor { NSEvent.removeMonitor(monitor) }
@@ -85,6 +97,7 @@ struct ComposerView: View {
     @State private var dismissedSlash = false
     @State private var caret: TextSelection?
     @FocusState private var focused: Bool
+    @Environment(\.pageTranscript) private var pageTranscript
 
     private var draftKey: String { session?.id ?? "main" }
     private var draft: Binding<String> {
@@ -135,7 +148,7 @@ struct ComposerView: View {
                     .lineLimit(1...8)
                     .padding(.vertical, 7)
                     .focused($focused)
-                    .onKeyPress(keys: [.return, .upArrow, .downArrow, .tab, .escape], phases: .down, action: handleKey)
+                    .onKeyPress(keys: [.return, .upArrow, .downArrow, .tab, .escape, .pageUp, .pageDown], phases: .down, action: handleKey)
                     .onSubmit(send)
 
                 Button(action: send) {
@@ -205,15 +218,40 @@ struct ComposerView: View {
         case .downArrow where slash: selection = (selection + 1) % options.count; return .handled
         case .tab where slash: complete(options[min(selection, options.count - 1)]); return .handled
         case .escape where slash: dismissedSlash = true; return .handled
+        // Clicking a message focuses its text view, and paging scrolls that row out of the lazy stack, which
+        // hands focus to the composer. The next PgUp/PgDn then lands here, so it pages the transcript.
+        case .pageUp: pageTranscript?(-1); return .handled
+        case .pageDown: pageTranscript?(1); return .handled
         case .escape where replyTarget != nil: connection.replyTargets[draftKey] = nil; return .handled
         case .return:
             if slash { complete(options[min(selection, options.count - 1)]); return .handled }
             if press.modifiers.contains(.shift) || press.modifiers.contains(.option) {
-                draft.wrappedValue += "\n"; return .handled
+                insertNewline(); return .handled
             }
             send(); return .handled
         default: return .ignored
         }
+    }
+
+    /// Shift/Option+Return: a line break at the insertion point, replacing any selection (E75). The
+    /// field editor does it when it's reachable, which keeps undo, IME and the caret native. Otherwise
+    /// the draft is edited through the `caret` selection binding.
+    private func insertNewline() {
+        if model.focused, let editor = model.window?.firstResponder as? NSTextView {
+            editor.insertText("\n", replacementRange: editor.selectedRange())
+            return
+        }
+        var ranges: [Range<String.Index>] = []
+        if let caret {
+            switch caret.indices {
+            case .selection(let range): ranges = [range]
+            case .multiSelection(let set): ranges = Array(set.ranges)
+            @unknown default: break
+            }
+        }
+        let edit = NewlineInsertion.insert(into: draft.wrappedValue, replacing: ranges)
+        draft.wrappedValue = edit.text
+        caret = TextSelection(insertionPoint: edit.caret)
     }
 
     /// Focus alone can select the whole draft, so the insertion point is set explicitly. Focus is dropped
