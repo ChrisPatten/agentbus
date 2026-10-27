@@ -43,7 +43,21 @@ struct DraftFile: Identifiable, Equatable {
     // intercepted here: files become attachments, rich text is inserted as Markdown.
     @ObservationIgnored var focused = false
     @ObservationIgnored weak var window: NSWindow?
+    @ObservationIgnored weak var textView: ComposerNSTextView?
     @ObservationIgnored private var monitor: Any?
+
+    func focusChanged(_ isFocused: Bool, in view: NSTextView) {
+        focused = isFocused
+        if isFocused { window = view.window }
+    }
+
+    /// Focuses the composer with the insertion point at the end of the draft, taking focus from a
+    /// selected message view if needed.
+    func focusAtEnd() {
+        guard let textView, let window = textView.window else { return }
+        if window.firstResponder !== textView { window.makeFirstResponder(textView) }
+        textView.moveInsertionPointToEnd()
+    }
 
     func startPasteMonitor(_ connection: BusConnection) {
         guard monitor == nil else { return }
@@ -95,8 +109,6 @@ struct ComposerView: View {
     @Binding var importing: Bool
     @State private var selection = 0
     @State private var dismissedSlash = false
-    @State private var caret: TextSelection?
-    @FocusState private var focused: Bool
     @Environment(\.pageTranscript) private var pageTranscript
 
     private var draftKey: String { session?.draftKey ?? "main" }
@@ -143,13 +155,14 @@ struct ComposerView: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Attach Files")
 
-                TextField(placeholder, text: draft, selection: $caret, axis: .vertical)
-                    .textFieldStyle(.plain)
-                    .lineLimit(1...8)
-                    .padding(.vertical, 7)
-                    .focused($focused)
-                    .onKeyPress(keys: [.return, .upArrow, .downArrow, .tab, .escape, .pageUp, .pageDown], phases: .down, action: handleKey)
-                    .onSubmit(send)
+                ComposerTextView(text: draft, placeholder: placeholder, model: model, onKey: handleKey)
+                    .overlay(alignment: .topLeading) {
+                        if draft.wrappedValue.isEmpty {
+                            Text(placeholder).foregroundStyle(.placeholder).lineLimit(1)
+                                .padding(.vertical, ComposerTextView.inset)
+                                .allowsHitTesting(false)
+                        }
+                    }
 
                 Button(action: send) {
                     Image(systemName: "arrow.up").font(.system(size: 14, weight: .semibold))
@@ -172,18 +185,15 @@ struct ComposerView: View {
         // Anchored to a 320-pt strip at the capsule's leading edge so the popover lines up with it.
         .popover(isPresented: showSlash, attachmentAnchor: .rect(.rect(CGRect(x: 0, y: 0, width: 320, height: 1))),
                  arrowEdge: .top) { slashList }
-        .onChange(of: focused) { _, isFocused in
-            model.focused = isFocused
-            if isFocused { model.window = NSApp.keyWindow }
-        }
         .onAppear { model.startPasteMonitor(connection) }
         .onDisappear { model.stopPasteMonitor() }
         .onChange(of: draft.wrappedValue) { old, new in
             if !new.hasPrefix("/") || old.isEmpty { dismissedSlash = false }
             selection = 0
         }
-        .onAppear { focused = true }
-        .onChange(of: model.focusRequest) { focusAtEnd() }
+        // On the next turn, once the text view is in the window and holds the updated draft.
+        .onAppear { Task { @MainActor in model.focusAtEnd() } }
+        .onChange(of: model.focusRequest) { Task { @MainActor in model.focusAtEnd() } }
         .task { await connection.loadCommands() }
     }
 
@@ -210,57 +220,24 @@ struct ComposerView: View {
         .frame(width: 320)
     }
 
-    private func handleKey(_ press: KeyPress) -> KeyPress.Result {
+    /// Shift/Option-Return newlines are handled by the text view itself.
+    private func handleKey(_ key: ComposerKey) -> Bool {
         let options = Array(matches.prefix(8))
         let slash = showSlash.wrappedValue && !options.isEmpty
-        switch press.key {
-        case .upArrow where slash: selection = (selection - 1 + options.count) % options.count; return .handled
-        case .downArrow where slash: selection = (selection + 1) % options.count; return .handled
-        case .tab where slash: complete(options[min(selection, options.count - 1)]); return .handled
-        case .escape where slash: dismissedSlash = true; return .handled
+        switch key {
+        case .up where slash: selection = (selection - 1 + options.count) % options.count; return true
+        case .down where slash: selection = (selection + 1) % options.count; return true
+        case .tab where slash: complete(options[min(selection, options.count - 1)]); return true
+        case .escape where slash: dismissedSlash = true; return true
         // Clicking a message focuses its text view, and paging scrolls that row out of the lazy stack, which
         // hands focus to the composer. The next PgUp/PgDn then lands here, so it pages the transcript.
-        case .pageUp: pageTranscript?(-1); return .handled
-        case .pageDown: pageTranscript?(1); return .handled
-        case .escape where replyTarget != nil: connection.replyTargets[draftKey] = nil; return .handled
-        case .return:
-            if slash { complete(options[min(selection, options.count - 1)]); return .handled }
-            if press.modifiers.contains(.shift) || press.modifiers.contains(.option) {
-                insertNewline(); return .handled
-            }
-            send(); return .handled
-        default: return .ignored
-        }
-    }
-
-    /// Shift/Option+Return: a line break at the insertion point, replacing any selection (E75). The
-    /// field editor does it when it's reachable, which keeps undo, IME and the caret native. Otherwise
-    /// the draft is edited through the `caret` selection binding.
-    private func insertNewline() {
-        if model.focused, let editor = model.window?.firstResponder as? NSTextView {
-            editor.insertText("\n", replacementRange: editor.selectedRange())
-            return
-        }
-        var ranges: [Range<String.Index>] = []
-        if let caret {
-            switch caret.indices {
-            case .selection(let range): ranges = [range]
-            case .multiSelection(let set): ranges = Array(set.ranges)
-            @unknown default: break
-            }
-        }
-        let edit = NewlineInsertion.insert(into: draft.wrappedValue, replacing: ranges)
-        draft.wrappedValue = edit.text
-        caret = TextSelection(insertionPoint: edit.caret)
-    }
-
-    /// Focus alone can select the whole draft, so the insertion point is set explicitly. Focus is dropped
-    /// first so a selected message view, or a stale focus flag, can't swallow the request.
-    private func focusAtEnd() {
-        focused = false
-        Task { @MainActor in
-            focused = true
-            caret = TextSelection(insertionPoint: draft.wrappedValue.endIndex)
+        case .pageUp: pageTranscript?(-1); return true
+        case .pageDown: pageTranscript?(1); return true
+        case .escape where replyTarget != nil: connection.replyTargets[draftKey] = nil; return true
+        case .send:
+            if slash { complete(options[min(selection, options.count - 1)]) } else { send() }
+            return true
+        default: return false
         }
     }
 

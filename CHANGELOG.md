@@ -10,6 +10,9 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+### Fixed
+- **The Mac app's composer handles long drafts properly.** Your draft stays where you left it when you click away (for example to copy text from a message) instead of jumping back to its start. The scroll wheel scrolls it, focused or not. When focus returns by keyboard or Reply, the insertion point is at the end of the draft; a click puts it where you click. Text re-wraps when you resize the window instead of running under the send button, and the caret and the bottom of the last line are no longer clipped.
+
 ## [0.16.0] - 2026-10-27
 
 ### Added
