@@ -16,6 +16,19 @@ Inside the bus, each of these is a topic named `thread:` plus a short code. You'
 
 In a Telegram group, threads are per person: two members in the same forum topic each have their own conversation with the agent.
 
+## Topic name and pinned message
+
+When a new session starts in a Telegram forum topic, your agent sees the topic's name and its pinned message before your first message, so you don't have to explain what the topic is for each time. The block looks like this:
+
+```
+[Topic context] Topic: Kitchen Reno
+Pinned: Budget is 40k; contractor is Bob
+```
+
+It is sent once per session, not on every message. A new session (for example after `/clear`) gets it again.
+
+Telegram doesn't let bots look up a topic's pin on demand, so the bus remembers the pins and names it sees while it's running. A pin made before the bot joined the group, or while the bus was down, is picked up the next time someone pins a message in that topic. Unpinning isn't reported by Telegram, so a removed pin may linger until you pin something else. Long pins are cut to 2,000 characters.
+
 ## Your agent can use threads too
 
 - **Replies stay in the thread.** When your agent answers with `reply`, the answer goes to the same email thread, forum topic or app topic.

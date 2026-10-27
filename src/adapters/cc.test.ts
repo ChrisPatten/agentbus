@@ -133,6 +133,13 @@ describe('formatMessagesForSampling', () => {
     expect(result).toContain('New message from contact:alice');
   });
 
+  it('renders topic_context (new-session topic name + pin) before the message', () => {
+    const env = makeEnvelope({ metadata: { topic_context: '[Topic context] Topic: Kitchen\nPinned: Budget 40k' } });
+    const result = formatMessagesForSampling([env]);
+    expect(result.startsWith('[Topic context] Topic: Kitchen')).toBe(true);
+    expect(result.indexOf('Pinned: Budget 40k')).toBeLessThan(result.indexOf('New message from'));
+  });
+
   it('does not prepend when injected_topic_context is absent', () => {
     const result = formatMessagesForSampling([makeEnvelope()]);
     expect(result.startsWith('New message')).toBe(true);

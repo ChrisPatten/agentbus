@@ -345,6 +345,33 @@ entirely separately from thread routing above and never touches the
   message never blocks delivery. Only the first part of a multi-part reply
   carries the quote.
 
+### Topic context on new sessions (name + pinned message)
+
+When a new session begins on a forum topic, the first message carries a
+`[Topic context] Topic: <name>\nPinned: <text>` block (pin truncated to
+`TOPIC_PIN_MAX_CHARS` = 2000).
+
+- **Capture** (`TelegramAdapter.captureTopicServiceMessage`, after the sender
+  allowlist): `pinned_message`, `forum_topic_created` and `forum_topic_edited`
+  service updates are persisted in the topic's `threads` row metadata
+  (`topicName`, `pinnedText`), so they survive restarts. The name is also
+  learned from `reply_to_message.forum_topic_created` on any topic message and
+  from `createForumTopic`. These fields are not one-shot (unlike
+  `pendingContext`) and are preserved across inbound upserts.
+- **Why not getChat?** The Bot API's `getChat.pinned_message` describes the
+  chat's General area only; there is no per-topic pin lookup and no unpin
+  service message. So the pin is only as fresh as the last `pinned_message`
+  update the bus saw. A text-less/inaccessible pin clears the stored pin.
+- **Injection**: pipeline stage 85 `topic-context-inject` runs after
+  transcript-log (80); when `ctx.sessionCreated` is true for a `thread:` topic
+  it calls the owning adapter's optional `getTopicContext(channel, topic)` and
+  stamps `metadata.topic_context`. `formatMessagesForSampling` (cc.ts, shared
+  by cc, cc-headless and cc-pool) renders it before the first message. It is a
+  synchronous local DB read, so it never blocks delivery; failures are logged
+  and swallowed. Skipped for slash commands, system-only and journaling turns.
+- Messages replying to a topic's root (Telegram's implicit reply) are no
+  longer surfaced as `quoted_message`.
+
 ### Authorization: no new mechanism
 
 Group messages are gated by the same sender allowlist (`allowedSenderIds`,

@@ -92,6 +92,13 @@ export function formatMessagesForSampling(envelopes: MessageEnvelope[]): string 
     delete firstMeta!['injected_topic_context'];
   }
 
+  // Topic name + pinned message, stamped by the topic-context-inject stage on
+  // the first message of a new session. User-authored text, so neutralized.
+  const sessionTopicContext = firstMeta?.['topic_context'];
+  if (typeof sessionTopicContext === 'string' && sessionTopicContext.length > 0) {
+    parts.push(sessionTopicContext);
+  }
+
   for (let i = 0; i < envelopes.length; i++) {
     const env = envelopes[i]!;
     let body: string;
