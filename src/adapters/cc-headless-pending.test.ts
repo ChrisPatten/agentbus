@@ -37,7 +37,10 @@ const config = {
 } as unknown as AppConfig;
 
 vi.mock('../config/loader.js', () => ({ loadConfig: vi.fn(() => config) }));
-vi.mock('./cc.js', () => ({ formatMessagesForSampling: vi.fn(() => 'FORMATTED') }));
+vi.mock('./message-format.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./message-format.js')>()),
+  formatMessagesForSampling: vi.fn(() => 'FORMATTED'),
+}));
 const spawnMock = vi.hoisted(() => vi.fn());
 vi.mock('node:child_process', () => ({ spawn: spawnMock }));
 

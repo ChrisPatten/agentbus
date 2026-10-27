@@ -41,7 +41,7 @@ import { memoryLayout, memorySettingsFor, type MemoryLayout } from '../memory/la
 import { DISABLE_AUTO_MEMORY_ENV, autoMemoryArgs, usesNativeMemory } from '../memory/native.js';
 import { runtimeCapabilities } from '../core/runtime-capabilities.js';
 import type { MessageEnvelope } from '../types/envelope.js';
-import { formatMessagesForSampling } from './cc.js';
+import { formatMessagesForSampling } from './message-format.js';
 import { isSystemOnly } from '../core/system-block.js';
 import { formatToolCallSummary } from './tool-call-summary.js';
 import { resolveModel } from './model-override-loader.js';

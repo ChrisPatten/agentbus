@@ -306,7 +306,7 @@ history for the new topic to inherit.
   `processUpdate` reads and clears it (a full metadata replace omitting
   `pendingContext` is what clears it — no separate delete needed), then
   attaches `metadata.injected_topic_context` to that one `InboundMessage`.
-  `formatMessagesForSampling` (`src/adapters/cc.ts`) renders it as
+  `formatMessagesForSampling` (`src/adapters/message-format.ts`) renders it as
   `[Context for this new topic, provided when it was created]\n<context>`
   before the first message body, for both the polling and headless
   adapters.

@@ -139,7 +139,7 @@ A turn killed by `/stop` sends nothing. See [SLASH_COMMANDS.md](SLASH_COMMANDS.m
 
 After variable substitution, `@<path>` tokens are replaced with the referenced file's contents, resolved relative to `working_dir` (`expandFileReferences` in `src/adapters/prompt-renderer.ts`). Unknown variables and unreadable paths are left verbatim so mistakes are visible. Expansion runs only on this operator-authored template, never on user messages.
 
-The user message is formatted by `formatMessagesForSampling` (`src/adapters/cc.ts`).
+The user message is formatted by `formatMessagesForSampling` (`src/adapters/message-format.ts`, shared with `cc.ts`). cc-headless imports that module, never `cc.ts`: `cc.ts` is an entrypoint, and it only starts (config load, stdio MCP server, polling loop) when run directly.
 
 ## Context loading (`CLAUDE.md` and file references)
 

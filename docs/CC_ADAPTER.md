@@ -62,6 +62,8 @@ Here is the document
 - Attachments append `[Image: <path>]` and `[File: <path> — <name>]` lines; inline email images append a `fetch_attachment` hint. See [ATTACHMENTS.md](ATTACHMENTS.md).
 - One-shot context from `create_telegram_topic` is prepended to a topic's first message.
 
+The formatter, `formatMessagesForSampling`, lives in `src/adapters/message-format.ts`, a module with no side effects that `cc.ts` and cc-headless both import (`cc.ts` re-exports it).
+
 The agent replies with `reply(message_id="<id>", body="...")`. The tool resolves channel and recipient from the original message.
 
 ### Setup
@@ -99,3 +101,5 @@ AGENTBUS_CONFIG=/path/to/config.yaml npx tsx src/adapters/cc.ts
 ```
 
 Useful for checking that the server starts. In normal operation Claude Code or the headless adapter spawns it.
+
+The startup code (config load, stdio MCP server, polling loop) is in `main()` and runs only when `process.argv[1]` is this file, with the extension ignored so `tsx src/adapters/cc.js` and `node dist/adapters/cc.js` both count. Importing `cc.ts` for one of its exported helpers starts nothing. Other bus code should import shared helpers from their own modules, such as `message-format.ts`, not from `cc.ts`.

@@ -69,13 +69,11 @@ vi.mock('../config/loader.js', () => ({
   loadConfig: vi.fn(() => currentConfig),
 }));
 
-// cc.ts is a runnable entrypoint script (legacy claude-code adapter) that
-// connects a real MCP stdio server and starts its own live polling loop as a
-// top-level side effect on import. cc-headless.ts only needs its pure
-// `formatMessagesForSampling` helper, so stub the module to avoid pulling in
-// those side effects (which would otherwise fire real fetches against the
-// mocked global.fetch below, contaminating assertions about this module).
-vi.mock('./cc.js', () => ({
+// Stub the shared prompt formatter so these tests assert on cc-headless's own
+// prompt assembly, not on message formatting (covered by message-format.test.ts).
+// Keep the module's other exports real: pending-context.ts uses them.
+vi.mock('./message-format.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./message-format.js')>()),
   formatMessagesForSampling: vi.fn(() => ''),
 }));
 

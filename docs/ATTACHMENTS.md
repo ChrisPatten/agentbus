@@ -176,7 +176,7 @@ The 10-minute cadence is not configurable in the current scope.
   message (no caption) is silently dropped before it reaches the queue, even
   though the file itself downloaded successfully.
 - `src/mcp/tools/attachments.ts` — the `fetch_attachment` tool.
-- `src/adapters/cc.ts` — `formatMessagesForSampling` appends `[Image: …]` /
+- `src/adapters/message-format.ts` — `formatMessagesForSampling` appends `[Image: …]` /
   `[File: …]` and inline-image hint lines.
 - `src/media/attachment-sweeper.ts` — periodic cleanup.
 - `src/db/migrations/006_attachments.sql` — table + index.
