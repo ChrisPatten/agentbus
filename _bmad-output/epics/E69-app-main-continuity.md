@@ -117,3 +117,47 @@ Main behaves like a Telegram DM. The operator sees one continuous conversation w
 - **Inactivity** counts only operator messages and agent turns. Proactive sends don't count.
 - **A rotation divider is shown** in Main's transcript.
 - **The ambient routine** is a Claude Code session in `~/workspace/baxter_agent`. Its agentbus MCP server comes from that project's `.mcp.json` (`AGENTBUS_AGENT_ID=baxter`). The routine's prompt should pass `source: "Ambient scan"` on its `send_message` calls once S69.1 lands.
+
+## Implementation Notes (architecture, 2026-10-27)
+
+Shared contracts every story builds against. Scaffolding already in place: migrations 036 (`pending_context_watermarks`) and 037 (`sessions.end_reason`) registered in `src/db/schema.ts`; config keys `adapters.app.main_idle_rotation_ms` (default 12 h, `0` disables) and `adapters.app.pending_context.{max_items: 10, max_chars: 4000}`; helpers `mainConversationId`, `isMainConversation`, `isMainSession` in `src/app/main.ts`. When `adapters.app` is absent, use the schema defaults (`AppAdapterSchema.parse({})`).
+
+### Origin metadata (S69.1)
+
+```ts
+type Origin =
+  | { kind: 'turn'; agent_id: string; conversation_id: string; label?: string }
+  | { kind: 'external'; label: string };
+```
+
+- Stamped as `metadata.origin` by `send_message`, `reply` and `send_email` in the MCP server. `kind: 'turn'` when `AGENTBUS_TURN_CONVERSATION_ID` is set in the MCP server's env, `external` otherwise. A caller-supplied `metadata.origin` is always replaced.
+- `label` precedence: the `send_message` `source` parameter, then `AGENTBUS_SOURCE_LABEL`, then `"another agent session"`.
+- cc-headless sets `AGENTBUS_TURN_CONVERSATION_ID` per turn in the generated MCP config's per-server env (the MCP config file is written per turn). Its own fallback `deliverResponse` stamps `{ kind: 'turn', agent_id, conversation_id }` directly, because it doesn't go through MCP.
+- **Rows with no `origin` (bus command responses, advisories, legacy rows) are never treated as pending.** Only `kind: 'external'`, or `kind: 'turn'` with a different `conversation_id`, is foreign. This narrows the epic's "any send without that stamp is foreign": unstamped sends are bus internals, and injecting them would repeat `/clear` responses and the like back to the agent.
+
+### Main as one conversation (S69.2)
+
+- `sessionInfo` for any Main row returns the aggregated Main item: `session_id` = the active row's id, else the newest Main row's id; `ended_at: null` always; `is_main: true`; `conversation_id`; `message_count` and `unread_count` over the whole conversation; `resumable: true`. `listSessions` returns Main at most once and never under `state=earlier`.
+- `messageInfo` gains `conversation_id` on every message so the client can map any Main row's messages to the one Main item.
+- `history` for any Main row id pages across every row in the conversation (`created_at`, `id` order, same cursor semantics). The response gains `boundaries: [{ session_id, ended_at, reason: 'idle' | 'clear' | null }]` for the ended Main rows whose `ended_at` falls inside the returned page's time range. Non-Main history responses omit `boundaries`.
+- Read marker for Main: the effective marker is `MAX(seq)` over `app_read_markers` rows for every Main row of the conversation; unread counts outbound message events across all rows above it. Marking read on any Main row id works.
+- When Main's active row changes (a new row is created, or the active row ends), record a `session` event for Main. Its data is the aggregated Main item plus `rotated: { previous_session_id, ended_at, reason }` when it follows an end.
+- A send to an ended Main row id is a send to Main (topic `general`), never an Earlier fork.
+
+### Lifecycle (S69.3)
+
+- Main rows are exempt from `SessionTracker.closeIdleSessions` and from Stage 80's non-headless gap rule.
+- Activity clock (derived, no new column): the later of the newest visible inbound transcript in the conversation and the newest outbound transcript with `origin.kind = 'turn'` and `origin.conversation_id` = this conversation.
+- Rotation: a Main row with a `claude_session_id` whose activity clock is older than `main_idle_rotation_ms` gets `ended_at = now`, `end_reason = 'idle'`, then a journal trigger with reason `close`. Shared helper `rotateMainSession(db, sessionId, reason, journal?)` in `src/app/main.ts`, also used by `/clear` in Main (`end_reason = 'clear'`). Rows with no `claude_session_id` never rotate.
+
+### Pending context (S69.4)
+
+- Pending = outbound transcript rows in the conversation (any row), visible, foreign per the origin rule, created after the watermark in `pending_context_watermarks`. With no watermark, the baseline is the newest inbound transcript in the conversation before the current batch.
+- Main only for now (`isMainConversation`). The block goes ahead of the batch's formatted messages, after any memory prefix.
+- The watermark advances to the newest injected row when the turn's `claude_session_id` becomes known. A failed spawn leaves it.
+
+### Reply targets (S69.5)
+
+- `QuotedMessage` gains optional `created_at` and `source` (the target's `origin.label`, or `"you"` / `"agent"`). The shared formatter in `src/adapters/cc.ts` renders them when present; Telegram's quotes stay as they are.
+- If the operator's reply target is one of the injected pending messages, that item is marked in the block.
+- An agent outbound app message whose `reply_to` resolves to a quotable message other than the newest inbound in that conversation gets `metadata.quoted_message`, so the client renders a quote. Replies to the newest inbound (every fallback reply) stay unquoted.
