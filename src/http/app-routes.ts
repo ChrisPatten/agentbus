@@ -14,7 +14,8 @@ import { patchThreadMetadata } from '../pipeline/thread-store.js';
 import { computeConversationId } from '../pipeline/conversation-id.js';
 import { channelMatches } from '../pipeline/types.js';
 import type { QuotedMessage } from '../app/store.js';
-import { createAppSession, eventBounds, history, listSessions, readEvents, quotableMessage, recordSessionEvent, routedAgent, sessionInfo, visibleSession } from '../app/store.js';
+import { createAppSession, eventBounds, history, isMainRow, listSessions, readEvents, quotableMessage, recordSessionEvent, routedAgent, sessionInfo, sessionScope, visibleSession } from '../app/store.js';
+import { MAIN_TOPIC } from '../app/main.js';
 import { sessionCanResume } from '../app/resume.js';
 import { VERSION } from '../version.js';
 import type { InboundAbort, InboundMessage, InboundResult } from './api.js';
@@ -199,9 +200,11 @@ export async function registerAppRoutes(server: FastifyInstance, deps: AppRouteD
       const contact = authenticate(req)!; const agent = agentFor(contact);
       if (!agent) return reply.code(404).send({ error: 'Session not found' });
       const { id } = req.params as { id: string }; const q = req.query as Record<string, unknown>;
-      const messages = history(deps.db, contact, agent, id, asNumber(q['limit'], 50, 100), typeof q['before'] === 'string' ? q['before'] : undefined);
-      return messages ? { messages, next_before: messages.length ? messages[0]!['cursor'] : null }
-        : reply.code(404).send({ error: 'Session not found' });
+      const page = history(deps.db, contact, agent, id, asNumber(q['limit'], 50, 100), typeof q['before'] === 'string' ? q['before'] : undefined);
+      if (!page) return reply.code(404).send({ error: 'Session not found' });
+      const { messages, boundaries } = page;
+      // E69: Main pages carry its rotation boundaries; other sessions omit the field.
+      return { messages, next_before: messages.length ? messages[0]!['cursor'] : null, ...(boundaries ? { boundaries } : {}) };
     });
     routes.post('/api/v1/app/attachments', async (req, reply) => {
       const contact = authenticate(req)!; const agent = agentFor(contact);
@@ -278,7 +281,9 @@ export async function registerAppRoutes(server: FastifyInstance, deps: AppRouteD
             if (!target) {
               send(socket, { type: 'ack', client_msg_id: f.client_msg_id, status: 'rejected', reason: 'session_not_found' }); return;
             }
-            if (target.ended_at) {
+            // E69: an ended Main row is still Main; the send goes to Main, never an Earlier fork.
+            if (target.ended_at && isMainRow(target)) topic = MAIN_TOPIC;
+            else if (target.ended_at) {
               if (!sessionCanResume(deps.db, deps.config, target.id)) {
                 send(socket, { type: 'ack', client_msg_id: f.client_msg_id, status: 'rejected', reason: 'not_resumable' }); return;
               }
@@ -363,9 +368,12 @@ export async function registerAppRoutes(server: FastifyInstance, deps: AppRouteD
         }
         if (frame['type'] === 'mark_read') {
           const id = String(frame['session_id'] ?? ''); const seq = Number(frame['seq']);
-          const event = deps.db.prepare(`SELECT 1 FROM app_events WHERE contact_id = ? AND session_id = ? AND seq = ?`)
-            .get(contactId, id, seq);
-          if (!visibleSession(deps.db, contactId, agentId, id) || !Number.isSafeInteger(seq) || seq < 0 || (seq !== 0 && !event)) {
+          // E69: a Main row's marker may name an event on any Main row of the conversation.
+          const row = visibleSession(deps.db, contactId, agentId, id);
+          const event = row && deps.db.prepare(`SELECT 1 FROM app_events WHERE contact_id = ?
+            AND session_id IN (SELECT value FROM json_each(?)) AND seq = ?`)
+            .get(contactId, JSON.stringify(sessionScope(deps.db, row)), seq);
+          if (!row || !Number.isSafeInteger(seq) || seq < 0 || (seq !== 0 && !event)) {
             send(socket, { type: 'error', code: 'invalid_read_marker' }); return;
           }
           deps.db.transaction(() => {

@@ -73,7 +73,7 @@ describe('reply tool — conversation_id forwarding (E48 S48.6)', () => {
     expect(result.isError).toBeFalsy();
     const postCall = fetchMock.mock.calls[1]! as [string, { body: string }];
     const sentBody = JSON.parse(postCall[1].body) as { metadata: Record<string, unknown> };
-    expect(sentBody.metadata).toEqual({ conversation_id: 'conv-abc123' });
+    expect(sentBody.metadata).toEqual({ conversation_id: 'conv-abc123', origin: { kind: 'external', label: 'another agent session' } });
 
     await client.close();
   });
@@ -97,7 +97,7 @@ describe('reply tool — conversation_id forwarding (E48 S48.6)', () => {
     expect(result.isError).toBeFalsy();
     const postCall = fetchMock.mock.calls[1]! as [string, { body: string }];
     const sentBody = JSON.parse(postCall[1].body) as { metadata: Record<string, unknown> };
-    expect(sentBody.metadata).toEqual({});
+    expect(sentBody.metadata).toEqual({ origin: { kind: 'external', label: 'another agent session' } });
 
     await client.close();
   });
@@ -120,7 +120,7 @@ describe('reply tool — conversation_id forwarding (E48 S48.6)', () => {
 
     const postCall = fetchMock.mock.calls[1]! as [string, { body: string }];
     const sentBody = JSON.parse(postCall[1].body) as { metadata: Record<string, unknown> };
-    expect(sentBody.metadata).toEqual({});
+    expect(sentBody.metadata).toEqual({ origin: { kind: 'external', label: 'another agent session' } });
 
     await client.close();
   });

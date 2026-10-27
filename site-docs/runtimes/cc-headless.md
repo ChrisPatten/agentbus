@@ -105,7 +105,7 @@ Each agent has its own folder, settings, queue and concurrency limit. Names may 
 | Command | Effect |
 |---|---|
 | `/stop` | Stops the agent's current turn in this conversation immediately. Nothing more is sent for that turn. |
-| `/clear` | Ends this conversation's session. Your next message starts a fresh Claude session. |
+| `/clear` | Ends this conversation's session. Your next message starts a fresh Claude session. In the Mac app's Main, the scrollback stays. |
 | `/cost` | What the agent has cost today, over the last 7 days and this month. |
 
 Claude Code's own commands, such as `/compact` or `/context`, run as their own turn in your conversation's session, and you get their output back. See [Claude Code commands](/features/slash-commands#claude-code-commands) and [Slash commands](/features/slash-commands).

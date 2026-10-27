@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Epic ID | E69 |
-| Status | Planned (draft) |
+| Status | Complete (2026-10-27, released in 0.16.0) |
 | Dependencies | E58, E59, E60, E61 (`feat/e58-e59-mac-client-foundation`); coordinates with E63 and E66 |
 | Story Count | 6 |
 | Estimated Complexity | M |
@@ -91,7 +91,7 @@ Main behaves like a Telegram DM. The operator sees one continuous conversation w
 ### S69.5 — Reply to a specific message in the app
 
 - Swift client: a reply action on any message (context menu), a quoted preview in the composer, and the quote rendered on the sent message.
-- Protocol: the `send` frame gains `reply_to: message_id`. The bus rejects a `reply_to` outside the target conversation or contact.
+- Protocol: the `send` frame gains `reply_to: message_id`. The bus rejects a `reply_to` outside the target conversation or contact. *(Not adopted for the conversation; see Implementation. The contact and agent check from E72 stands.)*
 - The agent's prompt shows which message is being answered (time, source, excerpt). If it's one of the pending messages, the injected block marks it.
 - Agent outbound `reply_to` on `app` renders as a quote in the client. Check against `boundAppReply`, which already reads `envelope.reply_to` on outbound app sends for session binding, so the two uses don't collide.
 - Share the reply-target prompt rendering with Telegram's existing native-reply path where practical.
@@ -117,3 +117,70 @@ Main behaves like a Telegram DM. The operator sees one continuous conversation w
 - **Inactivity** counts only operator messages and agent turns. Proactive sends don't count.
 - **A rotation divider is shown** in Main's transcript.
 - **The ambient routine** is a Claude Code session in `~/workspace/baxter_agent`. Its agentbus MCP server comes from that project's `.mcp.json` (`AGENTBUS_AGENT_ID=baxter`). The routine's prompt should pass `source: "Ambient scan"` on its `send_message` calls once S69.1 lands.
+
+## Implementation Notes (architecture, 2026-10-27)
+
+Shared contracts every story builds against. Scaffolding already in place: migrations 036 (`pending_context_watermarks`) and 037 (`sessions.end_reason`) registered in `src/db/schema.ts`; config keys `adapters.app.main_idle_rotation_ms` (default 12 h, `0` disables) and `adapters.app.pending_context.{max_items: 10, max_chars: 4000}`; helpers `mainConversationId`, `isMainConversation`, `isMainSession` in `src/app/main.ts`. When `adapters.app` is absent, use the schema defaults (`AppAdapterSchema.parse({})`).
+
+### Origin metadata (S69.1)
+
+```ts
+type Origin =
+  | { kind: 'turn'; agent_id: string; conversation_id: string; label?: string }
+  | { kind: 'external'; label: string };
+```
+
+- Stamped as `metadata.origin` by `send_message`, `reply` and `send_email` in the MCP server. `kind: 'turn'` when `AGENTBUS_TURN_CONVERSATION_ID` is set in the MCP server's env, `external` otherwise. A caller-supplied `metadata.origin` is always replaced.
+- `label` precedence: the `send_message` `source` parameter, then `AGENTBUS_SOURCE_LABEL`, then `"another agent session"`.
+- cc-headless sets `AGENTBUS_TURN_CONVERSATION_ID` per turn in the generated MCP config's per-server env (the MCP config file is written per turn). Its own fallback `deliverResponse` stamps `{ kind: 'turn', agent_id, conversation_id }` directly, because it doesn't go through MCP.
+- **Rows with no `origin` (bus command responses, advisories, legacy rows) are never treated as pending.** Only `kind: 'external'`, or `kind: 'turn'` with a different `conversation_id`, is foreign. This narrows the epic's "any send without that stamp is foreign": unstamped sends are bus internals, and injecting them would repeat `/clear` responses and the like back to the agent.
+
+### Main as one conversation (S69.2)
+
+- `sessionInfo` for any Main row returns the aggregated Main item: `session_id` = the active row's id, else the newest Main row's id; `ended_at: null` always; `is_main: true`; `conversation_id`; `message_count` and `unread_count` over the whole conversation; `resumable: true`. `listSessions` returns Main at most once and never under `state=earlier`.
+- `messageInfo` gains `conversation_id` on every message so the client can map any Main row's messages to the one Main item.
+- `history` for any Main row id pages across every row in the conversation (`created_at`, `id` order, same cursor semantics). The response gains `boundaries: [{ session_id, ended_at, reason: 'idle' | 'clear' | null }]` for the ended Main rows whose `ended_at` falls inside the returned page's time range. Non-Main history responses omit `boundaries`.
+- Read marker for Main: the effective marker is `MAX(seq)` over `app_read_markers` rows for every Main row of the conversation; unread counts outbound message events across all rows above it. Marking read on any Main row id works.
+- When Main's active row changes (a new row is created, or the active row ends), record a `session` event for Main. Its data is the aggregated Main item plus `rotated: { previous_session_id, ended_at, reason }` when it follows an end.
+- A send to an ended Main row id is a send to Main (topic `general`), never an Earlier fork.
+
+### Lifecycle (S69.3)
+
+- Main rows are exempt from `SessionTracker.closeIdleSessions` and from Stage 80's non-headless gap rule.
+- Activity clock (derived, no new column): the later of the newest visible inbound transcript in the conversation and the newest outbound transcript with `origin.kind = 'turn'` and `origin.conversation_id` = this conversation.
+- Rotation: a Main row with a `claude_session_id` whose activity clock is older than `main_idle_rotation_ms` gets `ended_at = now`, `end_reason = 'idle'`, then a journal trigger with reason `close`. Shared helper `rotateMainSession(db, sessionId, reason, journal?)` in `src/app/main.ts`, also used by `/clear` in Main (`end_reason = 'clear'`). Rows with no `claude_session_id` never rotate.
+
+### Pending context (S69.4)
+
+- Pending = outbound transcript rows in the conversation (any row), visible, foreign per the origin rule, created after the watermark in `pending_context_watermarks`. With no watermark, the baseline is the newest inbound transcript in the conversation before the current batch.
+- Main only for now (`isMainConversation`). The block goes ahead of the batch's formatted messages, after any memory prefix.
+- The watermark advances to the newest injected row when the turn's `claude_session_id` becomes known. A failed spawn leaves it.
+
+### Reply targets (S69.5)
+
+- `QuotedMessage` gains optional `created_at` and `source` (the target's `origin.label`, or `"you"` / `"agent"`). The shared formatter in `src/adapters/cc.ts` renders them when present; Telegram's quotes stay as they are.
+- If the operator's reply target is one of the injected pending messages, that item is marked in the block.
+- An agent outbound app message whose `reply_to` resolves to a quotable message other than the newest inbound in that conversation gets `metadata.quoted_message`, so the client renders a quote. Replies to the newest inbound (every fallback reply) stay unquoted.
+
+## Implementation (2026-10-27)
+
+S69.1–S69.5 are implemented on `feat/e69-app-main-continuity` as the notes above describe; S69.6 docs are done, and the live check on `baxter-mac-test` passed on 2026-10-27 (see Live check below). Deviations from the plan:
+
+- **Unstamped sends are never pending.** The epic said any send without a turn stamp is foreign. Only `origin.kind = 'external'`, or a `turn` origin from another conversation, is; rows with no origin (bus command responses, advisories, rows from before E69) are never injected.
+- **A turn origin carries a label only when given explicitly** (`source`, else `AGENTBUS_SOURCE_LABEL`). The generic "another agent session" applies to `external` origins only, so a quote of the agent's own message isn't attributed to it.
+- **Rotation journals through SessionTracker's close path.** `rotateIdleMainSessions` runs in the tracker tick without a journal engine; it sets `ended_at` and `end_reason = 'idle'`, and the tracker's mid-flight pass reports the close (`close` trigger) on the same tick. `/clear` in Main passes the engine and fires `clear` directly. The rotation `session` event is flagged by `app_events.rotation` (migration 037), and replay adds `rotated` to it.
+- **`send.reply_to` is not narrowed to the target conversation.** S69.5's "rejects a `reply_to` outside the target conversation" was not adopted: E72's check (a visible message for this contact and agent, in any session) already covers it, and narrowing broke replies from a resumed Earlier copy to its original session's messages. Any Main row's messages are valid targets, and `new` targets may carry `reply_to`.
+- **Agent quote rule.** An agent outbound app message gets `metadata.quoted_message` when its `reply_to` names an agent message, or an operator message the agent has since moved on from (a later agent message answers something else). Replies to the operator's latest message(s), including several messages from one turn answering the same thing and every fallback reply, stay unquoted.
+- **Not guarded:** a Main turn running longer than the whole rotation period can be rotated mid-turn. Rotation doesn't go through the conversation queue; with the 12 h default this is unlikely.
+
+### Live check (2026-10-27, `baxter-mac-test`)
+
+Run with `main_idle_rotation_ms: 180000` and `session_idle_threshold_ms: 60000`. All exit criteria passed:
+
+- Three proactive scans with no reply landed in one Main row, stamped `external` / "Ambient scan"; the row outlived the 1-minute legacy teardown; nothing new appeared under Earlier.
+- A reply to scan 2 opened with the pending block (all three scans with time, age and source; scan 2 marked) and the reply line carried scan 2's time and source. The watermark advanced to scan 3. The next turn had no block.
+- Idle rotation fired three times, about 3 minutes after the last activity, each journaled (`close`, `done`), with a new Claude session on the next message. A scan sent before a rotation reached the next session's first turn.
+- `/clear` set `end_reason = clear`, journaled with trigger `clear`, and started a new session; scrollback stayed continuous.
+- The real hourly ambient scan (a bus schedule in its own conversation, not a separate Claude Code session as the Decisions section assumed) was stamped as a foreign turn and injected.
+
+Fixed during the check: the Mac client didn't fold Main items cached before E69 (fold now runs at launch and on every welcome, and Main learns its rows from history), and XCTest runs no longer open the real app cache. Follow-ups made in the same branch: scheduled turns default their origin label to the schedule's label or id, and Main hides the old "Cleared with /clear" note in favor of the divider.

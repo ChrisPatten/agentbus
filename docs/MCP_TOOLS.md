@@ -35,6 +35,8 @@ Fetches the original message, swaps sender and recipient, and posts the reply on
 Input: `{ "message_id": "<bus id from [id:...]>", "body": "..." }`
 Output: `{ "success": true, "outbound_message_id": "<uuid>" }`
 
+The reply carries `metadata.origin` (see [Origin metadata](#origin-metadata)).
+
 ### `send_message`
 
 Sends to any contact on any channel. Validates the channel through `GET /api/v1/adapters/resolve`, so a dynamically derived channel such as a Telegram group resolves correctly.
@@ -47,7 +49,8 @@ Sends to any contact on any channel. Validates the channel through `GET /api/v1/
 | `topic` | no | Default `general`. To target a Telegram forum topic, pass the `thread:<hash>` value from `create_telegram_topic` or from the session's `topic` field. A thread topic with no stored thread record fails at delivery |
 | `reply_to` | no | Bus message ID. On Telegram this becomes a native quote unless it is the latest inbound message in the conversation |
 | `priority` | no | `normal`, `high`, or `urgent` |
-| `metadata` | no | Free-form object |
+| `metadata` | no | Free-form object. A caller-supplied `origin` key is replaced (see below) |
+| `source` | no | Short label naming what is sending, for example `Ambient scan`. Stamped as `metadata.origin.label`; when the message lands in a conversation this session isn't running in, that conversation's agent sees it with this label as context (E69) |
 
 For a proactive send, call `get_session` or `list_sessions` first and use the `topic` it returns rather than guessing.
 
@@ -59,6 +62,30 @@ Starts a new email thread, as opposed to `reply`, which threads into a received 
 
 Input: `{ "body": "...", "to"?: "chris@example.com", "subject"?: "Weekly status" }`
 Output: `{ "success": true, "message_id": "<uuid>", "to": "chris@example.com" }`
+
+The email's outbound row carries `metadata.origin` too.
+
+### Origin metadata
+
+`reply`, `send_message` and `send_email` always stamp `metadata.origin` (E69, `src/core/origin.ts`), replacing any value the caller passed, so an agent can't set it by accident:
+
+```ts
+type Origin =
+  | { kind: 'turn'; agent_id: string; conversation_id: string; label?: string }
+  | { kind: 'external'; label: string };
+```
+
+- **`kind: 'turn'`** when the MCP server's environment has `AGENTBUS_TURN_CONVERSATION_ID`. `cc-headless` writes that variable into the per-turn MCP config of each normal turn (not journaling or consolidation turns), so `conversation_id` is the conversation the turn runs in. `agent_id` is the server's bare `AGENTBUS_AGENT_ID`. cc-headless's own fallback delivery (a turn that ended without a delivery tool) doesn't go through MCP and stamps `{ kind: 'turn', agent_id, conversation_id }` directly.
+- **`kind: 'external'`** otherwise: a scheduled routine in another Claude Code session, a cc-pool pane, or the polling adapter.
+- **`label`** precedence: the `send_message` `source` parameter, then `AGENTBUS_SOURCE_LABEL` in the MCP server's environment, then (external only) `"another agent session"`. A turn origin carries a label only when one is given explicitly, so a quote of the agent's own message isn't attributed to the generic label.
+- **Scheduled turns.** When a cc-headless turn was fired by a bus schedule (`metadata.scheduled`), cc-headless sets `AGENTBUS_SOURCE_LABEL` in that turn's MCP config to the schedule's name, and its fallback delivery stamps the same `label`. The name is the schedule's `label` (`metadata.schedule_label`), else its id (`metadata.schedule_id`) when that's a config id such as `ambient-scan`, else `scheduled job <id8>` for a generated UUID id; never the prompt body (`scheduleSourceLabel` in `src/adapters/cc-headless.ts`). A per-call `source` still wins. Other turns get no label.
+
+| Variable | Set by | Effect |
+|---|---|---|
+| `AGENTBUS_TURN_CONVERSATION_ID` | cc-headless, per turn, in the generated MCP config | Sends are `kind: 'turn'` for that conversation. cc-headless removes any inherited copy from the `claude` process environment, so a stray value never leaks into journaling turns |
+| `AGENTBUS_SOURCE_LABEL` | You, in an MCP server's `env` (for example a project's `.mcp.json`); cc-headless, per scheduled turn, with the schedule's name | Default label for that server's sends. Prefer the per-call `source` when one project's `.mcp.json` serves several sessions, since the variable labels all of them |
+
+The origin is stored on the outbound transcript row's `metadata`; no migration was needed. The bus uses it to decide which messages are **foreign** to a conversation: `kind: 'external'`, or `kind: 'turn'` with a different `conversation_id`. Rows with no origin (bus command responses, advisories, rows written before E69) are never foreign. Foreign sends to the Mac app's Main are injected into the next Main turn as [pending context](CC_HEADLESS_ADAPTER.md#pending-context-main); only own-turn sends advance Main's [idle clock](APP_ADAPTER.md#main-one-continuous-conversation).
 
 ### `react_to_message`
 

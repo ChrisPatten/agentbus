@@ -86,7 +86,7 @@ struct ComposerView: View {
     @State private var caret: TextSelection?
     @FocusState private var focused: Bool
 
-    private var draftKey: String { session?.id ?? "main" }
+    private var draftKey: String { session?.draftKey ?? "main" }
     private var draft: Binding<String> {
         Binding(get: { connection.drafts[draftKey] ?? "" }, set: { connection.drafts[draftKey] = $0 })
     }

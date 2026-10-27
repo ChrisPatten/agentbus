@@ -56,6 +56,8 @@ struct BusSession: Codable, Identifiable {
     let activity: String?
     var messageCount: Int? = nil
     var claudeSessionID: String? = nil
+    /// The conversation the row belongs to. Main's rows share one (E69); absent from older buses.
+    var conversationID: String? = nil
     var id: String { sessionID }
 
     enum CodingKeys: String, CodingKey {
@@ -64,7 +66,26 @@ struct BusSession: Codable, Identifiable {
         case endedAt = "ended_at", unreadCount = "unread_count"
         case resumable, isMain = "is_main", activity
         case messageCount = "message_count", claudeSessionID = "claude_session_id"
+        case conversationID = "conversation_id"
     }
+}
+
+/// Where one of Main's Claude sessions ended, from a history page's `boundaries` (E69).
+struct SessionBoundary: Codable, Equatable {
+    let sessionID: String
+    let endedAt: String?
+    /// "idle" (inactivity rotation), "clear" (`/clear`), or nil when the bus doesn't know.
+    let reason: String?
+    enum CodingKeys: String, CodingKey { case sessionID = "session_id", endedAt = "ended_at", reason }
+}
+
+/// The `rotated` part of a Main session event: the row that just ended.
+struct SessionRotation: Decodable, Equatable {
+    let previousSessionID: String
+    let endedAt: String?
+    let reason: String?
+    var boundary: SessionBoundary { SessionBoundary(sessionID: previousSessionID, endedAt: endedAt, reason: reason) }
+    enum CodingKeys: String, CodingKey { case previousSessionID = "previous_session_id", endedAt = "ended_at", reason }
 }
 
 struct BusAttachment: Codable, Identifiable {
@@ -100,13 +121,16 @@ struct BusMessage: Codable, Identifiable {
     let createdAt: String
     let scheduled: Bool
     let attachments: [BusAttachment]
-    /// Present when the operator sent this message as a reply to another one (app protocol `reply_to`).
+    /// Present when the message replies to another one: an operator `reply_to`, or an agent reply the bus quotes.
     var replyTo: ReplyRef? = nil
+    /// The row's conversation, so any of Main's rows maps to the one Main item (E69). Absent from older buses.
+    var conversationID: String? = nil
     var id: String { messageID }
     enum CodingKeys: String, CodingKey {
         case messageID = "message_id", sessionID = "session_id", seq, cursor
         case direction, arrivalChannel = "arrival_channel", body
         case createdAt = "created_at", scheduled, attachments, replyTo = "reply_to"
+        case conversationID = "conversation_id"
     }
 }
 
@@ -125,6 +149,7 @@ extension BusMessage {
         scheduled = try c.decode(Bool.self, forKey: .scheduled)
         attachments = try c.decode([BusAttachment].self, forKey: .attachments)
         replyTo = try? c.decodeIfPresent(ReplyRef.self, forKey: .replyTo)
+        conversationID = try? c.decodeIfPresent(String.self, forKey: .conversationID)
     }
 }
 
@@ -132,7 +157,9 @@ struct SessionsPage: Decodable { let sessions: [BusSession]; let nextBefore: Str
     enum CodingKeys: String, CodingKey { case sessions, nextBefore = "next_before" }
 }
 struct MessagesPage: Decodable { let messages: [BusMessage]; let nextBefore: String?
-    enum CodingKeys: String, CodingKey { case messages, nextBefore = "next_before" }
+    /// Main only: where its ended rows fall within this page. Older buses and other sessions omit it.
+    var boundaries: [SessionBoundary]? = nil
+    enum CodingKeys: String, CodingKey { case messages, nextBefore = "next_before", boundaries }
 }
 struct UploadedFile: Codable, Hashable { let id: String; let originalFilename: String; let size: Int
     enum CodingKeys: String, CodingKey { case id, originalFilename = "original_filename", size }
@@ -210,9 +237,11 @@ struct ServerFrame: Decodable {
         let capacity: BusCapacity?
         let message: BusMessage?
         let session: BusSession?
+        /// On a Main session event that follows a rotation: the row that ended.
+        let rotated: SessionRotation?
         enum CodingKeys: String, CodingKey {
             case sessionID = "session_id", conversationID = "conversation_id", state
-            case turnClass = "turn_class", typing, toolLines = "tool_lines"
+            case turnClass = "turn_class", typing, toolLines = "tool_lines", rotated
         }
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -225,6 +254,7 @@ struct ServerFrame: Decodable {
             capacity = try? BusCapacity(from: decoder)
             message = try? BusMessage(from: decoder)
             session = try? BusSession(from: decoder)
+            rotated = try? c.decodeIfPresent(SessionRotation.self, forKey: .rotated)
         }
     }
 }

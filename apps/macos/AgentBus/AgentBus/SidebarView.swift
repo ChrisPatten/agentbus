@@ -1,7 +1,8 @@
 import SwiftUI
 import SwiftData
 
-/// Sidebar grouping rules (FR-54): one active Main, active Conversations by activity, then Earlier.
+/// Sidebar grouping rules (FR-54): one Main, active Conversations by activity, then Earlier.
+/// Main is one item across its rows (E69) and never appears under Earlier.
 struct SessionGroups {
     let main: CachedSession?
     let conversations: [CachedSession]
@@ -9,9 +10,9 @@ struct SessionGroups {
 
     init(_ sessions: [CachedSession]) {
         let newest: (CachedSession, CachedSession) -> Bool = { $0.lastActivity > $1.lastActivity }
-        main = sessions.filter { $0.isMain && $0.endedAt == nil }.sorted(by: newest).first
+        main = sessions.filter(\.isMain).sorted(by: newest).first
         conversations = sessions.filter { !$0.isMain && $0.endedAt == nil }.sorted(by: newest)
-        earlier = sessions.filter { $0.endedAt != nil }.sorted(by: newest)
+        earlier = sessions.filter { !$0.isMain && $0.endedAt != nil }.sorted(by: newest)
     }
 
     /// Selection order for Next/Previous Session.
@@ -95,7 +96,8 @@ struct SessionSidebar: View {
                 Task { try? await connection.send("/clear", target: session.isMain ? .main : .session(session.id)) }
             }
         } message: {
-            Text("The agent starts a fresh Claude session. This conversation moves to Earlier.")
+            Text(clearTarget?.isMain == true ? "The agent starts a fresh Claude session. Main keeps its scrollback."
+                 : "The agent starts a fresh Claude session. This conversation moves to Earlier.")
         }
     }
 

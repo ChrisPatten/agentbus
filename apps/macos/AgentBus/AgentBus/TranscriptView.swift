@@ -9,12 +9,14 @@ enum TranscriptItem: Identifiable {
     case message(CachedMessage, status: String?)
     case note(String, id: String)
     case pending(PendingSend)
+    case divider(ContextDivider)
 
     var id: String {
         switch self {
         case .day(_, let id), .note(_, let id): id
         case .message(let message, _): message.id
         case .pending(let row): "pending-" + row.id
+        case .divider(let divider): divider.id
         }
     }
 
@@ -38,7 +40,7 @@ enum TranscriptItem: Identifiable {
             items.append(.day(BusDate.dayLabel(date), id: "day-" + id))
         }
 
-        for message in messages {
+        for message in messages where !ContextDivider.hidesClearCommand(message, in: session) {
             dayLabel(message.date, id: message.id)
             let body = message.body.trimmingCharacters(in: .whitespacesAndNewlines)
             if message.isOperator && body == "/clear" {
@@ -79,11 +81,9 @@ struct TranscriptView<Bar: View>: View {
 
     init(connection: BusConnection, session: CachedSession?, @ViewBuilder bar: () -> Bar) {
         self.connection = connection; self.session = session; self.bar = bar()
-        let id = session?.id ?? "__no_session__"
         let origin = session.flatMap { connection.origin(of: $0.id) }
         originID = origin
-        let originKey = origin ?? "__no_origin__"
-        _messages = Query(filter: #Predicate<CachedMessage> { $0.sessionID == id || $0.sessionID == originKey }, sort: \.createdAt)
+        _messages = Query(filter: CachedMessage.transcript(of: session, origin: origin), sort: \.createdAt)
     }
 
     private var sessionChannel: String { session?.channel ?? "app" }
@@ -99,7 +99,7 @@ struct TranscriptView<Bar: View>: View {
     private var items: [TranscriptItem] {
         let own = messages.filter { $0.sessionID != originID }
         let current = TranscriptItem.build(own, pending: pending, session: session, activity: activity)
-        guard let originID else { return current }
+        guard let originID else { return ContextDivider.apply(current, messages: own, session: session) }
         let earlier = messages.filter { $0.sessionID == originID }
         guard !earlier.isEmpty else { return current }
         let original = connection.store.session(originID)
@@ -216,6 +216,8 @@ struct TranscriptRow: View {
             Text(label).font(.caption.weight(.semibold)).foregroundStyle(.secondary).frame(maxWidth: .infinity)
         case .note(let text, _):
             Text(text).font(.caption2).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: .infinity)
+        case .divider(let divider):
+            ContextDividerView(divider: divider)
         case .message(let message, let status):
             if message.isOperator {
                 OperatorMessageView(text: message.body, attachments: message.attachments.map { AttachmentInfo($0, local: connection.localFile($0.id)) },
@@ -319,6 +321,8 @@ struct OperatorMessageView: View {
 /// "↩ Replying to you: first line", above a sent bubble. Click to scroll to the original.
 struct ReplyNote: View {
     let reply: ReplyRef
+    /// Trailing above an operator bubble, leading above an agent message.
+    var alignment: Alignment = .trailing
     @Environment(\.revealMessage) private var reveal
 
     var body: some View {
@@ -331,7 +335,7 @@ struct ReplyNote: View {
         .buttonStyle(.plain)
         .font(.caption)
         .foregroundStyle(.secondary)
-        .frame(maxWidth: 380, alignment: .trailing)
+        .frame(maxWidth: 380, alignment: alignment)
         .help("Show the original message")
         .accessibilityLabel("Replying to \(reply.senderName): \(firstLine). Show the original message")
     }
@@ -349,6 +353,7 @@ struct AgentMessageView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
+            if let reply = message.replyTo { ReplyNote(reply: reply, alignment: .leading) }
             HStack(spacing: 6) {
                 if let date = message.date {
                     Text(message.scheduled ? "Scheduled · " + BusDate.time(date) : BusDate.time(date))

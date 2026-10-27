@@ -113,6 +113,7 @@ The previous session is **not discarded**: after closing it, the bus fires the j
 Scope and edge cases:
 
 - **Conversation-scoped.** `/clear` only closes the active session in the selected conversation. A Telegram `/clear` leaves a `system:peggy` (scheduler) session untouched, and vice versa. An app command bound to a Telegram session closes that Telegram session.
+- **Main in the Mac app (E69).** `/clear` in Main rotates its row (`rotateMainSession`, `end_reason = 'clear'`) and fires the same `clear` trigger. Main stays one item in the app with all its scrollback, and a "New context · /clear" divider marks where the next Claude session starts; nothing moves to Earlier. See [APP_ADAPTER.md → Main](APP_ADAPTER.md#main-one-continuous-conversation).
 - **Nothing to clear.** If you have no active session with a live `claude_session_id` on that channel, it replies `No active session to clear` and does nothing.
 - **Journaling not set up.** When the session's agent has no journaling settings (or they're disabled), the session is still closed, but there is no memory pass (the reply says so).
 

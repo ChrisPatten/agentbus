@@ -21,7 +21,7 @@ import { createMcpServer } from '../mcp/server.js';
 import { registerAllTools, registerHeadlessTools, type HealthState } from '../mcp/tools/index.js';
 import { installBusTokenFetch, resolveBusToken } from '../core/bus-auth.js';
 import type { MessageEnvelope } from '../types/envelope.js';
-import { isSystemOnly, neutralizeSystemMarkers, readSystemBlocks } from '../core/system-block.js';
+import { formatMessagesForSampling } from './message-format.js';
 
 const AGENT_ID = process.env['AGENTBUS_AGENT_ID'] ?? 'claude';
 const TOOLS_ONLY = process.env['AGENTBUS_TOOLS_ONLY'] === 'true';
@@ -78,144 +78,9 @@ if (TOOLS_ONLY) {
 
 // ── Message formatting ────────────────────────────────────────────────────────
 
-/**
- * Format a batch of message envelopes into a single string for delivery.
- * Each message becomes one paragraph; multiple messages in a batch are
- * separated by a blank line.
- */
-function fmtTs(iso: string, full: boolean): string {
-  const d = new Date(iso);
-  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  const p = new Intl.DateTimeFormat('en-CA', {
-    timeZone: tz,
-    year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', hour12: false,
-  }).formatToParts(d);
-  const get = (t: Intl.DateTimeFormatPartTypes) => p.find(x => x.type === t)?.value ?? '00';
-  const hh = get('hour') === '24' ? '00' : get('hour');
-  const time = `${hh}:${get('minute')}`;
-  return full ? `${get('year')}-${get('month')}-${get('day')}T${time}` : time;
-}
-
-export function formatMessagesForSampling(envelopes: MessageEnvelope[]): string {
-  const parts: string[] = [];
-
-  // Bus-originated system blocks (E65) go first, deduplicated across the
-  // batch. Everything after them is neutralized (see src/core/system-block.ts),
-  // so no message text can open or close a block of its own.
-  const systemBlocks = [...new Set(envelopes.flatMap((env) => readSystemBlocks(env.metadata)))];
-
-  const firstMeta = envelopes[0]?.metadata;
-
-  // One-shot context injected by create_telegram_topic (E28) for a brand-new
-  // topic's first turn.
-  const topicContext = firstMeta?.injected_topic_context;
-  if (typeof topicContext === 'string' && topicContext.length > 0) {
-    parts.push(`[Context for this new topic, provided when it was created]\n${topicContext}`);
-    delete firstMeta!['injected_topic_context'];
-  }
-
-  for (let i = 0; i < envelopes.length; i++) {
-    const env = envelopes[i]!;
-    let body: string;
-    if (env.payload.type === 'text') {
-      body = env.payload.body;
-    } else if (env.payload.type === 'reaction') {
-      const verb = env.payload.removed ? 'removed reaction' : 'reacted';
-      body = `[${verb} ${env.payload.emoji} to message ${env.payload.target_message_id}]`;
-    } else {
-      body = `[${(env.payload as { type: string }).type}]`;
-    }
-    // Quoted reply context (E28) — a user quote-replying to a message, rendered
-    // as a context line before the body (same precedent as the reaction line
-    // above), never affecting which session/topic the message routed to.
-    const quoted = env.metadata?.['quoted_message'] as
-      | { sender_name?: string; text?: string }
-      | undefined;
-    if (quoted) {
-      body = `[Replying to ${quoted.sender_name ?? 'someone'}: "${quoted.text ?? ''}"]\n${body}`;
-    }
-    const ts = env.timestamp ? ` at ${fmtTs(env.timestamp, i === 0)}` : '';
-    // Append [Image: ...] and [File: ...] lines after the body so the agent can
-    // read any attached files. Empty-body attachment-only messages become just
-    // the attachment line(s).
-    const attachments = extractAttachments(env.metadata);
-    const attachmentLines = attachments
-      .map((a) => {
-        if (a.type === 'image') return `[Image: ${a.local_path}]`;
-        const label = a.original_filename ? ` — ${a.original_filename}` : '';
-        return `[File: ${a.local_path}${label}]`;
-      })
-      .join('\n');
-    // Inline (HTML-embedded) email images are not downloaded into the body;
-    // surface a hint with the id so the agent can pull one in via fetch_attachment.
-    const inlineLines = extractInlineAttachments(env.metadata)
-      .map((a) => {
-        const name = a.original_filename ? ` ${a.original_filename}` : '';
-        return `[Inline image available${name} — fetch with fetch_attachment(id="${a.id}")]`;
-      })
-      .join('\n');
-    const extraLines = [attachmentLines, inlineLines].filter(Boolean).join('\n');
-    const bodyWithImages = body && extraLines ? `${body}\n${extraLines}` : body || extraLines;
-    const sessionChannel = env.metadata?.['session_channel'];
-    const routeLabel = typeof sessionChannel === 'string' && sessionChannel !== env.channel
-      ? `via ${env.channel} (in your ${sessionChannel} session)`
-      : `via ${env.channel} (topic: ${env.topic})`;
-    // A system-only envelope (E65) carries no human message: only its blocks.
-    if (isSystemOnly(env.metadata)) continue;
-    parts.push(`New message from ${env.sender} ${routeLabel}${ts} [id:${env.id}]:\n${bodyWithImages}`);
-  }
-
-  return [...systemBlocks, ...parts.map(neutralizeSystemMarkers)].join('\n\n');
-}
-
-/**
- * Pull attachments out of envelope.metadata. Tolerant of shape drift: anything
- * that is not an object with a known `type` and a string `local_path` is ignored.
- */
-function extractAttachments(
-  metadata: Record<string, unknown> | undefined,
-): Array<{ type: 'image' | 'file'; local_path: string; original_filename?: string }> {
-  const raw = metadata?.['attachments'];
-  if (!Array.isArray(raw)) return [];
-  const out: Array<{ type: 'image' | 'file'; local_path: string; original_filename?: string }> = [];
-  for (const item of raw) {
-    if (!item || typeof item !== 'object') continue;
-    const { type, local_path, original_filename } = item as Record<string, unknown>;
-    if ((type === 'image' || type === 'file') && typeof local_path === 'string') {
-      out.push({
-        type,
-        local_path,
-        ...(typeof original_filename === 'string' ? { original_filename } : {}),
-      });
-    }
-  }
-  return out;
-}
-
-/**
- * Pull inline-attachment references out of envelope.metadata.inline_attachments.
- * These carry only an id (not a path) — the agent fetches them on demand via the
- * fetch_attachment tool. Tolerant of shape drift, like extractAttachments.
- */
-function extractInlineAttachments(
-  metadata: Record<string, unknown> | undefined,
-): Array<{ id: string; original_filename?: string }> {
-  const raw = metadata?.['inline_attachments'];
-  if (!Array.isArray(raw)) return [];
-  const out: Array<{ id: string; original_filename?: string }> = [];
-  for (const item of raw) {
-    if (!item || typeof item !== 'object') continue;
-    const { id, original_filename } = item as Record<string, unknown>;
-    if (typeof id === 'string') {
-      out.push({
-        id,
-        ...(typeof original_filename === 'string' ? { original_filename } : {}),
-      });
-    }
-  }
-  return out;
-}
+// E69: the formatter lives in a side-effect-free module so it can be tested
+// (and imported) without this entrypoint's config load and stdio server.
+export { formatMessagesForSampling };
 
 /**
  * Send a `notifications/claude/channel` event to wake Claude Code and deliver

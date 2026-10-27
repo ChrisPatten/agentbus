@@ -220,7 +220,7 @@ describe('send_message tool', () => {
 
     const postCall = fetchMock.mock.calls[1]! as [string, { body: string }];
     const sentBody = JSON.parse(postCall[1].body) as { metadata: Record<string, unknown> };
-    expect(sentBody.metadata).toEqual({ thread: 'abc', pinned: true });
+    expect(sentBody.metadata).toEqual({ thread: 'abc', pinned: true, origin: { kind: 'external', label: 'another agent session' } });
 
     await client.close();
   });
