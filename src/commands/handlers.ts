@@ -15,8 +15,9 @@ import type { HeadlessCapacitySnapshot } from '../adapters/cc-headless.js';
 import type { RuntimeResolver } from '../core/runtime-resolver.js';
 import { formatCapabilities } from '../core/runtime-capabilities.js';
 import type { AdvisoryService } from '../advisories/service.js';
-import type { JournalEngine } from '../journaling/engine.js';
+import type { JournalEngine, TriggerHandle } from '../journaling/engine.js';
 import { formatInZone } from '../scheduler/time.js';
+import { isMainSession, rotateMainSession } from '../app/main.js';
 
 /**
  * Mutable holder for the headless adapter's control hooks. Populated by
@@ -435,11 +436,16 @@ async function clearHandler(
   }
 
   // Close immediately so the next inbound message starts a brand-new session.
-  deps.db
-    .prepare(`UPDATE sessions SET ended_at = ? WHERE id = ?`)
-    .run(new Date().toISOString(), session.id);
-
-  const journal = deps.journal?.trigger({ reason: 'clear', sessionId: session.id });
+  // E69: Main rotates (end_reason 'clear'); its scrollback stays continuous.
+  let journal: TriggerHandle | undefined;
+  if (isMainSession(deps.db, session.id)) {
+    journal = rotateMainSession(deps.db, session.id, 'clear', deps.journal)?.journal;
+  } else {
+    deps.db
+      .prepare(`UPDATE sessions SET ended_at = ? WHERE id = ?`)
+      .run(new Date().toISOString(), session.id);
+    journal = deps.journal?.trigger({ reason: 'clear', sessionId: session.id });
+  }
 
   // E66 S66.9 — on cc-pool the leased pane still holds the old Claude
   // context. Detach it now (the next message gets a fresh pane and session)

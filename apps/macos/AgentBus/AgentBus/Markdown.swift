@@ -93,49 +93,49 @@ enum MarkdownParser {
     }
 }
 
-struct MarkdownView: View {
-    let blocks: [MarkdownBlock]
-    init(_ source: String) { blocks = MarkdownParser.parse(source) }
+/// Equatable on its source, so `.equatable()` at the call site skips re-parsing and rebuilding when only
+/// surrounding state (such as hover) changes.
+struct MarkdownView: View, Equatable {
+    let source: String
+    /// The message this text belongs to, so its context menu can offer **Reply**.
+    let replyTarget: ReplyRef?
+    init(_ source: String, replyTarget: ReplyRef? = nil) {
+        self.source = source
+        self.replyTarget = replyTarget
+    }
+
+    /// A message is a run of text blocks in one selectable text view, then a code block, then another
+    /// run. A selection can span a whole run but stops at a code block.
+    enum Segment: Equatable {
+        case text([MarkdownBlock])
+        case code(language: String, text: String)
+    }
+
+    static func segments(_ blocks: [MarkdownBlock]) -> [Segment] {
+        var segments: [Segment] = []
+        var run: [MarkdownBlock] = []
+        for block in blocks {
+            if case .code(let language, let text) = block {
+                if !run.isEmpty { segments.append(.text(run)); run = [] }
+                segments.append(.code(language: language, text: text))
+            } else {
+                run.append(block)
+            }
+        }
+        if !run.isEmpty { segments.append(.text(run)) }
+        return segments
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            ForEach(Array(blocks.enumerated()), id: \.offset) { entry in
-                block(entry.element)
-            }
-        }
-        .textSelection(.enabled)
-    }
-
-    @ViewBuilder private func block(_ block: MarkdownBlock) -> some View {
-        switch block {
-        case .paragraph(let text):
-            Text(MarkdownParser.inline(text)).fixedSize(horizontal: false, vertical: true)
-        case .heading(let level, let text):
-            Text(MarkdownParser.inline(text))
-                .font(level == 1 ? .title2.bold() : level == 2 ? .title3.bold() : .headline)
-                .padding(.top, 2)
-        case .list(let items):
-            VStack(alignment: .leading, spacing: 4) {
-                ForEach(Array(items.enumerated()), id: \.offset) { entry in
-                    let item = entry.element
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Text(item.marker).monospacedDigit().foregroundStyle(.secondary)
-                            .frame(minWidth: 14, alignment: .trailing)
-                        Text(MarkdownParser.inline(item.text)).fixedSize(horizontal: false, vertical: true)
-                    }
-                    .padding(.leading, CGFloat(item.level) * 18)
+            ForEach(Array(Self.segments(MarkdownParser.parse(source)).enumerated()), id: \.offset) { entry in
+                switch entry.element {
+                case .text(let blocks):
+                    MessageTextView(blocks: blocks, kind: .agent, copyMessage: { copyToPasteboard(source) }, replyTarget: replyTarget)
+                case .code(let language, let text):
+                    CodeBlockView(language: language, code: text)
                 }
             }
-        case .code(let language, let text):
-            CodeBlockView(language: language, code: text)
-        case .quote(let text):
-            HStack(spacing: 10) {
-                RoundedRectangle(cornerRadius: 1.5).fill(.separator).frame(width: 3)
-                Text(MarkdownParser.inline(text)).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        case .rule:
-            Divider()
         }
     }
 }
@@ -167,6 +167,11 @@ struct CodeBlockView: View {
     }
 }
 
+func copyToPasteboard(_ text: String) {
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(text, forType: .string)
+}
+
 /// A borderless copy button that briefly shows a checkmark and "Copied".
 struct CopyButton: View {
     let text: String
@@ -175,8 +180,7 @@ struct CopyButton: View {
 
     var body: some View {
         Button {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(text, forType: .string)
+            copyToPasteboard(text)
             copied = true
             Task { try? await Task.sleep(for: .seconds(1.5)); copied = false }
         } label: {

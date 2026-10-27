@@ -174,6 +174,21 @@ function loadMigrations(): Migration[] {
       description: 'Feedback kind lapsed-proposal (E68)',
       sql: readFileSync(join(migrationsDir, '034_feedback_lapsed_proposal.sql'), 'utf-8'),
     },
+    {
+      version: 35,
+      description: 'memory_recent_seen.content for recent.md delta injection',
+      sql: readFileSync(join(migrationsDir, '035_memory_recent_seen_content.sql'), 'utf-8'),
+    },
+    {
+      version: 36,
+      description: 'pending_context_watermarks for E69 pending-context injection',
+      sql: readFileSync(join(migrationsDir, '036_pending_context_watermarks.sql'), 'utf-8'),
+    },
+    {
+      version: 37,
+      description: 'sessions.end_reason and app_events.rotation for E69 Main rotation dividers',
+      sql: readFileSync(join(migrationsDir, '037_session_end_reason.sql'), 'utf-8'),
+    },
   ];
 }
 

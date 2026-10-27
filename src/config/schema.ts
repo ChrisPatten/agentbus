@@ -66,6 +66,16 @@ const ContactPlatformsSchema = z.object({
     })
     .optional(),
   app: z.object({ token: z.string().min(16) }).optional(),
+  slack: z
+    .object({
+      /**
+       * Slack member id (`U…`, or `W…` on Enterprise Grid) that the slack
+       * channel DMs for this contact (E76). Copy it from the Slack profile's
+       * "Copy member ID".
+       */
+      user_id: z.string().regex(/^[UW][A-Z0-9]{2,}$/, 'must be a Slack member id like U012ABCDEF'),
+    })
+    .optional(),
 });
 
 /** A named contact that can send messages to the bus. */
@@ -372,16 +382,10 @@ const CcPoolAdapterSchema = z.object({
   /** What happens to a pane on lease release: clear its screen/context, or kill and relaunch it. */
   on_evict: z.enum(['clear', 'kill']).default('clear'),
   /**
-   * Total time (ms) `ackHandshake` polls capture-pane output for the
-   * "loading development channels" launch confirmation prompt to actually
-   * appear before concluding there is nothing to dismiss. NOT a blind delay
-   * before pressing Enter — Enter is only ever sent once the prompt is
-   * confirmed showing (see `src/pool/pane.ts`'s `ackHandshake`/
-   * `waitForAckPrompt`). Bumped from the original 500ms: measured against
-   * the real CLI (v2.1.274-276) across several runs, the prompt first
-   * renders roughly 1.0-1.6s after the launch line is sent, so 500ms was
-   * consistently too short to ever observe it — see docs/CC_POOL_ADAPTER.md's
-   * Troubleshooting section for the resulting bug and fix.
+   * Deprecated and ignored. The ack handshake used to give up on the prompt
+   * after this long; it now polls until the prompt appears, the pane starts
+   * polling the bus, or the 30s launch deadline passes. Kept so existing
+   * configs still load.
    */
   launch_ack_delay_ms: z.number().int().nonnegative().default(5000),
   /** Max Enter presses to dismiss the ack prompt once it's confirmed showing, before giving up. */
@@ -494,11 +498,35 @@ export const SiriAdapterSchema = z.object({
 
 export type SiriAdapterConfig = z.infer<typeof SiriAdapterSchema>;
 
+/**
+ * Slack channel adapter (E76, S76.0 POC) — outbound only. `send()` POSTs
+ * `{slack_user_id, message}` to an n8n webhook, authenticated with an HS256
+ * JWT, and n8n posts the DM. See docs/SLACK_ADAPTER.md.
+ */
+export const SlackAdapterSchema = z.object({
+  enabled: z.boolean().default(true),
+  /** The n8n webhook's production URL, e.g. https://n8n.example.com/webhook/agentbus/slack-dm. */
+  webhook_url: z.string().url().refine((u) => /^https?:\/\//.test(u), 'must be an http(s) URL'),
+  /** HS256 passphrase shared with n8n's JWT credential, used as raw UTF-8 bytes. */
+  jwt_secret: z.string().min(32),
+  /** Lifetime of each per-request token. */
+  jwt_ttl_seconds: z.number().int().min(10).max(3600).default(60),
+  request_timeout_ms: z.number().int().min(1000).max(60000).default(10000),
+});
+export type SlackAdapterConfig = z.infer<typeof SlackAdapterSchema>;
+
 export const AppAdapterSchema = z.object({
   enabled: z.boolean().default(true),
   event_retention_days: z.number().int().positive().default(30),
   max_upload_bytes: z.number().int().positive().default(25 * 1024 * 1024),
   ping_interval_ms: z.number().int().min(1000).default(30_000),
+  /** E69: retire Main's Claude session after this much operator/agent inactivity. 0 disables. */
+  main_idle_rotation_ms: z.number().int().min(0).default(43_200_000),
+  /** E69: foreign messages injected into the next Main turn as dated context. */
+  pending_context: z.object({
+    max_items: z.number().int().positive().default(10),
+    max_chars: z.number().int().positive().default(4000),
+  }).prefault({}),
 });
 export type AppAdapterConfig = z.infer<typeof AppAdapterSchema>;
 
@@ -512,6 +540,7 @@ const AdaptersConfigSchema = z.object({
   pebble: PebbleAdapterSchema.optional(),
   siri: SiriAdapterSchema.optional(),
   app: AppAdapterSchema.optional(),
+  slack: SlackAdapterSchema.optional(),
 });
 
 const MemoryConfigSchema = z.object({
@@ -927,6 +956,24 @@ export const AppConfigSchema = z.object({
         } else {
           byToken.set(token, key);
         }
+      }
+    }
+
+    // A Slack member id maps outbound DMs to one contact; two contacts on the
+    // same id would make delivery and the transcript ambiguous.
+    const bySlackId = new Map<string, string>();
+    for (const [key, contact] of Object.entries(contacts)) {
+      const userId = contact.platforms.slack?.user_id;
+      if (!userId) continue;
+      const owner = bySlackId.get(userId);
+      if (owner) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Duplicate slack user_id — also used by contact "${owner}"`,
+          path: [key, 'platforms', 'slack', 'user_id'],
+        });
+      } else {
+        bySlackId.set(userId, key);
       }
     }
   }),

@@ -19,7 +19,9 @@ import SwiftData
     static let standupID = "00000000-0000-4000-8000-000000000004"
     static let vendorID = "00000000-0000-4000-8000-000000000005"
     static let siriID = "00000000-0000-4000-8000-000000000006"
-    static let earlierMainID = "00000000-0000-4000-8000-000000000007"
+    /// Main's previous row: its Claude session rotated out after 12 hours idle, its messages still in Main.
+    static let mainPreviousID = "00000000-0000-4000-8000-000000000007"
+    static let mainConversationID = "app:contact:chris:general"
     static let dbtID = "00000000-0000-4000-8000-000000000008"
     static let weekendID = "00000000-0000-4000-8000-000000000009"
 
@@ -72,16 +74,20 @@ import SwiftData
                                 main: Bool = false, count: Int) -> BusSession {
         BusSession(sessionID: id, channel: channel, topic: topic, title: title, startedAt: started, lastActivity: last,
                    endedAt: ended, unreadCount: unread, resumable: resumable, isMain: main, activity: "idle",
-                   messageCount: count, claudeSessionID: id == standupID ? "3f9a5c1e-7b2d-4c8a-9e10-a4d27c9f0e21" : nil)
+                   messageCount: count, claudeSessionID: id == standupID ? "3f9a5c1e-7b2d-4c8a-9e10-a4d27c9f0e21" : nil,
+                   conversationID: main ? mainConversationID : nil)
     }
 
     private static var seq = 0
     private static func message(_ session: String, _ direction: String, _ body: String, at: String,
-                                arrival: String = "app", attachments: [BusAttachment] = [], scheduled: Bool = false) -> BusMessage {
+                                arrival: String = "app", attachments: [BusAttachment] = [], scheduled: Bool = false,
+                                replyTo: ReplyRef? = nil) -> BusMessage {
         seq += 1
+        let main = session == mainID || session == mainPreviousID
         return BusMessage(messageID: "m\(seq)-\(session.suffix(2))", sessionID: session, seq: seq, cursor: "row-\(seq)",
                           direction: direction, arrivalChannel: arrival, body: body, createdAt: at,
-                          scheduled: scheduled, attachments: attachments)
+                          scheduled: scheduled, attachments: attachments, replyTo: replyTo,
+                          conversationID: main ? mainConversationID : nil)
     }
 
     private static func file(_ name: String, expired: Bool = false) -> BusAttachment {
@@ -90,16 +96,14 @@ import SwiftData
 
     static func seed(_ store: ChatStore) {
         let sessions = [
-            session(mainID, "app", "general", "Main", started: daysAgo(3, 7, 0), last: ago(10), main: true, count: 142),
+            session(mainID, "app", "general", "Main", started: daysAgo(10, 9, 0), last: ago(10), main: true, count: 145),
             session(pipelineID, "app", "thread:7a1c", "Pipeline migration plan", started: ago(3600), last: ago(120), count: 12),
             session(snowflakeID, "app", "thread:9d42", "Snowflake cost spike", started: ago(7200), last: ago(300), count: 6),
             session(standupID, "telegram", "8812345", "Standup notes", started: today(8, 2), last: ago(540), count: 64),
             session(vendorID, "email", "vendor-renewal", "Re: Vendor renewal terms", started: ago(86_400), last: ago(3600), unread: 2, count: 9),
             session(siriID, "siri", "siri", "What's on tomorrow?", started: ago(10_800), last: ago(10_800), count: 2),
-            session(earlierMainID, "app", "general", "Main", started: daysAgo(10, 9, 0), last: daysAgo(10, 16, 31),
-                    ended: daysAgo(10, 16, 31), resumable: false, main: true, count: 38),
             session(dbtID, "app", "thread:1f0b", "Q3 dbt upgrade", started: daysAgo(17, 10, 0), last: daysAgo(17, 15, 0),
-                    ended: daysAgo(17, 15, 0), count: 21),
+                    ended: daysAgo(17, 15, 0), resumable: false, count: 21),
             session(weekendID, "app", "thread:52aa", "Weekend plans", started: daysAgo(19, 18, 0), last: daysAgo(19, 19, 0),
                     ended: daysAgo(19, 19, 0), count: 8),
         ]
@@ -127,7 +131,8 @@ import SwiftData
             **Blocked**
             - Snowflake role grant for the new analytics share (waiting on IT)
             """, at: today(8, 51))
-        let earlierReply = message(earlierMainID, "outbound", "Three connectors need changes before Q4: the Salesforce sync needs the new `Opportunity_Split` object, NetSuite should move to the incremental API, and the Zendesk connector can be retired once the support data lands in the lake.", at: daysAgo(10, 16, 13))
+        let earlierReply = message(mainPreviousID, "outbound", "Three connectors need changes before Q4: the Salesforce sync needs the new `Opportunity_Split` object, NetSuite should move to the incremental API, and the Zendesk connector can be retired once the support data lands in the lake.", at: daysAgo(1, 16, 13))
+        let dbtReply = message(dbtID, "outbound", "The upgrade to 1.8 is done. Two macros needed the new `adapter.dispatch` signature; everything else ran clean.", at: daysAgo(17, 14, 50))
         let messages = [
             message(mainID, "outbound", """
                 Morning. The overnight dbt run finished with 2 test failures, both in `stg_orders`:
@@ -141,21 +146,28 @@ import SwiftData
                     at: today(8, 14), attachments: [file("dbt_run_0930.log")]),
             reply,
             message(mainID, "inbound", "Go with both. Open a PR against the staging models.", at: today(8, 21)),
+            // An agent reply the bus quotes (E69 S69.5): it answers a message from before the rotation.
+            message(mainID, "outbound", "PR is up. While I was in there: the Zendesk connector can go now, the support data finished landing in the lake overnight.",
+                    at: today(8, 40), replyTo: ReplyRef(messageID: earlierReply.messageID, senderName: "agent", text: String(earlierReply.body.prefix(200)))),
             message(standupID, "inbound", "Standup in 10. Pull together what I shipped yesterday and what's blocked.",
                     at: today(8, 50), arrival: "telegram"),
             standupReply,
             message(standupID, "inbound", "Also add today's dbt failures. Here's the schema file.", at: today(9, 4),
                     attachments: [file("schema.yml")]),
-            message(earlierMainID, "inbound", "Summarize the Fivetran connector changes we need for the Q4 sources.", at: daysAgo(10, 16, 12)),
+            message(mainPreviousID, "inbound", "Summarize the Fivetran connector changes we need for the Q4 sources.", at: daysAgo(1, 16, 12)),
             earlierReply,
-            message(earlierMainID, "inbound", "Thanks. Attaching the vendor sheet for later.", at: daysAgo(10, 16, 20),
+            message(mainPreviousID, "inbound", "Thanks. Attaching the vendor sheet for later.", at: daysAgo(1, 16, 20),
                     attachments: [file("connector_inventory.xlsx", expired: true)]),
-            message(earlierMainID, "inbound", "/clear", at: daysAgo(10, 16, 31)),
+            message(dbtID, "inbound", "Upgrade the project to dbt 1.8 and tell me what broke.", at: daysAgo(17, 10, 2)),
+            dbtReply,
         ]
         for value in messages { try? store.upsert(value) }
+        // Main's previous row ended 12 hours after its last operator message; the transcript shows a divider there.
+        store.record(SessionBoundary(sessionID: mainPreviousID, endedAt: today(4, 20), reason: "idle"))
         try? store.attachTrail(reply.messageID, lines: Array(repeating: "📖 Read", count: 5), seconds: 41)
         try? store.attachTrail(standupReply.messageID, lines: Array(repeating: "📖 Read", count: 3), seconds: 22)
         try? store.attachTrail(earlierReply.messageID, lines: Array(repeating: "📖 Read", count: 2), seconds: 15)
+        try? store.attachTrail(dbtReply.messageID, lines: Array(repeating: "💻 Bash", count: 4), seconds: 63)
         for row in store.sessions { row.historyComplete = true }
         try? store.context.save()
     }
@@ -177,7 +189,7 @@ import SwiftData
 
 #Preview("Earlier read-only · offline", traits: .fixedLayout(width: 1280, height: 800)) {
     let model = PreviewFixtures.model(connected: false)
-    MainWindow(model: model, initialSelection: PreviewFixtures.earlierMainID, initialShowEarlier: true)
+    MainWindow(model: model, initialSelection: PreviewFixtures.dbtID, initialShowEarlier: true)
         .modelContainer(model.container)
 }
 
@@ -245,8 +257,8 @@ import SwiftData
         if let row = store.session(PreviewFixtures.pipelineID) { SessionRow(session: row, activity: "running", now: .now) }
         if let row = store.session(PreviewFixtures.snowflakeID) { SessionRow(session: row, activity: "queued", now: .now) }
         if let row = store.session(PreviewFixtures.vendorID) { SessionRow(session: row, activity: "idle", now: .now) }
-        if let row = store.session(PreviewFixtures.earlierMainID) { SessionRow(session: row, activity: "idle", now: .now) }
         if let row = store.session(PreviewFixtures.dbtID) { SessionRow(session: row, activity: "idle", now: .now) }
+        if let row = store.session(PreviewFixtures.weekendID) { SessionRow(session: row, activity: "idle", now: .now) }
     }
     .listStyle(.sidebar)
     .frame(width: 268, height: 320)

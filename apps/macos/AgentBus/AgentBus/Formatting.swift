@@ -81,10 +81,11 @@ enum ByteSize {
 
 extension CachedSession {
     var isForeign: Bool { channel != "app" }
-    var isEarlier: Bool { endedAt != nil }
+    /// Main is never Earlier: it is one conversation across its rotating rows (E69).
+    var isEarlier: Bool { endedAt != nil && !isMain }
     var isAppTopic: Bool { channel == "app" && !isMain }
     /// Earlier sessions accept a send (forked into a copy) only while their transcript survives.
-    var isWritable: Bool { endedAt == nil || resumable }
+    var isWritable: Bool { isMain || endedAt == nil || resumable }
     var started: Date? { BusDate.parse(startedAt) }
     var lastActive: Date? { BusDate.parse(lastActivity) }
     var ended: Date? { BusDate.parse(endedAt) }

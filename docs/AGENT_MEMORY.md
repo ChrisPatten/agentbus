@@ -13,7 +13,7 @@ AgentBus adopts Claude Code's native [auto memory](https://code.claude.com/docs/
 | `memory/MEMORY.md`: a few essentials plus a one-line index of topic files | First 200 lines / 25KB (native) | Native auto memory, journalers, consolidation |
 | Typed topic files (frontmatter `metadata.type`: `user`, `feedback`, `project`, `reference`) | On demand | Same |
 | `memory/daily/YYYY-MM-DD.md` (not indexed) | Through `recent.md` | Session journalers |
-| `memory/recent.md` (generated) | Imported from `CLAUDE.md`; refreshed in live sessions by the freshness hook | The bus only |
+| `memory/recent.md` (generated) | Imported from `CLAUDE.md`, or delivered by the freshness hook (E73); updated in live sessions by the hook | The bus only |
 | `memory/archive/` | Never | Consolidation (E68) |
 
 ## Agent setup
@@ -45,7 +45,7 @@ AgentBus adopts Claude Code's native [auto memory](https://code.claude.com/docs/
    ```
 
    In-turn capture is the agent's normal, proactive behavior, not only for explicit "remember X" requests. Journaling is the safety net for that capture and the place for reflection and second-order insights: it sees what the agent already saved and leaves it alone, or corrects and updates it (the default journaling prompt says so). Agents with standing in-turn rules (for example "log commitments immediately") keep them.
-5. **Freshness hook** for cc-pool agents ([below](#freshness-hook)).
+5. **Freshness hook** ([below](#freshness-hook)): sends updates to sessions that import `recent.md`, or delivers `recent.md` itself (full on session start, new entries after) when the import is removed.
 6. **Retire** any SessionStart hook that prints `MEMORY.md` or dailies: native loading and `recent.md` replace it, and it would load them twice.
 
 ## Configuration
@@ -106,31 +106,53 @@ The bus supplies `autoMemoryDirectory` itself, so no per-agent settings file is 
 
 ## Freshness hook
 
-A live session (a cc-pool pane) loads `recent.md` through its `CLAUDE.md` import only when it starts, after `/compact` and after `/clear`. `scripts/hooks/agentbus_recent_memory_hook.sh` keeps it current. Code: `src/memory/recent-freshness.ts` (`RecentFreshness`), route in `src/http/api.ts`, wiring in `src/index.ts`. cc-headless doesn't need it: every turn is a new `claude -p` that reloads the file.
+`scripts/hooks/agentbus_recent_memory_hook.sh` delivers `recent.md` to live sessions (E73) and keeps them current (E67). Code: `src/memory/recent-freshness.ts` (`RecentFreshness`), route in `src/http/api.ts`, wiring in `src/index.ts`. One script and one endpoint serve cc-headless, cc-pool and interactive sessions such as the Claude Code desktop app.
 
-**Wiring** (agent project `.claude/settings.json`; a symlink to the script in the AgentBus repo is the recommended setup):
+**Modes.** The bus picks a delivery mode per agent from disk on every call (a few small file reads: the working dir's `CLAUDE.md`, `.claude/CLAUDE.md` and `CLAUDE.local.md` closure, through `claudeMdImportsRecent` in `setup-check.ts`) and reports it as `mode` in the response:
+
+| Mode | When | What the hook does |
+|---|---|---|
+| `import` | The agent's `CLAUDE.md` closure imports `recent.md` (E67 behavior), or the agent has no working dir (the import can't be checked, so the safe default avoids a double load) | Claude Code loads the file itself at launch, `/compact` and `/clear`, and re-reads it whenever it changes. `SessionStart` only records a baseline and prints nothing; `UserPromptSubmit` prints what is new. |
+| `hook` | A working dir whose `CLAUDE.md` closure does not import `recent.md` | The hook is the only way the session gets the file: the whole file for a session that has not seen it, then only what is new. |
+
+**Wiring** (agent project `.claude/settings.json`; register both events). Use an absolute path to the script (or a symlink to it in the project) and set `AGENTBUS_AGENT_ID` and `AGENTBUS_RECENT_FILE` in the command:
 
 ```json
 {
   "hooks": {
-    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "scripts/hooks/agentbus_recent_memory_hook.sh" }] }],
-    "SessionStart":     [{ "hooks": [{ "type": "command", "command": "scripts/hooks/agentbus_recent_memory_hook.sh" }] }]
+    "SessionStart":     [{ "hooks": [{ "type": "command", "command": "AGENTBUS_AGENT_ID=baxter AGENTBUS_RECENT_FILE=/abs/path/memory/recent.md /path/to/agentbus/scripts/hooks/agentbus_recent_memory_hook.sh" }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "AGENTBUS_AGENT_ID=baxter AGENTBUS_RECENT_FILE=/abs/path/memory/recent.md /path/to/agentbus/scripts/hooks/agentbus_recent_memory_hook.sh" }] }]
   }
 }
 ```
 
-**Flow.** The hook sends `GET /api/v1/memory/recent?harness_session_id=<session_id>&event=prompt|session-start` (plus `&agent=$AGENTBUS_AGENT_ID` when that is set, as a fallback for sessions the bus doesn't know, such as a `claude-code` session). The bus resolves the agent from the Claude session id (bus session by `claude_session_id`, `journal_state.harness_session_id`, then a pool pane lease), regenerates `recent.md` (so dailies written in-turn since the last journal run count), hashes it and compares with `memory_recent_seen` (migration 027, keyed by harness session id, swept after 30 days untouched):
+To switch an agent to hook delivery, register the hook as above and remove the `@memory/recent.md` import from its `CLAUDE.md`. Claude Code sends a changed import whole on every resume; the hook sends only new entries.
 
-| Case | Response | Hook prints |
-|---|---|---|
-| `session-start`, or the session's first check | `reason: baseline`, hash recorded | nothing |
-| Hash unchanged | `reason: unchanged` | nothing |
-| Hash changed | `changed: true`, `context`, hash recorded | `context`: "AgentBus: memory/recent.md (your recent daily journals) changed since this session loaded it. This is the current version; …" plus the full file |
-| No agent / bus down / error | `404`, or nothing | nothing |
+**Flow.** The hook sends `GET /api/v1/memory/recent?harness_session_id=<session_id>&event=prompt|session-start` and, for `SessionStart`, `&source=<hook input source>` (`startup`, `resume`, `clear`, `compact` or `fork`; anything else is a `400`), plus `&agent=$AGENTBUS_AGENT_ID` when set (the fallback for sessions the bus doesn't know, such as the desktop app). The bus resolves the agent from the Claude session id (bus session by `claude_session_id`, `journal_state.harness_session_id`, then a pool pane lease), regenerates `recent.md` (so dailies written in-turn since the last journal run count), hashes it and compares with `memory_recent_seen` (migration 027, keyed by harness session id, swept after 30 days untouched; migration 035 adds `content`, the text the session has). The hook prints `context` for both events when `changed` is true.
 
-Registering `SessionStart` makes the baseline exact: the session has just loaded the file, so the first prompt doesn't repeat it, and every `/compact`, `/clear` or resume resets it. Without it, a session's first prompt is the baseline (anything that changed between launch and that prompt is missed until the next change). The hook is best-effort: it needs `jq` and `curl`, uses a 2 s timeout, prints nothing on any failure and always exits 0. It follows the common hook convention: `AGENTBUS_URL`, token from `AGENTBUS_BUS_TOKEN` (else `AGENTBUS_TOKEN`, else `AGENTBUS_TOKEN_FILE`) through curl's stdin.
+Observed in Claude Code 2.1.287 (spike S73.1, [E73](../_bmad-output/epics/E73-recent-hook-delivery.md)): `SessionStart` fires on every headless `claude -p --resume` with `source: "resume"`, and also right before a `/compact` or `/clear` in the same call; `/compact` then fires `compact` with the same session id; `/clear` and forks arrive with a new session id, so they simply have no row. Hook stdout lands in context at about its own size, once per call that prints.
 
-Injected content is never subtracted: a session that received a new `recent.md` holds both versions in its context until it compacts. The note tells the agent the new one replaces the earlier one.
+| Case | Mode | Response | Hook prints |
+|---|---|---|---|
+| `session-start` or a prompt, and no row for this session id (new session, `clear`, `fork`, or the SessionStart hook never ran / the bus was down) | `hook` | `changed: true`, `context` = "AgentBus: memory/recent.md, your recent daily journals (loaded by the freshness hook; later updates arrive as new entries only):" plus the whole file, no `reason`, hash and content recorded | the whole file |
+| `session-start` with `source=compact` | `hook` | the same, even when nothing changed (compaction dropped what the session had) | the whole file |
+| `session-start` (`resume`, `startup` with a row) or a prompt, with a row, hash unchanged | either | `reason: unchanged` | nothing |
+| With a row, hash changed, new lines | either | `changed: true`, `context`: "AgentBus: new entries in memory/recent.md … since this session last saw it …" plus only the new lines (see below); hash and content recorded | the new lines |
+| With a row, hash changed, nothing new (midnight rollover with no new entries, a day sliding out of the window) | either | `reason: no-new-entries`, hash and content recorded | nothing |
+| With a row, hash changed, row has no stored content (written before migration 035) | either | `changed: true`, `context` with the whole file ("changed since this session loaded it …") | the whole file, once; the next change is a delta |
+| `session-start`, or a session's first check | `import` | `reason: baseline`, hash recorded (whatever the `source`) | nothing |
+| Agent has no `recent.md` | either | `reason: no-recent` | nothing |
+| No agent | n/a | `404` | falls back (below) |
+
+In import mode, registering `SessionStart` makes the baseline exact: the session has just loaded the file, so the first prompt doesn't repeat it. Without it, a session's first prompt is the baseline (anything that changed between launch and that prompt is missed until the next change).
+
+**Disk fallback.** If the bus request fails (curl error, 2 s timeout, non-2xx such as the `404` for an unknown agent, or an answer that is not `{"ok": true, ...}`) on a `SessionStart` whose `source` is `startup`, `clear`, `compact` or `fork`, and `AGENTBUS_RECENT_FILE` names a readable, non-empty file, the hook prints a short preamble ("the bus was unreachable, so this is <path> as last written to disk ...") and the file, so the agent never starts without its journals. It never falls back on `resume` (that fires on every headless turn, so the file would repeat each turn) and `UserPromptSubmit` stays silent on failure. The hook can't know the mode when the bus is down, so an agent that keeps its import should leave `AGENTBUS_RECENT_FILE` unset. The bus's next successful check for that session id starts from no row and sends the whole file again; that duplicate only happens after an outage.
+
+The hook is best-effort: it needs `jq` (without it, it prints nothing) and uses `curl` (without it, the disk fallback still applies), uses a 2 s timeout, and always exits 0. It follows the common hook convention: `AGENTBUS_URL`, token from `AGENTBUS_BUS_TOKEN` (else `AGENTBUS_TOKEN`, else `AGENTBUS_TOKEN_FILE`) through curl's stdin.
+
+**Delta.** The hook sends only what was added (`recentDelta`, `src/memory/recent-freshness.ts`). The stored and current `recent.md` are split into days (`parseRecentDays`: headings, the budget-cut note and the left-out marker are ignored). Per day, in file order (newest first): unchanged → nothing; new day (or previously empty) → `## <date>` and the whole day; otherwise a line-level diff (`lineDiffChange`) decides. Both bodies are split into lines, blank lines are dropped from the alignment (so whitespace-only changes are invisible; trailing whitespace is ignored too), and a longest common subsequence (LCS, classic DP table) pairs the lines the session already has with the new text. Old lines outside the LCS are "deleted": any deleted line after the first matched line is an edit or removal, so the day is `## <date> (rewritten; replaces the earlier version of this day)` and the whole day; deleted lines before the first matched line are what a budget cut dropped from the start of the day and are ignored. Otherwise the new lines outside the LCS are the additions: each contiguous run (blank lines inside a run are kept, blank lines at its edges dropped) is a block, blocks are joined by a blank line, and the day is sent as `## <date> (new entries only)` and those blocks, or nothing if there are none. This covers entries appended at the end, entries inserted between existing ones (an agent that writes a new entry above the last one), and a moving budget cut, with or without additions. Two guards: if the matched content totals under 40 characters (trimmed) while the old day had more, or nothing matched at all, the alignment is a coincidence of stock lines such as `- Nothing actionable.` and the day is rewritten; and when old lines x new lines exceeds 4,000,000 (days are normally a few hundred lines) the table is not built and the previous rules decide (`appendOnlyChange`: stored text is a line-aligned prefix → appended lines; current text is a line-aligned tail of the stored text → nothing; the end of the stored text overlaps the start of the current text on whole lines, at least 40 characters, by `overlapLength` → lines after the overlap; anything else → rewritten). The cut moves because, when `recent.md` is over its budget, the oldest included day keeps only the end of its journal (`tailOf`, cut at a line boundary) and the cut moves later every time a newer day grows. Cost is O(old lines x new lines) time and memory per day. The midnight rollover sends nothing by itself, because the same text moves under a new heading.
+
+A session that received a delta holds it next to the original `recent.md` until it compacts, which is what the note says. A rewritten day is the only case where two versions of the same text sit in context; its heading says the new one replaces the earlier one.
 
 ## Setup checks
 
@@ -139,7 +161,7 @@ Injected content is never subtracted: a session that received a new `recent.md` 
 - `loading`: `native`, `injected` (cc-headless with `native: false`) or `none` (a runtime without native memory or injection).
 - Who supplies `autoMemoryDirectory`: `bus` (cc-headless, cc-pool), `operator` (cc-pool whose `launch_args` pass their own `--settings`: warns that file must set it), `settings-file` / `unknown` (claude-code: `.claude/settings.local.json` sets it, or a warning to set it).
 - Settings files that set it uselessly: project `.claude/settings.json` (ignored by Claude Code), a `.claude/settings.local.json` value the bus's `--settings` overrides.
-- Whether `CLAUDE.md`, `.claude/CLAUDE.md` or `CLAUDE.local.md` in the working dir import `recent.md`, following `@` imports (outside code) up to 4 hops (`importClosure`). Native without the import warns ("add that line so the agent sees its recent journals"); injection with the import warns (loaded twice). Without a working dir it can't check and says so.
+- How `recent.md` reaches the agent (`recentDelivery`: `import`, `hook`, `both` or `none`; `null` without a working dir). Import: `CLAUDE.md`, `.claude/CLAUDE.md` or `CLAUDE.local.md` in the working dir import it, following `@` imports (outside code) up to 4 hops (`importClosure`). Hook (E73): `.claude/settings.json` or `.claude/settings.local.json` registers a command under `SessionStart` that runs `agentbus_recent_memory_hook.sh` (`settingsRegisterRecentHook`). The match is on the script's basename, so absolute or relative paths, quotes, env prefixes such as `AGENTBUS_AGENT_ID=baxter` and a symlink to the script all count; malformed JSON, a missing file or `disableAllHooks: true` count as not registered. Native loading with `none` warns that the agent never sees its recent journals (register the hook or add the import); native with `both` is import mode, so the hook only sends updates, and the setup check recommends removing the import to let the hook deliver the file (full on session start, new entries after). Injection (`memory.native: false`) with either the import or the hook warns that the bus injects it too. Without a working dir it can't check and says so. `/journal` shows the result as `recent.md delivery: import | hook | import, hook sends updates | none`.
 - A memory dir that is unresolved or missing.
 
-**Advisory.** Native loading without the `recent.md` import also raises the `memory:recent-not-imported` advisory (`warning`, one per agent, to its owners; `src/memory/setup-advisory.ts`). Every setup check raises or resolves it: at startup, on `/journal`, after each successful journal run, and every 15 minutes on the journaling engine's tick. Once the import is there, the next check resolves it. An agent without a working dir (`importsRecent: null`) and bus injection never get it.
+**Advisory.** Native loading where `recent.md` is delivered by neither the import nor the hook raises the `memory:recent-not-imported` advisory (`warning`, one per agent, to its owners; `src/memory/setup-advisory.ts`, `missesRecentDelivery`). The condition key keeps its E68 name so advisories that are already open still resolve; since E73 it means "not delivered", and an agent whose `SessionStart` hook delivers `recent.md` never gets it (the remediation names both fixes). Every setup check raises or resolves it: at startup, on `/journal`, after each successful journal run, and every 15 minutes on the journaling engine's tick. Once the import or the hook is there, the next check resolves it. An agent without a working dir (`importsRecent: null`) and bus injection never get it. Import plus hook is a setup recommendation only (it is not a double load), not an advisory.

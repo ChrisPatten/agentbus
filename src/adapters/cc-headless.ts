@@ -41,7 +41,7 @@ import { memoryLayout, memorySettingsFor, type MemoryLayout } from '../memory/la
 import { DISABLE_AUTO_MEMORY_ENV, autoMemoryArgs, usesNativeMemory } from '../memory/native.js';
 import { runtimeCapabilities } from '../core/runtime-capabilities.js';
 import type { MessageEnvelope } from '../types/envelope.js';
-import { formatMessagesForSampling } from './cc.js';
+import { formatMessagesForSampling } from './message-format.js';
 import { isSystemOnly } from '../core/system-block.js';
 import { formatToolCallSummary } from './tool-call-summary.js';
 import { resolveModel } from './model-override-loader.js';
@@ -50,6 +50,9 @@ import { HeadlessLimiter, type TurnClass } from './headless-limiter.js';
 import { terminateProcessGroup } from '../journaling/process.js';
 import { busTokenEnv, resolveBusToken, withBusToken } from '../core/bus-auth.js';
 import { JOURNAL_TURN_DISALLOWED_TOOLS } from '../learning/protected-paths.js';
+import { SOURCE_LABEL_ENV, TURN_CONVERSATION_ENV, type Origin } from '../core/origin.js';
+import { isMainConversation } from '../app/main.js';
+import { advanceWatermark, buildPendingContext, pendingContextLimits } from '../app/pending-context.js';
 
 const configPath = resolve(process.env['AGENTBUS_CONFIG'] ?? 'config.yaml');
 const config = loadConfig(configPath);
@@ -159,8 +162,12 @@ function cleanTmp(...paths: string[]): void {
  * Build the stdio MCP config for this headless agent's tool subprocess.
  * E68: also used for fresh consolidation runs on cc-pool agents, so the
  * pass can call `propose_change`.
+ * E69: `turnConversationId` (normal turns only) lets the MCP tools stamp
+ * their sends with this turn's origin; `sourceLabel` (scheduled turns: the
+ * schedule's name) becomes the server's `AGENTBUS_SOURCE_LABEL`. The config
+ * file is written per turn.
  */
-export function buildMcpConfig(agentId: string): unknown {
+export function buildMcpConfig(agentId: string, turnConversationId?: string, sourceLabel?: string): unknown {
   return {
     mcpServers: {
       agentbus: {
@@ -171,6 +178,8 @@ export function buildMcpConfig(agentId: string): unknown {
           AGENTBUS_TOOLS_ONLY: 'true',
           AGENTBUS_CONFIG: configPath,
           AGENTBUS_AGENT_ID: agentId,
+          ...(turnConversationId ? { [TURN_CONVERSATION_ENV]: turnConversationId } : {}),
+          ...(turnConversationId && sourceLabel ? { [SOURCE_LABEL_ENV]: sourceLabel } : {}),
         },
       },
     },
@@ -384,6 +393,25 @@ export interface HeadlessActivityEvent extends HeadlessCapacitySnapshot {
   turn_class: TurnClass;
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * E69 — the human name of the schedule that fired `env`, or null when it
+ * isn't a scheduled fire. The scheduler stamps `schedule_label` (the
+ * schedule's `label`) and `schedule_id`: the label wins, then a config id
+ * (operator-chosen, e.g. "ambient-scan"), then "scheduled job <id8>" for a
+ * generated UUID id. Never the prompt body.
+ */
+export function scheduleSourceLabel(env: MessageEnvelope): string | null {
+  const meta = env.metadata;
+  if (meta?.['scheduled'] !== true) return null;
+  const label = typeof meta['schedule_label'] === 'string' ? meta['schedule_label'].trim() : '';
+  if (label) return label;
+  const id = typeof meta['schedule_id'] === 'string' ? meta['schedule_id'].trim() : '';
+  if (!id) return 'scheduled job';
+  return UUID_RE.test(id) ? `scheduled job ${id.slice(0, 8)}` : id;
+}
+
 /** The forwarded provider command an envelope carries, if any (E71). */
 export function providerCommandOf(env: MessageEnvelope): { command: string; args_raw: string } | null {
   const pc = env.metadata?.['provider_command'] as { command?: unknown; args_raw?: unknown } | undefined;
@@ -470,6 +498,10 @@ class HeadlessInstance {
     };
     if (this.nativeMemory) delete env[DISABLE_AUTO_MEMORY_ENV];
     else env[DISABLE_AUTO_MEMORY_ENV] = '1';
+    // E69: the turn's conversation reaches the MCP child only via the per-turn
+    // MCP config; never inherit a stray one (journaling turns must stay unstamped).
+    delete env[TURN_CONVERSATION_ENV];
+    delete env[SOURCE_LABEL_ENV];
     return env;
   }
 
@@ -888,7 +920,11 @@ class HeadlessInstance {
     return true;
   }
 
-  private async deliverResponse(original: MessageEnvelope, resultText: string): Promise<void> {
+  private async deliverResponse(original: MessageEnvelope, resultText: string, conversationId: string, sourceLabel?: string): Promise<void> {
+    // E69: fallback delivery bypasses MCP, so stamp the turn origin here.
+    const origin: Origin = {
+      kind: 'turn', agent_id: this.cfg.agent_id, conversation_id: conversationId, ...(sourceLabel ? { label: sourceLabel } : {}),
+    };
     const body = {
       channel: original.channel,
       topic: original.topic,
@@ -897,7 +933,7 @@ class HeadlessInstance {
       reply_to: original.id,
       priority: 'normal',
       payload: { type: 'text', body: resultText },
-      metadata: {},
+      metadata: { origin },
     };
 
     const res = await this.busFetch(`${this.busBaseUrl}/api/v1/messages`, {
@@ -953,6 +989,13 @@ class HeadlessInstance {
      * CLI only treats a prompt as a slash command when it starts with "/".
      */
     rawPrompt?: boolean;
+    /**
+     * E69 — fired once, when the turn's claude_session_id first becomes known
+     * (the turn started). Not fired when the spawn fails before that.
+     */
+    onTurnStarted?: (claudeSessionId: string) => void;
+    /** E69 — the turn's source label for MCP sends (scheduled turns: the schedule's name). */
+    sourceLabel?: string;
   }): Promise<SpawnResult> {
     const now = new Date();
 
@@ -1020,11 +1063,21 @@ class HeadlessInstance {
     );
 
     const spPath = writeTmp(systemPromptText, '.txt');
-    const mcpPath = writeTmp(JSON.stringify(buildMcpConfig(this.cfg.agent_id)), '.json');
+    // E69: journaling and consolidation turns stay unstamped (they never deliver).
+    const mcpPath = writeTmp(JSON.stringify(buildMcpConfig(this.cfg.agent_id, opts.journal ? undefined : opts.conversationId, opts.sourceLabel)), '.json');
 
     // Persist claude_session_id as soon as known so session observers have it
     // before child exit. The final write below is idempotent.
+    let turnStarted = false;
     const persistSessionId = (id: string): void => {
+      if (!turnStarted) {
+        turnStarted = true;
+        try {
+          opts.onTurnStarted?.(id);
+        } catch (err) {
+          console.error(`[${this.label}] onTurnStarted failed for ${opts.conversationId.slice(0, 8)}:`, err);
+        }
+      }
       if (!opts.session) return;
       try {
         storeClaudeSessionId(opts.db, opts.session.id, id);
@@ -1114,7 +1167,12 @@ class HeadlessInstance {
     const session = getActiveSession(db, conversationId);
     const resumeId = session?.claude_session_id ?? null;
 
-    const prompt = formatMessagesForSampling(envelopes);
+    // E69 S69.4: in Main, prepend foreign messages the agent hasn't seen
+    // (runClaudeTurn puts any memory prefix ahead of it). Queried at turn
+    // start, so anything arriving mid-turn waits for the next one.
+    const pending = this.pendingContextFor(db, conversationId, envelopes);
+    const formatted = formatMessagesForSampling(envelopes);
+    const prompt = pending ? `${pending.block}\n\n${formatted}` : formatted;
 
     // E53: the scheduler stamps metadata.schedule_model on the fired envelope
     // when the schedule that triggered this batch has its own `model`. Only
@@ -1122,6 +1180,8 @@ class HeadlessInstance {
     // global override or this instance's configured model.
     const rawScheduleModel = first.metadata?.['schedule_model'];
     const scheduleModel = typeof rawScheduleModel === 'string' && rawScheduleModel.trim().length > 0 ? rawScheduleModel : undefined;
+    // E69: a scheduled turn's sends are labelled with the schedule's name.
+    const sourceLabel = scheduleSourceLabel(first) ?? undefined;
 
     // Delivery can happen before child exit. Keep conversation ownership until
     // both exit and fallback delivery settle, so no two children ever resume
@@ -1137,6 +1197,9 @@ class HeadlessInstance {
       onToolCall: (call) =>
         this.reportToolCall(channel, contactId, formatToolCallSummary(call.name, call.input), topic, conversationId),
       scheduleModel,
+      sourceLabel,
+      // E69: advance only once the turn is known to have started.
+      ...(pending ? { onTurnStarted: () => advanceWatermark(db, conversationId, pending.through) } : {}),
     });
     if (stoppedByUser) return;
     if (deliveredViaTool) {
@@ -1146,10 +1209,30 @@ class HeadlessInstance {
     if (error || !resultText) {
       const detail = error ?? 'no result';
       console.error(`[${this.label}] claude invocation failed for ${conversationId.slice(0, 8)}: ${detail}`);
-      await this.deliverResponse(first, this.buildErrorReply(detail));
+      await this.deliverResponse(first, this.buildErrorReply(detail), conversationId, sourceLabel);
       return;
     }
-    await this.deliverResponse(first, resultText);
+    await this.deliverResponse(first, resultText, conversationId, sourceLabel);
+  }
+
+  /** E69 S69.4 — Main's pending-context block for this batch, or null. Never throws. */
+  private pendingContextFor(db: Database.Database, conversationId: string, envelopes: MessageEnvelope[]) {
+    try {
+      if (!isMainConversation(db, conversationId)) return null;
+      const replyTargets = new Set<string>();
+      for (const env of envelopes) {
+        const quotedId = (env.metadata?.['quoted_message'] as { message_id?: unknown } | undefined)?.message_id;
+        if (typeof quotedId === 'string') replyTargets.add(quotedId);
+      }
+      return buildPendingContext(db, conversationId, {
+        limits: pendingContextLimits(config),
+        batchMessageIds: envelopes.map((env) => env.id),
+        replyTargets,
+      });
+    } catch (err) {
+      console.error(`[${this.label}] pending context failed for ${conversationId.slice(0, 8)}:`, err);
+      return null;
+    }
   }
 
   // ── Forwarded provider command (E71) ─────────────────────────────────────
@@ -1183,7 +1266,7 @@ class HeadlessInstance {
     if (result.stoppedByUser) return;
     if (result.error) {
       console.error(`[${this.label}] ${line} failed for ${conversationId.slice(0, 8)}: ${result.error}`);
-      await this.deliverResponse(env, `${line} failed: ${result.error.slice(0, ERROR_DETAIL_MAX_LENGTH)}`);
+      await this.deliverResponse(env, `${line} failed: ${result.error.slice(0, ERROR_DETAIL_MAX_LENGTH)}`, conversationId);
       return;
     }
 
@@ -1194,7 +1277,7 @@ class HeadlessInstance {
     }
 
     if (result.deliveredViaTool) return;
-    await this.deliverResponse(env, result.resultText?.trim() ? result.resultText : `Ran ${line}.`);
+    await this.deliverResponse(env, result.resultText?.trim() ? result.resultText : `Ran ${line}.`, conversationId);
   }
 
   // ── Silent journaling turn (E20, E66) ──────────────────────────────────

@@ -1483,7 +1483,7 @@ describe('TelegramAdapter createTopic (E28)', () => {
         .get('telegram:group:-100123', result.topic) as { thread_key: string; metadata: string } | undefined;
       expect(row).toBeDefined();
       expect(row!.thread_key).toBe('-100123:42');
-      expect(JSON.parse(row!.metadata)).toEqual({ chatId: -100123, messageThreadId: 42 });
+      expect(JSON.parse(row!.metadata)).toEqual({ chatId: -100123, messageThreadId: 42, topicName: 'Wanda prep' });
     }
   });
 
@@ -1512,6 +1512,7 @@ describe('TelegramAdapter createTopic (E28)', () => {
       expect(JSON.parse(row.metadata)).toEqual({
         chatId: -100123,
         messageThreadId: 42,
+        topicName: 'Wanda prep',
         pendingContext: 'Track Wanda birthday planning here',
       });
     }
@@ -1704,6 +1705,101 @@ describe('TelegramAdapter create_telegram_topic context injection (E28)', () => 
 });
 
 // ── buildDraftTrail (E29 length cap / truncation) ────────────────────────────
+
+describe('TelegramAdapter topic name + pinned message capture', () => {
+  let db: Database.Database;
+  let tmpDir: string;
+  let adapter: TelegramAdapter;
+  let processInboundCalls: Array<Record<string, unknown>>;
+  const CH = 'telegram:group:-100123';
+  const topic = topicForThreadKey('-100123:42');
+  const upd = (u: unknown) => (adapter as unknown as { processUpdate: (u: unknown) => Promise<boolean> }).processUpdate(u);
+  const base = { from: { id: 12345, first_name: 'Chris' }, chat: { id: -100123, type: 'supergroup' }, date: 0 };
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'agentbus-topic-pin-'));
+    db = new Database(':memory:');
+    runMigrations(db);
+    processInboundCalls = [];
+    const pipeline = {
+      process: async (ctx: { envelope: Record<string, unknown> }) => {
+        processInboundCalls.push(ctx.envelope);
+        return null;
+      },
+    } as unknown as PipelineEngine;
+    adapter = new TelegramAdapter({
+      config: makeTestConfig(tmpDir),
+      queue: {} as unknown as MessageQueue,
+      pipeline,
+      db,
+      instanceConfig: { token: 'test:token', poll_timeout: 30 },
+    });
+    vi.stubGlobal('fetch', vi.fn());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    db.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('returns null with no topic info', () => {
+    expect(adapter.getTopicContext(CH, topic)).toBeNull();
+  });
+
+  it('captures the name from forum_topic_created and the pin from a pinned_message service update', async () => {
+    await upd({ update_id: 1, message: { ...base, message_id: 42, message_thread_id: 42, is_topic_message: true, forum_topic_created: { name: 'Kitchen Reno' } } });
+    expect(adapter.getTopicContext(CH, topic)).toBe('[Topic context] Topic: Kitchen Reno');
+    await upd({ update_id: 2, message: { ...base, message_id: 50, message_thread_id: 42, is_topic_message: true, pinned_message: { message_id: 44, text: 'Budget is 40k; contractor is Bob' } } });
+    expect(adapter.getTopicContext(CH, topic)).toBe('[Topic context] Topic: Kitchen Reno\nPinned: Budget is 40k; contractor is Bob');
+    // Service messages are never delivered to the agent.
+    expect(processInboundCalls).toHaveLength(0);
+  });
+
+  it('updates the name on forum_topic_edited', async () => {
+    await upd({ update_id: 1, message: { ...base, message_id: 42, message_thread_id: 42, forum_topic_created: { name: 'Old' } } });
+    await upd({ update_id: 2, message: { ...base, message_id: 60, message_thread_id: 42, forum_topic_edited: { name: 'New' } } });
+    expect(adapter.getTopicContext(CH, topic)).toBe('[Topic context] Topic: New');
+  });
+
+  it('learns the name from the topic-root reply_to of an ordinary message, and does not treat it as a quote', async () => {
+    await upd({ update_id: 1, message: { ...base, message_id: 70, text: 'hi', message_thread_id: 42, is_topic_message: true, reply_to_message: { message_id: 42, forum_topic_created: { name: 'Trip' } } } });
+    expect(adapter.getTopicContext(CH, topic)).toBe('[Topic context] Topic: Trip');
+    const md = processInboundCalls[0]!['metadata'] as Record<string, unknown>;
+    expect(md['quoted_message']).toBeUndefined();
+  });
+
+  it('keeps name and pin across later messages (not one-shot) and clears a text-less pin', async () => {
+    await upd({ update_id: 1, message: { ...base, message_id: 42, message_thread_id: 42, forum_topic_created: { name: 'T' } } });
+    await upd({ update_id: 2, message: { ...base, message_id: 50, message_thread_id: 42, pinned_message: { message_id: 44, text: 'pin' } } });
+    await upd({ update_id: 3, message: { ...base, message_id: 51, text: 'hello', message_thread_id: 42, is_topic_message: true } });
+    expect(adapter.getTopicContext(CH, topic)).toBe('[Topic context] Topic: T\nPinned: pin');
+    await upd({ update_id: 4, message: { ...base, message_id: 52, message_thread_id: 42, pinned_message: { message_id: 45, date: 0 } } });
+    expect(adapter.getTopicContext(CH, topic)).toBe('[Topic context] Topic: T');
+  });
+
+  it('truncates very long pins', async () => {
+    await upd({ update_id: 1, message: { ...base, message_id: 50, message_thread_id: 42, pinned_message: { message_id: 44, text: 'x'.repeat(5000) } } });
+    const ctx = adapter.getTopicContext(CH, topic)!;
+    expect(ctx.length).toBeLessThan(2100);
+    expect(ctx).toContain('[truncated]');
+  });
+
+  it('ignores service messages from non-allowlisted senders', async () => {
+    await upd({ update_id: 1, message: { ...base, from: { id: 999, first_name: 'X' }, message_id: 50, message_thread_id: 42, pinned_message: { message_id: 44, text: 'evil' } } });
+    expect(adapter.getTopicContext(CH, topic)).toBeNull();
+  });
+
+  it('records the name at createTopic time', async () => {
+    const threadKey = '-100123:77';
+    upsertThread(db, { channel: CH, topic: topicForThreadKey(threadKey), threadKey, metadata: { chatId: -100123, messageThreadId: 77, topicName: 'Made' } });
+    expect(adapter.getTopicContext(CH, topicForThreadKey(threadKey))).toBe('[Topic context] Topic: Made');
+  });
+
+  it('ignores channels it does not own', () => {
+    expect(adapter.getTopicContext('email', topic)).toBeNull();
+  });
+});
 
 describe('buildDraftTrail', () => {
   it('returns an empty, non-truncated trail for no lines', () => {

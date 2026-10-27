@@ -820,6 +820,25 @@ describe('command handlers', () => {
       expect(db.prepare('SELECT ended_at FROM sessions WHERE id = ?').get('foreign-clear')).toMatchObject({ ended_at: null });
     });
 
+    it('rotates Main with end_reason clear and keeps the reply (E69)', async () => {
+      const db = makeDb();
+      const now = new Date().toISOString();
+      db.prepare(`INSERT INTO conversation_registry(id,contact_id,channel,topic,first_seen,last_seen) VALUES (?,?,?,?,?,?)`)
+        .run(computeConversationId('chris', 'app', 'general'), 'chris', 'app', 'general', now, now);
+      insertSession(db, { id: 'main-clear', channel: 'app', agentId: 'agent:peggy' });
+      const journal = journalMock();
+      const clear = createBuiltinCommands({ ...makeDeps({ db }), journal } as never).find(c => c.name === 'clear')!;
+      const envelope = { ...makeEnvelope(), channel: 'app', payload: { type: 'text' as const, body: '/clear' } };
+      const result = await clear.handler([], makeCtx(db, { channel: 'app', adapterId: 'app', envelope }));
+      expect(result.body).toBe('Context cleared — your next message starts a fresh session. Journaling the previous session in the background.');
+      expect(db.prepare('SELECT ended_at, end_reason FROM sessions WHERE id = ?').get('main-clear'))
+        .toEqual({ ended_at: expect.any(String), end_reason: 'clear' });
+      expect(journal.trigger).toHaveBeenCalledExactlyOnceWith({ reason: 'clear', sessionId: 'main-clear' });
+      // The end event is tagged for the app's rotation divider.
+      expect(db.prepare(`SELECT COUNT(*) AS n FROM app_events WHERE session_id = 'main-clear' AND rotation = 1`).get())
+        .toEqual({ n: 1 });
+    });
+
     it('reports nothing to clear when there is no active session', async () => {
       const db = makeDb();
       const journal = journalMock();

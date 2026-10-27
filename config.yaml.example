@@ -61,11 +61,24 @@ adapters:
   #   reply_timeout_ms: 25000        # server-side cap on how long an ask waits (1000-60000)
   #   max_body_bytes: 8192
   #   debug_delay_ms: 0              # device testing only; refused when NODE_ENV=production
+  # ── Slack (outbound POC, E76) — docs/SLACK_ADAPTER.md ───────────────────────
+  # send() POSTs {slack_user_id, message} to an n8n webhook with an HS256 JWT;
+  # n8n posts the DM. Setup: integrations/n8n/slack-relay/README.md.
+  # slack:
+  #   enabled: true
+  #   webhook_url: https://n8n.example.com/webhook/agentbus/slack-dm
+  #   jwt_secret: ${SLACK_JWT_SECRET}  # >= 32 chars, same text as n8n's JWT credential passphrase
+  #   jwt_ttl_seconds: 60
+  #   request_timeout_ms: 10000
   # app:                            # Mac app; local Fastify listener, no extra port
   #   enabled: true
   #   event_retention_days: 30
   #   max_upload_bytes: 26214400
   #   ping_interval_ms: 30000
+  #   main_idle_rotation_ms: 43200000  # retire Main's Claude session after 12 h without operator/agent activity; 0 = never
+  #   pending_context:                 # foreign messages shown to the next Main turn as dated context
+  #     max_items: 10
+  #     max_chars: 4000
   #   # Scheduled work can notify this contact through send_message(channel: app).
   #   # An omitted topic lands in Main and remains available while the client is offline.
 
@@ -132,7 +145,7 @@ adapters:
   #   launch_args: []                # extra args appended to every launch/resume (the bus already
   #                                  # adds --dangerously-load-development-channels server:agentbus)
   #   poll_interval_ms: 1000         # passed through to each pane's cc.ts
-  #   launch_ack_delay_ms: 5000       # how long to poll for the "loading development channels" prompt before sending Enter to dismiss it
+  #   launch_ack_delay_ms: 5000       # deprecated, ignored: the prompt is now polled for until the launch deadline
   #   launch_ack_max_attempts: 3     # re-send Enter if capture-pane still shows the prompt after a dismiss attempt
   #   launch_ack_pattern: "loading development channels"  # prompt text to match; override if the CLI rewords it
   #   pane_env:                      # set via `tmux new-window -e` (TERM/COLORTERM always added)
@@ -163,6 +176,8 @@ contacts:
       #   token: ${SIRI_TOKEN_ALICE}          # identifies this contact on /api/v1/siri; >= 16 chars, `openssl rand -hex 24`
       # app:
       #   token: ${APP_TOKEN_ALICE}           # identifies this contact on /api/v1/app; >= 16 chars
+      # slack:
+      #   user_id: U012ABCDEF                 # Slack member id the slack channel DMs; unique across contacts
 
 topics:
   - general

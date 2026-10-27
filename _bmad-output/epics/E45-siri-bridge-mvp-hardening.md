@@ -3,6 +3,7 @@
 | Field | Value |
 |---|---|
 | Epic ID | E45 |
+| Status | Pending (not started) |
 | Dependencies | E43 (production endpoints), E44 (Gate 2 numbers). |
 | Story Count | 7 |
 | Estimated Complexity | L |

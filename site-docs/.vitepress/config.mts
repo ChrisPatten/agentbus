@@ -49,6 +49,7 @@ export default defineConfig({
           { text: 'Mac app', link: '/channels/mac-app' },
           { text: 'Siri', link: '/channels/siri' },
           { text: 'Pebble', link: '/channels/pebble' },
+          { text: 'Slack', link: '/channels/slack' },
         ],
       },
       {

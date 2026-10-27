@@ -15,6 +15,9 @@ import { createRouteResolve } from '../pipeline/stages/route-resolve.js';
 import { createTranscriptLog } from '../pipeline/stages/transcript-log.js';
 import { Scheduler } from '../scheduler/scheduler.js';
 import { CommandRegistry } from '../commands/registry.js';
+import { SessionTracker } from '../memory/session-tracker.js';
+import { mainConversationId } from './main.js';
+import type { PipelineContext } from '../pipeline/types.js';
 import { createAppSession, eventBounds, listSessions, readEvents } from './store.js';
 import type { AppConfig } from '../config/schema.js';
 import type { MessageEnvelope } from '../types/envelope.js';
@@ -113,4 +116,55 @@ describe('scheduled work notifying the app while the client is offline', () => {
       }
     });
   }
+});
+
+describe('proactive Main sends with no reply (E69)', () => {
+  it('stay in one Main across 30-minute gaps, with no Earlier entries, and a late reply joins the same row', async () => {
+    const db = new Database(':memory:');
+    try {
+      db.pragma('foreign_keys = ON');
+      runMigrations(db);
+      const app = new AppAdapter(db, () => 'agent:work');
+      const thirtyMinutes = { ...config,
+        memory: { session_idle_threshold_ms: 1_800_000, summarizer_interval_ms: 60_000 } } as AppConfig;
+      const tracker = new SessionTracker({ db, config: thirtyMinutes });
+      const age = (ms: number) => {
+        const at = new Date(Date.now() - ms).toISOString();
+        db.prepare('UPDATE sessions SET last_activity = ?, started_at = ?').run(at, at);
+        db.prepare('UPDATE transcripts SET created_at = ?').run(at);
+      };
+      const ids: string[] = [];
+      for (let i = 0; i < 3; i++) {
+        const outbound: MessageEnvelope = {
+          id: randomUUID(), timestamp: new Date().toISOString(), channel: 'app', topic: 'general',
+          sender: 'agent:work', recipient: 'contact:alice', reply_to: null, priority: 'normal',
+          payload: { type: 'text', body: `Scan ${i}` }, metadata: { origin: { kind: 'external', label: 'Ambient scan' } },
+        };
+        ids.push(outbound.id);
+        expect((await app.send(outbound)).success).toBe(true);
+        age(60 * 60 * 1000); // an hour passes with no reply
+        tracker.tick();
+      }
+      expect(db.prepare('SELECT COUNT(*) AS n FROM sessions').get()).toEqual({ n: 1 });
+      expect(db.prepare('SELECT ended_at FROM sessions').get()).toEqual({ ended_at: null });
+      expect(listSessions(db, 'alice', 'agent:work', 'earlier', 20)).toEqual([]);
+      const all = listSessions(db, 'alice', 'agent:work', 'all', 20);
+      expect(all).toHaveLength(1);
+      expect(all[0]).toMatchObject({ is_main: true, title: 'Main', ended_at: null, unread_count: 3 });
+
+      // The operator's reply an hour later lands in the same row (Stage 80's gap rule exempts Main).
+      const reply: MessageEnvelope = { id: randomUUID(), timestamp: new Date().toISOString(), channel: 'app', topic: 'general',
+        sender: 'contact:alice', recipient: 'agent:work', reply_to: null, priority: 'normal',
+        payload: { type: 'text', body: 'Thanks for the scans' }, metadata: {} };
+      await createTranscriptLog(db, thirtyMinutes)({ envelope: reply, contact: null, dedupKey: reply.id,
+        isSlashCommand: false, slashCommand: null, topics: ['general'], priorityScore: 0,
+        routes: [{ adapterId: 'cc-headless', recipientId: 'agent:work' }], conversationId: mainConversationId('alice'),
+        sessionId: null, sessionCreated: false, config, db } as unknown as PipelineContext);
+      expect(db.prepare('SELECT COUNT(*) AS n FROM sessions').get()).toEqual({ n: 1 });
+      const replay = readEvents(db, 'alice', 'agent:work', 0, eventBounds(db, 'alice').latest);
+      expect(replay.filter(e => e.event === 'message').map(e => e.data['body']))
+        .toEqual(['Scan 0', 'Scan 1', 'Scan 2', 'Thanks for the scans']);
+      expect(new Set(replay.filter(e => e.event === 'session').map(e => e.data['session_id'])).size).toBe(1);
+    } finally { db.close(); }
+  });
 });

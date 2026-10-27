@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Epic ID | E60 |
-| Status | Implemented; live Telegram-to-app walkthrough pending |
+| Status | Implemented; live Telegram-to-app walkthrough deferred until the personal agent (no Telegram on the work agent) |
 | Dependencies | E58 conversation-scoped queue and `/stop`; E59 authenticated app protocol, session list, history, and event stream |
 | Story Count | 6 |
 | Estimated Complexity | XL |

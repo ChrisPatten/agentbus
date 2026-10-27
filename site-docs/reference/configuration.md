@@ -43,6 +43,7 @@ One block per channel or runtime you want to run. Leave a block out to turn it o
 | `app` | [Mac app](/channels/mac-app) |
 | `siri` | [Siri](/channels/siri) |
 | `pebble` | [Pebble](/channels/pebble) |
+| `slack` | [Slack](/channels/slack) |
 | `cc-headless` | [cc-headless](/runtimes/cc-headless) |
 | `cc-pool` | [cc-pool](/runtimes/cc-pool) |
 | `claude-code` | [claude-code](/runtimes/claude-code) |
@@ -78,6 +79,7 @@ contacts:
       app: { token: ${APP_TOKEN_ME} }
       siri: { token: ${SIRI_TOKEN_ME} }
       pebble: { token: ${PEBBLE_TOKEN_ME} }
+      slack: { user_id: U012ABCDEF }
 ```
 
 | Field | Rules |
@@ -87,6 +89,7 @@ contacts:
 | `email.address` | One address or a list |
 | `app.token`, `siri.token` | At least 16 characters, unique across contacts |
 | `pebble.token` | Unique across contacts |
+| `slack.user_id` | A Slack member ID (`U…` or `W…`), unique across contacts |
 
 ## agents
 

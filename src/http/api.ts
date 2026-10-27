@@ -866,13 +866,15 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
   }
 
   // ── Recent memory freshness (E67) ──────────────────────────────────────────
-  // GET /api/v1/memory/recent?harness_session_id=&event=prompt|session-start&agent=
+  // GET /api/v1/memory/recent?harness_session_id=&event=prompt|session-start&source=startup|resume|clear|compact|fork&agent=
   // — called by scripts/hooks/agentbus_recent_memory_hook.sh. Resolves the
-  // agent from the Claude session id (agent= is only a fallback), regenerates
-  // the agent's recent.md and returns it in `context` only when its hash
-  // differs from what that session last saw. session-start (and a session's
-  // first check) records a baseline. 404 when no agent resolves. See
-  // docs/AGENT_MEMORY.md#freshness-hook.
+  // agent from the Claude session id (agent= is only a fallback) and
+  // regenerates the agent's recent.md. Import mode (its CLAUDE.md imports
+  // recent.md): session-start records a baseline, later checks return new
+  // entries in `context`. Hook mode (no import, E73): a session that hasn't
+  // seen the file, or a compact start, gets the whole file; otherwise new
+  // entries only. `mode` is in the response. 404 when no agent resolves,
+  // 400 for a bad event/source. See docs/AGENT_MEMORY.md#freshness-hook.
   if (deps.memoryRecent) {
     const memoryRecent = deps.memoryRecent;
     server.get<{ Querystring: Record<string, unknown> }>('/api/v1/memory/recent', async (req, reply) => {

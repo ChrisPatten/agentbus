@@ -129,7 +129,20 @@ interface TelegramMessage {
   /** True for a message in a forum topic other than General (E28). */
   is_topic_message?: boolean;
   /** The message this one quote-replies to, if any (E28 — context only, not thread routing). */
-  reply_to_message?: { message_id: number; from?: TelegramUser; text?: string; caption?: string };
+  reply_to_message?: {
+    message_id: number;
+    from?: TelegramUser;
+    text?: string;
+    caption?: string;
+    /** Present when the replied-to message is a forum topic's creation service message (the topic root). */
+    forum_topic_created?: { name: string };
+  };
+  /** Service message: a message was pinned (in a forum topic, in that topic). Carries the pinned message. */
+  pinned_message?: { message_id: number; text?: string; caption?: string; date?: number };
+  /** Service message: a forum topic was created. */
+  forum_topic_created?: { name: string };
+  /** Service message: a forum topic was renamed (name absent if only the icon changed). */
+  forum_topic_edited?: { name?: string };
 }
 
 interface TelegramReactionType {
@@ -184,7 +197,22 @@ interface TelegramThreadMetadata {
    * the first turn of a fresh session, regardless of which contact sends it.
    */
   pendingContext?: string;
+  /**
+   * Forum topic display name, captured from Telegram service messages
+   * (forum_topic_created / forum_topic_edited, or the topic-root reply_to of
+   * any message in the topic) or from createForumTopic. Survives restarts.
+   */
+  topicName?: string;
+  /**
+   * Text of the topic's most recently pinned message, captured from the
+   * `pinned_message` service update. The Bot API has no per-topic getChat
+   * pinned_message, so this is the only way to learn a topic's pin.
+   */
+  pinnedText?: string;
 }
+
+/** Max chars of a topic's pinned text injected into a new session's context. */
+export const TOPIC_PIN_MAX_CHARS = 2000;
 
 /** Per-chat state for the live tool-call status stream (E29). */
 interface DraftState {
@@ -797,6 +825,7 @@ export class TelegramAdapter implements AdapterInstance {
       metadata: {
         chatId,
         messageThreadId: created.message_thread_id,
+        topicName: created.name ?? name,
         ...(context ? { pendingContext: context } : {}),
       },
     });
@@ -1388,6 +1417,72 @@ export class TelegramAdapter implements AdapterInstance {
     }
   }
 
+  /**
+   * Record a forum topic's name / pinned message from a service message.
+   * Returns true when `msg` was such a service message (fully handled).
+   * Pure local DB work; never throws into the inbound loop.
+   */
+  private captureTopicServiceMessage(msg: TelegramMessage, channel: string): boolean {
+    const isPin = !!msg.pinned_message;
+    const created = msg.forum_topic_created?.name;
+    const edited = msg.forum_topic_edited;
+    if (!isPin && !created && !edited) return false;
+    // Topic id: service messages inside a topic carry message_thread_id; a
+    // creation message is the topic root, whose id is the topic id.
+    const threadId = msg.message_thread_id ?? (created ? msg.message_id : undefined);
+    if (threadId === undefined || msg.chat.type === 'private') return true;
+    try {
+      const threadKey = `${msg.chat.id}:${threadId}`;
+      const topic = topicForThreadKey(threadKey);
+      const existing = getThread<TelegramThreadMetadata>(this.deps.db, channel, topic);
+      const metadata: TelegramThreadMetadata = {
+        ...(existing?.metadata ?? {}),
+        chatId: msg.chat.id,
+        messageThreadId: threadId,
+      };
+      const newName = created ?? edited?.name;
+      if (newName) metadata.topicName = newName;
+      if (msg.pinned_message) {
+        const text = (msg.pinned_message.text ?? msg.pinned_message.caption ?? '').trim();
+        // An inaccessible/non-text pin still replaces any older pin, so a
+        // stale pin is never presented as current.
+        if (text) metadata.pinnedText = text;
+        else delete metadata.pinnedText;
+      }
+      upsertThread<TelegramThreadMetadata>(this.deps.db, { channel, topic, threadKey, metadata });
+    } catch (err) {
+      console.error(`${this.tag} Failed to record forum topic service message: ${String(err)}`);
+    }
+    return true;
+  }
+
+  /**
+   * AdapterInstance.getTopicContext — the "[Topic context]" block for a forum
+   * topic's new session: its name and pinned-message text, from what
+   * captureTopicServiceMessage / processUpdate persisted. Null when the topic
+   * is unknown or has neither. Synchronous local read: cannot block delivery.
+   */
+  getTopicContext(channel: string, topic: string): string | null {
+    if (!this.ownsChannel(channel)) return null;
+    try {
+      const thread = getThread<TelegramThreadMetadata>(this.deps.db, channel, topic);
+      const { topicName, pinnedText } = thread?.metadata ?? {};
+      if (!topicName && !pinnedText) return null;
+      const lines = ['[Topic context]'];
+      if (topicName) lines[0] += ` Topic: ${topicName}`;
+      if (pinnedText) {
+        const pin = pinnedText.length > TOPIC_PIN_MAX_CHARS
+          ? `${pinnedText.slice(0, TOPIC_PIN_MAX_CHARS)}… [truncated]`
+          : pinnedText;
+        lines.push(`Pinned: ${pin}`);
+      }
+      return lines.join('\n');
+    } catch (err) {
+      console.error(`${this.tag} getTopicContext failed: ${String(err)}`);
+      return null;
+    }
+  }
+
   private async processUpdate(update: TelegramUpdate): Promise<boolean> {
     if (process.env.TELEGRAM_DEBUG_PAYLOADS) {
       console.log(`${this.tag} [DEBUG] raw update ${update.update_id}:\n${JSON.stringify(update, null, 2)}`);
@@ -1417,6 +1512,13 @@ export class TelegramAdapter implements AdapterInstance {
     // no static per-group config (E28). See ownsChannel() for how the
     // registry's channel lookups recognize this dynamically-derived id.
     const channel = msg.chat.type === 'private' ? this.id : `${this.id}:group:${msg.chat.id}`;
+
+    // Forum-topic service messages (pin / create / rename) carry no body but
+    // are the only way the Bot API tells us a topic's name and pinned
+    // message. Capture them (after the allowlist check, so only trusted
+    // members' pins can reach an agent's context) and stop — nothing to
+    // deliver.
+    if (this.captureTopicServiceMessage(msg, channel)) return true;
 
     // Detect an inbound image or file attachment.
     const attachmentSource = this.extractAttachmentSource(msg);
@@ -1455,11 +1557,18 @@ export class TelegramAdapter implements AdapterInstance {
       // Full replace (not patch): omitting pendingContext here is what clears
       // it — this topic's very first delivered message is definitionally the
       // first turn of a fresh session, so the injection is naturally one-shot.
+      // Preserves the captured topic name / pin (they are not one-shot).
+      const rootName = msg.reply_to_message?.forum_topic_created?.name;
       upsertThread<TelegramThreadMetadata>(this.deps.db, {
         channel,
         topic,
         threadKey,
-        metadata: { chatId: msg.chat.id, messageThreadId: msg.message_thread_id },
+        metadata: {
+          chatId: msg.chat.id,
+          messageThreadId: msg.message_thread_id,
+          ...((rootName ?? existingThread?.metadata.topicName) ? { topicName: rootName ?? existingThread!.metadata.topicName } : {}),
+          ...(existingThread?.metadata.pinnedText ? { pinnedText: existingThread.metadata.pinnedText } : {}),
+        },
       });
     }
 
@@ -1467,7 +1576,10 @@ export class TelegramAdapter implements AdapterInstance {
     // conversational gesture, not a request to fork a session: surfaced to
     // the agent as context only, via metadata.quoted_message. Never touches
     // topic/thread routing (computed independently above).
-    const quoted = msg.reply_to_message;
+    // In a forum topic, a message with no explicit reply targets the topic
+    // root, which Telegram reports as reply_to_message (the creation service
+    // message) — that is not a user quote.
+    const quoted = msg.reply_to_message?.forum_topic_created ? undefined : msg.reply_to_message;
     const quotedMessage = quoted
       ? {
           platform_message_id: `${msg.chat.id}:${quoted.message_id}`,

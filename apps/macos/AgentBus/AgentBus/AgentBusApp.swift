@@ -13,10 +13,11 @@ private let alertLog = Logger(subsystem: "com.chrispatten.agentbus.mac", categor
 
     func install() { UNUserNotificationCenter.current().delegate = self }
     /// One alert per live message; replayed messages collapse into one alert per session.
-    func received(_ message: BusMessage, title: String, replay: Bool) {
+    /// `id` is the sidebar item the message belongs to, which for Main can differ from the message's row.
+    func received(_ message: BusMessage, id: String, title: String, replay: Bool) {
         guard message.direction == "outbound" else { return }
         if replay {
-            pendingReplay[message.sessionID, default: (title, 0)].count += 1
+            pendingReplay[id, default: (title, 0)].count += 1
             flushTask?.cancel()
             flushTask = Task { [weak self] in
                 try? await Task.sleep(for: .seconds(1))
@@ -24,7 +25,7 @@ private let alertLog = Logger(subsystem: "com.chrispatten.agentbus.mac", categor
                 self?.flushReplay()
             }
         } else {
-            post(id: message.sessionID, title: title, body: hidePreviews ? "New message" : String(message.body.prefix(400)))
+            post(id: id, title: title, body: hidePreviews ? "New message" : String(message.body.prefix(400)))
         }
     }
     private func flushReplay() {
@@ -71,7 +72,9 @@ private let alertLog = Logger(subsystem: "com.chrispatten.agentbus.mac", categor
 /// Owns the cache, settings, connection and alerts shared by every window.
 @MainActor final class AppModel {
     /// The app's one instance. `App` structs can be initialized more than once, so the model isn't stored there.
-    static let shared = AppModel()
+    /// As the unit tests' host it stays offline and in memory, so a test run never touches the real cache or bus.
+    static let shared = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+        ? AppModel(inMemory: true, live: false) : AppModel()
     let container: ModelContainer
     let settings: ClientSettings
     let connection: BusConnection
@@ -95,17 +98,18 @@ private let alertLog = Logger(subsystem: "com.chrispatten.agentbus.mac", categor
     }
 
     private func agentMessage(_ message: BusMessage, replay: Bool) {
-        let session = connection.store.session(message.sessionID)
-        let onScreen = connection.isViewing(message.sessionID) && NSApp.isActive
-        alertLog.debug("Agent message in \(message.sessionID, privacy: .public): onScreen=\(onScreen) replay=\(replay)")
+        let session = connection.store.item(for: message)
+        let id = session?.id ?? message.sessionID
+        let onScreen = connection.isViewing(id) && NSApp.isActive
+        alertLog.debug("Agent message in \(id, privacy: .public): onScreen=\(onScreen) replay=\(replay)")
         if onScreen {
-            Task { try? await connection.markRead(message.sessionID) }
+            Task { try? await connection.markRead(id) }
             if !replay {
                 AccessibilityNotification.Announcement("New message in \(session?.title ?? "AgentBus")").post()
             }
         } else {
             alert.hidePreviews = settings.hidePreviews
-            alert.received(message, title: session?.title ?? "AgentBus", replay: replay)
+            alert.received(message, id: id, title: session?.title ?? "AgentBus", replay: replay)
         }
     }
 
@@ -184,7 +188,8 @@ struct MainWindow: View {
             if let initialSelection {
                 selection = initialSelection; showInspector = initialInspector; showEarlier = initialShowEarlier
             }
-            if selection == nil { selection = groups.main?.id ?? BusTarget.mainSentinel }
+            // A stored selection of one of Main's former rows (a rotation while the app was closed) is Main.
+            if selection == nil || groups.main?.answers(to: selection) == true { selection = groups.main?.id ?? BusTarget.mainSentinel }
             connection.setViewing(windowID, session: selection)
             if let selection { model.open(selection) }
             if model.live && !model.settings.hasSavedToken {
@@ -198,9 +203,9 @@ struct MainWindow: View {
             if let id { model.open(id) }
         }
         .onChange(of: groups.main?.id) { _, id in
-            // Main's session appears after the first connect, or after a /clear successor.
-            let selected = sessions.first { $0.id == selection }
-            if let id, selection == nil || selection == BusTarget.mainSentinel || (selected?.isMain == true && selected?.isEarlier == true) {
+            // Main's session appears after the first connect, and its ID follows each rotation (E69).
+            let selected = sessions.first { $0.answers(to: selection) }
+            if let id, selection == nil || selection == BusTarget.mainSentinel || selected?.isMain == true {
                 selection = id
             }
         }
@@ -215,11 +220,12 @@ struct MainWindow: View {
     }
 
     @ViewBuilder private func detail(_ groups: SessionGroups) -> some View {
-        let current = sessions.first { $0.id == selection }
+        let current = sessions.first { $0.answers(to: selection) }
         if current != nil || selection == BusTarget.mainSentinel || selection == nil {
             SessionDetail(connection: connection, session: current ?? (selection == nil ? groups.main : nil),
                           showInspector: $showInspector, newConversation: model.newConversation)
-                .id(current?.id ?? BusTarget.mainSentinel)
+                // Main keeps one identity across rotations, so its composer and scroll position survive.
+                .id(current?.draftKey ?? BusTarget.mainSentinel)
         } else {
             // A new topic's ack can arrive before its session event.
             ProgressView().controlSize(.small)
@@ -244,7 +250,7 @@ struct SessionWindow: View {
 
     var body: some View {
         Group {
-            if let session = sessions.first(where: { $0.id == sessionID }) {
+            if let session = sessions.first(where: { $0.answers(to: sessionID) }) {
                 SessionDetail(connection: model.connection, session: session,
                               showInspector: $showInspector, newConversation: model.newConversation)
             } else {
@@ -285,6 +291,10 @@ struct AgentBusCommands: Commands {
             Button("Rename…") { session?.rename() }
                 .keyboardShortcut("r")
                 .disabled(session?.canRename != true)
+            Divider()
+            Button("Reply") { session?.reply() }
+                .keyboardShortcut("r", modifiers: [.command, .shift])
+                .disabled(session?.canReply != true)
         }
         CommandGroup(after: .sidebar) {
             Button(session?.inspectorShown == true ? "Hide Inspector" : "Show Inspector") { session?.toggleInspector() }

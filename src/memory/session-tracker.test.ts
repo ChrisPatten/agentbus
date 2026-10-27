@@ -279,6 +279,38 @@ describe('SessionTracker close notifications (E66)', () => {
   });
 });
 
+describe('SessionTracker and Main (E69)', () => {
+  const mainConversation = (db: Database.Database, id: string) => db.prepare(`INSERT INTO conversation_registry(id,contact_id,channel,topic,first_seen,last_seen)
+    VALUES (?,'contact:chris','app','general',?,?)`).run(id, new Date().toISOString(), new Date().toISOString());
+
+  it('never closes an idle Main row that has no claude_session_id', () => {
+    const db = makeDb();
+    const closed: string[] = [];
+    mainConversation(db, 'c-main');
+    insertSession(db, { id: 'main', channel: 'app', conversationId: 'c-main', lastActivityOffset: 2 * 3_600_000 });
+    new SessionTracker({ db, config: stubConfig, onSessionClosed: (s) => closed.push(s.id) }).tick();
+    expect(db.prepare(`SELECT ended_at, status FROM sessions WHERE id = 'main'`).get()).toEqual({ ended_at: null, status: 'active' });
+    expect(closed).toEqual([]);
+  });
+
+  it('rotates a Main row idle past main_idle_rotation_ms and reports the close once', () => {
+    const db = makeDb();
+    const closed: string[] = [];
+    mainConversation(db, 'c-main');
+    insertSession(db, { id: 'main', channel: 'app', conversationId: 'c-main', claudeSessionId: 'claude-1', startedAtOffset: 3 * 3_600_000 });
+    db.prepare(`INSERT INTO transcripts(id,message_id,conversation_id,session_id,created_at,channel,contact_id,direction,body,metadata)
+      VALUES ('t1','m1','c-main','main',?,'app','contact:chris','inbound','hi','{}')`).run(new Date(Date.now() - 3 * 3_600_000).toISOString());
+    const config = (ms: number) => ({ ...stubConfig, adapters: { app: { main_idle_rotation_ms: ms } } }) as unknown as AppConfig;
+    new SessionTracker({ db, config: config(4 * 3_600_000), onSessionClosed: (s) => closed.push(s.id) }).tick();
+    expect(db.prepare(`SELECT ended_at FROM sessions WHERE id = 'main'`).get()).toEqual({ ended_at: null });
+    const tracker = new SessionTracker({ db, config: config(2 * 3_600_000), onSessionClosed: (s) => closed.push(s.id) });
+    tracker.tick();
+    tracker.tick();
+    expect(db.prepare(`SELECT end_reason, status FROM sessions WHERE id = 'main'`).get()).toEqual({ end_reason: 'idle', status: 'closed' });
+    expect(closed).toEqual(['main']);
+  });
+});
+
 describe('SessionTracker start/stop', () => {
   it('starts and stops without errors', () => {
     const db = makeDb();

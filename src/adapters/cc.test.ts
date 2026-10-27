@@ -133,6 +133,13 @@ describe('formatMessagesForSampling', () => {
     expect(result).toContain('New message from contact:alice');
   });
 
+  it('renders topic_context (new-session topic name + pin) before the message', () => {
+    const env = makeEnvelope({ metadata: { topic_context: '[Topic context] Topic: Kitchen\nPinned: Budget 40k' } });
+    const result = formatMessagesForSampling([env]);
+    expect(result.startsWith('[Topic context] Topic: Kitchen')).toBe(true);
+    expect(result.indexOf('Pinned: Budget 40k')).toBeLessThan(result.indexOf('New message from'));
+  });
+
   it('does not prepend when injected_topic_context is absent', () => {
     const result = formatMessagesForSampling([makeEnvelope()]);
     expect(result.startsWith('New message')).toBe(true);
@@ -314,6 +321,15 @@ describe('formatMessagesForSampling', () => {
     });
     const result = formatMessagesForSampling([env]);
     expect(result).toContain('[Replying to someone: "Original message"]');
+  });
+
+  it('renders the app whole-message reference (message_id, you|agent) as a Replying line', () => {
+    for (const sender of ['you', 'agent']) {
+      const env = makeEnvelope({
+        metadata: { quoted_message: { message_id: '0a1b2c3d-0000-4000-8000-000000000001', sender_name: sender, text: 'Earlier text' } },
+      });
+      expect(formatMessagesForSampling([env])).toContain(`[Replying to ${sender}: "Earlier text"]\nHello!`);
+    }
   });
 
   it('does not render a quoted line when quoted_message is absent', () => {

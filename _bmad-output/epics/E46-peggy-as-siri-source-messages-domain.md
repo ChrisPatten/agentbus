@@ -3,6 +3,7 @@
 | Field | Value |
 |---|---|
 | Epic ID | E46 |
+| Status | Pending (not started) |
 | Dependencies | E43, E45 (MVP shipped). E35 (`GET /api/v1/sessions/:id/transcript`) for sync. |
 | Story Count | 7 |
 | Estimated Complexity | L |

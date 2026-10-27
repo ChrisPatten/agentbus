@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Epic ID | E61 |
-| Status | Implemented; live offline cron-to-app check pending |
+| Status | Complete (live check confirmed 2026-10-21) |
 | Dependencies | E59 durable app events/offline send; existing scheduler and `send_message`; E53 schedule topic behavior where available |
 | Story Count | 4 |
 | Estimated Complexity | M |

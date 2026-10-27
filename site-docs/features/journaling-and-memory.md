@@ -219,7 +219,7 @@ why, and the evidence. Your owner approves or denies it. Memory files are yours 
 
 | Command | Shows or does |
 |---|---|
-| `/journal` | Journaling status for this conversation and its agent: time since the last journal, waiting messages, the configured chain, recent failures, hook health, open warnings, and whether the agent's memory is set up (for example, that its `CLAUDE.md` imports `recent.md`) |
+| `/journal` | Journaling status for this conversation and its agent: time since the last journal, waiting messages, the configured chain, recent failures, hook health, open warnings, and whether the agent's memory is set up (for example, whether `recent.md` reaches it through an import or the recent-memory hook) |
 | `/journal runs [n]` | Recent journal runs: which journaler ran, the outcome, what it could see, and the cost |
 | `/journal now` | Journal this conversation now, if there's anything new |
 | `/journal consolidate` | Run consolidation now |

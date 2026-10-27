@@ -3,6 +3,7 @@
 | Field | Value |
 |---|---|
 | Epic ID | E4 |
+| Status | Backlog (not started) |
 | Build Order Position | 9 of 12 |
 | Dependencies | E1 (AppConfig, AdapterRegistry, Envelope type), E5 (inbound pipeline endpoint) |
 | Story Count | 3 |

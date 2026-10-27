@@ -39,6 +39,8 @@ The headless runtime currently posts typing and tool status to the source channe
 
 ### S63.3 — App `/clear` successor session
 
+> **Superseded for Main by E69 (2026-10-27).** `/clear` in Main rotates Main's row and keeps it one continuous item in the app (`_bmad-output/epics/E69-app-main-continuity.md`, S69.3). This story still applies to app topic sessions.
+
 For `app` Main and app topic sessions, create or identify the new active session as part of handling `/clear`, after closing the old row and without reusing its Claude transcript. Emit the old closed state and new active state through the existing transactional session-event path. Expose the successor ID to the client through an additive protocol-v1 field or a precise documented event contract. Keep the old command response in the old session, maintain idempotent retry behavior, and test Main/topic, repeated `/clear`, offline replay, and Earlier resume. Do not alter foreign-channel `/clear` semantics.
 
 ### S63.4 — Lifecycle verification and documentation

@@ -13,7 +13,9 @@ import { persistAttachmentBuffer, resolveMediaConfig } from '../media/attachment
 import { patchThreadMetadata } from '../pipeline/thread-store.js';
 import { computeConversationId } from '../pipeline/conversation-id.js';
 import { channelMatches } from '../pipeline/types.js';
-import { createAppSession, eventBounds, history, listSessions, readEvents, recordSessionEvent, routedAgent, sessionInfo, visibleSession } from '../app/store.js';
+import type { QuotedMessage } from '../app/store.js';
+import { createAppSession, eventBounds, history, isMainRow, listSessions, readEvents, quotableMessage, recordSessionEvent, routedAgent, sessionInfo, sessionScope, visibleSession } from '../app/store.js';
+import { MAIN_TOPIC } from '../app/main.js';
 import { sessionCanResume } from '../app/resume.js';
 import { VERSION } from '../version.js';
 import type { InboundAbort, InboundMessage, InboundResult } from './api.js';
@@ -34,13 +36,16 @@ const Target = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('session'), session_id: z.string().uuid() }),
 ]);
 const Send = z.object({ type: z.literal('send'), client_msg_id: z.string().uuid(), target: Target,
-  body: z.string().default(''), attachment_ids: z.array(z.string().uuid()).default([]) })
+  body: z.string().default(''), attachment_ids: z.array(z.string().uuid()).default([]),
+  reply_to: z.string().uuid().optional() })
   .refine(v => v.body.trim().length > 0 || v.attachment_ids.length > 0);
 
 interface StoredIntent {
   message_id: string; topic: string; session_id: string | null; body: string;
   original_channel?: string;
   attachments: InboundMessage['attachments']; agent_id: string; adapter_id: string;
+  /** E72 whole-message reply: id as sent, and the quote resolved once at send time. */
+  reply_to?: string; quoted_message?: QuotedMessage;
 }
 
 function asNumber(input: unknown, fallback: number, max: number): number {
@@ -108,6 +113,7 @@ export async function registerAppRoutes(server: FastifyInstance, deps: AppRouteD
           ...(intent.session_id ? { bound_session_id: intent.session_id } : {}),
           conversation_id: bound?.conversation_id ?? computeConversationId(contactId, 'app', intent.topic),
           ...(bound ? { session_channel: intent.original_channel ?? bound.channel, session_topic: bound.topic } : {}),
+          ...(intent.quoted_message ? { quoted_message: intent.quoted_message } : {}),
           attachments: intent.attachments ?? [] } };
       deps.queue.enqueue(envelope);
       status = 'queued';
@@ -116,7 +122,8 @@ export async function registerAppRoutes(server: FastifyInstance, deps: AppRouteD
         sender: `contact:${contactId}`, payload: { type: 'text', body: intent.body },
         attachments: intent.attachments, metadata: { source: 'app', client_msg_id: clientMsgId,
           ...(intent.session_id ? { bound_session_id: intent.session_id } : {}),
-          ...(intent.original_channel ? { resumed_from_channel: intent.original_channel } : {}) } });
+          ...(intent.original_channel ? { resumed_from_channel: intent.original_channel } : {}),
+          ...(intent.quoted_message ? { quoted_message: intent.quoted_message } : {}) } });
       status = result.queued && result.enqueued_count > 0 ? 'queued'
         : !result.queued && result.reason === 'command_handled' ? 'command' : 'rejected';
       reason = status === 'rejected' ? result.queued ? 'No route accepted the message' : result.reason : undefined;
@@ -193,9 +200,11 @@ export async function registerAppRoutes(server: FastifyInstance, deps: AppRouteD
       const contact = authenticate(req)!; const agent = agentFor(contact);
       if (!agent) return reply.code(404).send({ error: 'Session not found' });
       const { id } = req.params as { id: string }; const q = req.query as Record<string, unknown>;
-      const messages = history(deps.db, contact, agent, id, asNumber(q['limit'], 50, 100), typeof q['before'] === 'string' ? q['before'] : undefined);
-      return messages ? { messages, next_before: messages.length ? messages[0]!['cursor'] : null }
-        : reply.code(404).send({ error: 'Session not found' });
+      const page = history(deps.db, contact, agent, id, asNumber(q['limit'], 50, 100), typeof q['before'] === 'string' ? q['before'] : undefined);
+      if (!page) return reply.code(404).send({ error: 'Session not found' });
+      const { messages, boundaries } = page;
+      // E69: Main pages carry its rotation boundaries; other sessions omit the field.
+      return { messages, next_before: messages.length ? messages[0]!['cursor'] : null, ...(boundaries ? { boundaries } : {}) };
     });
     routes.post('/api/v1/app/attachments', async (req, reply) => {
       const contact = authenticate(req)!; const agent = agentFor(contact);
@@ -272,12 +281,21 @@ export async function registerAppRoutes(server: FastifyInstance, deps: AppRouteD
             if (!target) {
               send(socket, { type: 'ack', client_msg_id: f.client_msg_id, status: 'rejected', reason: 'session_not_found' }); return;
             }
-            if (target.ended_at) {
+            // E69: an ended Main row is still Main; the send goes to Main, never an Earlier fork.
+            if (target.ended_at && isMainRow(target)) topic = MAIN_TOPIC;
+            else if (target.ended_at) {
               if (!sessionCanResume(deps.db, deps.config, target.id)) {
                 send(socket, { type: 'ack', client_msg_id: f.client_msg_id, status: 'rejected', reason: 'not_resumable' }); return;
               }
               earlierTarget = target;
             } else { topic = target.topic; sessionId = target.id; }
+          }
+          let quotedMessage: QuotedMessage | undefined;
+          if (f.reply_to) {
+            quotedMessage = quotableMessage(deps.db, contactId, agentId, f.reply_to) ?? undefined;
+            if (!quotedMessage) {
+              send(socket, { type: 'ack', client_msg_id: f.client_msg_id, status: 'rejected', reason: 'reply_target_not_found' }); return;
+            }
           }
           const attachments: NonNullable<InboundMessage['attachments']> = [];
           for (const id of f.attachment_ids) {
@@ -307,6 +325,7 @@ export async function registerAppRoutes(server: FastifyInstance, deps: AppRouteD
               (!r.match.topic || r.match.topic === topic));
             const intent: StoredIntent = { message_id: messageId, topic, session_id: sessionId, body: f.body,
               attachments, agent_id: agentId,
+              ...(quotedMessage ? { reply_to: f.reply_to, quoted_message: quotedMessage } : {}),
               ...(earlierTarget ? { original_channel: earlierTarget.channel } : {}),
               adapter_id: route?.target.adapterId ?? 'cc-headless' };
             const pending = { type: 'ack', client_msg_id: f.client_msg_id, message_id: messageId, session_id: sessionId, status: 'pending' };
@@ -316,7 +335,8 @@ export async function registerAppRoutes(server: FastifyInstance, deps: AppRouteD
           const result = await deps.submitInbound({ id: messageId, channel: 'app', topic, sender: `contact:${contactId}`,
             payload: { type: 'text', body: f.body }, attachments, metadata: { source: 'app', client_msg_id: f.client_msg_id,
               ...(sessionId ? { bound_session_id: sessionId } : {}),
-              ...(earlierTarget ? { resumed_from_channel: earlierTarget.channel } : {}) } });
+              ...(earlierTarget ? { resumed_from_channel: earlierTarget.channel } : {}),
+              ...(quotedMessage ? { quoted_message: quotedMessage } : {}) } });
           if (!sessionId) {
             sessionId = (deps.db.prepare(`SELECT s.id FROM sessions s JOIN conversation_registry cr ON cr.id=s.conversation_id
               WHERE cr.contact_id=? AND cr.channel='app' AND cr.topic=? AND s.ended_at IS NULL ORDER BY s.started_at DESC LIMIT 1`)
@@ -348,9 +368,12 @@ export async function registerAppRoutes(server: FastifyInstance, deps: AppRouteD
         }
         if (frame['type'] === 'mark_read') {
           const id = String(frame['session_id'] ?? ''); const seq = Number(frame['seq']);
-          const event = deps.db.prepare(`SELECT 1 FROM app_events WHERE contact_id = ? AND session_id = ? AND seq = ?`)
-            .get(contactId, id, seq);
-          if (!visibleSession(deps.db, contactId, agentId, id) || !Number.isSafeInteger(seq) || seq < 0 || (seq !== 0 && !event)) {
+          // E69: a Main row's marker may name an event on any Main row of the conversation.
+          const row = visibleSession(deps.db, contactId, agentId, id);
+          const event = row && deps.db.prepare(`SELECT 1 FROM app_events WHERE contact_id = ?
+            AND session_id IN (SELECT value FROM json_each(?)) AND seq = ?`)
+            .get(contactId, JSON.stringify(sessionScope(deps.db, row)), seq);
+          if (!row || !Number.isSafeInteger(seq) || seq < 0 || (seq !== 0 && !event)) {
             send(socket, { type: 'error', code: 'invalid_read_marker' }); return;
           }
           deps.db.transaction(() => {

@@ -3,6 +3,7 @@
 | Field | Value |
 |---|---|
 | Epic ID | E41 |
+| Status | Pending (not started) |
 | Dependencies | E19/E19.1 (headless adapter), E20 (journaling + long-lived sessions), E23 (multi-instance), E29 (tool-call status), E30 (decoupled memory logging), E39 (cost command) |
 | Story Count | 9 |
 | Estimated Complexity | L |

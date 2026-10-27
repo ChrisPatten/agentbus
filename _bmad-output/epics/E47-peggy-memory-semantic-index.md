@@ -3,6 +3,7 @@
 | Field | Value |
 |---|---|
 | Epic ID | E47 |
+| Status | Pending (not started) |
 | Dependencies | E46 (index plumbing), E20 (memory files are the source of truth). |
 | Story Count | 3 |
 | Estimated Complexity | M |

@@ -238,6 +238,24 @@ describe('transcript-log stage', () => {
     expect(session.message_count).toBe(2);
   });
 
+  it('extends a Main session with no claude_session_id across an idle gap (E69)', async () => {
+    const db = makeDb();
+    const config: AppConfig = { ...stubConfig, memory: { ...stubConfig.memory, session_idle_threshold_ms: 1 } };
+    const stage = createTranscriptLog(db, config);
+    const cid = convId('chris', 'app', 'general');
+    const r1 = await stage(makeCtx({ channel: 'app' }, db, cid));
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const r2 = await stage(makeCtx({ id: 'msg-2', channel: 'app' }, db, cid));
+    expect(r2!.sessionId).toBe(r1!.sessionId);
+    expect(db.prepare('SELECT COUNT(*) AS n, MAX(ended_at) AS ended FROM sessions').get()).toEqual({ n: 1, ended: null });
+    // An app topic keeps the legacy rule.
+    const topic = convId('chris', 'app', 'thread:0123456789abcdef');
+    const t1 = await stage(makeCtx({ id: 'msg-3', channel: 'app', topic: 'thread:0123456789abcdef' }, db, topic));
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const t2 = await stage(makeCtx({ id: 'msg-4', channel: 'app', topic: 'thread:0123456789abcdef' }, db, topic));
+    expect(t2!.sessionId).not.toBe(t1!.sessionId);
+  });
+
   it('keeps distinct conversation_ids on separate sessions', async () => {
     const db = makeDb();
     const stage = createTranscriptLog(db, stubConfig);

@@ -3,6 +3,7 @@
 | Field | Value |
 |---|---|
 | Epic ID | E24 |
+| Status | Backlog (not started) |
 | Dependencies | E7 (MCP tools registration pattern), E13 (proactive channel notification), E19/E19.1 (headless `claude -p` spawn mechanics, reply delivery), E20 (memory injection, long-lived sessions), E23 (multi-instance `cc-headless`, per-agent `agent_id` concept) |
 | Story Count | 8 |
 | Estimated Complexity | L |

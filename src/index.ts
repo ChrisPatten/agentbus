@@ -39,6 +39,7 @@ import { createTranscriptLog } from './pipeline/stages/transcript-log.js';
 import { TelegramAdapter } from './adapters/telegram.js';
 import { EmailAdapter } from './adapters/email.js';
 import { SiriAdapter } from './adapters/siri.js';
+import { SlackAdapter } from './adapters/slack.js';
 import { AppAdapter } from './adapters/app.js';
 import { routedAgent } from './app/store.js';
 import { startHeadless, stopHeadless, getHeadlessSnapshots, buildMcpConfig } from './adapters/cc-headless.js';
@@ -66,6 +67,7 @@ import { OwnerDirectory } from './core/owners.js';
 import { AdvisoryStore } from './advisories/store.js';
 import { AdvisoryService } from './advisories/service.js';
 import { createBusAdvisoryTransport } from './advisories/transport.js';
+import { createTopicContextInject } from './pipeline/stages/topic-context-inject.js';
 import { createAdvisoryInject } from './pipeline/stages/advisory-inject.js';
 import { resolveJournalingSettings } from './journaling/config.js';
 import { reviewChains } from './journaling/advisories.js';
@@ -209,7 +211,9 @@ const approvalHooks: ApprovalResolveHooks = {
 };
 // E67 S67.5 — memory setup checks: /journal shows them; startup logs them.
 // Every check also raises/resolves the memory:recent-not-imported advisory
-// (src/memory/setup-advisory.ts), so it clears on its own once fixed.
+// (src/memory/setup-advisory.ts; since E73 it means "recent.md not delivered",
+// by neither the CLAUDE.md import nor the SessionStart hook), so it clears on
+// its own once fixed.
 function memorySetup(agentId: string) {
   const layout = recentMemory.layoutFor(agentId);
   const status = checkMemorySetup(layout, runtimeResolver.resolve(layout.agentId));
@@ -306,6 +310,8 @@ pipeline.use({ slot: 70, name: 'route-resolve',    stage: createRouteResolve(con
 // route targets (e.g. an also_notify entry).
 pipeline.use({ slot: 72, name: 'pool-route-resolve', stage: createPoolRouteResolve(poolManagers), critical: false });
 pipeline.use({ slot: 80, name: 'transcript-log',   stage: createTranscriptLog(db, config), critical: false });
+// A new session on a forum topic starts with the topic's name + pinned message.
+pipeline.use({ slot: 85, name: 'topic-context-inject', stage: createTopicContextInject(registry), critical: false });
 // E65 — open advisories ride along with an owner's next message, as a
 // bus-originated system block for the owned agent's route only.
 pipeline.use({ slot: 86, name: 'advisory-inject',  stage: createAdvisoryInject(advisories), critical: false });
@@ -319,6 +325,8 @@ pipeline.use({ slot: 87, name: 'journal-hold',     stage: createJournalHoldNotic
 // with the other platform adapters below.
 const siri = config.adapters.siri?.enabled ? new SiriAdapter(config.adapters.siri) : undefined;
 if (siri) registry.register(siri);
+// E76 (S76.0) — outbound-only Slack DMs through an n8n webhook.
+if (config.adapters.slack?.enabled) registry.register(new SlackAdapter(config.adapters.slack, config.contacts));
 const app = config.adapters.app?.enabled
   ? new AppAdapter(db, (contactId) => routedAgent(config, contactId), getHeadlessSnapshots) : undefined;
 if (app) registry.register(app);

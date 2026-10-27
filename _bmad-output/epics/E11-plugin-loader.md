@@ -3,6 +3,7 @@
 | Field | Value |
 |---|---|
 | Epic ID | E11 |
+| Status | Backlog (not started) |
 | Build Order Position | 11 of 12 (but should be finalized before or alongside E3/E4 to ensure interface stability) |
 | Dependencies | E1 (AdapterRegistry) |
 | Story Count | 2 |

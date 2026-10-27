@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, readdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, readdirSync, writeFileSync, utimesSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { TmuxController } from './tmux.js';
@@ -138,7 +138,7 @@ describe('PaneLifecycle.launch — fresh vs resume', () => {
     const launchPromise = pl.launch(
       makeLaunchParams({ ensureWindow: { cwd: '/work/dir', env: { FOO: 'bar' } } }),
     );
-    await vi.advanceTimersByTimeAsync(600);
+    await vi.advanceTimersByTimeAsync(2000);
     await launchPromise;
 
     expect(tmux.ensureSession).toHaveBeenCalledWith('peggy-pool', '/work/dir');
@@ -162,13 +162,29 @@ describe('PaneLifecycle.launch — fresh vs resume', () => {
     expect(line).toContain(`${q('--dangerously-load-development-channels')} ${q('server:agentbus')}`);
   });
 
+  it('waits for a new window\'s shell output to settle before sending the launch line', async () => {
+    const outputs = ['', 'direnv: loading', 'direnv: loading\n$ '];
+    let i = 0;
+    const capturePane = vi.fn(async () => outputs[Math.min(i++, outputs.length - 1)]!);
+    const tmux = makeTmux({ paneAlive: vi.fn(async () => false), capturePane });
+    const pl = new PaneLifecycle({ tmux, busBaseUrl: 'http://x', cfg: makeCfg(), scratchDir, fetchFn: makeReadyFetch() });
+
+    const launchPromise = pl.launch(makeLaunchParams());
+    await vi.advanceTimersByTimeAsync(500);
+    expect(tmux.sendCommand).not.toHaveBeenCalled(); // still printing
+
+    await vi.advanceTimersByTimeAsync(5000);
+    await launchPromise;
+    expect(tmux.sendCommand).toHaveBeenCalledTimes(1);
+  });
+
   it('resume launch (window already alive at a shell) skips window creation and uses --resume', async () => {
     const tmux = makeTmux({ paneAlive: vi.fn(async () => true), capturePane: makeNoAckCapture() });
     const fetchFn = makeReadyFetch();
     const pl = new PaneLifecycle({ tmux, busBaseUrl: 'http://127.0.0.1:3000', cfg: makeCfg(), scratchDir, fetchFn });
 
     const launchPromise = pl.launch(makeLaunchParams({ resume: true, sessionId: 'abc-resume-id' }));
-    await vi.advanceTimersByTimeAsync(600);
+    await vi.advanceTimersByTimeAsync(2000);
     await launchPromise;
 
     expect(tmux.createWindow).not.toHaveBeenCalled();
@@ -189,7 +205,7 @@ describe('PaneLifecycle.launch — fresh vs resume', () => {
     const pl = new PaneLifecycle({ tmux, busBaseUrl: 'http://127.0.0.1:3000', cfg: makeCfg(), scratchDir, fetchFn: makeReadyFetch() });
 
     const launchPromise = pl.launch(makeLaunchParams());
-    await vi.advanceTimersByTimeAsync(600);
+    await vi.advanceTimersByTimeAsync(2000);
     await launchPromise;
 
     expect(tmux.killWindow).not.toHaveBeenCalled();
@@ -209,7 +225,7 @@ describe('PaneLifecycle.launch — fresh vs resume', () => {
       const pl = new PaneLifecycle({ tmux, busBaseUrl: 'http://127.0.0.1:3000', cfg: makeCfg(), scratchDir, fetchFn: makeReadyFetch() });
 
       const launchPromise = pl.launch(makeLaunchParams({ resume: true, sessionId: 'abc-resume-id' }));
-      await vi.advanceTimersByTimeAsync(1000);
+      await vi.advanceTimersByTimeAsync(2000);
       await launchPromise;
 
       expect(tmux.killWindow).toHaveBeenCalledWith('peggy-pool:1');
@@ -241,7 +257,7 @@ describe('PaneLifecycle.launch — optional flags', () => {
       fetchFn: makeReadyFetch(),
     });
     const withPromise = plWith.launch(makeLaunchParams({ model: 'claude-sonnet-5' }));
-    await vi.advanceTimersByTimeAsync(600);
+    await vi.advanceTimersByTimeAsync(2000);
     await withPromise;
     expect(tmuxWith.sendCommand.mock.calls[0]![1] as string).toContain(`${q('--model')} ${q('claude-sonnet-5')}`);
 
@@ -254,7 +270,7 @@ describe('PaneLifecycle.launch — optional flags', () => {
       fetchFn: makeReadyFetch(),
     });
     const withoutPromise = plWithout.launch(makeLaunchParams({ model: undefined }));
-    await vi.advanceTimersByTimeAsync(600);
+    await vi.advanceTimersByTimeAsync(2000);
     await withoutPromise;
     // cfg.model is set here but LaunchParams.model is not — confirms
     // buildLaunchLine() no longer falls back to cfg.model directly; the
@@ -272,7 +288,7 @@ describe('PaneLifecycle.launch — optional flags', () => {
       fetchFn: makeReadyFetch(),
     });
     const withPromise = plWith.launch(makeLaunchParams());
-    await vi.advanceTimersByTimeAsync(600);
+    await vi.advanceTimersByTimeAsync(2000);
     await withPromise;
     const lineWith = tmuxWith.sendCommand.mock.calls[0]![1] as string;
     expect(lineWith).toContain(q('--append-system-prompt-file'));
@@ -287,7 +303,7 @@ describe('PaneLifecycle.launch — optional flags', () => {
       fetchFn: makeReadyFetch(),
     });
     const withoutPromise = plWithout.launch(makeLaunchParams());
-    await vi.advanceTimersByTimeAsync(600);
+    await vi.advanceTimersByTimeAsync(2000);
     await withoutPromise;
     expect(tmuxWithout.sendCommand.mock.calls[0]![1] as string).not.toContain(q('--append-system-prompt-file'));
   });
@@ -298,7 +314,7 @@ describe('PaneLifecycle.launch — optional flags', () => {
     const pl = new PaneLifecycle({ tmux, busBaseUrl: 'http://x', cfg, scratchDir, fetchFn: makeReadyFetch() });
 
     const launchPromise = pl.launch(makeLaunchParams());
-    await vi.advanceTimersByTimeAsync(600);
+    await vi.advanceTimersByTimeAsync(2000);
     await launchPromise;
 
     const line = tmux.sendCommand.mock.calls[0]![1] as string;
@@ -314,7 +330,7 @@ describe('PaneLifecycle.launch — optional flags', () => {
     const pl = new PaneLifecycle({ tmux, busBaseUrl: 'http://x', cfg, scratchDir, fetchFn: makeReadyFetch() });
 
     const launchPromise = pl.launch(makeLaunchParams());
-    await vi.advanceTimersByTimeAsync(600);
+    await vi.advanceTimersByTimeAsync(2000);
     await launchPromise;
 
     const line = tmux.sendCommand.mock.calls[0]![1] as string;
@@ -327,7 +343,7 @@ describe('PaneLifecycle.launch — optional flags', () => {
     const tmux = makeTmux({ capturePane: makeNoAckCapture() });
     const pl = new PaneLifecycle({ tmux, busBaseUrl: 'http://x', cfg: makeCfg(), scratchDir, fetchFn: makeReadyFetch(), autoMemoryDir: '/agents/peggy/memory' });
     const launchPromise = pl.launch(makeLaunchParams());
-    await vi.advanceTimersByTimeAsync(600);
+    await vi.advanceTimersByTimeAsync(2000);
     await launchPromise;
     const line = tmux.sendCommand.mock.calls[0]![1] as string;
     expect(line).toContain(`${q('--settings')} ${q('{"autoMemoryDirectory":"/agents/peggy/memory"}')}`);
@@ -338,7 +354,7 @@ describe('PaneLifecycle.launch — optional flags', () => {
     const cfg2 = makeCfg({ launch_args: ['--settings', '/my/settings.json'] });
     const pl2 = new PaneLifecycle({ tmux: tmux2, busBaseUrl: 'http://x', cfg: cfg2, scratchDir, fetchFn: makeReadyFetch(), autoMemoryDir: '/m' });
     const p2 = pl2.launch(makeLaunchParams());
-    await vi.advanceTimersByTimeAsync(600);
+    await vi.advanceTimersByTimeAsync(2000);
     await p2;
     const line2 = tmux2.sendCommand.mock.calls[0]![1] as string;
     expect(line2.split(q('--settings')).length - 1).toBe(1);
@@ -349,7 +365,7 @@ describe('PaneLifecycle.launch — optional flags', () => {
     const tmux = makeTmux({ capturePane: makeNoAckCapture() });
     const pl = new PaneLifecycle({ tmux, busBaseUrl: 'http://x', cfg: makeCfg(), scratchDir, fetchFn: makeReadyFetch() });
     const launchPromise = pl.launch(makeLaunchParams());
-    await vi.advanceTimersByTimeAsync(600);
+    await vi.advanceTimersByTimeAsync(2000);
     await launchPromise;
     const line = tmux.sendCommand.mock.calls[0]![1] as string;
     expect(line).not.toContain('--settings');
@@ -373,7 +389,7 @@ describe('PaneLifecycle.launch — optional flags', () => {
     const pl = new PaneLifecycle({ tmux, busBaseUrl: 'http://x', cfg, scratchDir, fetchFn: makeReadyFetch() });
 
     const launchPromise = pl.launch(makeLaunchParams());
-    await vi.advanceTimersByTimeAsync(600);
+    await vi.advanceTimersByTimeAsync(2000);
     await launchPromise;
 
     const line = tmux.sendCommand.mock.calls[0]![1] as string;
@@ -390,7 +406,7 @@ describe('PaneLifecycle.launch — ack handshake', () => {
     // prompt that never renders (e.g. a CLI/flag combination that skips the
     // warning) must not get a speculative Enter pressed into it.
     const capturePane = makeNoAckCapture();
-    const tmux = makeTmux({ capturePane });
+    const tmux = makeTmux({ paneAlive: vi.fn(async () => true), capturePane });
     const pl = new PaneLifecycle({
       tmux,
       busBaseUrl: 'http://x',
@@ -429,13 +445,16 @@ describe('PaneLifecycle.launch — ack handshake', () => {
       // dismissal.
       const captures = ['', 'unset TMUX; claude ...', 'confirm this experimental channel warning', 'Welcome! Ready.'];
       const capturePane = vi.fn(async () => captures.shift()!);
-      const tmux = makeTmux({ capturePane });
+      const tmux = makeTmux({ paneAlive: vi.fn(async () => true), capturePane });
       const pl = new PaneLifecycle({
         tmux,
         busBaseUrl: 'http://x',
         cfg: makeCfg({ launch_ack_delay_ms: 2000 }),
         scratchDir,
-        fetchFn: makeReadyFetch(),
+        // Not polling the bus until the prompt has been dismissed.
+        fetchFn: vi.fn(async () =>
+          jsonResponse({ lastPollAt: tmux.sendKeys.mock.calls.length > 0 ? new Date().toISOString() : null }),
+        ),
       });
 
       const launchPromise = pl.launch(makeLaunchParams());
@@ -456,7 +475,7 @@ describe('PaneLifecycle.launch — ack handshake', () => {
     // clear it (still showing); second dismiss Enter does.
     const captures = ['this experimental channel warning', 'this experimental channel warning', 'Welcome! Ready.'];
     const capturePane = vi.fn(async () => captures.shift()!);
-    const tmux = makeTmux({ capturePane });
+    const tmux = makeTmux({ paneAlive: vi.fn(async () => true), capturePane });
     const pl = new PaneLifecycle({
       tmux,
       busBaseUrl: 'http://x',
@@ -474,9 +493,35 @@ describe('PaneLifecycle.launch — ack handshake', () => {
     expect(tmux.sendKeys).toHaveBeenNthCalledWith(2, 'peggy-pool:1', 'Enter');
   });
 
+  it('still dismisses a prompt that renders after launch_ack_delay_ms (slow start)', async () => {
+    // 6s of "nothing yet" is past the old 5s-style window; the prompt must still be found.
+    let captureCalls = 0;
+    const capturePane = vi.fn(async () => {
+      captureCalls++;
+      if (captureCalls <= 12) return 'loading...';
+      return captureCalls === 13 ? 'this experimental channel warning' : 'Welcome! Ready.';
+    });
+    const tmux = makeTmux({ paneAlive: vi.fn(async () => true), capturePane });
+    const pl = new PaneLifecycle({
+      tmux,
+      busBaseUrl: 'http://x',
+      cfg: makeCfg({ launch_ack_delay_ms: 500 }),
+      scratchDir,
+      fetchFn: vi.fn(async () =>
+        jsonResponse({ lastPollAt: tmux.sendKeys.mock.calls.length > 0 ? new Date().toISOString() : null }),
+      ),
+    });
+
+    const launchPromise = pl.launch(makeLaunchParams());
+    await vi.advanceTimersByTimeAsync(10_000);
+    await expect(launchPromise).resolves.toBeUndefined();
+
+    expect(tmux.sendKeys).toHaveBeenCalledTimes(1);
+  });
+
   it('throws PaneLaunchError when the ack pattern never clears, and never polls readiness', async () => {
     const capturePane = vi.fn(async () => 'still experimental, please confirm');
-    const tmux = makeTmux({ capturePane });
+    const tmux = makeTmux({ paneAlive: vi.fn(async () => true), capturePane });
     const fetchFn = vi.fn();
     const pl = new PaneLifecycle({
       tmux,
@@ -505,7 +550,7 @@ describe('PaneLifecycle.launch — readiness poll', () => {
       .fn()
       .mockImplementationOnce(async () => jsonResponse({ lastPollAt: null }))
       .mockImplementationOnce(async () => jsonResponse({ lastPollAt: null }))
-      .mockImplementationOnce(async () => jsonResponse({ lastPollAt: new Date().toISOString() }));
+      .mockImplementation(async () => jsonResponse({ lastPollAt: new Date().toISOString() }));
     const pl = new PaneLifecycle({
       tmux,
       busBaseUrl: 'http://x',
@@ -531,7 +576,7 @@ describe('PaneLifecycle.launch — readiness poll', () => {
       .fn()
       .mockImplementationOnce(async () => jsonResponse({ lastPollAt: staleIso }))
       .mockImplementationOnce(async () => jsonResponse({ lastPollAt: staleIso }))
-      .mockImplementationOnce(async () => jsonResponse({ lastPollAt: new Date().toISOString() }));
+      .mockImplementation(async () => jsonResponse({ lastPollAt: new Date().toISOString() }));
     const pl = new PaneLifecycle({
       tmux,
       busBaseUrl: 'http://x',
@@ -601,7 +646,7 @@ describe('PaneLifecycle.launch — readiness poll', () => {
     // for each phase." A large operator-configured launch_ack_max_attempts
     // makes that untrue unless ackHandshake itself checks the same deadline.
     const capturePane = vi.fn(async () => 'still experimental'); // pattern never clears
-    const tmux = makeTmux({ capturePane });
+    const tmux = makeTmux({ paneAlive: vi.fn(async () => true), capturePane });
     const pl = new PaneLifecycle({
       tmux,
       busBaseUrl: 'http://x',
@@ -636,7 +681,7 @@ describe('PaneLifecycle.launch — temp file cleanup', () => {
     });
 
     const launchPromise = pl.launch(makeLaunchParams());
-    await vi.advanceTimersByTimeAsync(600);
+    await vi.advanceTimersByTimeAsync(2000);
     await launchPromise;
 
     expect(mockWritePaneMcpConfig).toHaveBeenCalledTimes(1);
@@ -644,9 +689,9 @@ describe('PaneLifecycle.launch — temp file cleanup', () => {
     expect(mockCleanupPaneMcpConfig).toHaveBeenCalledWith(FAKE_MCP_CONFIG_PATH);
   });
 
-  it('still cleans up when the ack handshake throws (partial-failure cleanup)', async () => {
+  it('keeps the scratch files when the ack handshake throws (the typed launch line may still run)', async () => {
     const capturePane = vi.fn(async () => 'still experimental');
-    const tmux = makeTmux({ capturePane });
+    const tmux = makeTmux({ paneAlive: vi.fn(async () => true), capturePane });
     const pl = new PaneLifecycle({
       tmux,
       busBaseUrl: 'http://x',
@@ -661,10 +706,10 @@ describe('PaneLifecycle.launch — temp file cleanup', () => {
     await assertion;
 
     expect(mockWritePaneMcpConfig).toHaveBeenCalledTimes(1);
-    expect(mockCleanupPaneMcpConfig).toHaveBeenCalledTimes(1);
+    expect(mockCleanupPaneMcpConfig).not.toHaveBeenCalled();
   });
 
-  it('still cleans up the rendered system-prompt file when the readiness poll times out', async () => {
+  it('keeps the rendered system-prompt file when the readiness poll times out', async () => {
     const tmux = makeTmux({ capturePane: makeNoAckCapture() });
     const fetchFn = vi.fn(async () => jsonResponse({ lastPollAt: null }));
     const pl = new PaneLifecycle({
@@ -680,9 +725,29 @@ describe('PaneLifecycle.launch — temp file cleanup', () => {
     await vi.advanceTimersByTimeAsync(LAUNCH_READY_TIMEOUT_MS + 5_000);
     await assertion;
 
-    expect(mockCleanupPaneMcpConfig).toHaveBeenCalledTimes(1);
+    expect(mockCleanupPaneMcpConfig).not.toHaveBeenCalled();
     const leftoverPromptFiles = readdirSync(scratchDir).filter((f) => f.startsWith('pool-prompt-'));
-    expect(leftoverPromptFiles).toEqual([]);
+    expect(leftoverPromptFiles).toHaveLength(1);
+  });
+
+  it('prunes scratch files older than a day at the start of a launch, and keeps recent ones', async () => {
+    const stale = join(scratchDir, 'pool-mcp-stale.json');
+    const fresh = join(scratchDir, 'pool-mcp-fresh.json');
+    const unrelated = join(scratchDir, 'notes.txt');
+    for (const f of [stale, fresh, unrelated]) writeFileSync(f, '{}');
+    const old = new Date(Date.now() - 25 * 60 * 60 * 1000);
+    utimesSync(stale, old, old);
+    utimesSync(unrelated, old, old);
+
+    const tmux = makeTmux({ paneAlive: vi.fn(async () => true), capturePane: makeNoAckCapture() });
+    const pl = new PaneLifecycle({ tmux, busBaseUrl: 'http://x', cfg: makeCfg(), scratchDir, fetchFn: makeReadyFetch() });
+    const launchPromise = pl.launch(makeLaunchParams());
+    await vi.advanceTimersByTimeAsync(2000);
+    await launchPromise;
+
+    expect(existsSync(stale)).toBe(false);
+    expect(existsSync(fresh)).toBe(true);
+    expect(existsSync(unrelated)).toBe(true);
   });
 });
 
@@ -734,7 +799,7 @@ describe('PaneLifecycle.launch — pane still running claude (after on_evict: cl
 
     await pl.release('peggy-pool:1', 'clear');
     const launchPromise = pl.launch(makeLaunchParams());
-    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(2000);
     await launchPromise;
 
     expect(tmux.sendKeys).toHaveBeenCalledWith('peggy-pool:1', 'C-c');
@@ -755,7 +820,7 @@ describe('PaneLifecycle.launch — pane still running claude (after on_evict: cl
     const pl = new PaneLifecycle({ tmux, busBaseUrl: 'http://x', cfg: makeCfg(), scratchDir, fetchFn: makeReadyFetch() });
 
     const launchPromise = pl.launch(makeLaunchParams());
-    await vi.advanceTimersByTimeAsync(600);
+    await vi.advanceTimersByTimeAsync(2000);
     await launchPromise;
 
     expect(tmux.killWindow).not.toHaveBeenCalled();
@@ -782,7 +847,7 @@ describe('PaneLifecycle.launch — pane still running claude (after on_evict: cl
     vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     const launchPromise = pl.launch(makeLaunchParams());
-    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(2000);
     await launchPromise;
 
     expect(tmux.sendKeys).not.toHaveBeenCalledWith('peggy-pool:1', 'C-c');
@@ -801,7 +866,7 @@ describe('PaneLifecycle — poll_interval_ms', () => {
     });
 
     const launchPromise = pl.launch(makeLaunchParams());
-    await vi.advanceTimersByTimeAsync(600);
+    await vi.advanceTimersByTimeAsync(2000);
     await launchPromise;
 
     expect(mockWritePaneMcpConfig).toHaveBeenCalledWith(expect.objectContaining({ pollIntervalMs: 250 }));
@@ -819,7 +884,7 @@ describe('PaneLifecycle — bus.auth_token', () => {
     });
 
     const launchPromise = pl.launch(makeLaunchParams());
-    await vi.advanceTimersByTimeAsync(600);
+    await vi.advanceTimersByTimeAsync(2000);
     await launchPromise;
 
     expect(tmux.createWindow.mock.calls[0]![3]).toMatchObject({ AGENTBUS_BUS_TOKEN: 'tok-1' });
@@ -833,7 +898,7 @@ describe('PaneLifecycle — bus.auth_token', () => {
     const pl = new PaneLifecycle({ tmux, busBaseUrl: 'http://127.0.0.1:3000', cfg: makeCfg(), scratchDir, fetchFn });
 
     const launchPromise = pl.launch(makeLaunchParams());
-    await vi.advanceTimersByTimeAsync(600);
+    await vi.advanceTimersByTimeAsync(2000);
     await launchPromise;
 
     expect(tmux.createWindow.mock.calls[0]![3]).not.toHaveProperty('AGENTBUS_BUS_TOKEN');

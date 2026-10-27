@@ -7,6 +7,10 @@
  *      status still 'active') — fires the on_session_close hook for those
  *      that meet the min-messages threshold.
  *
+ * E69: Main rows (app + general) are exempt from the idle close. Instead,
+ * each tick rotates Main rows idle past `adapters.app.main_idle_rotation_ms`
+ * (see rotateIdleMainSessions); the mid-flight pass then reports the close.
+ *
  * Every close is reported to the journaling engine (`onSessionClosed`, the
  * `close` trigger) and the session moves to status `closed`. E66 retired the
  * Anthropic-API summarizer that used to run here; journaling replaces it.
@@ -19,6 +23,7 @@ import { exec, type ExecOptionsWithStringEncoding } from 'node:child_process';
 import type Database from 'better-sqlite3';
 import type { AppConfig } from '../config/schema.js';
 import type { SessionRow } from './types.js';
+import { rotateIdleMainSessions } from '../app/main.js';
 
 export class SessionTracker {
   private db: Database.Database;
@@ -70,6 +75,15 @@ export class SessionTracker {
     }
 
     try {
+      // E69: before the mid-flight pass, which journals what this ends.
+      for (const id of rotateIdleMainSessions(this.db, this.config)) {
+        console.log(`[session-tracker] Rotated idle Main session ${id.slice(0, 8)}`);
+      }
+    } catch (err) {
+      console.error('[session-tracker] Error rotating idle Main sessions:', err);
+    }
+
+    try {
       this.processMidFlightClosedSessions();
     } catch (err) {
       console.error('[session-tracker] Error processing mid-flight closed sessions:', err);
@@ -97,11 +111,16 @@ export class SessionTracker {
     // cc-pool) are long-lived and never force-closed on idle; journaling
     // captures their knowledge on pause instead. Only the legacy MCP path
     // (claude_session_id IS NULL) is torn down here.
+    //
+    // E69: Main rows are exempt. A Main row with no claude_session_id (only
+    // proactive sends so far) stays open; Main has its own idle rotation.
     const idleSessions = this.db
       .prepare(
         `SELECT * FROM sessions
          WHERE ended_at IS NULL AND status = 'active' AND last_activity < ?
-           AND claude_session_id IS NULL`,
+           AND claude_session_id IS NULL
+           AND NOT (channel = 'app' AND EXISTS (SELECT 1 FROM conversation_registry cr
+             WHERE cr.id = sessions.conversation_id AND cr.channel = 'app' AND cr.topic = 'general'))`,
       )
       .all(cutoff) as SessionRow[];
 
