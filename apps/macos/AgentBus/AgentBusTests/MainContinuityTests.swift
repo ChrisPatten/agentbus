@@ -291,6 +291,124 @@ import SwiftData
         connection.stop()
     }
 
+    // MARK: Live upgrade (2026-10-27)
+
+    /// The live cache an older build left behind: one Main item per row, the newest two both "active"
+    /// (that build never learned the rotation), no conversation IDs, and the cursor past every event.
+    private func seedPreE69Cache(_ store: ChatStore) throws {
+        let rows: [(String, String?, String, String)] = [
+            ("b87586fd", "2026-10-02T12:35:16.504Z", "2026-10-01T13:16:29.467Z", "2026-10-02T12:35:16.499Z"),
+            ("bf1305f9", "2026-10-05T12:40:24.198Z", "2026-10-05T12:09:54.625Z", "2026-10-05T12:09:54.625Z"),
+            ("22bbbf25", "2026-10-08T15:42:00.799Z", "2026-10-05T15:37:06.210Z", "2026-10-08T15:42:00.797Z"),
+            ("1f9b6008", nil, "2026-10-01T13:16:29.467Z", "2026-10-27T12:23:58.292Z"),
+            ("5188fd11", nil, "2026-10-01T13:16:29.467Z", "2026-10-27T13:44:14.003Z"),
+        ]
+        for (id, ended, started, last) in rows {
+            var value = try session(id, ended: ended, conversation: nil, started: started)
+            value = BusSession(sessionID: value.sessionID, channel: value.channel, topic: value.topic, title: value.title,
+                               startedAt: started, lastActivity: last, endedAt: ended, unreadCount: id == "5188fd11" ? 1 : 0,
+                               resumable: ended == nil, isMain: true, activity: "idle")
+            store.context.insert(CachedSession(value))
+        }
+        let messages: [(String, String, String, String)] = [
+            ("b1", "b87586fd", "inbound", "2026-10-01T13:16:29.467Z"),
+            ("f1", "bf1305f9", "outbound", "2026-10-05T12:09:54.625Z"),
+            ("g1", "22bbbf25", "inbound", "2026-10-08T15:40:00.000Z"),
+            ("r1", "1f9b6008", "inbound", "2026-10-27T12:23:58.292Z"),
+            ("r2", "1f9b6008", "outbound", "2026-10-27T12:35:42.131Z"),
+            ("scan1", "5188fd11", "outbound", "2026-10-27T13:44:14.006Z"),
+            ("scan2", "5188fd11", "outbound", "2026-10-27T13:46:31.704Z"),
+        ]
+        for (index, entry) in messages.enumerated() {
+            store.context.insert(CachedMessage(try message(entry.0, session: entry.1, seq: 34_900 + index, direction: entry.2,
+                                                           conversation: nil, at: entry.3)))
+        }
+        store.state.cursor = 34_966
+        try store.context.save()
+    }
+
+    func testPreE69CacheThatAlreadySawTheRotationHealsOnLaunch() async throws {
+        let store = try makeStore()
+        try seedPreE69Cache(store)
+        let api = ReplayAPI()
+        api.sessionsPage = SessionsPage(sessions: [try session("5188fd11", unread: 1, started: "2026-10-01T13:16:29.467Z")], nextBefore: nil)
+        // The bus's newest Main page spans rows: the old row's last messages, then the scans.
+        api.messagesPage = MessagesPage(messages: [
+            try message("r1", session: "1f9b6008", seq: 34_903, direction: "inbound", at: "2026-10-27T12:23:58.292Z"),
+            try message("r2", session: "1f9b6008", seq: 34_904, at: "2026-10-27T12:35:42.131Z"),
+            try message("scan1", session: "5188fd11", seq: 34_957, at: "2026-10-27T13:44:14.006Z"),
+            try message("scan2", session: "5188fd11", seq: 34_962, at: "2026-10-27T13:46:31.704Z"),
+        ], nextBefore: "row-r1", boundaries: [SessionBoundary(sessionID: "1f9b6008", endedAt: "2026-10-27T13:41:27.437Z", reason: "idle")])
+        let settings = ClientSettings(); settings.appToken = "test-app-token"
+        let socket = MockSocket()
+        let connection = BusConnection(settings: settings, store: store, socket: socket, api: api, observeSystemEvents: false)
+
+        // Launch: the window's stored selection is the old row, before any frame arrives.
+        XCTAssertEqual(store.sessions.filter(\.isMain).count, 1)
+        let main = try XCTUnwrap(store.main)
+        XCTAssertEqual(main.id, "5188fd11")
+        XCTAssertTrue(main.answers(to: "1f9b6008"))
+        XCTAssertTrue(store.session("1f9b6008") === main)
+        XCTAssertFalse(SessionGroups(store.sessions).earlier.contains { $0.isMain })
+
+        // Nothing replays (the cursor is current), so the welcome itself refreshes Main.
+        connection.start()
+        try await waitFor { socket.sent.count >= 1 }
+        socket.push(#"{"type":"welcome","version":1,"reset":false,"latest_seq":34966}"#)
+        try await waitFor { connection.state == .connected }
+        XCTAssertEqual(store.main?.conversationID, conversation)
+
+        // Opening the old selection loads Main's history across rows.
+        try await connection.loadHistory("1f9b6008")
+        let messages = store.transcript(main.id)
+        XCTAssertEqual(messages.map(\.id), ["b1", "f1", "g1", "r1", "r2", "scan1", "scan2"])
+        let items = ContextDivider.apply(TranscriptItem.build(messages, pending: [], session: main, activity: "idle"),
+                                         messages: messages, session: main)
+        // Scan 1 is on the old row's last day, so the divider sits directly above it.
+        let scan = try XCTUnwrap(items.firstIndex { $0.id == "scan1" })
+        guard scan >= 1, case .divider(let divider) = items[scan - 1] else {
+            return XCTFail("expected a divider directly above scan 1, got \(items.map(\.id))")
+        }
+        XCTAssertEqual(divider.label, "New context · after 1 h idle")
+        XCTAssertEqual(Set(main.formerIDs), ["b87586fd", "bf1305f9", "22bbbf25", "1f9b6008"])
+        connection.stop()
+    }
+
+    func testMainLearnsRowsFromItsConversationsMessagesAndBoundaries() throws {
+        let store = try makeStore()
+        try store.upsert(session("s2"))
+        try store.upsert(message("m1", session: "s1", seq: 1, conversation: nil))
+        XCTAssertEqual(store.transcript("s2").map(\.id), [])
+        // A message logged in another Main row teaches Main that row, so its older cached messages appear.
+        try store.upsert(message("m2", session: "s1", seq: 2))
+        XCTAssertEqual(store.main?.formerIDs, ["s1"])
+        XCTAssertEqual(store.transcript("s2").map(\.id), ["m1", "m2"])
+        // A message for the next row can precede that row's session event; the event still takes Main over.
+        try store.upsert(message("m3", session: "s3", seq: 3))
+        try store.upsert(session("s3"))
+        XCTAssertEqual(store.main?.id, "s3")
+        XCTAssertEqual(store.main?.formerIDs, ["s1", "s2"])
+    }
+
+    func testReplayedRotationOverPerRowCacheFoldsIntoOneMain() async throws {
+        let store = try makeStore()
+        try seedPreE69Cache(store)
+        // The rotation's events projected live: Main reported at the ended row until the new row exists.
+        store.state.cursor = 34_943
+        try store.context.save()
+        let rotated = #","rotated":{"previous_session_id":"1f9b6008","ended_at":"2026-10-27T13:41:27.437Z","reason":"idle"}"#
+        for (seq, json) in [(34_944, sessionJSON("1f9b6008", extra: rotated)), (34_945, sessionJSON("1f9b6008")),
+                            (34_956, sessionJSON("5188fd11")),
+                            (34_957, messageJSON("scan1", session: "5188fd11", seq: 34_957, at: "2026-10-27T13:44:14.006Z"))] {
+            let kind = json.contains("message_id") ? "message" : "session"
+            _ = try store.apply(ProtocolCodec.frame(Data(#"{"type":"event","seq":\#(seq),"event":"\#(kind)","data":\#(json)}"#.utf8)))
+        }
+        XCTAssertEqual(store.sessions.filter(\.isMain).count, 1)
+        XCTAssertEqual(store.main?.id, "5188fd11")
+        XCTAssertEqual(store.main?.boundaries.first { $0.sessionID == "1f9b6008" }?.reason, "idle")
+        XCTAssertEqual(store.transcript("1f9b6008").count, 7)
+    }
+
     // MARK: Divider
 
     private let start = Date(timeIntervalSince1970: 1_790_000_000)
@@ -357,4 +475,18 @@ import SwiftData
         XCTAssertTrue(ContextDivider.apply(items, messages: messages, session: main).contains { $0.id == "context-m2" })
         XCTAssertEqual(ContextDivider.apply(items, messages: messages, session: store.session("t1")).map(\.id), items.map(\.id))
     }
+}
+
+/// Serves one sessions page and one history page, for the live-upgrade tests.
+@MainActor final class ReplayAPI: BusAPI {
+    var sessionsPage = SessionsPage(sessions: [], nextBefore: nil)
+    var messagesPage = MessagesPage(messages: [], nextBefore: nil)
+    private let fixture = #"{"ok":true,"contact":"contact:me","agent":"agent:work","routed":true,"version":"0.14.0","limits":{"max_upload_bytes":26214400}}"#
+    func health() async throws -> BusHealth { try JSONDecoder().decode(BusHealth.self, from: Data(fixture.utf8)) }
+    func sessions(before: String?) async throws -> SessionsPage { sessionsPage }
+    func messages(_ id: String, before: String?) async throws -> MessagesPage {
+        before == nil ? messagesPage : MessagesPage(messages: [], nextBefore: nil)
+    }
+    func commands() async throws -> Data { Data(#"{"commands":[]}"#.utf8) }
+    func upload(_ url: URL, maxBytes: Int) async throws -> UploadedFile { throw ClientError.disconnected }
 }

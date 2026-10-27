@@ -240,6 +240,8 @@ struct SelectionRequest: Equatable {
          api: (any BusAPI)? = nil, observeSystemEvents: Bool = true) {
         self.settings = settings; self.store = store; self.socket = socket
         self.http = api ?? BusHTTP(settings: settings)
+        // Before any window reads the cache, so a stored selection of an old Main row resolves to Main.
+        store.foldMain()
         guard observeSystemEvents else { return }
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.reconnect() }
@@ -442,8 +444,13 @@ struct SelectionRequest: Equatable {
                 isResetting = false
                 for buffered in resetBuffer.sorted(by: { ($0.seq ?? 0) < ($1.seq ?? 0) }) { try await handle(buffered, replay: true) }
                 resetBuffer.removeAll()
-            } else if store.sessions.isEmpty {
-                try await loadSessions()
+            } else {
+                // A cache from before E69 has Main split per row and no conversation ID, and the events that
+                // would fix that may already be consumed: fold, then refresh the list until Main has one.
+                let main = store.main?.id
+                store.foldMain()
+                followMain(from: main)
+                if store.sessions.isEmpty || store.main.map({ $0.conversationID == nil }) == true { try await loadSessions() }
             }
             state = .connected
             error = nil

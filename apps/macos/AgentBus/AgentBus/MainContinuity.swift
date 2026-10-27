@@ -47,6 +47,8 @@ extension CachedSession {
         if let endedAt { record(SessionBoundary(sessionID: id, endedAt: endedAt, reason: nil)) }
         let old = id
         id = value.sessionID
+        // The new row may already be known: from a message logged in it, or a fragment an older build cached.
+        formerIDs.removeAll { $0 == value.sessionID }
         addFormer(old)
         update(value)
         // The new row has no Claude session until its first turn runs.
@@ -81,8 +83,8 @@ extension ChatStore {
             exact.update(value)
             if let ended = value.endedAt { exact.record(SessionBoundary(sessionID: value.id, endedAt: ended, reason: nil)) }
             item = exact
-        } else if let current = mains.max(by: { $0.lastActivity < $1.lastActivity }) {
-            if !current.formerIDs.contains(value.id) && value.supersedes(current) {
+        } else if let current = mains.max(by: Self.currentMainOrder) {
+            if value.supersedes(current) {
                 current.rekey(to: value)
             } else {
                 current.addFormer(value.id)
@@ -93,15 +95,43 @@ extension ChatStore {
             item = CachedSession(value)
             context.insert(item)
         }
-        for other in mains where other !== item {
+        fold(mains.filter { $0 !== item }, into: item)
+    }
+
+    /// Folds every cached Main item into one. A build before E69 cached one Main item per row (the older
+    /// ones under Earlier) and may already have consumed the events that would fold them, so this runs at
+    /// launch and on every welcome, not only when a Main event arrives.
+    func foldMain() {
+        let mains = sessions.filter(\.isMain)
+        guard mains.count > 1, let item = mains.max(by: Self.currentMainOrder) else { return }
+        fold(mains.filter { $0 !== item }, into: item)
+        try? context.save()
+    }
+
+    /// Main's current row is the active one, then the most recently active.
+    private static func currentMainOrder(_ a: CachedSession, _ b: CachedSession) -> Bool {
+        let rank = { (row: CachedSession) in row.endedAt == nil ? 1 : 0 }
+        return (rank(a), a.lastActivity) < (rank(b), b.lastActivity)
+    }
+
+    private func fold(_ others: [CachedSession], into item: CachedSession) {
+        for other in others {
             for id in other.rowIDs { item.addFormer(id) }
             for boundary in other.boundaries { item.record(boundary) }
             if let ended = other.endedAt { item.record(SessionBoundary(sessionID: other.id, endedAt: ended, reason: nil)) }
             item.readSeq = max(item.readSeq, other.readSeq)
+            item.conversationID = item.conversationID ?? other.conversationID
             // The folded rows' history isn't paged in yet; the bus pages Main across every row.
             item.historyComplete = false
             context.delete(other)
         }
+    }
+
+    /// Teaches Main a row from a message in its conversation, so that row's cached messages (stored
+    /// before E69 without a conversation ID) join Main's transcript.
+    func learnMainRow(from message: BusMessage) {
+        guard let conversation = message.conversationID, let main, main.conversationID == conversation else { return }
+        main.addFormer(message.sessionID)
     }
 
     /// Records where one of Main's rows ended (a rotation event or a history page).

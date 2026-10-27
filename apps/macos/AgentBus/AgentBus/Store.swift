@@ -173,6 +173,7 @@ struct AckedTarget: Equatable { let kind: String; let sessionID: String? }
             // Rows cached from an older bus learn their conversation when history reloads.
             if row.conversationID == nil { row.conversationID = value.conversationID }
         } else { context.insert(CachedMessage(value)) }
+        learnMainRow(from: value)
         if save { try context.save() }
     }
     func apply(_ frame: ServerFrame) throws -> Bool {
@@ -186,7 +187,8 @@ struct AckedTarget: Equatable { let kind: String; let sessionID: String? }
     }
     func replace(sessions: [BusSession], history: [String: [BusMessage]], cursor: Int) throws {
         // Main's former row IDs keep old selections and windows pointing at Main after the reload.
-        let previousMain = main.map { (ids: $0.rowIDs, boundaries: $0.boundaries) }
+        let mains = self.sessions.filter(\.isMain)
+        let previousMain = mains.isEmpty ? nil : (ids: mains.flatMap(\.rowIDs), boundaries: mains.flatMap(\.boundaries))
         for row in self.sessions { context.delete(row) }
         for row in try context.fetch(FetchDescriptor<CachedMessage>()) { context.delete(row) }
         try context.save()
@@ -233,7 +235,12 @@ struct AckedTarget: Equatable { let kind: String; let sessionID: String? }
     func setHistory(_ id: String, page: MessagesPage, first: Bool) throws {
         for message in page.messages { try upsert(message) }
         if let row = session(id) {
-            if row.isMain { for boundary in page.boundaries ?? [] { record(boundary) } }
+            if row.isMain {
+                // Every message on a Main page is Main's, whichever row logged it (E69).
+                row.conversationID = row.conversationID ?? page.messages.lazy.compactMap(\.conversationID).first
+                for message in page.messages { row.addFormer(message.sessionID) }
+                for boundary in page.boundaries ?? [] { record(boundary) }
+            }
             row.oldestCursor = page.nextBefore
             row.historyComplete = page.messages.isEmpty || page.messages.count < 50
             try context.save()

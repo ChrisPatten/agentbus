@@ -72,7 +72,9 @@ private let alertLog = Logger(subsystem: "com.chrispatten.agentbus.mac", categor
 /// Owns the cache, settings, connection and alerts shared by every window.
 @MainActor final class AppModel {
     /// The app's one instance. `App` structs can be initialized more than once, so the model isn't stored there.
-    static let shared = AppModel()
+    /// As the unit tests' host it stays offline and in memory, so a test run never touches the real cache or bus.
+    static let shared = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+        ? AppModel(inMemory: true, live: false) : AppModel()
     let container: ModelContainer
     let settings: ClientSettings
     let connection: BusConnection
