@@ -3,9 +3,9 @@
 | Field | Value |
 |---|---|
 | Epic ID | E75 |
-| Status | Planned |
+| Status | Implemented; live check in the app pending |
 | Dependencies | E62 (Mac client), E72 (composer caret handling) |
-| Story Count | 2 |
+| Story Count | 3 |
 | Estimated Complexity | S |
 
 Source: operator report, 2026-10-20.
@@ -65,6 +65,13 @@ The implementer should confirm in S75.1 which mechanism works with `TextField(ax
 
 - XCTest for the helper: empty text, caret at start, middle, and end, selection replaced, non-ASCII and emoji (grapheme boundaries), existing trailing newline.
 - `CHANGELOG.md` `[Unreleased]` → Fixed. Update `apps/macos/AgentBus/README.md` and `site-docs/` only where the composer keys are already documented; update the relevant `docs/` file.
+
+### S75.3 — Keep the newest message visible as the composer grows
+
+Operator report, 2026-10-21. The composer sits in a bottom safe-area inset, so growing the field raises the inset without moving the transcript, and the last message is covered. `TranscriptView` also read the larger inset as "scrolled away" and stopped following.
+
+- Track the bottom inset together with the at-bottom flag. When only the inset changes and the transcript was following, scroll to the bottom; otherwise update `following` as before.
+- Live check: add lines with Shift-Return at the bottom of a conversation (the last message stays visible), then scroll up and add lines (the position does not jump).
 
 ## Out of Scope
 

@@ -1171,7 +1171,7 @@ epics:
       S74.6: pending  # Mac client: card, badge, background notification
       S74.7: pending  # Docs, tests, live check
   E75:
-    status: planned
+    status: in-progress
     notes: >
       Mac composer newline at the caret. Shift/Option+Return appends "\n" to the
       end of the bound draft string (ComposerView.handleKey) instead of
@@ -1180,8 +1180,9 @@ epics:
       TextSelection binding). Epic: _bmad-output/epics/E75-mac-composer-newline-at-caret.md.
       Depends on E62, E72.
     stories:
-      S75.1: pending  # Insert newline at the caret
-      S75.2: pending  # Tests and docs
+      S75.1: complete  # Insert newline at the caret (field editor first, TextSelection fallback; live check pending)
+      S75.3: complete  # Transcript keeps the newest message visible when the composer grows (live check pending)
+      S75.2: complete  # NewlineInsertion helper + 9 XCTests (63 pass), CHANGELOG, docs/MAC_CLIENT.md
   E76:
     status: in-progress
     notes: >

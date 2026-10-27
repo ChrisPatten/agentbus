@@ -75,6 +75,9 @@ struct TranscriptView<Bar: View>: View {
     @State private var position = ScrollPosition(edge: .bottom)
     /// True while the user is at (or near) the bottom; new content then keeps the view pinned there.
     @State private var following = true
+    @State private var repinPending = false
+    @State private var repinning = false
+    @State private var metrics = ScrollBox()
     /// The message a reply note just scrolled to, highlighted for a moment.
     @State private var highlightedID: String?
     private let originID: String?
@@ -128,6 +131,36 @@ struct TranscriptView<Bar: View>: View {
         }
     }
 
+    /// Scrolls to the bottom once layout settles. A lazy stack only estimates the height of rows it hasn't
+    /// laid out, and in a long conversation the bottom edge it jumps to can be thousands of points short of
+    /// the real end. So the last row is scrolled to by ID first, which makes the stack lay out the tail, and
+    /// only then the bottom edge, which now includes the live-activity row and the padding below it.
+    private func repin() {
+        guard !repinPending, !repinning else { return }
+        repinPending = true
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(50))
+            repinPending = false
+            guard following else { return }
+            // The first step lands above the live-activity row and bottom padding, which can read as
+            // "scrolled away" and unpin the view mid-way, so scrolling is not tracked until both steps finish.
+            repinning = true
+            if let last = items.last?.id {
+                position.scrollTo(id: last, anchor: .bottom)
+                try? await Task.sleep(for: .milliseconds(60))
+            }
+            position.scrollTo(edge: .bottom)
+            try? await Task.sleep(for: .milliseconds(200))
+            repinning = false
+        }
+    }
+
+    /// PgUp/PgDn from the composer: one page of the transcript, less a little overlap.
+    private func page(_ direction: Int) {
+        let step = max(metrics.visible - metrics.inset - 80, 100)
+        position.scrollTo(y: max(metrics.offset + CGFloat(direction) * step, -metrics.insetTop))
+    }
+
     private var followToken: String {
         let live = session.flatMap { connection.live[$0.id] }
         return "\(messages.count)-\(pending.count)-\(live?.state ?? "")-\(live?.lines.count ?? 0)"
@@ -164,23 +197,45 @@ struct TranscriptView<Bar: View>: View {
                 }
                 .environment(\.revealMessage, reveal)
                 .scrollPosition($position)
+                // TEMP E75 DIAGNOSTIC: remove before commit.
+                .onScrollGeometryChange(for: String.self) { g in
+                    "offY=\(g.contentOffset.y) content=\(g.contentSize.height) container=\(g.containerSize.height) insetTop=\(g.contentInsets.top) insetBottom=\(g.contentInsets.bottom) visibleH=\(g.visibleRect.height)"
+                } action: { _, new in
+                    let line = "\(Date().timeIntervalSince1970) \(new)\n"
+                    if let h = FileHandle(forWritingAtPath: "/tmp/agentbus-scroll.log") { h.seekToEndOfFile(); h.write(Data(line.utf8)); try? h.close() }
+                    else { try? line.write(toFile: "/tmp/agentbus-scroll.log", atomically: false, encoding: .utf8) }
+                }
                 .defaultScrollAnchor(.bottom)
                 .safeAreaInset(edge: .bottom, spacing: 0) { bar }
-                .onScrollGeometryChange(for: Bool.self) { geometry in
-                    geometry.contentOffset.y + geometry.containerSize.height
-                        >= geometry.contentSize.height + geometry.contentInsets.bottom - 60
-                } action: { _, atBottom in
-                    following = atBottom
+                .environment(\.pageTranscript, page)
+                // `following` tracks whether the reader is pinned to the bottom. It follows the user's scrolling
+                // (an offset-only change). A layout change (the composer growing, a lazy row being measured and
+                // the content estimate shifting) never unpins; it re-pins the view instead, so the newest
+                // message neither hides under a taller composer nor drifts away when the estimate changes (E75).
+                .onScrollGeometryChange(for: ScrollMetrics.self) { g in
+                    ScrollMetrics(offset: g.contentOffset.y, content: g.contentSize.height,
+                                  visible: g.visibleRect.height, inset: g.contentInsets.bottom,
+                                  container: g.containerSize.height, insetTop: g.contentInsets.top)
+                } action: { old, new in
+                    metrics.offset = new.offset
+                    metrics.visible = new.visible
+                    metrics.inset = new.inset
+                    metrics.insetTop = new.insetTop
+                    if new.sameLayout(as: old) {
+                        if !repinning { following = new.atBottom }
+                    } else if following {
+                        repin()
+                    }
                 }
                 .onChange(of: followToken) {
                     guard following else { return }
-                    withAnimation(.easeOut(duration: 0.2)) { position.scrollTo(edge: .bottom) }
+                    repin()
                 }
                 .onChange(of: pending.count) { old, new in
                     // Your own send always jumps to the bottom.
                     guard new > old else { return }
                     following = true
-                    withAnimation(.easeOut(duration: 0.2)) { position.scrollTo(edge: .bottom) }
+                    repin()
                 }
             }
         }
@@ -192,6 +247,32 @@ struct TranscriptView<Bar: View>: View {
             }
         }
     }
+}
+
+/// The scroll geometry `TranscriptView` uses to tell the reader scrolling from layout changing. At rest
+/// at the bottom, `offset + visible == content + inset`.
+private struct ScrollMetrics: Equatable {
+    var offset: CGFloat
+    var content: CGFloat
+    var visible: CGFloat
+    var inset: CGFloat
+    var container: CGFloat
+    var insetTop: CGFloat
+
+    var atBottom: Bool { offset + visible >= content + inset - 60 }
+
+    func sameLayout(as other: ScrollMetrics) -> Bool {
+        abs(content - other.content) < 0.5 && abs(visible - other.visible) < 0.5
+            && abs(inset - other.inset) < 0.5 && abs(container - other.container) < 0.5
+    }
+}
+
+/// The latest scroll geometry, kept out of view state so reading it for a page jump never re-renders.
+final class ScrollBox {
+    var offset: CGFloat = 0
+    var visible: CGFloat = 0
+    var inset: CGFloat = 0
+    var insetTop: CGFloat = 0
 }
 
 struct TranscriptRow: View {
@@ -344,6 +425,8 @@ struct ReplyNote: View {
 extension EnvironmentValues {
     /// Scrolls the transcript to a message by ID and highlights it. Set by `TranscriptView`.
     @Entry var revealMessage: ((String) -> Void)?
+    /// PgUp (-1) and PgDn (1) pressed in the composer scroll the transcript.
+    @Entry var pageTranscript: ((Int) -> Void)?
 }
 
 struct AgentMessageView: View {
