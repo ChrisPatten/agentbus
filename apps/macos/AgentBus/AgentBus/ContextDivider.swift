@@ -78,10 +78,20 @@ struct ContextDivider: Identifiable, Equatable {
         return result
     }
 
+    /// Whether the operator's own "/clear" stays out of the transcript. In Main the "New context · /clear"
+    /// divider already marks it, so the older "Cleared with /clear" note would repeat it; other sessions keep the note.
+    static func hidesClearCommand(body: String, inbound: Bool, inMain: Bool) -> Bool {
+        inMain && inbound && body.trimmingCharacters(in: .whitespacesAndNewlines) == "/clear"
+    }
+    @MainActor static func hidesClearCommand(_ message: CachedMessage, in session: CachedSession?) -> Bool {
+        hidesClearCommand(body: message.body, inbound: message.isOperator, inMain: session?.isMain == true)
+    }
+
     /// Main's transcript with its dividers; every other session's unchanged.
     @MainActor static func apply(_ items: [TranscriptItem], messages: [CachedMessage], session: CachedSession?) -> [TranscriptItem] {
         guard let session, session.isMain else { return items }
-        let entries = messages.map { Entry(id: $0.id, sessionID: $0.sessionID, date: $0.date, inbound: $0.isOperator) }
+        // Placed over the messages that are shown, so a divider never keys on a hidden "/clear".
+        let entries = messages.filter { !hidesClearCommand($0, in: session) }.map { Entry(id: $0.id, sessionID: $0.sessionID, date: $0.date, inbound: $0.isOperator) }
         return insert(place(entries, boundaries: session.boundaries), into: items)
     }
 }

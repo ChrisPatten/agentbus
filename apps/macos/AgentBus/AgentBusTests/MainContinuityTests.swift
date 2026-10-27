@@ -463,6 +463,55 @@ import SwiftData
         XCTAssertEqual(ContextDivider.insert([:], into: sameDay).map(\.id), ["a", "c"])
     }
 
+    func testClearCommandNoteIsHiddenOnlyInMain() {
+        XCTAssertTrue(ContextDivider.hidesClearCommand(body: "/clear", inbound: true, inMain: true))
+        XCTAssertTrue(ContextDivider.hidesClearCommand(body: " /clear\n", inbound: true, inMain: true))
+        XCTAssertFalse(ContextDivider.hidesClearCommand(body: "/clear", inbound: true, inMain: false))
+        XCTAssertFalse(ContextDivider.hidesClearCommand(body: "/clear", inbound: false, inMain: true))
+        XCTAssertFalse(ContextDivider.hidesClearCommand(body: "/clear please", inbound: true, inMain: true))
+        XCTAssertFalse(ContextDivider.hidesClearCommand(body: "/stop", inbound: true, inMain: true))
+    }
+
+    private func clearSequence(_ session: String, conversation: String?) throws -> [BusMessage] {
+        func cached(_ id: String, _ session: String, _ direction: String, _ body: String, _ at: String) throws -> BusMessage {
+            let conversationKey = conversation.map { #","conversation_id":"\#($0)""# } ?? ""
+            let json = #"{"message_id":"\#(id)","session_id":"\#(session)","seq":1,"cursor":"c-\#(id)","direction":"\#(direction)","arrival_channel":"app","body":"\#(body)","created_at":"\#(at)","scheduled":false,"attachments":[]"# + conversationKey + "}"
+            return try JSONDecoder().decode(BusMessage.self, from: Data(json.utf8))
+        }
+        let next = conversation == nil ? session : "s2"
+        return [try cached("a", session, "inbound", "Hi", "2026-10-27T14:00:00Z"),
+                try cached("clear", session, "inbound", "/clear", "2026-10-27T14:22:00Z"),
+                try cached("reply", session, "outbound", "Context cleared. Starting fresh.", "2026-10-27T14:22:01Z"),
+                try cached("b", next, "inbound", "New topic", "2026-10-27T14:30:00Z")]
+    }
+
+    func testMainShowsTheClearDividerButNotTheClearNote() throws {
+        let store = try makeStore()
+        try store.upsert(session("s2"))
+        for value in try clearSequence("s1", conversation: conversation) { try store.upsert(value) }
+        try store.upsert(session("s2"))
+        store.record(SessionBoundary(sessionID: "s1", endedAt: "2026-10-27T14:22:00Z", reason: "clear"))
+        let main = try XCTUnwrap(store.main)
+        let messages = store.transcript(main.id)
+        let items = ContextDivider.apply(TranscriptItem.build(messages, pending: [], session: main, activity: "idle"),
+                                         messages: messages, session: main)
+        XCTAssertEqual(items.map(\.id), ["day-a", "a", "reply", "context-b", "b"])
+        if case .divider(let divider) = items[3] { XCTAssertEqual(divider.label, "New context · /clear") } else { XCTFail() }
+    }
+
+    func testTopicKeepsTheClearNote() throws {
+        let store = try makeStore()
+        try store.upsert(session("t1", main: false, conversation: nil))
+        for value in try clearSequence("t1", conversation: nil) { try store.upsert(value) }
+        let topic = try XCTUnwrap(store.session("t1"))
+        let messages = store.transcript("t1")
+        let items = ContextDivider.apply(TranscriptItem.build(messages, pending: [], session: topic, activity: "idle"),
+                                         messages: messages, session: topic)
+        XCTAssertEqual(items.map(\.id), ["day-a", "a", "clear", "reply", "b"])
+        guard case .note(let text, _) = items[2] else { return XCTFail("expected the /clear note") }
+        XCTAssertTrue(text.hasPrefix("Cleared with /clear"))
+    }
+
     func testOnlyMainTranscriptsGetDividers() throws {
         let store = try makeStore()
         try store.upsert(session("s2"))

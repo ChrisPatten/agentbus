@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { runMigrations } from '../db/schema.js';
 import { ensureOutboundAppSession } from '../app/outbound.js';
-import { readWatermark, PENDING_CONTEXT_INTRO, REPLY_TARGET_MARK } from '../app/pending-context.js';
+import { readWatermark, buildPendingContext, PENDING_CONTEXT_INTRO, REPLY_TARGET_MARK } from '../app/pending-context.js';
 import type { AppConfig } from '../config/schema.js';
 
 // E69 — cc-headless wiring for origin stamping (S69.1) and pending-context
@@ -199,9 +199,58 @@ describe('cc-headless E69 wiring', () => {
     child.emit('close', 0);
   });
 
+  it('labels a scheduled turn with the schedule name, in the MCP env and the fallback origin, and Main renders it', async () => {
+    const sched = ensureOutboundAppSession(db, 'chris', 'agent:peggy', 'sched:ambient-scan');
+    transcript({ conv: sched.conversationId, session: sched.sessionId, at: new Date().toISOString(), direction: 'inbound', messageId: 'm1' });
+    pollOnce({ ...envelope('m1', 'app', { scheduled: true, schedule_id: 'ambient-scan', schedule_label: 'Ambient scan' }),
+      topic: 'sched:ambient-scan', sender: 'system:baxter' });
+    const { startHeadless } = await import('./cc-headless.js');
+    startHeadless(db as unknown as Database.Database);
+    await tick();
+    expect(spawned!.mcp.mcpServers.agentbus.env['AGENTBUS_SOURCE_LABEL']).toBe('Ambient scan');
+    expect(spawned!.mcp.mcpServers.agentbus.env['AGENTBUS_TURN_CONVERSATION_ID']).toBe(sched.conversationId);
+    expect(spawned!.env['AGENTBUS_SOURCE_LABEL']).toBeUndefined();
+    writeEvent(child.stdout, { type: 'result', session_id: 'claude-s', result: 'Two calendar items' });
+    child.emit('close', 0);
+    await tick();
+    const origin = postedMessages()[0]!.metadata['origin'];
+    expect(origin).toEqual({ kind: 'turn', agent_id: 'peggy', conversation_id: sched.conversationId, label: 'Ambient scan' });
+
+    // The same origin on a row in Main renders the schedule's name.
+    const main = ensureOutboundAppSession(db, 'chris', 'agent:peggy', 'general');
+    transcript({ conv: main.conversationId, session: main.sessionId, at: new Date().toISOString(), direction: 'outbound',
+      body: 'Two calendar items', metadata: { origin } });
+    const built = buildPendingContext(db, main.conversationId, { limits: { max_items: 10, max_chars: 4000 } })!;
+    expect(built.block).toContain('Ambient scan: Two calendar items');
+  });
+
+  it('a non-scheduled turn gets no source label', async () => {
+    const conv = seedMain('m1');
+    pollOnce(envelope('m1', 'app'));
+    const { startHeadless } = await import('./cc-headless.js');
+    startHeadless(db as unknown as Database.Database);
+    await tick();
+    expect(spawned!.mcp.mcpServers.agentbus.env).not.toHaveProperty('AGENTBUS_SOURCE_LABEL');
+    writeEvent(child.stdout, { type: 'result', session_id: 'claude-1', result: 'ok' });
+    child.emit('close', 0);
+    await tick();
+    expect(postedMessages()[0]!.metadata['origin']).toEqual({ kind: 'turn', agent_id: 'peggy', conversation_id: conv });
+  });
+
+  it('scheduleSourceLabel: label, then config id, then a short generated id; never the body', async () => {
+    const { scheduleSourceLabel } = await import('./cc-headless.js');
+    const e = (metadata: Record<string, unknown>) => envelope('x', 'app', metadata) as unknown as import('../types/envelope.js').MessageEnvelope;
+    expect(scheduleSourceLabel(e({}))).toBeNull();
+    expect(scheduleSourceLabel(e({ scheduled: true, schedule_id: 'ambient-scan', schedule_label: ' Ambient scan ' }))).toBe('Ambient scan');
+    expect(scheduleSourceLabel(e({ scheduled: true, schedule_id: 'ambient-scan' }))).toBe('ambient-scan');
+    expect(scheduleSourceLabel(e({ scheduled: true, schedule_id: '0f8fad5b-d9cb-469f-a165-70867728950e' }))).toBe('scheduled job 0f8fad5b');
+    expect(scheduleSourceLabel(e({ scheduled: true }))).toBe('scheduled job');
+  });
+
   it('buildMcpConfig omits the turn conversation when none is given (journaling turns)', async () => {
     const { buildMcpConfig } = await import('./cc-headless.js');
-    const cfg = buildMcpConfig('peggy') as { mcpServers: { agentbus: { env: Record<string, string> } } };
+    const cfg = buildMcpConfig('peggy', undefined, 'Ambient scan') as { mcpServers: { agentbus: { env: Record<string, string> } } };
     expect(cfg.mcpServers.agentbus.env).not.toHaveProperty('AGENTBUS_TURN_CONVERSATION_ID');
+    expect(cfg.mcpServers.agentbus.env).not.toHaveProperty('AGENTBUS_SOURCE_LABEL');
   });
 });

@@ -40,7 +40,7 @@ enum TranscriptItem: Identifiable {
             items.append(.day(BusDate.dayLabel(date), id: "day-" + id))
         }
 
-        for message in messages {
+        for message in messages where !ContextDivider.hidesClearCommand(message, in: session) {
             dayLabel(message.date, id: message.id)
             let body = message.body.trimmingCharacters(in: .whitespacesAndNewlines)
             if message.isOperator && body == "/clear" {

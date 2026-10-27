@@ -36,7 +36,7 @@ When you find something worth telling me, call send_message with to: contact:me,
 channel: app, and source: "Ambient scan".
 ```
 
-Without a `source`, the message is labelled "another agent session". You can also set a default label for every message from one MCP server with the `AGENTBUS_SOURCE_LABEL` environment variable in that server's settings; see [MCP tools](/reference/mcp-tools#send-message).
+If the routine is an AgentBus schedule, its messages are labelled with the schedule's `label` (or its `id` if it has no label) unless you pass a `source`. Otherwise, without a `source`, the message is labelled "another agent session". You can also set a default label for every message from one MCP server with the `AGENTBUS_SOURCE_LABEL` environment variable in that server's settings; see [MCP tools](/reference/mcp-tools#send-message).
 
 ## Things to know
 

@@ -26,7 +26,7 @@ These are the tools AgentBus gives your agent. Claude Code loads them automatica
 | `priority` | no | `normal` (default), `high` or `urgent` |
 | `source` | no | A short name for what's sending the message, such as `Ambient scan`. When the message lands in a conversation the sender isn't part of, such as the Mac app's Main, the agent there sees it with this name. |
 
-Without `source`, the message uses the `AGENTBUS_SOURCE_LABEL` environment variable of the agentbus MCP server that sent it, if you set one, and otherwise "another agent session". Set the variable in the server's `env`, for example in a project's `.mcp.json`. It labels every session that uses that file, so prefer `source` when one project runs several kinds of sessions.
+Without `source`, a message sent during a scheduled job's turn uses the schedule's `label` (or its `id` if it has no label). Any other message uses the `AGENTBUS_SOURCE_LABEL` environment variable of the agentbus MCP server that sent it, if you set one, and otherwise "another agent session". Set the variable in the server's `env`, for example in a project's `.mcp.json`. It labels every session that uses that file, so prefer `source` when one project runs several kinds of sessions.
 
 The bus records where every message from `send_message`, `reply` and `send_email` came from. You can't set this yourself; it's what lets the agent in Main tell its own replies apart from messages sent by other sessions.
 

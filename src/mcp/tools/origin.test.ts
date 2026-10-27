@@ -68,6 +68,14 @@ describe('origin stamping (E69 S69.1)', () => {
     expect(isForeignOrigin(readOrigin(metadata), 'conv-main')).toBe(true);
   });
 
+  it('per-call source beats the per-turn AGENTBUS_SOURCE_LABEL on a scheduled turn', async () => {
+    vi.stubEnv('AGENTBUS_TURN_CONVERSATION_ID', 'conv-sched');
+    vi.stubEnv('AGENTBUS_SOURCE_LABEL', 'Ambient scan');
+    expect((await sendMessage())['origin']).toEqual({ kind: 'turn', agent_id: 'baxter', conversation_id: 'conv-sched', label: 'Ambient scan' });
+    fetchMock.mockClear();
+    expect((await sendMessage({ source: 'Calendar alert' }))['origin']).toMatchObject({ label: 'Calendar alert' });
+  });
+
   it('a turn origin carries a label only when one is given', async () => {
     vi.stubEnv('AGENTBUS_TURN_CONVERSATION_ID', 'conv-telegram');
     expect((await sendMessage({ source: 'Travel check' }))['origin']).toEqual({

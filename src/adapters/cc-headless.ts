@@ -50,7 +50,7 @@ import { HeadlessLimiter, type TurnClass } from './headless-limiter.js';
 import { terminateProcessGroup } from '../journaling/process.js';
 import { busTokenEnv, resolveBusToken, withBusToken } from '../core/bus-auth.js';
 import { JOURNAL_TURN_DISALLOWED_TOOLS } from '../learning/protected-paths.js';
-import { TURN_CONVERSATION_ENV, type Origin } from '../core/origin.js';
+import { SOURCE_LABEL_ENV, TURN_CONVERSATION_ENV, type Origin } from '../core/origin.js';
 import { isMainConversation } from '../app/main.js';
 import { advanceWatermark, buildPendingContext, pendingContextLimits } from '../app/pending-context.js';
 
@@ -163,9 +163,11 @@ function cleanTmp(...paths: string[]): void {
  * E68: also used for fresh consolidation runs on cc-pool agents, so the
  * pass can call `propose_change`.
  * E69: `turnConversationId` (normal turns only) lets the MCP tools stamp
- * their sends with this turn's origin. The config file is written per turn.
+ * their sends with this turn's origin; `sourceLabel` (scheduled turns: the
+ * schedule's name) becomes the server's `AGENTBUS_SOURCE_LABEL`. The config
+ * file is written per turn.
  */
-export function buildMcpConfig(agentId: string, turnConversationId?: string): unknown {
+export function buildMcpConfig(agentId: string, turnConversationId?: string, sourceLabel?: string): unknown {
   return {
     mcpServers: {
       agentbus: {
@@ -177,6 +179,7 @@ export function buildMcpConfig(agentId: string, turnConversationId?: string): un
           AGENTBUS_CONFIG: configPath,
           AGENTBUS_AGENT_ID: agentId,
           ...(turnConversationId ? { [TURN_CONVERSATION_ENV]: turnConversationId } : {}),
+          ...(turnConversationId && sourceLabel ? { [SOURCE_LABEL_ENV]: sourceLabel } : {}),
         },
       },
     },
@@ -390,6 +393,25 @@ export interface HeadlessActivityEvent extends HeadlessCapacitySnapshot {
   turn_class: TurnClass;
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * E69 — the human name of the schedule that fired `env`, or null when it
+ * isn't a scheduled fire. The scheduler stamps `schedule_label` (the
+ * schedule's `label`) and `schedule_id`: the label wins, then a config id
+ * (operator-chosen, e.g. "ambient-scan"), then "scheduled job <id8>" for a
+ * generated UUID id. Never the prompt body.
+ */
+export function scheduleSourceLabel(env: MessageEnvelope): string | null {
+  const meta = env.metadata;
+  if (meta?.['scheduled'] !== true) return null;
+  const label = typeof meta['schedule_label'] === 'string' ? meta['schedule_label'].trim() : '';
+  if (label) return label;
+  const id = typeof meta['schedule_id'] === 'string' ? meta['schedule_id'].trim() : '';
+  if (!id) return 'scheduled job';
+  return UUID_RE.test(id) ? `scheduled job ${id.slice(0, 8)}` : id;
+}
+
 /** The forwarded provider command an envelope carries, if any (E71). */
 export function providerCommandOf(env: MessageEnvelope): { command: string; args_raw: string } | null {
   const pc = env.metadata?.['provider_command'] as { command?: unknown; args_raw?: unknown } | undefined;
@@ -479,6 +501,7 @@ class HeadlessInstance {
     // E69: the turn's conversation reaches the MCP child only via the per-turn
     // MCP config; never inherit a stray one (journaling turns must stay unstamped).
     delete env[TURN_CONVERSATION_ENV];
+    delete env[SOURCE_LABEL_ENV];
     return env;
   }
 
@@ -897,9 +920,11 @@ class HeadlessInstance {
     return true;
   }
 
-  private async deliverResponse(original: MessageEnvelope, resultText: string, conversationId: string): Promise<void> {
+  private async deliverResponse(original: MessageEnvelope, resultText: string, conversationId: string, sourceLabel?: string): Promise<void> {
     // E69: fallback delivery bypasses MCP, so stamp the turn origin here.
-    const origin: Origin = { kind: 'turn', agent_id: this.cfg.agent_id, conversation_id: conversationId };
+    const origin: Origin = {
+      kind: 'turn', agent_id: this.cfg.agent_id, conversation_id: conversationId, ...(sourceLabel ? { label: sourceLabel } : {}),
+    };
     const body = {
       channel: original.channel,
       topic: original.topic,
@@ -969,6 +994,8 @@ class HeadlessInstance {
      * (the turn started). Not fired when the spawn fails before that.
      */
     onTurnStarted?: (claudeSessionId: string) => void;
+    /** E69 — the turn's source label for MCP sends (scheduled turns: the schedule's name). */
+    sourceLabel?: string;
   }): Promise<SpawnResult> {
     const now = new Date();
 
@@ -1037,7 +1064,7 @@ class HeadlessInstance {
 
     const spPath = writeTmp(systemPromptText, '.txt');
     // E69: journaling and consolidation turns stay unstamped (they never deliver).
-    const mcpPath = writeTmp(JSON.stringify(buildMcpConfig(this.cfg.agent_id, opts.journal ? undefined : opts.conversationId)), '.json');
+    const mcpPath = writeTmp(JSON.stringify(buildMcpConfig(this.cfg.agent_id, opts.journal ? undefined : opts.conversationId, opts.sourceLabel)), '.json');
 
     // Persist claude_session_id as soon as known so session observers have it
     // before child exit. The final write below is idempotent.
@@ -1153,6 +1180,8 @@ class HeadlessInstance {
     // global override or this instance's configured model.
     const rawScheduleModel = first.metadata?.['schedule_model'];
     const scheduleModel = typeof rawScheduleModel === 'string' && rawScheduleModel.trim().length > 0 ? rawScheduleModel : undefined;
+    // E69: a scheduled turn's sends are labelled with the schedule's name.
+    const sourceLabel = scheduleSourceLabel(first) ?? undefined;
 
     // Delivery can happen before child exit. Keep conversation ownership until
     // both exit and fallback delivery settle, so no two children ever resume
@@ -1168,6 +1197,7 @@ class HeadlessInstance {
       onToolCall: (call) =>
         this.reportToolCall(channel, contactId, formatToolCallSummary(call.name, call.input), topic, conversationId),
       scheduleModel,
+      sourceLabel,
       // E69: advance only once the turn is known to have started.
       ...(pending ? { onTurnStarted: () => advanceWatermark(db, conversationId, pending.through) } : {}),
     });
@@ -1179,10 +1209,10 @@ class HeadlessInstance {
     if (error || !resultText) {
       const detail = error ?? 'no result';
       console.error(`[${this.label}] claude invocation failed for ${conversationId.slice(0, 8)}: ${detail}`);
-      await this.deliverResponse(first, this.buildErrorReply(detail), conversationId);
+      await this.deliverResponse(first, this.buildErrorReply(detail), conversationId, sourceLabel);
       return;
     }
-    await this.deliverResponse(first, resultText, conversationId);
+    await this.deliverResponse(first, resultText, conversationId, sourceLabel);
   }
 
   /** E69 S69.4 — Main's pending-context block for this batch, or null. Never throws. */
