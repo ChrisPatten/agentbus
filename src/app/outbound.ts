@@ -46,3 +46,32 @@ export function ensureOutboundAppSession(db: Database.Database, contactId: strin
     return { conversationId, sessionId: row.id };
   })();
 }
+
+/**
+ * E83 — the session row a hidden `share_context` note for a non-app primary
+ * conversation (a Telegram DM) attaches to when the conversation has none: the
+ * conversation registry row and an open placeholder session with no
+ * `claude_session_id`, no messages and the owning agent's logical id.
+ *
+ * The placeholder keeps the note's foreign key valid and leaves the DM exactly
+ * as a quiet conversation: the first real message finds it as the active row,
+ * and `PoolManager` sees no `claude_session_id` there, so it launches a fresh
+ * `--session-id` pane session (and stores that id on this row). It would
+ * otherwise be closed as an idle legacy session, so `SessionTracker` exempts a
+ * message-less row in a primary channel.
+ */
+export function ensurePrimarySession(
+  db: Database.Database, contactId: string, channel: string, topic: string, agentId: string,
+): { conversationId: string; sessionId: string } {
+  const conversationId = computeConversationId(contactId, channel, topic);
+  const now = new Date().toISOString();
+  return db.transaction(() => {
+    db.prepare(`INSERT INTO conversation_registry(id,contact_id,channel,topic,first_seen,last_seen)
+      VALUES (?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET last_seen=excluded.last_seen`)
+      .run(conversationId, contactId, channel, topic, now, now);
+    const sessionId = randomUUID();
+    db.prepare(`INSERT INTO sessions(id,conversation_id,channel,contact_id,started_at,last_activity,message_count,agent_id)
+      VALUES (?,?,?,?,?,?,0,?)`).run(sessionId, conversationId, channel, contactId, now, now, agentId);
+    return { conversationId, sessionId };
+  })();
+}

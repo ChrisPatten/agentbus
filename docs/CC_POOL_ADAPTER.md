@@ -58,6 +58,7 @@ Every field of `adapters.cc-pool`:
 | `on_evict` | `clear` \| `kill` | `clear` | What happens to a pane on release: type `/clear` (drop context, leave the session running until the pane is next claimed) or send `Ctrl-C` and kill the window. Either way, the next launch starts from a fresh window: a launch reuses a live window only when it's at a shell prompt, and otherwise kills and recreates it. |
 | `launch_ack_delay_ms` | number (ms) | `5000` | Deprecated and ignored; accepted so existing configs load. The pane now polls for the `--dangerously-load-development-channels` prompt until it appears, the pane starts polling the bus, or the 30-second launch deadline passes. |
 | `launch_ack_max_attempts` | number | `3` | Maximum `Enter` presses to dismiss the ack prompt, once it's confirmed showing, before giving up. |
+| `model_confirm_pattern` | string (regex) | `"switch model\?"` | Case-insensitive regex that, together with a numbered `1. Yes, switch to <model>` line, identifies Claude Code's "Switch model?" prompt (see [Model-confirmation prompt](#model-confirmation-prompt)). The pool answers it with the key `1` only. |
 | `launch_ack_pattern` | string | `"loading development channels"` | Text matched (case-insensitively) in pane output to detect the ack prompt — the real prompt's header reads "WARNING: Loading development channels". Override if a CLI update rewords it. |
 | `pane_env` | map of string to string | `{}` | Extra environment variables set at window-creation time (`tmux new-window -e`). `TERM` and `COLORTERM` are always added on top, unconditionally. |
 | `watchdog.enabled` | boolean | `true` | Turns the stall watchdog on or off. |
@@ -165,7 +166,7 @@ Every pane launch — a fresh `bound`/`grow`/`evict` claim, and every `reuse` of
 4. **The pool's own `model`** (`adapters.cc-pool.<name>.model`).
 5. **Nothing** — no `--model` flag at all. The CLI falls back to whatever `model` is set in `~/.claude/settings.json`, and any interactive `/model` typed into ANY Claude session (this pool's or an entirely unrelated one) rewrites that file — so which model a pane actually runs can change for reasons that have nothing to do with this pool's own configuration. bus-core logs a startup warning (`[pool:<id>] No 'model' configured for this pool — ...`) for every configured pool whose `model` is unset, precisely because this fallback is a leak, not a feature.
 
-Overrides (steps 2–3) live in the same store `cc-headless` uses (`src/adapters/model-override-loader.ts`) — see `docs/MCP_TOOLS.md` and [HTTP_API.md](HTTP_API.md#model-overrides) for managing them. The resolved model, and which of the five steps produced it, is logged on every launch: `[pool:<id>] launching <pane> model=<m> (source=<s>)`.
+To set the agent override (step 2) from chat, send `/model` in a chat routed to the pool — for example `/model opus` or `/model haiku 4.5` (see [SLASH_COMMANDS.md](SLASH_COMMANDS.md#model-query--reset--list)). It stores a concrete model ID and, if the chat holds a live pane between turns, switches that pane immediately (typing `/model` into it and answering the prompt, falling back to a relaunch); otherwise the change applies at the next message. New model IDs can be added to `/model`'s catalog under `models.catalog` in `config.yaml`. Overrides (steps 2–3) live in the same store `cc-headless` uses (`src/adapters/model-override-loader.ts`) — see `docs/MCP_TOOLS.md` and [HTTP_API.md](HTTP_API.md#model-overrides) for managing them. The resolved model, and which of the five steps produced it, is logged on every launch: `[pool:<id>] launching <pane> model=<m> (source=<s>)`.
 
 **The model is fixed per Claude session, not per message.** `--model` only takes effect at process start (fresh `--session-id`) or resume (`--resume`) — there is no way to change a running session's model mid-turn. `pool_leases.model` (migration 023) records what the pane's *current* session was actually launched with, so a `reuse` can compare against it without re-deriving anything.
 
@@ -177,6 +178,33 @@ Overrides (steps 2–3) live in the same store `cc-headless` uses (`src/adapters
 - If the relaunch itself fails, the pane is marked `dead` and the message is parked — the same failure path a fresh launch failure takes; `reconcileLiveness()` revives a `dead` pane back to `free` on the next sweep tick.
 
 **Using `/model` inside a pane is not a supported way to switch.** It only rewrites `~/.claude/settings.json` — exactly the leak this feature exists to close — and has no effect on what `PoolManager` resolves or persists to `pool_leases.model` for the next relaunch; a later resolution can silently override it back.
+
+### Model-confirmation prompt
+
+Typing `/model <id>` into a live Claude Code session whose context is cached for the current model shows this prompt (real capture):
+
+```
+Switch model?
+Your next response will be slower and use more tokens
+This conversation is cached for the current model. Switching to Opus 5.5
+means the full history gets re-read.
+❯ 1. Yes, switch to Opus 5.5
+  2. No, go back
+```
+
+`/model` in chat calls `PoolManager.applyModelNow()` for the chat's `leased` pane, which keeps the Claude session whenever it can (`PaneLifecycle.switchModelInPane()`):
+
+1. **Only an idle pane.** If a turn is in flight (unhandled work, the same signal the stall watchdog uses) the result is `deferred`: nothing is typed, and the switch happens at the next message through the normal relaunch path. A pane at a shell, one already showing a prompt, or a model id with unexpected characters is never typed into.
+2. **Type the command.** `tmux.sendCommand(pane, "/model <id>")`, the same literal-type-plus-Enter helper the pool uses for `/clear`.
+3. **Wait, bounded, for the prompt** (10 s, polling `capture-pane`). It counts as present only when the capture matches `model_confirm_pattern` (default `switch model\?`, case-insensitive regex) **and** a numbered `1. Yes, switch to <model>` line is on screen.
+4. **Answer it with the key `1`** via `tmux.sendKeys`, only while that match holds; it re-reads the pane and retries up to `launch_ack_max_attempts` presses. The pool never sends `2` or any other key.
+5. **Verify** the prompt is gone and the idle composer is back (5 s bound). Then `pool_leases.model` is updated and `/model` replies that the pane was switched in place and the session kept.
+
+If the prompt never appears, will not clear, or the composer does not return, the in-place attempt fails with a plain reason and `applyModelNow()` falls back to the relaunch (kill, then `--resume` on the same Claude session with the new `--model`; see "Model selection"). The reply then says `Relaunched ... (switching in place failed: <reason>)`. The override is saved either way. If the relaunch also fails, `/model` reports the launch error and the next message starts a fresh pane on the new model. A chat with no live pane just gets the new model on its next launch.
+
+**Does a `--model` relaunch show this prompt?** Not expected, though no live capture shows either way. The prompt warns that the *current session's* cache is tied to the old model; a relaunch starts a new process (`--resume` with `--model` at startup), so there is no running session to switch. The launch sequence above documents only the development-channels prompt, and the E53 relaunch path has run with just that ack handler. The same detector therefore stays in the launch path purely as a safety net: any launch carrying `--model` checks the pane on each readiness poll and sends `1` only if the exact prompt (header plus numbered Yes option) is on screen; absent, no key. A prompt that will not clear fails the launch with `Pane launch failed: the model confirmation prompt in <pane> was still showing after N attempt(s) to answer it`.
+
+If a CLI update rewords the prompt, set `model_confirm_pattern` (check with `/pane` or `tmux capture-pane -p`); a pattern that stops matching is safe, because no key is sent and the in-place attempt falls back to a relaunch. `cc-headless` has no pane and is unaffected.
 
 ## Allocation and eviction
 
@@ -202,11 +230,51 @@ A pool never actually shrinks back down in row count. A grown pane that's later 
 
 Proactive sends (`send_message`, `send_email`) carry neither field and are not guarded. A pane leased to one conversation may message another, for example a scheduled-topic pane alerting the user's DM.
 
+## Primary conversations: pending context and shared context (E83)
+
+Main in the Mac app gets two things a plain conversation doesn't: a message sent into it from elsewhere (a scheduled routine) reaches the agent as dated context on its next turn (E69), and an operator's Claude Code session can hand it a hidden note with `share_context` (E82). E83 gives a pool's Telegram DM both. Peggy's 1:1 DM is the Main analogue: one long conversation she comes back to all day.
+
+**Opt in.** List the exact channel under the agent that serves it:
+
+```yaml
+agents:
+  "agent:peggy":
+    pending_context:
+      channels: [telegram:peggy]      # her DM; not telegram:pokeclaude, not telegram:peggy:group:*
+      # max_items: 10                 # each falls back to adapters.app.pending_context
+      # max_chars: 4000
+      # context_ttl_ms: 86400000
+```
+
+A **primary conversation** (`isPrimaryConversation`, `src/app/main.ts`) is Main plus the `general` conversation of each listed channel. The match is exact: `channelMatches` would let `telegram:peggy` also match `telegram:peggy:group:*` for routing, but a group chat or a `thread:` forum topic is never primary. It is not "every Telegram DM" because the same bus carries other bots and Peggy's `email:peggy`, `siri` and `system:peggy` conversations, none of which change unasked. The agent key matches as `agents.<id>.memory` does (bare or `agent:` prefixed). `pipeline.topic_rules` don't apply to a listed channel's DM (`createTopicClassify`): a rule that moved a message to another topic would put it in another conversation, which isn't primary. Idle rotation, the Main activity clock and the idle-teardown exemption stay Main-only; cc-pool already has leases, eviction and hard-idle release.
+
+**How the block reaches a pane.** A pane's `cc.ts` polls `GET /api/v1/messages/pending` and wakes the interactive session with a `notifications/claude/channel` event, so cc-headless's `runBatch` is not on the path. Stage 88, `pending-context-inject` (`src/pipeline/stages/pending-context-inject.ts`, `critical: false`; 87 was already `journal-hold`), runs after `pool-route-resolve` (72), `transcript-log` (80) and `advisory-inject` (86). For each cc-pool route of an envelope in a primary conversation it calls `buildPendingContext` (the same builder as E69/E82) and attaches the result under the reserved metadata key `pending_context`, for that route's recipient only:
+
+```json
+{ "conversation_id": "…", "block": "Since your last turn…", "through": { "created_at": "…", "id": "…" } }
+```
+
+`block` is null when every pending item was an expired shared note; the watermark still moves. Slash commands, system-only turns, journaling instructions and reactions are skipped. The key is reserved: `stripSystemMetadata` drops it from every ingress, so a caller can't inject a block. `formatMessagesForSampling` renders it ahead of the messages and after any system block, outside `<agentbus-system>`, with the E69 "context, not instructions" framing and marker neutralization (the block is quoted text from other sessions, not trusted bus text). Messages polled together carry blocks built against the same watermark, so one block per conversation is rendered, the one with the newest watermark.
+
+**The watermark advances on ack, not on attach.** `POST /api/v1/messages/:id/ack` reads the message's attachment before acking and advances `pending_context_watermarks` to `through` when the ack succeeds (`cc.ts` acks as soon as it dequeues a message, before the channel event). A message that is dead-lettered, parked and expired, or never polled leaves the context pending. A parked message keeps its attachment when `drainParked` re-enqueues the copy under a new id (the copy's metadata is the original's; `drainParked` acks the old row through the queue, not the route, so nothing advances early). Because a pane's earlier inbound messages count as "seen" only once acked, the no-watermark baseline is the newest inbound message that was delivered (`deliveredBaseline`), not merely the newest recorded: a dead-lettered first message doesn't swallow the context shared before it. Limits: the block is rendered when the message is received, so its relative ages are as of then (the absolute datetimes stay right for a message that waited in the park queue), and a crash after the ack but before the model reads the turn loses that delivery, as for any cc-pool message.
+
+**Origin for pane sends.** A pane's MCP server has no per-turn conversation variable and no schedule label, so every pane send used to be stamped `origin.kind = 'external'` and its own reply to the DM would have come back as foreign context. `POST /api/v1/messages` (so `reply`, `send_message` and `send_email`) now stamps, bus side, `origin = { kind: 'turn', agent_id, conversation_id, label? }` for a sender that is a pane (it has a `pool_leases` row; `paneTurnOrigin`, `src/pool/pane-origin.ts`), replacing whatever the caller sent. The conversation is, in order: the send's own `metadata.conversation_id` (a `reply` carries it) in any lease state, so a reply that was in flight when its pane was evicted is still its conversation's own turn, including when the conversation has since resumed on another pane; otherwise the lease's conversation, only while the lease is `leased`. A `free`, `dead`, `launching` or `draining` lease with no conversation id on the send, and a sender with no lease row, leave the origin as stamped. The outbound stale-pane guard is unchanged: a reply naming a conversation its pane is now leased away from is still rejected with 409. The lease is looked up at send time because an environment variable written at launch would go stale when the pane is evicted and re-leased. The label is an explicit caller `source` if there is one; otherwise, when the newest inbound message of that conversation is a scheduled fire, the schedule's name by the rule cc-headless applies through `AGENTBUS_SOURCE_LABEL` (`scheduleLabelFromMetadata`, `src/core/origin.ts`: `schedule_label`, else a config-style `schedule_id`, else `scheduled job <id8>`), so a routine's send into the DM reads "Morning scan". If a person wrote in that conversation after the schedule fired, the pane is no longer running the routine and no schedule label is used. So Peggy's replies and proactive sends from the DM pane are never injected back, while a send from a pane leased to another conversation (a scheduled-topic pane messaging the DM) is.
+
+**Where a send into the DM is logged.** `DeliveryWorker` resolves the conversation of an outbound send from the newest `conversation_registry` row for the contact and channel (for the app, from the topic). For a channel listed in `pending_context.channels` it now resolves topic `general` when the send has no topic or `general` (`DeliveryWorkerDeps.primaryChannels`), so a forum-topic or other registry row seen more recently can't take the routine's message away from the DM. Other channels and thread topics behave as before. A send into a DM with no open session isn't logged (existing behavior of `resolveConversationForOutbound`), so it is not delivered as context later.
+
+**`share_context` into the DM.** Pass `channel: "telegram:peggy"` ([MCP_TOOLS.md](MCP_TOOLS.md#share_context)). The bus resolves the owning agent through `pipeline.routes` for the contact and channel, and refuses a channel that is not listed in `pending_context.channels`, one with no route, one served by a runtime that doesn't read pending context (only cc-headless and cc-pool do), and for a Telegram channel a bot that isn't configured or a contact with no `contacts.<id>.platforms.telegram` identity (the rule the Telegram adapter uses to treat a contact as its own: every bot serves each contact that has a Telegram `userId`). The hidden row attaches to the DM's newest session row, open or ended. A DM with no session row gets a **placeholder**: the conversation registry row and an open session with no `claude_session_id`, no messages (`message_count` 0) and `agent_id` the pool's logical id (`ensurePrimarySession`). `PoolManager.resolveRoute` reads that open row as `priorRow` with no session id, so the first real message launches a fresh `--session-id` (not a resume) and stores it on the placeholder; `SessionTracker.closeIdleSessions` skips a message-less row in a listed channel, which it would otherwise close like any legacy session. A call from the pane leased to the target conversation is rejected (409), since `POST /api/v1/context` stamps the sender's pane origin the same way. The note is hidden from the transcript API, search and every other app-facing read, and journaling windows and prompts keep it ([JOURNALING.md](JOURNALING.md#shared-context)).
+
+**Reaching a remote bus.** A tools-only `cc.ts` builds its base URL as `http://127.0.0.1:<http_port>`. `AGENTBUS_URL` (the variable the hook scripts already use) overrides it, so a Claude Code session on another machine can call `share_context` against Peggy's bus. With the override set the token comes only from the environment, by the hook scripts' convention: `AGENTBUS_BUS_TOKEN`, else `AGENTBUS_TOKEN`, else the first line of `AGENTBUS_TOKEN_FILE`. The loaded config's `bus.auth_token` belongs to the local bus and is never sent to the remote host, and the token is attached only to requests under the configured URL (`withBusToken`). Unset, behavior is unchanged: `bus.auth_token`, else `AGENTBUS_BUS_TOKEN`. The bus serves plain HTTP, so reach a remote bus through an SSH tunnel or an HTTPS proxy, not across an open network. A bus bound to the LAN with no `bus.auth_token` accepts anything that can reach it: set a token before pointing remote sessions at it.
+
+**Config rollout (Peggy).** Her bus runs on BobaFett, separate from any local bus: deploy a build with E82 and E83 there, then add `agents."agent:peggy".pending_context.channels: [telegram:peggy]`. Routes on `telegram:peggy` already target her pool. The abandoned `context:user` route plays no part.
+
+**Not verified live.** The attached block's rendering in a real pane (where the channel turn shows leading text and whether the model reads it), whether `UserPromptSubmit` fires on a channel-injected turn, and what `/clear` and resume do to context injected earlier all need the spike on a real pool; see `_bmad-output/epics/E83-telegram-dm-primary-conversation-cc-pool.md`.
+
 ## Session-tracker interaction
 
 Writing `sessions.claude_session_id` for a pool-owned session — rather than leaving it `NULL` — is deliberate, not incidental. That column doubles as a flag `SessionTracker` reads two ways:
 
-- It opts the session **out of** `SessionTracker.closeIdleSessions()`'s legacy idle-close path, which only ever considers sessions where `claude_session_id IS NULL`. Idle handling for a pool session is `cc-pool`'s own job — the hard-idle sweep and LRU eviction above — not the generic session-closer's.
+- It opts the session **out of** `SessionTracker.closeIdleSessions()`'s legacy idle-close path, which only ever considers sessions where `claude_session_id IS NULL` (E83: and also skips the message-less placeholder `share_context` creates for a listed primary channel). Idle handling for a pool session is `cc-pool`'s own job — the hard-idle sweep and LRU eviction above — not the generic session-closer's.
 - Since E66 it is also how the journaling engine and the journal hook find a pool session: `POST /api/v1/journal/events` resolves the hook's Claude session id to the bus session through it.
 
 **Journaling (E66).** Pool sessions journal through the shared journaling engine ([JOURNALING.md](JOURNALING.md)). A pane session belongs to the pool's logical agent, so configure `agents.<pool agent id>.journaling`; the default chain `[system-message, cc-headless, script]` fits a pool.
@@ -219,6 +287,8 @@ Writing `sessions.claude_session_id` for a pool-owned session — rather than le
 ## Observability
 
 ### Live tool-call status stream
+
+> **E79:** by default the line the hook posts is a short fixed phrase ("Checking the calendar"), not the tool name and arguments described below, and the agent can set its own with the `status` MCP tool. Phrases come from `scripts/hooks/tool-status-phrases.json` next to the hook (resolved through the symlink; override with `AGENTBUS_TOOL_STATUS_PHRASES`) and are read with jq; the hook's `PostToolUse` branch recognises `mcp__agentbus__status`, posts its sanitised text, and, via an `agent-status-<session>` flag in the hook's state dir, suppresses fixed phrases until the next `UserPromptSubmit` (turn-long stickiness). Set `AGENTBUS_TOOL_STATUS_MODE=raw` in the pane environment (`pane_env`) to restore the raw lines; keep it in step with `tool_status.mode` for cc-headless. The hook needs `jq` and `python3` on the pane's PATH, as before. Details: [TELEGRAM_ADAPTER.md](TELEGRAM_ADAPTER.md#live-tool-call-status-stream) item 11.
 
 `cc-headless` gets the typing indicator and live tool-call status stream (E29) for free by parsing its spawned `claude -p` process's own stdout stream — see [TELEGRAM_ADAPTER.md#live-tool-call-status-stream](TELEGRAM_ADAPTER.md#live-tool-call-status-stream). A pool pane has no equivalent: it's a normal interactive `claude` process talking to bus-core over MCP, so bus-core only ever sees calls to the small set of MCP tools it itself exposes, not the pane's other tool calls.
 
@@ -248,7 +318,7 @@ On the adapter side (`TelegramAdapter.appendToolCallLine`, `src/adapters/telegra
      parked: 1 (oldest 42s)
 ```
 
-An optional argument narrows the output to one pool, matched against either the bare or `agent:`-prefixed form of its logical agent id. `/status` also gets a one-line summary per configured pool (`pool peggy: 3/4 leased, 1 parked`), omitted entirely on a deployment with no `cc-pool` instances configured.
+The pane serving the conversation you ran the command in is marked `◀ this chat`. `/pool kill` kills that pane's window (see [SLASH_COMMANDS.md](SLASH_COMMANDS.md#pool-pool-agent-id)). An optional argument narrows the output to one pool, matched against either the bare or `agent:`-prefixed form of its logical agent id. `/status` also gets a one-line summary per configured pool (`pool peggy: 3/4 leased, 1 parked`), omitted entirely on a deployment with no `cc-pool` instances configured.
 
 ### `/pane` command
 

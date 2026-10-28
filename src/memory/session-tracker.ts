@@ -23,7 +23,7 @@ import { exec, type ExecOptionsWithStringEncoding } from 'node:child_process';
 import type Database from 'better-sqlite3';
 import type { AppConfig } from '../config/schema.js';
 import type { SessionRow } from './types.js';
-import { rotateIdleMainSessions } from '../app/main.js';
+import { primaryChannels, rotateIdleMainSessions } from '../app/main.js';
 
 export class SessionTracker {
   private db: Database.Database;
@@ -114,15 +114,22 @@ export class SessionTracker {
     //
     // E69: Main rows are exempt. A Main row with no claude_session_id (only
     // proactive sends so far) stays open; Main has its own idle rotation.
+    //
+    // E83: so is the message-less placeholder row `share_context` creates for
+    // a primary channel's conversation (a Telegram DM with no session yet).
+    // The first real message reuses it and gives it a Claude session.
     const idleSessions = this.db
       .prepare(
         `SELECT * FROM sessions
          WHERE ended_at IS NULL AND status = 'active' AND last_activity < ?
            AND claude_session_id IS NULL
            AND NOT (channel = 'app' AND EXISTS (SELECT 1 FROM conversation_registry cr
-             WHERE cr.id = sessions.conversation_id AND cr.channel = 'app' AND cr.topic = 'general'))`,
+             WHERE cr.id = sessions.conversation_id AND cr.channel = 'app' AND cr.topic = 'general'))
+           AND NOT (message_count = 0 AND EXISTS (SELECT 1 FROM conversation_registry cr
+             WHERE cr.id = sessions.conversation_id AND cr.topic = 'general'
+               AND cr.channel IN (SELECT value FROM json_each(?))))`,
       )
-      .all(cutoff) as SessionRow[];
+      .all(cutoff, JSON.stringify(primaryChannels(this.config))) as SessionRow[];
 
     if (idleSessions.length === 0) return;
 

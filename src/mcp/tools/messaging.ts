@@ -8,7 +8,9 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { toolError, toolSuccess } from './helpers.js';
 import { getEmailInstances, type AppConfig } from '../../config/schema.js';
 import { toPrefixedAgentId } from '../../pool/types.js';
+import { applyChoices, choicesSchema, CHOICES_DESCRIPTION } from '../../choices/validate.js';
 import { originFromEnv, withOrigin } from '../../core/origin.js';
+import { applySendOptions, sendOptionFields } from '../../outbound/send-options.js';
 
 /**
  * @param agentId - The BARE agent id of the pane/instance registering this
@@ -25,7 +27,9 @@ export function registerMessagingTools(server: McpServer, busBaseUrl: string, ag
         'Send a message to any contact on any channel. Use list_channels to discover available channels. ' +
         'For proactive sends (not replying to a message you just received), call get_session or ' +
         'list_sessions first to check the current topic for that conversation rather than guessing one. ' +
-        'For channel app, omit topic to send to Main, or use an existing app session thread:<hash> topic. Unknown app topics are rejected.',
+        'For channel app, omit topic to send to Main, or use an existing app session thread:<hash> topic. Unknown app topics are rejected. ' +
+        'Pass `choices` to offer single-choice answers (tappable buttons on Telegram). ' +
+        '`silent`, `no_preview` and `pin` tune Telegram delivery (no notification sound, no link card, pin after sending).',
       inputSchema: {
         to: z.string().min(1).describe('Recipient identifier (e.g. "contact:chris", "contact:alice")'),
         channel: z.string().min(1).describe('Target channel (e.g. "telegram", "bluebubbles", "app")'),
@@ -52,6 +56,8 @@ export function registerMessagingTools(server: McpServer, busBaseUrl: string, ag
           .record(z.string(), z.unknown())
           .optional()
           .describe('Optional key/value metadata attached to the message'),
+        choices: choicesSchema.optional().describe(CHOICES_DESCRIPTION),
+        ...sendOptionFields,
         source: z
           .string()
           .optional()
@@ -62,7 +68,7 @@ export function registerMessagingTools(server: McpServer, busBaseUrl: string, ag
           ),
       },
     },
-    async ({ to, channel, body, topic, reply_to, priority, metadata, source }) => {
+    async ({ to, channel, body, topic, reply_to, priority, metadata, source, choices, silent, no_preview, pin }) => {
       // Validate channel exists — resolved the same way real delivery is
       // (registry.lookupPrimaryByChannel), so a dynamically-derived channel
       // (e.g. a Telegram group, E28) validates correctly too.
@@ -84,6 +90,7 @@ export function registerMessagingTools(server: McpServer, busBaseUrl: string, ag
       // Construct and enqueue the envelope.
       // reply_to is passed through as-is; the bus stores it without validating
       // against transcripts (no /api/v1/transcripts/:id endpoint exists yet).
+      const withChoices = applyChoices(channel, body, applySendOptions(metadata ?? {}, { silent, no_preview, pin }), choices);
       const envelope = {
         channel,
         topic: topic ?? 'general',
@@ -91,9 +98,9 @@ export function registerMessagingTools(server: McpServer, busBaseUrl: string, ag
         recipient: to,
         reply_to: reply_to ?? null,
         priority: priority ?? 'normal',
-        payload: { type: 'text' as const, body },
+        payload: { type: 'text' as const, body: withChoices.body },
         // E69: the bus-side origin always replaces a caller-supplied one.
-        metadata: withOrigin(metadata, originFromEnv(agentId, source)),
+        metadata: withOrigin(withChoices.metadata, originFromEnv(agentId, source)),
       };
 
       try {
@@ -114,6 +121,66 @@ export function registerMessagingTools(server: McpServer, busBaseUrl: string, ag
         return toolError(`Failed to send message: ${String(err)}`);
       }
     }
+  );
+
+  registerShareContextTool(server, busBaseUrl, agentId); // E82
+}
+
+/**
+ * E82 — `share_context`: hand a Claude Code session's outcome to Main without
+ * a message. POSTs to `/api/v1/context`, which writes a hidden row; the app
+ * shows nothing and Main reads it on its next turn. Separate from
+ * `send_message` on purpose: it has no channel, topic, queue or delivery.
+ * Registered by `registerMessagingTools`, so both tool sets
+ * (`registerAllTools`, `registerHeadlessTools`) get it.
+ */
+function registerShareContextTool(server: McpServer, busBaseUrl: string, agentId: string): void {
+  server.registerTool(
+    'share_context',
+    {
+      description:
+        "Hand a note to Main (the operator's main conversation in the Mac app), or to an agent's Telegram DM when you pass `channel`, " +
+        'so that conversation knows about it on its next turn. ' +
+        'Nothing is shown to the user: no message, no notification, no unread badge, and the agent is not woken. ' +
+        'Use it to pass on the outcome of work you finished in a Claude Code session (an artifact you finished, ' +
+        'a decision you made, a result worth knowing). One note per finished piece of work; make it self-contained. ' +
+        'Do not use it to notify the operator, ask a question or request an answer: use send_message for that. ' +
+        'Notes older than 24 hours are not passed on, and a note too long for the context budget is rejected, ' +
+        'so summarize rather than paste. Cannot be called from a turn in the conversation it targets.',
+      inputSchema: {
+        to: z.string().min(1).describe('Contact whose conversation receives the note (e.g. "contact:chris")'),
+        body: z.string().min(1).describe('The note: what happened and what Main should know, self-contained and concise'),
+        source: z
+          .string()
+          .min(1)
+          .describe('Where the note comes from, shown to the agent as its label (e.g. "Claude Code: baxter")'),
+        channel: z
+          .string()
+          .min(1)
+          .optional()
+          .default('app')
+          .describe(
+            'Where the note goes: "app" (default) is Main in the Mac app. Pass an agent\'s Telegram DM channel ' +
+              '(e.g. "telegram:peggy") when that agent is set up to receive shared context there.',
+          ),
+      },
+    },
+    async ({ to, body, source, channel }) => {
+      try {
+        const res = await fetch(`${busBaseUrl}/api/v1/context`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ to, body, source, channel, sender: toPrefixedAgentId(agentId), origin: originFromEnv(agentId, source) }),
+        });
+        const data = (await res.json()) as { ok: boolean; id?: string; error?: string; reason?: string };
+        if (!data.ok) {
+          return toolError(`Bus rejected context: ${data.reason ?? data.error ?? 'unknown error'}`);
+        }
+        return toolSuccess({ success: true, message_id: data.id });
+      } catch (err) {
+        return toolError(`Failed to share context: ${String(err)}`);
+      }
+    },
   );
 }
 

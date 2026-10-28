@@ -81,5 +81,5 @@ Keep this terminal open. The agent only receives messages while the session is r
 - **Sessions end after 30 minutes of quiet.** For this runtime, the bus closes a conversation's session after `memory.session_idle_threshold_ms` (default 30 minutes) without messages. The Claude Code session itself keeps running.
 - **No phone approvals.** Permission prompts must be answered in the terminal. [Approvals](/features/approvals) only work with `cc-pool`.
 - **Typing indicators go to the main chat.** In Telegram forum topics, "typing…" appears in the group's General topic.
-- **No live tool list** in Telegram, unless you install the `agentbus_tool_status_hook.sh` hook described under [cc-pool](/runtimes/cc-pool#optional-hooks).
+- **No live status line** in Telegram, unless you install the `agentbus_tool_status_hook.sh` hook described under [cc-pool](/runtimes/cc-pool#optional-hooks). For the older lines with tool names and details, export `AGENTBUS_TOOL_STATUS_MODE=raw` in the shell that starts `claude`.
 - `/stop` and `/cost` don't apply to this runtime.

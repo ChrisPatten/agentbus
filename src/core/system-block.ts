@@ -47,7 +47,22 @@ export const SYSTEM_ONLY_KEY = 'system_only';
  */
 export const JOURNAL_RUN_KEY = 'journal_run_id';
 
-const RESERVED_KEYS = [SYSTEM_BLOCKS_KEY, SYSTEM_ONLY_KEY, JOURNAL_RUN_KEY] as const;
+/**
+ * E82 — transcript metadata flag marking a hidden handoff (`share_context`):
+ * Main reads the row as context, the app never shows it. Reserved: stripped
+ * at ingress, so only `POST /api/v1/context` can set it.
+ */
+export const CONTEXT_ONLY_KEY = 'context_only';
+
+/**
+ * E83 — envelope metadata key carrying a pending-context block for a cc-pool
+ * pane (see `PendingContextAttachment`). Unlike a system block it is quoted
+ * text from other sessions, rendered outside `<agentbus-system>`. Reserved:
+ * stripped at ingress, so a caller can never inject one.
+ */
+export const PENDING_CONTEXT_KEY = 'pending_context';
+
+const RESERVED_KEYS = [SYSTEM_BLOCKS_KEY, SYSTEM_ONLY_KEY, JOURNAL_RUN_KEY, CONTEXT_ONLY_KEY, PENDING_CONTEXT_KEY] as const;
 
 /**
  * A block attached during the pipeline. `recipient`, when set, limits it to
@@ -144,6 +159,49 @@ export function readSystemBlocks(metadata: Record<string, unknown> | undefined):
   return raw
     .map((entry) => (typeof entry === 'string' ? entry : (entry as PendingSystemBlock | null)?.text))
     .filter((t): t is string => typeof t === 'string' && t.length > 0);
+}
+
+/**
+ * E83 — what the pending-context stage attaches to a pane's copy of a message:
+ * the rendered block (null when every pending item had expired, so there is
+ * nothing to show) and the watermark to advance to once the pane acks it. The
+ * block is built against the watermark as it stood, so messages polled
+ * together carry the same one.
+ */
+export interface PendingContextAttachment {
+  conversation_id: string;
+  block: string | null;
+  through: { created_at: string; id: string };
+}
+
+/** Pipeline-time form: attachments tagged with the route recipient they are for. */
+type PendingContextEntry = PendingContextAttachment & { recipient: string };
+
+/** Attach pending context during the pipeline, for one route recipient. */
+export function attachPendingContext(metadata: Record<string, unknown>, recipient: string, attachment: PendingContextAttachment): void {
+  const existing = Array.isArray(metadata[PENDING_CONTEXT_KEY]) ? (metadata[PENDING_CONTEXT_KEY] as PendingContextEntry[]) : [];
+  metadata[PENDING_CONTEXT_KEY] = [...existing.filter((e) => e.recipient !== recipient), { ...attachment, recipient }];
+}
+
+/** The attachment a fan-out copy for `recipient` should carry (pipeline-time form), or null. */
+export function pendingContextFor(metadata: Record<string, unknown> | undefined, recipient: string): PendingContextAttachment | null {
+  const raw = metadata?.[PENDING_CONTEXT_KEY];
+  if (!Array.isArray(raw)) return null;
+  const entry = (raw as PendingContextEntry[]).find((e) => e && e.recipient === recipient);
+  if (!entry) return null;
+  const { recipient: _recipient, ...attachment } = entry;
+  return attachment;
+}
+
+/** The attachment on an enqueued envelope (queue-time form: a single object), or null when absent or malformed. */
+export function readPendingContext(metadata: Record<string, unknown> | undefined): PendingContextAttachment | null {
+  const raw = metadata?.[PENDING_CONTEXT_KEY];
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const a = raw as Partial<PendingContextAttachment>;
+  const through = a.through;
+  if (typeof a.conversation_id !== 'string' || !through || typeof through.created_at !== 'string' || typeof through.id !== 'string') return null;
+  if (a.block !== null && typeof a.block !== 'string') return null;
+  return { conversation_id: a.conversation_id, block: a.block, through: { created_at: through.created_at, id: through.id } };
 }
 
 /** True for a bus-originated envelope whose body must not be shown as a message. */

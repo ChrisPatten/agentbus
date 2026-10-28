@@ -12,12 +12,23 @@ bus:
   db_path: ~/.agentbus/agentbus.db
   log_level: info             # accepted, but not yet applied to log output
 
+tool_status:                  # E79 - the live status line shown while an agent works
+  mode: phrases               # phrases (default): short fixed phrases such as "Checking the calendar"
+  #                           # raw: the old lines naming the tool and its arguments
+  # phrases_file: /path/to/tool-status-phrases.json   # cc-headless only; default is scripts/hooks/tool-status-phrases.json
+  # The pool hook (scripts/hooks/agentbus_tool_status_hook.sh) runs in the agent's own project and does
+  # not read this file: set AGENTBUS_TOOL_STATUS_MODE=raw (and optionally AGENTBUS_TOOL_STATUS_PHRASES)
+  # in the pane's environment (cc-pool pane_env) to match.
+
 adapters:
   # ── Telegram — docs/TELEGRAM_ADAPTER.md ──────────────────────────────────────
   # Single-bot form (adapter id and channel: "telegram"):
   telegram:
     token: ${TELEGRAM_BOT_TOKEN}
     poll_timeout: 30          # long-poll timeout in seconds
+    # choice_ttl_hours: 24    # hours before an unanswered choice-button prompt expires (E74)
+    # send_paths:             # directories the send_document tool may upload from (E81); symlinks are resolved first
+    #   - /Users/me/agent/data  # default: each agent's data/ dir and its Claude Code scratchpad root
   # Multi-bot form (ids "telegram:peggy", "telegram:jarvis"):
   # telegram:
   #   peggy:
@@ -76,9 +87,10 @@ adapters:
   #   max_upload_bytes: 26214400
   #   ping_interval_ms: 30000
   #   main_idle_rotation_ms: 43200000  # retire Main's Claude session after 12 h without operator/agent activity; 0 = never
-  #   pending_context:                 # foreign messages shown to the next Main turn as dated context
+  #   pending_context:                 # foreign messages and share_context notes shown to the next Main turn as dated context
   #     max_items: 10
-  #     max_chars: 4000
+  #     max_chars: 4000                # also the longest note share_context accepts
+  #     context_ttl_ms: 86400000       # share_context notes older than 24 h are not injected; 0 = no cutoff
   #   # Scheduled work can notify this contact through send_message(channel: app).
   #   # An omitted topic lands in Main and remains available while the client is offline.
 
@@ -148,6 +160,7 @@ adapters:
   #   launch_ack_delay_ms: 5000       # deprecated, ignored: the prompt is now polled for until the launch deadline
   #   launch_ack_max_attempts: 3     # re-send Enter if capture-pane still shows the prompt after a dismiss attempt
   #   launch_ack_pattern: "loading development channels"  # prompt text to match; override if the CLI rewords it
+  #   model_confirm_pattern: "..."    # regex for Claude Code's "Switch model?" prompt (answered with key 1 only); default: switch model\\?
   #   pane_env:                      # set via `tmux new-window -e` (TERM/COLORTERM always added)
   #     CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: "50"
   #   lease:
@@ -200,6 +213,11 @@ agents:
     owners:                          # who receives bus advisories about this agent
       - channel: telegram            # exact channel of the owner's conversation
         contact_id: alice            # a key under contacts
+    # pending_context:               # E83: context from other sessions for a primary conversation (docs/CC_POOL_ADAPTER.md)
+    #   channels: [telegram:peggy]   # exact channels whose DM is a primary conversation, like the Mac app's Main; default []
+    #   max_items: 10                # each limit falls back to adapters.app.pending_context
+    #   max_chars: 4000
+    #   context_ttl_ms: 86400000
     # memory:                        # E67 memory layout; replaces the cc-headless memory block (docs/AGENT_MEMORY.md)
     #   dir: memory                  # relative to the runtime's working_dir, or absolute
     #   index_file: MEMORY.md        # native auto memory loads its first 200 lines / 25KB
@@ -247,6 +265,18 @@ pipeline:
   #     target:
   #       channel: telegram
   #       template: "Voice note:\n{{body}}"
+
+# models:                            # extra /model catalog entries; same id overrides a built-in
+#   catalog:
+#     - id: claude-opus-5-6
+#       family: opus
+#       version: "5.6"                # quote it so YAML keeps it a string
+#       label: Opus 5.6
+#     - id: claude-sonnet-4-6
+#       family: sonnet
+#       version: "4.6"
+#       label: Sonnet 4.6
+#       deprecated: true              # hidden from the picker; still resolvable
 
 scheduler:
   tick_interval_ms: 30000

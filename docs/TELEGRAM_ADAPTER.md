@@ -44,6 +44,15 @@ adapters:
 
 The adapter id is `telegram` and inbound messages use channel `telegram`.
 
+| Key | Default | Purpose |
+|---|---|---|
+| `token` | required | Bot token from @BotFather |
+| `poll_timeout` | `30` | `getUpdates` long-poll timeout, in seconds |
+| `choice_ttl_hours` | `24` | Hours before an unanswered choice-button prompt (E74) or `ask_input` prompt (E81) expires. See [Choice buttons](#choice-buttons) |
+| `send_paths` | each agent's `data/` directory and its Claude Code scratchpad root | Absolute directories `send_document` may upload from (E81). Symlinks are resolved before the check. See [E81 additions](#e81-additions) |
+
+The same keys apply to each named bot below. The live status line's top-level `tool_status` block (`mode: phrases | raw`, `phrases_file`) is described under [Live tool-call status stream](#live-tool-call-status-stream).
+
 ### Multiple bots
 
 Use a named record under `adapters.telegram`. Each key becomes the bot's name, which is appended to the adapter id and channel:
@@ -460,6 +469,33 @@ delivered — instead of just a typing indicator.
     still applies unconditionally if the draft is still just the
     placeholder when the final reply arrives.
 
+11. **Succinct phrases (E79, the default).** The trail described in 2 above is the
+    `tool_status.mode: raw` behaviour. In the default `phrases` mode the line is a
+    fixed 2-5 word phrase ("Checking the calendar", "Reading a file", "Searching
+    the files", "Working on it") looked up from
+    [`scripts/hooks/tool-status-phrases.json`](../scripts/hooks/tool-status-phrases.json)
+    by tool name, MCP prefix, and, for `Bash`, the command's first word
+    (`calctl`, `imsg`, `capos`, `remindctl`, `mailwatch`, `grizzly`/`bear.sh`).
+    `src/adapters/tool-status.ts` (cc-headless) and the pool hook (jq) read the
+    same file; edit the phrases there, no code change. No tool input (path,
+    command, URL, query, message text) is ever copied into a line. Phrase lines
+    are sent with `placeholder: true`, so each replaces the previous one (one
+    evolving "current status" line, not a trail), and a line identical to the one
+    shown causes no edit. The agent can override with the `status` MCP tool
+    ([MCP_TOOLS.md](MCP_TOOLS.md#status)); that text is sticky for the rest of the
+    turn (chosen over a timed window because it is simpler and predictable: the
+    agent wrote it, so it stays until it writes another or the turn ends). Fixed
+    phrases never overwrite it. Unchanged: nothing after delivery, no status on
+    email, best-effort only. Config: `tool_status.mode: phrases | raw` and an
+    optional `tool_status.phrases_file` (cc-headless).
+
+| Setting | Where | Default | Purpose |
+|---|---|---|---|
+| `tool_status.mode` | `config.yaml` (top level) | `phrases` | `phrases` or `raw` (the E29 lines). Read by cc-headless |
+| `tool_status.phrases_file` | `config.yaml` (top level) | `scripts/hooks/tool-status-phrases.json` | Phrase table for cc-headless |
+| `AGENTBUS_TOOL_STATUS_MODE` | pane environment (`pane_env`), or the shell that starts `claude` | `phrases` | The same switch for the pool hook, which doesn't read `config.yaml`; keep it in step with `tool_status.mode` |
+| `AGENTBUS_TOOL_STATUS_PHRASES` | pane environment | the JSON next to the hook (through the symlink) | Phrase table for the pool hook |
+
 **Known limitation:** if bus-core crashes mid-turn, a draft message can be
 left showing a stale tool-call trail on Telegram forever (the same exposure
 the persistent typing indicator already has, just visually stickier). No
@@ -485,6 +521,41 @@ The adapter sends a permission request as a DM with **Approve** and **Deny** inl
 
 ---
 
+## Choice buttons
+
+When an outbound envelope carries `metadata.choices` (set by the `choices` argument of the `reply` and `send_message` tools, see [MCP_TOOLS.md](MCP_TOOLS.md#choice-buttons)), the adapter adds an inline keyboard to the last part of the message and stores a `choice_prompts` row (migration 038; migration 039 adds the nullable `commands` column). Invalid `metadata.choices` is logged and ignored; the message goes out without buttons.
+
+- **Layout.** One button per row; two per row when every label is 12 characters or fewer.
+- **Callback data.** `choice:<prompt uuid>:<index>`, 45 bytes at most. Telegram caps `callback_data` at 64 bytes, so labels are kept in the database and never in the button.
+- **Tap.** Only the contact the message was addressed to may answer; another allow-listed contact gets "Not authorized" and the prompt stays open. The tap marks the prompt answered (an atomic flip, so a double tap acts once), edits the message to append `You chose: <label>` with no keyboard, and injects `[tapped] <label>` into the prompt's own channel and topic as a normal inbound message (`metadata.choice_prompt_id`, `metadata.choice_index`, `reply_to` = the prompt's bus message id). Existing routing and lease rules therefore apply as for any typed message. If the injection fails the prompt is reopened and the user is told to tap again.
+- **Command choices (E54).** A choice may also carry a slash-command payload: the envelope's optional `metadata.choice_commands` is an array parallel to `choices` (each entry a single-line `/command ...` of at most 200 characters, or `null`; a length mismatch or invalid entry drops the payloads and keeps plain buttons). It is stored in `choice_prompts.commands`. When the tapped index has a payload, the adapter injects that slash command as the tapping user's inbound message (same channel, topic, sender and `reply_to` as the plain case, plus `metadata.choice_prompt_id`/`choice_index`) instead of `[tapped] <label>`, after every check above, so it runs through the normal command path. This is how bus commands such as `/model` offer a picker; see [SLASH_COMMANDS.md](SLASH_COMMANDS.md#choices). Agent-sent `choices` never carry payloads.
+- **Rejections.** A second tap answers "Already answered"; a tap after expiry answers "Expired" and clears the keyboard; an unknown prompt answers "Prompt not found". None of these inject a message.
+- **Expiry.** Prompts expire 24 hours after sending; set `choice_ttl_hours` on the Telegram adapter config to change it. A sweep on bus-core's 60-second maintenance tick (and once 15 seconds after startup) marks overdue prompts expired and removes their keyboards, leaving the message text.
+- **Buttons v2 (E81).** `metadata.choices` items may be objects `{label, style?, copy_text?, url?}`. A `copy_text` button is `{copy_text: {text}}` and a `url` button `{url}`; neither has `callback_data`, so a tap on them produces no update and no inbound message. `style` is sent as the button `style` (`primary`, `success`, `danger`). Non-label attributes are stored in `choice_prompts.buttons` (migration 041, NULL for plain-string prompts). When that column is set, a tap edits the keyboard to just the chosen button, disabled (`disabled: {}`, Bot API 10.3) and prefixed `✓`, and leaves the text alone; if Telegram refuses that edit the adapter falls back to the E74 `You chose: <label>` text edit. A prompt with only `copy_text`/`url` buttons stores no prompt row. Plain-string prompts are unchanged.
+- E51 Approve/Deny buttons are unaffected: they use `approve:` / `deny:` callback data and their own handler.
+
+---
+
+## E81 additions
+
+Verified against the live Bot API in the E81 spike; see the epic's Verified Behavior section (`_bmad-output/epics/E81-telegram-integration-enhancements.md`) for the request shapes and the limitations found.
+
+**Send options.** `metadata.silent` sets `disable_notification`, `metadata.no_preview` sets `link_preview_options.is_disabled` (also applied when the send overwrites a status draft by editing it), and `metadata.pin` pins the last delivered part silently after sending (failure logged only).
+
+**Outbound registry (migration 040, `outbound_messages`).** Every delivered Telegram message is recorded under its bus message id (chat, forum topic, platform message id, kind, part count); rows are pruned after 30 days at adapter start. `POST /api/v1/messages/:id/edit`, `/pin` and `/unpin` resolve a bus id through it and call the adapter's `editMessage`, `pinMessage` and `unpinMessage`. Edit uses `deliverText` (Markdown with a plain-text retry) or `editMessageText` with `rich_message` for rich messages; `message is not modified` is returned as success. A multi-part message records its last part and cannot be edited. Pin errors containing `not enough rights` are rewritten to name the "Pin Messages" admin right (the bot must be an administrator with `can_pin_messages`; the live bot already is). A pin makes Telegram post a "pinned a message" service message, which the adapter already reads to keep the topic's pinned text in new-session context.
+
+**`metadata.telegram_send`.** The location, venue, contact, document, rich and ask_input tools put their native form here (validated with zod in `src/outbound/telegram-send.ts`); the envelope body is the plain-text fallback. Absent or invalid, the adapter sends the body as ordinary text. `sendLocation`, `sendVenue`, `sendContact`, `sendDocument`/`sendPhoto` (multipart) and `sendRichMessage` are used; a tool-status draft pending for the chat or topic is deleted first, since these cannot overwrite it.
+
+**Documents.** `src/outbound/documents.ts` resolves the path with `realpath`, then requires it to be inside a `realpath`-resolved directory from `send_paths` (Telegram adapter config; default: each agent's `data/` directory and `/tmp/claude-<uid>/<working_dir slug>`), a regular non-empty file, and within 50 MB (documents) or 10 MB (photos). It runs in the MCP tool and again in the adapter (the authority), and the file is read only after the check.
+
+**Rich messages.** `sendRichMessage` with `rich_message: {markdown}` or `{html}`, 32768 characters. Content over 30000 characters is split into parts by `splitRichContent`; the choice keyboard rides the last part. A 400 or 404 on the first part falls back to the plain-text body. Edits use `editMessageText` with `rich_message`.
+
+**ask_input and inbound payloads (migration 042, `input_prompts`).** In a private chat the prompt carries a one-time reply keyboard; elsewhere it is a `force_reply`. The adapter now forwards `location`, `contact` and `users_shared` messages from allow-listed senders (previously dropped as non-text), as `[location] ...`, `[contact] ...` and `[shared person] ...` text with structured metadata. If an open prompt of that kind exists for the chat/topic and contact (or the message replies to the prompt message), `reply_to` is set to the prompt's bus message id, the prompt is marked answered, and the reply keyboard is removed by sending then deleting a short message carrying `remove_keyboard`. The expiry sweep (`sweepInputPrompts`, same tick as the choice sweep) does the same for unanswered prompts after 24 hours.
+
+**Operator notes.** No BotFather toggle and no new `allowed_updates` are needed. The bot needs the Pin Messages admin right for pins and Manage Topics as before. New optional config key: `send_paths` on the Telegram adapter.
+
+---
+
 ## Capabilities
 
 | Capability | Supported |
@@ -493,6 +564,8 @@ The adapter sends a permission request as a DM with **Approve** and **Deny** inl
 | Live tool-call status stream | Yes — see [Live tool-call status stream](#live-tool-call-status-stream) |
 | Read receipts | No |
 | Interactive approvals | Yes — Approve/Deny inline buttons, see [APPROVALS.md](APPROVALS.md) |
+| Choice buttons | Yes — single-choice inline buttons, see [Choice buttons](#choice-buttons) |
+| Rich messages, location/venue/contact, documents, input prompts, edit and pin | Yes — see [E81 additions](#e81-additions) |
 | Slash command registration | Yes (`setMyCommands`) |
 | Reactions | Yes (`sendReaction` with emoji) |
 | Message splitting | Yes (chunks <=4096 chars) |

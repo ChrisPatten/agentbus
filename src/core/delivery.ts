@@ -25,6 +25,13 @@ export interface DeliveryWorkerDeps {
   registry: AdapterRegistry;
   db: Database.Database;
   /**
+   * E83 — channels agents list in `pending_context.channels` (primary
+   * conversations). A send to one with no topic or `general` is logged into
+   * the `general` conversation, not whichever registry row for the contact and
+   * channel was seen last (for example a forum topic).
+   */
+  primaryChannels?: readonly string[];
+  /**
    * E68 S68.2 — called when a message is dead-lettered (the bus records a
    * `tool-error` feedback event when an agent sent it). Errors are logged.
    */
@@ -36,6 +43,7 @@ export class DeliveryWorker {
   private readonly registry: AdapterRegistry;
   private readonly db: Database.Database;
   private readonly onFailed: DeliveryWorkerDeps['onFailed'];
+  private readonly primaryChannels: ReadonlySet<string>;
   private stopping = false;
   private timer: ReturnType<typeof setTimeout> | null = null;
 
@@ -44,6 +52,7 @@ export class DeliveryWorker {
     this.registry = deps.registry;
     this.db = deps.db;
     this.onFailed = deps.onFailed;
+    this.primaryChannels = new Set(deps.primaryChannels ?? []);
   }
 
   /** Dead-letter and report the failure. */
@@ -171,7 +180,8 @@ export class DeliveryWorker {
         this.db,
         contactId,
         envelope.channel,
-        envelope.channel === 'app' ? envelope.topic || 'general' : undefined,
+        envelope.channel === 'app' || (this.primaryChannels.has(envelope.channel) && (!envelope.topic || envelope.topic === 'general'))
+          ? envelope.topic || 'general' : undefined,
       );
       logOutboundTranscript(this.db, {
         messageId,

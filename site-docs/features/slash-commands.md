@@ -9,6 +9,7 @@ Slash commands let you control the bus from any chat. Type a message starting wi
 - **Commands are recorded** in the conversation's transcript like any other message.
 - **Other commands go to your agent's Claude Code.** On `cc-pool` and `cc-headless`, a command the bus doesn't have, such as `/compact` or `/context`, is passed on to Claude Code. See [Claude Code commands](#claude-code-commands). On other runtimes you get `Unknown command: /foo`, with a pointer to `/help`.
 - **Telegram and the Mac app list the commands** as you type `/`. In Telegram groups, `/status@YourBot` works as well as `/status`.
+- **Some commands offer choices.** On Telegram they're buttons you tap. On other channels they're a numbered list: reply with the number within 10 minutes.
 
 **Every contact can use every command.** There are no per-person permissions yet, so anyone listed under `contacts` can, for example, pause a channel.
 
@@ -48,6 +49,17 @@ See [Journaling and memory](/features/journaling-and-memory).
 
 See [Scheduling](/features/scheduling).
 
+### Models
+
+| Command | What it does |
+|---|---|
+| `/model` | Shows the model of the agent this chat routes to, with a picker to change it |
+| `/model <name>` | Switches to a model by family (`opus`), family and version (`haiku 4.5`) or full ID |
+| `/model reset` | Goes back to the model in the agent's configuration |
+| `/model list` | Every model AgentBus knows |
+
+Works for chats routed to `cc-headless` or `cc-pool`. See [Switching from chat](/features/models#switching-from-chat).
+
 ### Channels
 
 | Command | What it does |
@@ -61,7 +73,8 @@ The adapter names are the ones `/status` lists. A pause lasts across restarts un
 
 | Command | What it does |
 |---|---|
-| `/pool` | Each pane: free or leased, its conversation, model and idle time, plus parked messages |
+| `/pool` | Each pane: free or leased, its conversation, model and idle time, plus parked messages. Marks the pane serving this chat |
+| `/pool kill` | Kill the window serving this chat, even mid-turn; your next message gets a fresh one |
 | `/pane` | A picture of this conversation's pane as it looks now |
 | `/pane <n>` or `/pane all` | A picture of pane `n`, or every pane (up to 8) |
 | `/rc` or `/rc <n>` | Sends `/remote-control` to this conversation's pane, or pane `n` |
@@ -82,8 +95,8 @@ On `cc-pool` and `cc-headless`, you can run Claude Code's own commands from chat
 
 | You type | What happens |
 |---|---|
-| `/status`, `/clear`, `/journal`, … | A bus command: the bus answers it, as above. Bus commands always win. |
-| `/compact`, `/context`, `/model`, … | The bus has no such command, so it passes it on to Claude Code. |
+| `/status`, `/clear`, `/model`, … | A bus command: the bus answers it, as above. Bus commands always win. |
+| `/compact`, `/context`, … | The bus has no such command, so it passes it on to Claude Code. |
 | `//clear`, `//status`, … | Two slashes pass the command on to Claude Code even though the bus has one with that name. |
 
 What you get back depends on the runtime:

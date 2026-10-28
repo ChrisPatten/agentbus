@@ -13,6 +13,12 @@
  * that message as context. Slash commands and their replies, and bus
  * system-only turns, are left out of the window entirely.
  *
+ * E82: hidden `context_only` handoffs (`share_context`) are real conversation
+ * content, so the window keeps them. They are rendered as
+ * `[Context shared by <label>, not shown to the user] <body>` so a journaler
+ * doesn't read them as the agent's own words, never count as a human message,
+ * and are not the agent message a reply is anchored to.
+ *
  * Thresholds: a non-final trigger needs `min_human_messages`; below that the
  * content is "pending". Final triggers (close, clear, evict, release,
  * pre-compact, session-end, shutdown) and `manual` bypass the threshold.
@@ -20,7 +26,7 @@
  * denied approval or `/feedback` makes the session eligible right away.
  */
 import type Database from 'better-sqlite3';
-import type { JournalMessage, JournalTrigger } from './types.js';
+import type { JournalMessage, JournalTrigger, SharedContextNote } from './types.js';
 import { isFinalTrigger } from './types.js';
 
 /** Pending content older than this is journaled on the next trigger regardless of the threshold. */
@@ -68,6 +74,15 @@ const isCommandRow = (row: TranscriptRowLite, meta: Record<string, unknown>) =>
   meta['command_response'] === true || (row.direction === 'inbound' && row.body.startsWith('/'));
 
 const isNonHumanSender = (contactId: string) => contactId.startsWith('agent:') || contactId.startsWith('system:');
+
+const isContextOnly = (meta: Record<string, unknown>) => meta['context_only'] === true;
+
+/** E82: how a context-only row reads in a journal window. */
+function contextOnlyBody(row: TranscriptRowLite, meta: Record<string, unknown>): string {
+  const origin = meta['origin'] as { label?: unknown } | undefined;
+  const label = typeof origin?.label === 'string' && origin.label.trim() ? origin.label.trim() : 'another agent session';
+  return `[Context shared by ${label}, not shown to the user] ${row.body}`;
+}
 
 /** True when an inbound transcript row counts as a human message for eligibility. */
 export function isEligibleHuman(row: Pick<TranscriptRowLite, 'direction' | 'contact_id' | 'body'>, meta: Record<string, unknown>): boolean {
@@ -128,18 +143,22 @@ export function loadWindow(
 
   // Context: the last agent message before the first eligible human message,
   // even if it is before the cursor (a scheduled briefing the reply answers).
+  // A shared note is not something the human replied to.
   let startIdx = humanIdx;
   for (let i = humanIdx - 1; i >= 0; i--) {
     const { row, meta } = parsed[i]!;
-    if (row.direction === 'outbound' && !isCommandRow(row, meta)) {
+    if (row.direction === 'outbound' && !isCommandRow(row, meta) && !isContextOnly(meta)) {
       startIdx = i;
       break;
     }
   }
 
   const messages: JournalMessage[] = [];
-  for (let i = startIdx; i < parsed.length; i++) {
+  for (let i = 0; i < parsed.length; i++) {
     const { row, meta } = parsed[i]!;
+    const shared = isContextOnly(meta);
+    // Shared notes since the cursor stay in the window even when they precede its start.
+    if (i < startIdx && !(shared && (cursor === null || row.created_at > cursor))) continue;
     if (isCommandRow(row, meta)) continue;
     // Bus system-only turns (advisory turns, journal instructions) are bus internals, not conversation.
     if (meta['system_only'] === true) continue;
@@ -154,9 +173,9 @@ export function loadWindow(
         id: inbound ? row.contact_id : opts.agentId,
         is_human: human,
         is_owner: inbound && !isNonHumanSender(row.contact_id) && (opts.isOwner?.(row.contact_id, row.channel) ?? false),
-        is_agent: !inbound || row.contact_id.startsWith('agent:'),
+        is_agent: !shared && (!inbound || row.contact_id.startsWith('agent:')),
       },
-      body: row.body,
+      body: shared ? contextOnlyBody(row, meta) : row.body,
       attachments: attachmentsOf(meta),
       scheduled: meta['scheduled'] === true,
       context: i < humanIdx,
@@ -172,6 +191,25 @@ export function loadWindow(
     from: messages[0]?.created_at ?? null,
     to: messages[messages.length - 1]?.created_at ?? null,
   };
+}
+
+/**
+ * E82: the hidden notes shared into a conversation after `since`, oldest
+ * first. Read by conversation, not session, because a note written after an
+ * idle rotation sits on the ended row while the next turn starts a new one.
+ */
+export function loadSharedContext(db: Database.Database, opts: { conversationId: string; since: string }): SharedContextNote[] {
+  const rows = db
+    .prepare(
+      `SELECT created_at, body, metadata FROM transcripts
+       WHERE conversation_id = ? AND direction = 'outbound' AND json_extract(metadata, '$.context_only') = 1
+         AND created_at > ? ORDER BY created_at ASC, rowid ASC`,
+    )
+    .all(opts.conversationId, opts.since) as Array<{ created_at: string; body: string; metadata: string }>;
+  return rows.map((row) => {
+    const origin = parseMeta(row.metadata)['origin'] as { label?: unknown } | undefined;
+    return { created_at: row.created_at, body: row.body, label: typeof origin?.label === 'string' && origin.label.trim() ? origin.label.trim() : 'another agent session' };
+  });
 }
 
 /** Decide whether a window should be journaled for this trigger. */

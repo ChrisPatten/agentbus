@@ -8,6 +8,7 @@
  * GET  /api/v1/messages/pending          — Poll pending messages for an agent.
  * POST /api/v1/messages/:id/ack          — Acknowledge or dead-letter a message.
  * POST /api/v1/messages                  — Direct enqueue (MCP reply tool).
+ * POST /api/v1/context                   — Hidden context handoff into a primary conversation (E82, E83, share_context).
  * GET  /api/v1/messages/:id              — Fetch a single message by ID.
  * POST /api/v1/inbound                   — Inbound pipeline entry point.
  * POST /api/v1/pool/:agentId/turn-ended  — Pool pane activity signal (Stop hook).
@@ -54,14 +55,17 @@ import multipart from '@fastify/multipart';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { MessageQueue } from '../core/queue.js';
-import type { AdapterRegistry } from '../core/registry.js';
+import type { AdapterInstance, AdapterRegistry, OutboundActionResult } from '../core/registry.js';
 import type { AppConfig } from '../config/schema.js';
 import type { MessageEnvelope } from '../types/envelope.js';
 import type { PipelineEngine } from '../pipeline/engine.js';
 import type { PipelineContext, RouteTarget } from '../pipeline/types.js';
-import { SYSTEM_BLOCKS_KEY, SYSTEM_ONLY_KEY, attachSystemBlock, stripSystemMetadata, systemBlocksFor } from '../core/system-block.js';
+import { PENDING_CONTEXT_KEY, SYSTEM_BLOCKS_KEY, SYSTEM_ONLY_KEY, attachSystemBlock, pendingContextFor, readPendingContext, stripSystemMetadata, systemBlocksFor } from '../core/system-block.js';
 import type Database from 'better-sqlite3';
-import type { CommandImage, CommandRegistry, SlashCommandContext } from '../commands/registry.js';
+import type { CommandChoice, CommandImage, CommandRegistry, CommandResponse, SlashCommandContext } from '../commands/registry.js';
+import { isTelegramChannel, choicesSchema } from '../choices/validate.js';
+import { OutboundStore } from '../outbound/store.js';
+import { MAX_CHOICES, MAX_CHOICE_LABEL_LENGTH } from '../choices/types.js';
 import {
   PROVIDER_COMMAND_NAME_RE,
   providerCommandLine,
@@ -72,6 +76,9 @@ import { logOutboundTranscript } from '../pipeline/outbound-transcript.js';
 import { validateAppDestination } from '../app/outbound.js';
 import { boundAppReply } from '../app/binding.js';
 import { routedAgent, VISIBLE_TRANSCRIPT } from '../app/store.js';
+import { shareContext } from '../app/context-share.js';
+import { paneTurnOrigin } from '../pool/pane-origin.js';
+import { advanceWatermark } from '../app/pending-context.js';
 import { journalingHealth, runForApi, type JournalStatusDeps } from '../journaling/status.js';
 import { logWebhookRequest } from './webhook-log.js';
 import { registerSiriRoutes } from './siri-routes.js';
@@ -153,6 +160,24 @@ const MessagePayloadSchema = z.discriminatedUnion('type', [
     args_raw: z.string(),
   }),
 ]);
+
+/**
+ * E82 — body of POST /api/v1/context. `origin` is what the caller's MCP
+ * server stamped (`originFromEnv`); its label is replaced by `source`. A
+ * sender that is a pane with a leased lease is stamped from the lease instead (E83).
+ */
+const ContextShareSchema = z.object({
+  to: z.string().regex(/^contact:.+/, 'to must be contact:<id>'),
+  body: z.string().min(1),
+  source: z.string().min(1).max(120),
+  /** E83: `app` (Main) or a primary channel such as `telegram:peggy`. */
+  channel: z.string().min(1).default('app'),
+  sender: z.string().min(1).optional(),
+  origin: z.discriminatedUnion('kind', [
+    z.object({ kind: z.literal('turn'), agent_id: z.string(), conversation_id: z.string().min(1), label: z.string().optional() }),
+    z.object({ kind: z.literal('external'), label: z.string().optional() }),
+  ]).optional(),
+});
 
 const MessageSubmitSchema = z.object({
   id: z.string().uuid().optional(),
@@ -408,6 +433,63 @@ export async function sendCommandResponse(
   }
 }
 
+/** How long a numbered-list choice capture stays open (E54). */
+const CHOICE_FOLLOW_UP_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * Deliver a bus-command handler's response, including any interactive
+ * `choices` (E54). On Telegram the choices ride the E74 button path
+ * (`metadata.choices` labels plus `metadata.choice_commands`, the slash command
+ * each tap runs); on every other channel they are appended to the body as a
+ * numbered list and a choice follow-up capture is registered so a reply like
+ * `2` picks one. Choices beyond E74's limit (8, labels of 64 characters) are
+ * clipped here as a backstop; handlers should already respect them.
+ */
+export async function deliverCommandResponse(
+  deps: { db: Database.Database; registry?: AdapterRegistry; commandRegistry?: CommandRegistry },
+  result: { envelope: MessageEnvelope; sessionId: string | null; conversationId: string | null },
+  commandName: string,
+  response: CommandResponse,
+): Promise<void> {
+  const choices: CommandChoice[] = (response.choices ?? []).slice(0, MAX_CHOICES).map((c) => ({
+    label: c.label.length > MAX_CHOICE_LABEL_LENGTH ? `${c.label.slice(0, MAX_CHOICE_LABEL_LENGTH - 1)}…` : c.label,
+    args: c.args,
+  }));
+  const body = response.body ?? (choices.length > 0 ? 'Choose an option:' : '');
+  const images = response.images;
+  if (choices.length === 0) {
+    if (images?.length || response.body !== undefined) {
+      await sendCommandResponse(deps, result, commandName, body, {}, images);
+    }
+    return;
+  }
+
+  if (isTelegramChannel(result.envelope.channel)) {
+    await sendCommandResponse(
+      deps,
+      result,
+      commandName,
+      body,
+      {
+        choices: choices.map((c) => c.label),
+        choice_commands: choices.map((c) => `/${commandName}${c.args.trim() ? ` ${c.args.trim()}` : ''}`),
+      },
+      images,
+    );
+    return;
+  }
+
+  const list = choices.map((c, i) => `${i + 1}. ${c.label}`).join('\n');
+  deps.commandRegistry?.registerChoiceFollowUp(
+    result.envelope.channel,
+    result.envelope.sender,
+    commandName,
+    choices,
+    CHOICE_FOLLOW_UP_TTL_MS,
+  );
+  await sendCommandResponse(deps, result, commandName, `${body}\n\n${list}\n\nReply with a number to choose.`, {}, images);
+}
+
 /**
  * Process an inbound message through the pipeline and enqueue the results.
  *
@@ -500,7 +582,21 @@ export async function processInbound(
     const followUp = deps.commandRegistry.consumeFollowUp(result.envelope.channel, result.envelope.sender);
     if (followUp) {
       const body = result.envelope.payload.body;
-      if (followUp.validate(body)) {
+      // A choice capture (E54) maps the reply to that choice's args; a
+      // validator capture (E36) passes the trimmed body as the single arg.
+      let argsRaw: string | null = null;
+      let args: string[] = [];
+      if (followUp.kind === 'choice') {
+        const choice = followUp.match(body);
+        if (choice) {
+          argsRaw = choice.args.trim();
+          args = argsRaw.split(/\s+/).filter(Boolean);
+        }
+      } else if (followUp.validate(body)) {
+        argsRaw = body.trim();
+        args = [argsRaw];
+      }
+      if (argsRaw !== null) {
         const cmd = deps.commandRegistry.lookup(followUp.command);
         if (cmd && cmd.scope === 'bus') {
           const originAdapter = deps.registry?.lookupPrimaryByChannel(result.envelope.channel);
@@ -508,26 +604,21 @@ export async function processInbound(
             channel: result.envelope.channel,
             sender: result.envelope.sender,
             adapterId: originAdapter?.id ?? 'unknown',
-            argsRaw: body.trim(),
+            argsRaw,
             envelope: result.envelope,
             db: createSafeDatabase(deps.db),
             config: deps.config,
+            routes: result.routes.map((r) => ({ adapterId: r.adapterId, recipientId: r.recipientId })),
           };
 
-          let responseBody: string | undefined;
-          let responseImages: CommandImage[] | undefined;
+          let response: CommandResponse;
           try {
-            const response = await cmd.handler([body.trim()], cmdCtx);
-            responseBody = response.body;
-            responseImages = response.images;
+            response = await cmd.handler(args, cmdCtx);
           } catch (err) {
-            responseBody = `Command error: ${String(err)}`;
+            response = { body: `Command error: ${String(err)}` };
           }
 
-          if (responseImages?.length) responseBody ??= '';
-          if (responseBody !== undefined) {
-            await sendCommandResponse(deps, result, followUp.command, responseBody, {}, responseImages);
-          }
+          await deliverCommandResponse(deps, result, followUp.command, response);
 
           return { ok: true, queued: false, reason: 'command_handled' };
         }
@@ -565,16 +656,19 @@ export async function processInbound(
       envelope: result.envelope,
       db: createSafeDatabase(deps.db),
       config: deps.config,
+      routes: result.routes.map((r) => ({ adapterId: r.adapterId, recipientId: r.recipientId })),
     };
 
     let responseBody: string | undefined;
     let responseImages: CommandImage[] | undefined;
+    let responseChoices: CommandChoice[] | undefined;
 
     if (cmd && cmd.scope === 'bus' && !forced) {
       try {
         const response = await cmd.handler(result.slashCommand.args, cmdCtx);
         responseBody = response.body;
         responseImages = response.images;
+        responseChoices = response.choices;
       } catch (err) {
         responseBody = `Command error: ${String(err)}`;
       }
@@ -624,6 +718,14 @@ export async function processInbound(
     }
     // scope: 'agent' falls through to normal fan-out enqueue below
 
+    if (responseChoices?.length) {
+      await deliverCommandResponse(deps, result, commandName, {
+        body: responseBody,
+        images: responseImages,
+        choices: responseChoices,
+      });
+      return { ok: true, queued: false, reason: 'command_handled' };
+    }
     if (responseImages?.length) responseBody ??= '';
     if (responseBody !== undefined) {
       await sendCommandResponse(deps, result, commandName, responseBody, {}, responseImages);
@@ -668,7 +770,9 @@ export async function processInbound(
     // E65 — each fan-out copy carries only the system blocks meant for its
     // recipient (an advisory for agent A must not reach also_notify agent B).
     const blocks = systemBlocksFor(result.envelope.metadata, route.recipientId);
-    const { [SYSTEM_BLOCKS_KEY]: _pending, ...baseMetadata } = result.envelope.metadata;
+    // E83 — likewise the pending-context block built for this route's pane.
+    const pendingContext = pendingContextFor(result.envelope.metadata, route.recipientId);
+    const { [SYSTEM_BLOCKS_KEY]: _pending, [PENDING_CONTEXT_KEY]: _pendingContext, ...baseMetadata } = result.envelope.metadata;
     const fanEnvelope: MessageEnvelope = {
       ...result.envelope,
       payload: outboundPayload,
@@ -677,6 +781,7 @@ export async function processInbound(
       metadata: {
         ...baseMetadata,
         ...(blocks.length > 0 ? { [SYSTEM_BLOCKS_KEY]: blocks } : {}),
+        ...(pendingContext ? { [PENDING_CONTEXT_KEY]: pendingContext } : {}),
         adapter_id: route.adapterId,
         conversation_id: result.conversationId ?? undefined,
         ...(result.isSlashCommand && result.slashCommand
@@ -1194,10 +1299,13 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       const { id } = req.params;
       const { status } = req.body ?? {};
       if (status === 'delivered') {
+        // E83 — a pane's message carries the pending-context watermark; it moves only when the pane takes the message.
+        const pending = readPendingContext(queue.getById(id)?.envelope.metadata);
         const acked = queue.ack(id);
         if (!acked) {
           return reply.status(404).send({ ok: false, error: 'Message not found or not in processing state' });
         }
+        if (pending) advanceWatermark(db, pending.conversation_id, pending.through);
         return { ok: true, id, status: 'delivered' };
       } else if (status === 'failed') {
         const reason = req.body?.error ?? 'failed';
@@ -1242,6 +1350,10 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     // message instead of a native reply in that case.
     // E65 — only the bus adds system blocks; an agent or HTTP caller can't.
     const metadata: Record<string, unknown> = stripSystemMetadata(data.metadata);
+    // E83 — a pane with a leased lease is running a turn in that conversation, whatever origin it stamped.
+    // A reply names its conversation (metadata.conversation_id), which wins over a lease that has moved on.
+    const paneOrigin = paneTurnOrigin(db, data.sender, metadata['origin'], metadata['conversation_id']);
+    if (paneOrigin) metadata['origin'] = paneOrigin;
     // Captured alongside the reply_to lookup below so the E48 (S48.6)
     // stale-pane guard further down can reuse this same query result instead
     // of re-running it.
@@ -1346,6 +1458,34 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
 
     const id = queue.enqueue(envelope, data.expires_at);
     return reply.status(201).send({ ok: true, id, queued: true });
+  });
+
+  // POST /api/v1/context — hidden handoff into a primary conversation (E82
+  // Main, E83 a Telegram DM; share_context). Writes a context-only transcript
+  // row directly: no queue row, no delivery, no app event the client would
+  // show. The agent reads it on its next turn.
+  server.post<{ Body: unknown }>('/api/v1/context', (req, reply) => {
+    const parsed = ContextShareSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ ok: false, error: parsed.error.message });
+    }
+    const data = parsed.data;
+    const blockedBy = data.sender ? deps.journalGate?.blockedSend(data.sender) : undefined;
+    if (blockedBy) {
+      return reply.status(409).send({
+        ok: false,
+        error: 'journal_run_in_progress',
+        reason: `Outbound messages are blocked while journal run ${blockedBy.runId} is open. Finish journaling and call journal_complete; do not share context during the run.`,
+      });
+    }
+    // E83 — a cc-pool pane running a turn in the target conversation must not hand itself context.
+    const paneOrigin = data.sender ? paneTurnOrigin(db, data.sender, data.origin) : null;
+    const result = shareContext(db, config, {
+      contactId: data.to.replace(/^contact:/, ''), body: data.body, source: data.source, channel: data.channel,
+      origin: paneOrigin ?? data.origin,
+    });
+    if (!result.ok) return reply.status(result.status).send({ ok: false, error: result.error });
+    return reply.status(201).send({ ok: true, id: result.messageId, conversation_id: result.conversationId, session_id: result.sessionId });
   });
 
   // GET /api/v1/messages/:id
@@ -1749,6 +1889,67 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
         });
       }
     }
+  );
+
+  // ── Edit / pin a previously sent message (E81) ──────────────────────────────
+  //
+  // `:id` is the bus message id the `reply` / `send_message` tools returned.
+  // The outbound_messages registry (written by the Telegram adapter's send path)
+  // maps it to the chat and platform message; the adapter does the real work.
+
+  const outboundAction = async (
+    id: string,
+    reply: import('fastify').FastifyReply,
+    method: 'editMessage' | 'pinMessage' | 'unpinMessage',
+    call: (adapter: AdapterInstance) => Promise<OutboundActionResult> | undefined,
+  ) => {
+    const row = new OutboundStore(db).get(id);
+    if (!row) {
+      return reply.status(404).send({
+        ok: false,
+        error: `No record of a delivered message for bus message "${id}". Only Telegram messages delivered in the last 30 days can be edited or pinned.`,
+      });
+    }
+    const adapter = registry.lookupPrimaryByChannel(row.channel);
+    if (!adapter || typeof adapter[method] !== 'function') {
+      return reply.status(400).send({ ok: false, error: `Channel "${row.channel}" does not support ${method}` });
+    }
+    try {
+      const result = await call(adapter);
+      if (!result) return reply.status(400).send({ ok: false, error: `Channel "${row.channel}" does not support ${method}` });
+      return result.ok
+        ? { ok: true, note: result.note }
+        : reply.status(400).send({ ok: false, error: result.error });
+    } catch (err) {
+      return reply.status(502).send({ ok: false, error: String(err) });
+    }
+  };
+
+  server.post<{ Params: { id: string }; Body: { body?: unknown; choices?: unknown } }>(
+    '/api/v1/messages/:id/edit',
+    async (req, reply) => {
+      const { body, choices } = req.body ?? {};
+      if (typeof body !== 'string' || body.length === 0) {
+        return reply.status(400).send({ ok: false, error: 'body is required' });
+      }
+      let parsedChoices: unknown[] | undefined;
+      if (choices !== undefined) {
+        const parsed = choicesSchema.safeParse(choices);
+        if (!parsed.success) {
+          return reply.status(400).send({ ok: false, error: parsed.error.issues[0]?.message ?? 'invalid choices' });
+        }
+        parsedChoices = parsed.data;
+      }
+      return outboundAction(req.params.id, reply, 'editMessage', (a) => a.editMessage?.(req.params.id, body, parsedChoices));
+    },
+  );
+
+  server.post<{ Params: { id: string }; Body: { silent?: boolean } }>('/api/v1/messages/:id/pin', async (req, reply) =>
+    outboundAction(req.params.id, reply, 'pinMessage', (a) => a.pinMessage?.(req.params.id, req.body?.silent !== false)),
+  );
+
+  server.post<{ Params: { id: string }; Body: { all?: boolean } }>('/api/v1/messages/:id/unpin', async (req, reply) =>
+    outboundAction(req.params.id, reply, 'unpinMessage', (a) => a.unpinMessage?.(req.params.id, req.body?.all === true)),
   );
 
   // ── Knowledge store endpoints (agent-managed structured knowledge, Phase 1) ──

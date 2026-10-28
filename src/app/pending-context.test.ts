@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { runMigrations } from '../db/schema.js';
 import { ensureOutboundAppSession } from './outbound.js';
 import {
-  PENDING_CONTEXT_INTRO, advanceWatermark, buildPendingContext, pendingContextLimits, pendingMessages,
+  CONTEXT_SHARED_INTRO, PENDING_CONTEXT_INTRO, advanceWatermark, buildPendingContext, pendingContextLimits, pendingMessages,
   readWatermark, renderPendingContext, type PendingMessage,
 } from './pending-context.js';
 import type { AppConfig } from '../config/schema.js';
@@ -126,7 +126,7 @@ describe('renderPendingContext', () => {
   const now = new Date('2026-10-05T19:06:00.000Z');
   const tz = 'America/New_York';
   const msg = (i: number, body = `message ${i}`): PendingMessage => ({
-    id: `t${i}`, message_id: `m${i}`, created_at: new Date(Date.UTC(2026, 9, 5, 15, i)).toISOString(), body, label: 'Ambient scan',
+    id: `t${i}`, message_id: `m${i}`, created_at: new Date(Date.UTC(2026, 9, 5, 15, i)).toISOString(), body, label: 'Ambient scan', kind: 'visible',
   });
 
   it('renders datetime with zone, relative age and source', () => {
@@ -188,8 +188,151 @@ describe('buildPendingContext', () => {
   });
 
   it('uses schema defaults when adapters.app is absent', () => {
-    expect(pendingContextLimits({ adapters: {} } as unknown as AppConfig)).toEqual({ max_items: 10, max_chars: 4000 });
+    expect(pendingContextLimits({ adapters: {} } as unknown as AppConfig)).toEqual({ max_items: 10, max_chars: 4000, context_ttl_ms: 86_400_000 });
     expect(pendingContextLimits({ adapters: { app: { pending_context: { max_items: 3, max_chars: 100 } } } } as unknown as AppConfig))
       .toEqual({ max_items: 3, max_chars: 100 });
+  });
+});
+
+// E82 — hidden context-only rows (`share_context`) in the pending-context block.
+describe('context-only items (E82)', () => {
+  const shared = (label = 'Claude Code: baxter') => ({ ...external(label), context_only: true });
+  const now = new Date('2026-10-05T19:06:00.000Z');
+  const tz = 'America/New_York';
+  const HOUR = 3_600_000;
+  const ago = (ms: number) => new Date(now.getTime() - ms).toISOString();
+  const limits = { max_items: 10, max_chars: 4000 };
+
+  it('pendingMessages includes context-only rows, tagged, and still skips system-only ones', () => {
+    const { db, conv, session } = fixture();
+    row(db, { conv, session, at: '2026-10-05T10:00:00.000Z', body: 'scan', metadata: external() });
+    row(db, { conv, session, at: '2026-10-05T10:01:00.000Z', body: 'note', metadata: shared() });
+    row(db, { conv, session, at: '2026-10-05T10:02:00.000Z', body: 'advisory', metadata: { ...shared(), system_only: true } });
+    expect(pendingMessages(db, conv).map((m) => [m.body, m.kind, m.label])).toEqual([
+      ['scan', 'visible', 'Ambient scan'],
+      ['note', 'context', 'Claude Code: baxter'],
+    ]);
+    db.close();
+  });
+
+  it('never treats a context-only row as pending when its origin is a turn in this conversation', () => {
+    const { db, conv, session } = fixture();
+    row(db, { conv, session, at: '2026-10-05T10:00:00.000Z', body: 'own', metadata: { ...turn(conv), context_only: true } });
+    expect(pendingMessages(db, conv)).toEqual([]);
+    db.close();
+  });
+
+  it('renders visible items first under the E69 intro, then context items under their own intro', () => {
+    const { db, conv, session } = fixture();
+    row(db, { conv, session, at: ago(3 * HOUR), body: 'note one', metadata: shared() });
+    row(db, { conv, session, at: ago(2 * HOUR), body: 'scan result', metadata: external() });
+    row(db, { conv, session, at: ago(HOUR), body: 'note two', metadata: shared('Claude Code: agentbus') });
+    const built = buildPendingContext(db, conv, { limits, now, timeZone: tz })!;
+    const [visible, context] = built.block!.split(`\n\n${CONTEXT_SHARED_INTRO}\n\n`);
+    expect(visible).toBe(`${PENDING_CONTEXT_INTRO}\n\n- [2026-10-05 13:06 EDT, 2h ago] Ambient scan: scan result`);
+    expect(context!.split('\n')).toEqual([
+      '- [2026-10-05 12:06 EDT, 3h ago] Claude Code: baxter: note one',
+      '- [2026-10-05 14:06 EDT, 1h ago] Claude Code: agentbus: note two',
+    ]);
+    expect(CONTEXT_SHARED_INTRO).toContain('the user has not seen these');
+    db.close();
+  });
+
+  it('renders only the section that has items', () => {
+    const only = (m: PendingMessage[]) => renderPendingContext(m, { ...limits, now, timeZone: tz })!;
+    const base = { id: 't1', message_id: 'm1', created_at: ago(HOUR), body: 'hello', label: 'src' } as const;
+    expect(only([{ ...base, kind: 'visible' }])).toContain(PENDING_CONTEXT_INTRO);
+    expect(only([{ ...base, kind: 'visible' }])).not.toContain(CONTEXT_SHARED_INTRO);
+    expect(only([{ ...base, kind: 'context' }])).toBe(`${CONTEXT_SHARED_INTRO}\n\n- [2026-10-05 14:06 EDT, 1h ago] src: hello`);
+  });
+
+  it('keeps the oldest-visible text byte-for-byte as in E69 when no context-only item is present', () => {
+    const m: PendingMessage = { id: 't6', message_id: 'm6', created_at: new Date(Date.UTC(2026, 9, 5, 15, 6)).toISOString(),
+      body: 'Two calendar items', label: 'Ambient scan', kind: 'visible' };
+    expect(renderPendingContext([m], { ...limits, now, timeZone: tz }))
+      .toBe(`${PENDING_CONTEXT_INTRO}\n\n- [2026-10-05 11:06 EDT, 4h ago] Ambient scan: Two calendar items`);
+  });
+
+  it('budgets both kinds together, dropping the oldest of either and counting omissions per section', () => {
+    const mk = (i: number, kind: PendingMessage['kind']): PendingMessage => ({
+      id: `t${i}`, message_id: `m${i}`, created_at: ago((10 - i) * 60_000), body: `item ${i}`, label: 'src', kind });
+    // Oldest first: v1 c2 v3 c4 v5. max_items 3 keeps v3 c4 v5.
+    const text = renderPendingContext([mk(1, 'visible'), mk(2, 'context'), mk(3, 'visible'), mk(4, 'context'), mk(5, 'visible')],
+      { max_items: 3, max_chars: 4000, now, timeZone: tz })!;
+    expect(text).toContain('(1 older message omitted)');
+    expect(text).toContain('(1 older note omitted)');
+    expect(text).not.toContain('item 1');
+    expect(text).not.toContain('item 2');
+    for (const kept of ['item 3', 'item 4', 'item 5']) expect(text).toContain(kept);
+    // max_chars is shared too: room for the newest item only.
+    const lineLen = text.split('\n').find((l) => l.endsWith('item 5'))!.length;
+    const tight = renderPendingContext([mk(3, 'visible'), mk(4, 'context'), mk(5, 'visible')], { max_items: 10, max_chars: lineLen, now, timeZone: tz })!;
+    expect(tight).toContain('item 5');
+    expect(tight).not.toContain('item 4');
+    expect(tight).toContain('(1 older message omitted)');
+    expect(tight).toContain('(1 older note omitted)');
+  });
+
+  it('survives session-row rotation and is injected once: the watermark moves past it', () => {
+    const { db, conv, session } = fixture();
+    row(db, { conv, session, at: ago(2 * HOUR), body: 'before rotation', metadata: shared() });
+    db.prepare('UPDATE sessions SET ended_at = ? WHERE id = ?').run(ago(HOUR), session);
+    const next = ensureOutboundAppSession(db, 'chris', 'agent:baxter', 'general');
+    expect(next.sessionId).not.toBe(session);
+    const first = buildPendingContext(db, conv, { limits, now, timeZone: tz })!;
+    expect(first.block).toContain('before rotation');
+    advanceWatermark(db, conv, first.through);
+    expect(buildPendingContext(db, conv, { limits, now, timeZone: tz })).toBeNull();
+    db.close();
+  });
+
+  describe('time to live', () => {
+    it('injects a 23 h note and skips a 25 h note, with the watermark moving past both', () => {
+      const { db, conv, session } = fixture();
+      row(db, { conv, session, at: ago(25 * HOUR), body: 'stale note', metadata: shared() });
+      const fresh = row(db, { conv, session, at: ago(23 * HOUR), body: 'fresh note', metadata: shared() });
+      const built = buildPendingContext(db, conv, { limits, now, timeZone: tz })!;
+      expect(built.block).toContain('fresh note');
+      expect(built.block).not.toContain('stale note');
+      expect(built.block).not.toContain('omitted');
+      expect(built.through.id).toBe(fresh);
+      advanceWatermark(db, conv, built.through);
+      expect(buildPendingContext(db, conv, { limits, now: new Date(now.getTime() + HOUR), timeZone: tz })).toBeNull();
+      db.close();
+    });
+
+    it('an expired note is not injected, never uses the budget, and a turn that only had expired notes still advances the watermark', () => {
+      const { db, conv, session } = fixture();
+      const stale = row(db, { conv, session, at: ago(25 * HOUR), body: 'x'.repeat(100), metadata: shared() });
+      row(db, { conv, session, at: ago(HOUR), body: 'recent', metadata: external() });
+      // max_items 1: if the stale note counted it would show an omission.
+      const mixed = buildPendingContext(db, conv, { limits: { ...limits, max_items: 1 }, now, timeZone: tz })!;
+      expect(mixed.block).toContain('recent');
+      expect(mixed.block).not.toContain('omitted');
+
+      const { db: db2, conv: conv2, session: session2 } = fixture();
+      const only = row(db2, { conv: conv2, session: session2, at: ago(25 * HOUR), body: 'stale', metadata: shared() });
+      const built = buildPendingContext(db2, conv2, { limits, now, timeZone: tz })!;
+      expect(built.block).toBeNull();
+      expect(built.through.id).toBe(only);
+      expect(stale).toBeTruthy();
+      db.close();
+      db2.close();
+    });
+
+    it('context_ttl_ms 0 disables the cutoff', () => {
+      const { db, conv, session } = fixture();
+      row(db, { conv, session, at: ago(200 * HOUR), body: 'ancient note', metadata: shared() });
+      expect(buildPendingContext(db, conv, { limits: { ...limits, context_ttl_ms: 0 }, now, timeZone: tz })!.block).toContain('ancient note');
+      expect(buildPendingContext(db, conv, { limits: { ...limits, context_ttl_ms: HOUR }, now, timeZone: tz })!.block).toBeNull();
+      db.close();
+    });
+
+    it('does not apply to visible foreign sends', () => {
+      const { db, conv, session } = fixture();
+      row(db, { conv, session, at: ago(72 * HOUR), body: 'old scan', metadata: external() });
+      expect(buildPendingContext(db, conv, { limits, now, timeZone: tz })!.block).toContain('old scan');
+      db.close();
+    });
   });
 });

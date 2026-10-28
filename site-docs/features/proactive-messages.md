@@ -38,6 +38,35 @@ channel: app, and source: "Ambient scan".
 
 If the routine is an AgentBus schedule, its messages are labelled with the schedule's `label` (or its `id` if it has no label) unless you pass a `source`. Otherwise, without a `source`, the message is labelled "another agent session". You can also set a default label for every message from one MCP server with the `AGENTBUS_SOURCE_LABEL` environment variable in that server's settings; see [MCP tools](/reference/mcp-tools#send-message).
 
+## Letting Main know without a message
+
+Sometimes you finish something in a Claude Code session yourself (an artifact, a decision) and you want Main to know, but you don't want a message to appear. That's what **`share_context`** is for. It hands the agent in Main a short note that you never see: nothing shows up in the app, there's no notification or unread badge, and Main isn't woken. The next time you send a message in Main, the agent reads the note first, along with anything else it missed, and the note is labelled as something you haven't seen, so it won't say "as I told you".
+
+| Parameter | Required | Meaning |
+|---|---|---|
+| `to` | yes | The contact whose Main should know, such as `contact:me` |
+| `body` | yes | The note. Say what you did, where the result is and what's still open, in a few sentences. |
+| `source` | yes | Where the note comes from, such as `Claude Code: my-project`. Main sees it as the label. |
+| `channel` | no | Where the note goes. The default, `app`, is Main in the Mac app. To brief an agent through its private Telegram chat, pass that bot's channel, such as `telegram:assistant`, once you've listed it under `pending_context.channels` (see [cc-pool](/runtimes/cc-pool#your-main-chat-with-the-agent)). |
+
+You can ask for it in plain language ("tell Main we picked the Boston pilot"), or put it in your agent's instructions for Claude Code sessions:
+
+```text
+When you finish a meaningful piece of work, call share_context once with to: contact:me and
+source: "Claude Code: my-project". Say what you did, where the result is and what's still open.
+Don't use it to ask me something. Use send_message for that.
+```
+
+A few limits keep it useful:
+
+- **It reaches Main, or a private chat you've listed.** It doesn't go to Telegram groups, email or an app topic, and a channel you haven't listed is refused. The agent has to run on `cc-headless` or [`cc-pool`](/runtimes/cc-pool); with any other agent the call is refused so a note isn't stored where nobody will read it.
+- **Notes expire after 24 hours.** If you don't message Main within a day, the note is skipped. Change this with `context_ttl_ms` under `pending_context` (an agent's own setting applies to its private chat) in the [Mac app settings](/channels/mac-app#set-up-the-bus).
+- **Long notes are refused.** A note has to fit in `pending_context.max_chars` (4000 characters by default, including its label and time), and the agent is told to shorten it and try again rather than having it cut off.
+- **Not from the conversation itself.** The agent already knows what it knows, so a call from inside Main, or from the pane that is serving that chat, is refused.
+- **It isn't a conversation.** Use `send_message` when you want to be told something or want an answer.
+
+Your agent's memory journal still picks the note up, marked as not shown to you, even if Main hasn't read it yet.
+
 ## Things to know
 
 - **The agent can only message your contacts.** `send_email` only sends to addresses listed under your contacts. Channels only deliver to people they know.

@@ -101,6 +101,15 @@ describe('SystemMessageJournaler.canJournal (S66.8)', () => {
     expect(j.canJournal(job())).toMatchObject({ ok: false, reason: expect.stringContaining('waiting') });
   });
 
+  it('a hidden shared note does not count as the agent answering (E82)', () => {
+    const { j } = make(okDeliver);
+    transcript('t1', 'inbound', '2026-10-06T10:00:00.000Z');
+    transcript('t2', 'outbound', '2026-10-06T10:01:00.000Z', { context_only: true, origin: { kind: 'external', label: 'Claude Code: baxter' } });
+    expect(j.canJournal(job())).toMatchObject({ ok: false, reason: expect.stringContaining('not answered') });
+    transcript('t3', 'outbound', '2026-10-06T10:02:00.000Z');
+    expect(j.canJournal(job())).toEqual({ ok: true });
+  });
+
   it('ignores bus system-only turns when checking the last human message', () => {
     const { j } = make(okDeliver);
     transcript('t1', 'inbound', '2026-10-06T10:00:00.000Z', { system_only: true });
@@ -138,6 +147,19 @@ describe('SystemMessageJournaler.run (S66.8)', () => {
     expect(seenBlock).toContain('journal_complete');
     expect(gate.isHeld({ recipient: 'agent:peggy-pool-1', metadata: { conversation_id: 'conv-1' } })).toBe(false);
     expect(gate.blockedSend('agent:peggy-pool-1')).toBeNull();
+  });
+
+  it('puts unconsumed shared notes in the instruction block, quoted as data (E82)', async () => {
+    let seenBlock = '';
+    const gate = new JournalRunGate();
+    const { j } = make(async (req) => {
+      seenBlock = req.block;
+      setTimeout(() => gate.complete({ runId: 'run-1', agentId: 'agent:peggy', nothingNew: true }), 5);
+      return { queued: true, messageId: 'i', conversationId: 'conv-1' };
+    }, gate);
+    await j.run(job({ sharedContext: [{ created_at: '2026-10-06T10:01:00.000Z', label: 'Claude Code: baxter', body: 'Finished the plan' }] }));
+    expect(seenBlock).toContain('Notes shared with you from other sessions since the last journal (the user has not seen these');
+    expect(seenBlock).toContain('- 2026-10-06T10:01:00.000Z Claude Code: baxter: Finished the plan');
   });
 
   it('reports nothing-to-do for nothing_new with no file changes', async () => {

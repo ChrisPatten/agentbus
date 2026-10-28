@@ -42,6 +42,7 @@ import { SiriAdapter } from './adapters/siri.js';
 import { SlackAdapter } from './adapters/slack.js';
 import { AppAdapter } from './adapters/app.js';
 import { routedAgent } from './app/store.js';
+import { primaryChannels } from './app/main.js';
 import { startHeadless, stopHeadless, getHeadlessSnapshots, buildMcpConfig } from './adapters/cc-headless.js';
 import { createPoolManagers } from './pool/pool-manager.js';
 import { RuntimeResolver } from './core/runtime-resolver.js';
@@ -51,6 +52,7 @@ import { createCommandSystem } from './commands/index.js';
 import { createTorrentCommand } from './commands/torrent.js';
 import { createCostCommand } from './commands/cost.js';
 import { createPoolCommand } from './commands/pool.js';
+import { createModelCommand } from './commands/model.js';
 import { createPaneCommand } from './commands/pane.js';
 import { createRcCommand } from './commands/rc.js';
 import { createJournalCommand } from './commands/journal.js';
@@ -62,6 +64,10 @@ import { AttachmentSweeper } from './media/attachment-sweeper.js';
 import { ApprovalStore } from './approvals/store.js';
 import { resolveApproval, type ApprovalResolveHooks } from './approvals/resolve.js';
 import { sweepApprovals } from './approvals/sweep.js';
+import { ChoiceStore } from './choices/store.js';
+import { sweepChoices, sweepInputPrompts } from './choices/sweep.js';
+import { InputPromptStore } from './choices/input-store.js';
+import { OutboundStore } from './outbound/store.js';
 import type { ApprovalDecision } from './approvals/types.js';
 import { OwnerDirectory } from './core/owners.js';
 import { AdvisoryStore } from './advisories/store.js';
@@ -69,6 +75,7 @@ import { AdvisoryService } from './advisories/service.js';
 import { createBusAdvisoryTransport } from './advisories/transport.js';
 import { createTopicContextInject } from './pipeline/stages/topic-context-inject.js';
 import { createAdvisoryInject } from './pipeline/stages/advisory-inject.js';
+import { createPendingContextInject } from './pipeline/stages/pending-context-inject.js';
 import { resolveJournalingSettings } from './journaling/config.js';
 import { reviewChains } from './journaling/advisories.js';
 import { JournalEngine } from './journaling/engine.js';
@@ -278,6 +285,7 @@ const { registry: commandRegistry, pauseSet, headlessControl } = createCommandSy
 commandRegistry.register(createTorrentCommand({ commandRegistry, db, registry }));
 commandRegistry.register(createCostCommand({ db, headlessControl }));
 commandRegistry.register(createPoolCommand({ poolManagers }));
+commandRegistry.register(createModelCommand({ db, poolManagers }));
 commandRegistry.register(createPaneCommand({ poolManagers }));
 commandRegistry.register(createRcCommand({ poolManagers }));
 commandRegistry.register(createFeedbackCommand({ db, engine: journalEngine }));
@@ -318,6 +326,10 @@ pipeline.use({ slot: 86, name: 'advisory-inject',  stage: createAdvisoryInject(a
 // E66 — a message held by a System Message journal run tells its sender,
 // once per hold, that the agent is busy.
 pipeline.use({ slot: 87, name: 'journal-hold',     stage: createJournalHoldNotice(journalGate, (run, target) => notifyBusy(run, target)), critical: false });
+// E83 — a cc-pool pane serving a primary conversation (Main, or a channel an
+// agent lists in pending_context.channels) gets the pending-context block on
+// the envelope; the ack advances the watermark. (87 is taken by journal-hold.)
+pipeline.use({ slot: 88, name: 'pending-context-inject', stage: createPendingContextInject(db, config), critical: false });
 
 // ── Siri channel (E42) ───────────────────────────────────────────────────────
 // Registered before the HTTP server is built because the /api/v1/siri routes
@@ -407,9 +419,19 @@ const approvalStore = new ApprovalStore(db);
 const resolveApprovalFn = (id: string, decision: ApprovalDecision, resolvedBy: string, onlyContactId?: string) =>
   resolveApproval({ store: approvalStore, poolManagers, ...approvalHooks }, id, decision, resolvedBy, undefined, onlyContactId);
 
+// Choice-button prompts (E74): shared by the Telegram send/tap paths and the
+// expiry sweep below.
+const choiceStore = new ChoiceStore(db);
+// E81: ask_input prompts and the outbound-message registry, shared by the Telegram adapter and the sweep.
+const inputPromptStore = new InputPromptStore(db);
+const outboundStore = new OutboundStore(db);
+
 for (const inst of getTelegramInstances(config)) {
   const telegram = new TelegramAdapter({
     ...adapterDeps,
+    choiceStore,
+    inputPromptStore,
+    outboundStore,
     instanceName: inst.name ?? undefined,
     instanceConfig: inst,
     resolveApproval: resolveApprovalFn,
@@ -431,7 +453,7 @@ for (const inst of getEmailInstances(config)) {
 // Agent-bound messages (agent:*) stay in the queue for CC adapter to poll.
 
 const deliveryWorker = new DeliveryWorker({
-  queue, registry, db,
+  queue, registry, db, primaryChannels: primaryChannels(config),
   onFailed: (envelope, reason) => safeFeedback(() => recordDeliveryFailure(feedbackProducers, envelope, reason)),
 });
 
@@ -494,10 +516,26 @@ const maintenanceTimer = setInterval(() => {
   sweepApprovals({ registry, store: approvalStore }).catch((err) =>
     console.error(`[agentbus] Approval sweep failed: ${String(err)}`),
   );
+  sweepChoices({ registry, store: choiceStore }).catch((err) =>
+    console.error(`[agentbus] Choice prompt sweep failed: ${String(err)}`),
+  );
+  sweepInputPrompts({ registry, store: inputPromptStore }).catch((err) =>
+    console.error(`[agentbus] Input prompt sweep failed: ${String(err)}`),
+  );
   advisories.retryPending().catch((err) =>
     console.error(`[agentbus] Advisory retry failed: ${String(err)}`),
   );
 }, SWEEP_INTERVAL_MS);
+// Keyboards left behind across a restart are cleared shortly after startup,
+// once adapters are up, rather than waiting for the first interval tick.
+setTimeout(() => {
+  sweepChoices({ registry, store: choiceStore }).catch((err) =>
+    console.error(`[agentbus] Startup choice prompt sweep failed: ${String(err)}`),
+  );
+  sweepInputPrompts({ registry, store: inputPromptStore }).catch((err) =>
+    console.error(`[agentbus] Startup input prompt sweep failed: ${String(err)}`),
+  );
+}, 15_000).unref();
 
 // ── Shutdown ─────────────────────────────────────────────────────────────────
 

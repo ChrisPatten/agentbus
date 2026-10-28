@@ -4,7 +4,13 @@ import {
   processAckedMessages,
   sendChannelNotification,
   resolvePollIntervalMs,
+  resolveBusBaseUrl,
+  resolveBusTokenFor,
 } from './cc.js';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { withBusToken } from '../core/bus-auth.js';
 import type { MessageEnvelope } from '../types/envelope.js';
 
 const FIXED_TS = '2026-01-01T00:00:00.000Z';
@@ -446,5 +452,67 @@ describe('resolvePollIntervalMs', () => {
   it('ignores an invalid env value', () => {
     expect(resolvePollIntervalMs('abc', 2000)).toBe(2000);
     expect(resolvePollIntervalMs('0', 2000)).toBe(2000);
+  });
+});
+
+describe('resolveBusBaseUrl (E83)', () => {
+  it('defaults to the local bus on http_port, as before', () => {
+    expect(resolveBusBaseUrl(undefined, 3000)).toBe('http://127.0.0.1:3000');
+    expect(resolveBusBaseUrl('', 3000)).toBe('http://127.0.0.1:3000');
+    expect(resolveBusBaseUrl('   ', 3000)).toBe('http://127.0.0.1:3000');
+  });
+
+  it('AGENTBUS_URL overrides it, without a trailing slash', () => {
+    expect(resolveBusBaseUrl('http://bobafett.local:3000', 3000)).toBe('http://bobafett.local:3000');
+    expect(resolveBusBaseUrl(' http://bobafett.local:3000/// ', 3000)).toBe('http://bobafett.local:3000');
+  });
+
+  it('with AGENTBUS_URL set, only the environment\'s token counts, never the local config\'s', () => {
+    const config = { bus: { auth_token: 'local-secret' } };
+    expect(resolveBusTokenFor(undefined, config, { AGENTBUS_BUS_TOKEN: 'env-token' })).toBe('local-secret'); // unset: unchanged, config wins
+    expect(resolveBusTokenFor(undefined, config, {})).toBe('local-secret');
+    expect(resolveBusTokenFor(undefined, null, { AGENTBUS_BUS_TOKEN: 'env-token' })).toBe('env-token');
+    expect(resolveBusTokenFor('', config, {})).toBe('local-secret');
+    const url = 'http://bobafett.local:3000';
+    expect(resolveBusTokenFor(url, config, {})).toBeUndefined(); // the local token is not sent to the remote host
+    expect(resolveBusTokenFor(url, config, { AGENTBUS_BUS_TOKEN: 'env-token' })).toBe('env-token');
+    expect(resolveBusTokenFor(url, config, { AGENTBUS_BUS_TOKEN: 'a', AGENTBUS_TOKEN: 'b' })).toBe('a');
+    expect(resolveBusTokenFor(url, config, { AGENTBUS_BUS_TOKEN: '', AGENTBUS_TOKEN: 'older' })).toBe('older');
+  });
+
+  it('with AGENTBUS_URL set, falls back to the first line of AGENTBUS_TOKEN_FILE', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'busurl-'));
+    try {
+      const file = join(dir, 'token');
+      writeFileSync(file, '  file-token  \nsecond line\n');
+      expect(resolveBusTokenFor('http://remote:3000', { bus: { auth_token: 'local' } }, { AGENTBUS_TOKEN_FILE: file })).toBe('file-token');
+      expect(resolveBusTokenFor('http://remote:3000', null, { AGENTBUS_TOKEN_FILE: join(dir, 'missing') })).toBeUndefined();
+      writeFileSync(file, '\n');
+      expect(resolveBusTokenFor('http://remote:3000', null, { AGENTBUS_TOKEN_FILE: file })).toBeUndefined();
+      // The file is only for a remote bus: with no override the local rule is unchanged.
+      expect(resolveBusTokenFor(undefined, null, { AGENTBUS_TOKEN_FILE: file })).toBeUndefined();
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('attaches the token only to URLs under the configured bus URL', async () => {
+    const base = vi.fn(async (_input: Parameters<typeof fetch>[0], _init?: RequestInit) => ({ ok: true }) as Response);
+    const url = resolveBusBaseUrl('http://bobafett.local:3000', 3000);
+    const wrapped = withBusToken(url, 'secret', base as unknown as typeof fetch);
+    for (const target of [`${url}/api/v1/context`, `${url}?x=1`]) await wrapped(target, { method: 'POST' });
+    for (const target of ['http://bobafett.local:30001/api/v1/context', 'http://bobafett.local:3000.evil.example/api', 'http://bobafett.local:3000@evil.example/x', 'https://api.anthropic.com/v1/messages']) {
+      await wrapped(target, { method: 'POST' });
+    }
+    const sent = base.mock.calls.map((c) => (c[1]?.headers ? new Headers(c[1].headers).get('X-Bus-Token') : null));
+    expect(sent).toEqual(['secret', 'secret', null, null, null, null]);
+  });
+
+  it('the bus token goes to the overridden URL and nowhere else', async () => {
+    const base = vi.fn(async (_input: Parameters<typeof fetch>[0], _init?: RequestInit) => ({ ok: true }) as Response);
+    const url = resolveBusBaseUrl('http://bobafett.local:3000/', 3000);
+    const wrapped = withBusToken(url, 'secret', base as unknown as typeof fetch);
+    await wrapped(`${url}/api/v1/context`, { method: 'POST' });
+    await wrapped('http://127.0.0.1:3000/api/v1/context', { method: 'POST' });
+    expect(new Headers(base.mock.calls[0]![1]!.headers).get('X-Bus-Token')).toBe('secret');
+    expect(base.mock.calls[1]![1]!.headers).toBeUndefined();
   });
 });

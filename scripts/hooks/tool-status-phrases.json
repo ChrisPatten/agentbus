@@ -1,0 +1,57 @@
+{
+  "_comment": "E79 fixed status phrases, shared by scripts/hooks/agentbus_tool_status_hook.sh (via jq) and src/adapters/tool-status.ts (cc-headless). Keep every phrase 2-5 words, plain, and free of any tool input. Lookup order: bash (Bash only, matched on the command's first word) -> tools (exact tool name) -> prefixes (first matching prefix; its tools map by suffix, else its default) -> default.",
+  "default": "Working on it",
+  "tools": {
+    "Read": "Reading a file",
+    "Edit": "Editing a file",
+    "MultiEdit": "Editing a file",
+    "Write": "Writing a file",
+    "NotebookEdit": "Editing a notebook",
+    "Bash": "Running a command",
+    "Grep": "Searching the files",
+    "Glob": "Searching the files",
+    "WebFetch": "Reading a web page",
+    "WebSearch": "Searching the web",
+    "Agent": "Delegating a task",
+    "Task": "Delegating a task",
+    "Skill": "Loading a skill",
+    "ToolSearch": "Finding the right tool",
+    "TodoWrite": "Planning the steps"
+  },
+  "bash": [
+    { "commands": ["calctl"], "text": "Checking the calendar" },
+    { "commands": ["imsg"], "text": "Checking your messages" },
+    { "commands": ["capos"], "text": "Checking the ledger" },
+    { "commands": ["remindctl"], "text": "Checking reminders" },
+    { "commands": ["mailwatch"], "text": "Checking the mail" },
+    { "commands": ["grizzly", "bear.sh"], "text": "Checking your notes" }
+  ],
+  "prefixes": [
+    {
+      "prefix": "mcp__agentbus__",
+      "default": "Working with the message bus",
+      "tools": {
+        "search_transcripts": "Searching past conversations",
+        "get_transcript": "Reading a conversation",
+        "get_session": "Checking a session",
+        "list_sessions": "Checking sessions",
+        "schedule_message": "Scheduling a message",
+        "list_schedules": "Checking schedules",
+        "update_schedule": "Updating a schedule",
+        "cancel_schedule": "Cancelling a schedule",
+        "write_knowledge": "Saving a note",
+        "get_knowledge": "Looking up notes",
+        "search_knowledge": "Searching saved notes",
+        "forget_knowledge": "Removing a note",
+        "send_email": "Sending an email",
+        "react_to_message": "Reacting to a message",
+        "fetch_attachment": "Fetching an attachment",
+        "create_telegram_topic": "Creating a topic",
+        "list_channels": "Checking channels"
+      }
+    },
+    { "prefix": "mcp__bmp__", "default": "Checking the lists" },
+    { "prefix": "mcp__copilot__", "default": "Checking the finances" },
+    { "prefix": "mcp__claude-in-chrome__", "default": "Working in the browser" }
+  ]
+}

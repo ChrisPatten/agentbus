@@ -40,6 +40,8 @@ Telegram is the quickest way to reach your agent from your phone. You chat with 
 |---|---|---|
 | `token` | required | The bot token from @BotFather |
 | `poll_timeout` | `30` | How long, in seconds, each request to Telegram waits for new messages |
+| `choice_ttl_hours` | `24` | How long [buttons](#buttons) and [share requests](#asking-you-for-a-location-contact-or-person) stay answerable |
+| `send_paths` | each agent's `data/` folder and its Claude Code scratchpad | The folders your agent may [send files](#cards-files-and-rich-messages) from, as full paths |
 
 ### Several bots
 
@@ -67,6 +69,8 @@ Each bot's channel is `telegram:<name>`. Names may use lowercase letters, digits
 
 Your private chat with the bot is one [conversation](/concepts/conversations-and-sessions). It keeps its Claude session until you send `/clear`, so you can pick up a topic days later.
 
+If your agent runs on [`cc-pool`](/runtimes/cc-pool#your-main-chat-with-the-agent), you can make this chat work like Main in the Mac app: the agent hears about routine messages sent into it, and your Claude Code sessions can brief it with notes you don't see in Telegram.
+
 ## Groups and forum topics
 
 Add the bot to a Telegram group and it works there too, with no extra configuration:
@@ -86,24 +90,62 @@ Your agent can open a new forum topic in a group with the `create_telegram_topic
 - **Quoting.** When you reply to a message, the agent sees the quoted text. When the agent replies to an earlier message, Telegram shows it as a quote. It skips the quote when it's answering your most recent message, to avoid clutter.
 - **Reactions.** Your reactions to the agent's messages are passed to the agent. The agent can react to your messages too. Emoji that Telegram doesn't allow as reactions are sent as a plain message instead.
 
+## Buttons
+
+When your agent needs a decision from you, it can attach up to 8 buttons to a message. Tap one and the agent receives `[tapped] <label>` as your answer, in the same chat or topic. Typing an answer still works too.
+
+- **Only you can answer.** A button tap from anyone other than the person the message was for is refused, and so is a second tap. Buttons stop working after 24 hours (`choice_ttl_hours`), and the bus removes them.
+- **After you tap**, the message shows `You chose: <label>` and the buttons disappear. If the message has any of the special buttons below, the button you chose stays on the message instead, ticked and greyed out, and the others disappear.
+- **Styled, copy and link buttons.** A button can be colored as a primary, success or danger action, copy a piece of text to your clipboard, or open a link. Copy and link buttons don't send anything back to the agent.
+
+Some [slash commands](/features/slash-commands) use buttons too: `/model` offers a picker of models, and tapping one runs the command for you.
+
+On other channels, the same choices arrive as a numbered list at the end of the message.
+
+## Cards, files and rich messages
+
+Besides ordinary text, your agent can send:
+
+| What | What you see |
+|---|---|
+| A location or venue | A map card for a fixed point (not a live location) |
+| A contact | A contact card you can save |
+| A file or photo | The file itself, with an optional caption. Files can be up to 50 MB, photos up to 10 MB, and only from the folders in `send_paths`. |
+| A rich message | Headings, real tables, sections you tap to expand, and rows of link buttons, in one message of up to 32,768 characters. Longer ones are split into parts. |
+
+The agent can also **edit** a message it sent earlier, so a status report can update in place, and **pin** or unpin its messages. Pinning in a group needs the bot to be an admin with the **Pin Messages** right; without it, the agent is told how to fix that. Your agent can send a message **silently**, with no notification sound, or without a link preview.
+
+If the conversation is on another channel, these arrive as plain text instead: a location as coordinates with a map link, a table as a list. Files can only be sent on Telegram.
+
+## Asking you for a location, contact or person
+
+Your agent can ask you to share your location, a contact, or a Telegram user. In your private chat with the bot, the request shows a one-tap button that opens Telegram's share sheet. Telegram only allows these buttons in private chats, so in a group the agent asks in words and you share from the attach (📎) menu. The agent can also ask for a typed answer, which opens Telegram's reply box.
+
+Your answer reaches the agent as a message linked to its question, such as `[location] 51.5007, -0.1246` or `[contact] Sam Lee, +44 20 7946 0000`. Locations and contacts you share without being asked are passed on the same way.
+
 ## Watching your agent work
 
 While your agent works, you see:
 
 - **"typing…"**, from the moment the agent picks up your message until it replies (for up to two minutes at a time);
-- **a live list of what it's doing**, in a single message that updates as it goes:
+- **a short status line**, in a single message that changes as it goes, such as "Reading a file", "Checking the calendar" or "Searching the web". Each line replaces the previous one.
 
-  ```
-  📖 Reading `notes/travel.md`
-  🔍 Searching for `flight confirmation`
-  🌐 Fetching `https://example.com/status`
-  ```
+The line only ever says what kind of thing the agent is doing. File names, commands, search terms and message text are never shown. Your agent can also set the line itself, in its own words ("Comparing the quotes"), and its words stay until it changes them or the turn ends. When the agent replies, its answer replaces the status message.
 
-When the agent replies, its answer replaces that progress message. A long run keeps only the most recent steps, with `… (earlier steps omitted)` at the top.
+The phrases come from `scripts/hooks/tool-status-phrases.json` in the AgentBus folder. Edit it to change the wording or to give your own tools and commands a phrase.
 
-The progress list is built in for `cc-headless`. For `cc-pool` and `claude-code`, install the tool-status hook described under [cc-pool](/runtimes/cc-pool#optional-hooks).
+The status line is built in for `cc-headless`. For `cc-pool` and `claude-code`, install the tool-status hook described under [cc-pool](/runtimes/cc-pool#optional-hooks).
 
-`/stop` ends the current turn and leaves the progress message in place with a note.
+To see the tool name and its details instead, as earlier versions did, set the mode to `raw`:
+
+```yaml
+tool_status:
+  mode: raw          # default: phrases
+```
+
+For `cc-pool` and `claude-code`, the hook doesn't read `config.yaml`: set `AGENTBUS_TOOL_STATUS_MODE: raw` in the pool's `pane_env` (or in the shell that starts `claude`) to match. In raw mode a long run keeps only the most recent steps, with `… (earlier steps omitted)` at the top.
+
+`/stop` ends the current turn and leaves the status message in place with a note.
 
 ## Formatting and long messages
 

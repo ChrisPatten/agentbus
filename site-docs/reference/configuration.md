@@ -226,6 +226,27 @@ agents:
 
 For a `cc-headless` agent, the older `memory` options under `adapters.cc-headless` still apply where this block doesn't set them (`journal_lookback_days` there is `lookback_days` here). They're deprecated; move them here.
 
+### pending_context
+
+Makes the agent's private Telegram chat work like Main in the Mac app: messages sent into it from elsewhere, and notes from `share_context`, reach the agent's next turn as context. Works with `cc-pool` and `cc-headless`. See [Your main chat with the agent](/runtimes/cc-pool#your-main-chat-with-the-agent).
+
+```yaml
+agents:
+  "agent:assistant":
+    pending_context:
+      channels: [telegram:assistant]
+      max_items: 20
+```
+
+| Option | Default | What it does |
+|---|---|---|
+| `channels` | `[]` | The exact channels whose private chat is treated this way, for example `telegram:assistant`. Groups and forum topics never are. |
+| `max_items` | `adapters.app.pending_context.max_items` (`10`) | The most items the agent catches up on in one turn |
+| `max_chars` | `adapters.app.pending_context.max_chars` (`4000`) | How much text those items can take up. Also the longest note `share_context` accepts. |
+| `context_ttl_ms` | `adapters.app.pending_context.context_ttl_ms` (`86400000`, 24 hours) | How old a `share_context` note can be before it's skipped. `0` means never. |
+
+The same limits for the Mac app's Main are set under `adapters.app.pending_context`; see [Mac app](/channels/mac-app#set-up-the-bus). Each one you leave out here comes from there.
+
 ## pipeline
 
 How messages are sorted and routed.
@@ -288,6 +309,38 @@ schedules:
 | `enabled` | `true` | Fire schedules. With `false`, schedules are still loaded but never fire. |
 | `tick_interval_ms` | `30000` | How often the bus checks for due schedules |
 
+## tool_status
+
+The status line Telegram and the Mac app show while your agent works. See [Watching your agent work](/channels/telegram#watching-your-agent-work).
+
+| Option | Default | What it does |
+|---|---|---|
+| `mode` | `phrases` | `phrases` shows a short fixed phrase, such as "Reading a file". `raw` shows the tool's name and details instead. |
+| `phrases_file` | `scripts/hooks/tool-status-phrases.json` | Your own phrase table, as a full path (`cc-headless` only) |
+
+The `cc-pool` and `claude-code` hook doesn't read these settings. Set `AGENTBUS_TOOL_STATUS_MODE` (see [Environment variables](#environment-variables)) to match.
+
+## models
+
+Extra models for the [`/model`](/features/models#switching-from-chat) picker, so a new model works without updating AgentBus. An entry with the same `id` as a built-in model replaces it.
+
+```yaml
+models:
+  catalog:
+    - id: claude-opus-5-6
+      family: opus
+      version: "5.6"      # in quotes, so it stays text
+      label: Opus 5.6
+```
+
+| Field | Required | What it does |
+|---|---|---|
+| `id` | yes | The full model ID passed to Claude Code |
+| `family` | yes | The family name you type, such as `opus` |
+| `version` | yes | Numbers separated by dots, such as `"5.6"`. The highest version is a family's latest. |
+| `label` | yes | The name shown in replies and buttons |
+| `deprecated` | no | `true` hides it from the picker. You can still choose it by version or ID. |
+
 ## memory
 
 Required, but can be empty: `memory: {}`.
@@ -305,5 +358,7 @@ Required, but can be empty: `memory: {}`.
 |---|---|
 | `AGENTBUS_CONFIG` | Path to the config file. Default: `config.yaml` in the current folder. `.env` is read from the same folder. |
 | `TELEGRAM_DEBUG_PAYLOADS` | When set to anything, logs every raw Telegram update **instead of** passing it on. For troubleshooting only: messages received in this mode are lost. |
+| `AGENTBUS_TOOL_STATUS_MODE` | For the tool-status hook (`cc-pool` and `claude-code`): `raw` shows tool names and details instead of phrases, like [`tool_status.mode`](#tool-status). Set it in the pool's `pane_env`. `AGENTBUS_TOOL_STATUS_PHRASES` points the hook at your own phrase table. |
+| `AGENTBUS_URL` | Where the hooks and AgentBus tools find the bus. Default `http://127.0.0.1:3000`. Point a Claude Code session on another computer at your bus with this and `AGENTBUS_BUS_TOKEN`; see [cc-pool](/runtimes/cc-pool#your-main-chat-with-the-agent). |
 
 Any other variable you reference as `${NAME}` in the config is yours to name.

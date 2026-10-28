@@ -6,13 +6,17 @@ These are the tools AgentBus gives your agent. Claude Code loads them automatica
 
 | Tool | What it does |
 |---|---|
-| `reply` | Answers a message. Takes the `message_id` shown in the incoming message as `[id:…]`, and a `body`. The answer goes back on the same channel, in the same thread or topic. |
+| `reply` | Answers a message. Takes the `message_id` shown in the incoming message as `[id:…]`, and a `body`. The answer goes back on the same channel, in the same thread or topic. Also takes `choices`, `silent`, `no_preview` and `pin`, as `send_message` does. |
 | `send_message` | Starts a message to a contact on any channel. See below. |
+| `share_context` | Hands a note to Main without showing you a message. See below. |
 | `send_email` | Starts a new email. See below. |
 | `react_to_message` | Adds an emoji reaction to a message, by `message_id`. On channels without reactions, it reports that instead of failing. |
+| `status` | Sets the short status line you see while the agent works. See below. |
 | `create_telegram_topic` | Opens a forum topic in a Telegram group. See below. |
 | `list_channels` | Lists the channels running on the bus and what each can do |
 | `fetch_attachment` | Looks up a saved attachment by its ID and returns its file path. Mostly used for images embedded in emails. |
+
+`reply` and `send_message` return the new message's ID, which `edit_message` and `pin_message` take.
 
 ### `send_message`
 
@@ -25,12 +29,48 @@ These are the tools AgentBus gives your agent. Claude Code loads them automatica
 | `reply_to` | no | A message ID to reply to |
 | `priority` | no | `normal` (default), `high` or `urgent` |
 | `source` | no | A short name for what's sending the message, such as `Ambient scan`. When the message lands in a conversation the sender isn't part of, such as the Mac app's Main, the agent there sees it with this name. |
+| `choices` | no | 1 to 8 answers to offer as buttons. See [Choices](#choices). |
+| `silent` | no | `true` delivers on Telegram without a notification sound |
+| `no_preview` | no | `true` stops Telegram from showing a preview card for links |
+| `pin` | no | `true` pins the message on Telegram after it's sent |
+
+Other channels ignore `silent`, `no_preview` and `pin`.
 
 Without `source`, a message sent during a scheduled job's turn uses the schedule's `label` (or its `id` if it has no label). Any other message uses the `AGENTBUS_SOURCE_LABEL` environment variable of the agentbus MCP server that sent it, if you set one, and otherwise "another agent session". Set the variable in the server's `env`, for example in a project's `.mcp.json`. It labels every session that uses that file, so prefer `source` when one project runs several kinds of sessions.
 
 The bus records where every message from `send_message`, `reply` and `send_email` came from. You can't set this yourself; it's what lets the agent in Main tell its own replies apart from messages sent by other sessions.
 
 See [Proactive messages](/features/proactive-messages).
+
+### Choices
+
+Each item in `choices` is a label of up to 64 characters, or an object for a special button:
+
+| Field | Meaning |
+|---|---|
+| `label` | The button text (required) |
+| `style` | `primary`, `success` or `danger`, to color the button |
+| `copy_text` | Text the button copies to your clipboard, up to 256 characters. Sends nothing back. |
+| `url` | A link the button opens (`https://`, `http://` or `tg://`). Sends nothing back. |
+
+A button can't have both `copy_text` and `url`. Plain labels and objects can be mixed. On Telegram, a tap on an ordinary button reaches the agent as `[tapped] <label>`. On other channels the choices are added to the message as a numbered list. See [Telegram buttons](/channels/telegram#buttons).
+
+```json
+{ "choices": ["Book it", { "label": "Cancel", "style": "danger" }, { "label": "Open the booking", "url": "https://example.com/b/123" }] }
+```
+
+### `share_context`
+
+Gives the agent in the Mac app's Main a note about work you finished in another Claude Code session. You see nothing: no message, notification or unread badge, and Main isn't woken. Main reads the note on its next turn.
+
+| Parameter | Required | Meaning |
+|---|---|---|
+| `to` | yes | The contact, such as `contact:me` |
+| `body` | yes | The note: what happened, where the result is, what's still open |
+| `source` | yes | Where it comes from, such as `Claude Code: my-project`. Main sees this label. |
+| `channel` | no | `app` (default) is Main in the Mac app. Pass a listed private-chat channel such as `telegram:assistant` to brief an agent through its Telegram chat. |
+
+Notes older than 24 hours are skipped, a note too long for the context budget is refused (shorten it and try again), and it can't be called from Main itself. To tell you something or ask a question, use `send_message`. See [Proactive messages](/features/proactive-messages#letting-main-know-without-a-message).
 
 ### `send_email`
 
@@ -51,6 +91,32 @@ Available when an email channel is configured and at least one contact has an em
 | `context` | no | A note the agent sees with the first message in the new topic |
 
 Returns the new topic's `thread:` name, for use with `send_message`. Available when a Telegram channel is configured. The bot needs the **Manage Topics** admin right in that group.
+
+### `status`
+
+| Parameter | Required | Meaning |
+|---|---|---|
+| `text` | yes | 1 to 5 plain words, at most 40 characters, such as `Comparing the quotes` |
+
+Replaces the automatic status line for the rest of the turn, or until the next `status` call. Markdown and symbols are removed. Nothing is shown once the agent has replied, or on email. See [Watching your agent work](/channels/telegram#watching-your-agent-work).
+
+## Telegram extras
+
+These tools are available when a Telegram channel is configured. The send tools take the same `to`, `channel`, `topic` and `reply_to` as `send_message`, plus `silent` and `pin`, and return a message ID.
+
+| Tool | What it does | On other channels |
+|---|---|---|
+| `send_location` | A map card: `latitude`, `longitude` | Coordinates and a map link |
+| `send_venue` | A venue card: `latitude`, `longitude`, `title`, `address` | Name, address and a map link |
+| `send_contact` | A contact card: `phone_number`, `first_name`, optional `last_name` and `vcard` | Name and number |
+| `send_document` | Uploads a file: `path` (full path), optional `caption` (up to 1,024 characters) and `as` (`document`, the default, up to 50 MB; or `photo`, up to 10 MB). The file must be inside one of the Telegram channel's [`send_paths`](/channels/telegram#set-it-up). | Not supported; returns an error |
+| `send_rich` | A rich message with headings, tables, expandable sections and link buttons: `markdown` or `html`, optional `choices`. Up to 32,768 characters; longer content is split into parts. | Plain text, with tables as lists |
+| `ask_input` | Asks you for something: `kind` (`location`, `contact`, `person` or `text`), `prompt`, optional `placeholder` for `text`. Your answer arrives as a message linked to the prompt. Share buttons only appear in private chats. | The prompt as plain text |
+| `edit_message` | Changes the text of a message the agent sent in the last 30 days: `message_id`, `body`, optional `choices` (leave it out to remove the buttons). Messages that were split into parts, files and cards can't be edited. | Not supported |
+| `pin_message` | Pins a message the agent sent: `message_id`, `silent` (default `true`) | Not supported |
+| `unpin_message` | Unpins it: `message_id`, or `unpin_all: true` to unpin everything in that topic or chat | Not supported |
+
+Pinning in a group needs the bot's **Pin Messages** admin right. See [Telegram](/channels/telegram#cards-files-and-rich-messages).
 
 ## Sessions and history
 

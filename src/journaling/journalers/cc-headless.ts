@@ -56,7 +56,7 @@ const PROMPT_SUFFIX =
 const ERROR_TAIL = 400;
 
 /** Delivery tools a fresh consolidation run with the agentbus tools may never call. */
-const JOURNAL_DELIVERY_TOOLS = 'mcp__agentbus__reply,mcp__agentbus__send_message,mcp__agentbus__send_email';
+const JOURNAL_DELIVERY_TOOLS = 'mcp__agentbus__reply,mcp__agentbus__send_message,mcp__agentbus__send_email,mcp__agentbus__share_context';
 
 export interface CcHeadlessJournalerDeps {
   resolver: Pick<RuntimeResolver, 'checkLive' | 'resolve'>;

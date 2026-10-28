@@ -174,6 +174,51 @@ describe('bus-originated turns are hidden (E65/E66)', () => {
   });
 });
 
+describe('context-only handoffs are hidden from the app (E82)', () => {
+  const shared = { context_only: true, origin: { kind: 'external', label: 'Claude Code: baxter' } };
+
+  it('keeps a context-only row out of history, replay, unread counts and quote resolution, while the cursor still advances', () => {
+    const f = fixture();
+    try {
+      const main = ensureOutboundAppSession(f.db, 'alice', 'agent:work', 'general');
+      f.addMessage('alice', main.sessionId, main.conversationId, 'hello', 'inbound', 'Hello there');
+      f.addMessage('alice', main.sessionId, main.conversationId, 'hidden', 'outbound', 'Shipped the artifact', shared);
+      f.addMessage('alice', main.sessionId, main.conversationId, 'reply', 'outbound', 'Hi!');
+      // Newest event is the hidden one, then a visible reply follows it.
+      f.addMessage('alice', main.sessionId, main.conversationId, 'hidden-2', 'outbound', 'Another note', shared);
+
+      expect(history(f.db, 'alice', 'agent:work', main.sessionId, 50)!.messages.map((r) => r['message_id'])).toEqual(['hello', 'reply']);
+      const { latest } = eventBounds(f.db, 'alice');
+      const events = readEvents(f.db, 'alice', 'agent:work', 0, latest);
+      expect(events.filter((e) => e.event === 'message').map((e) => e.data['message_id'])).toEqual(['hello', 'reply']);
+      // The hidden rows each took a seq, so the visible events leave gaps rather than the stream stalling.
+      const seqs = events.filter((e) => e.event === 'message').map((e) => e.seq);
+      expect(seqs[1]! - seqs[0]!).toBe(2);
+      expect(latest).toBeGreaterThan(seqs[1]!);
+      // Resuming from the last visible event sees nothing further and loses nothing.
+      expect(readEvents(f.db, 'alice', 'agent:work', seqs[1]!, latest)).toEqual([]);
+
+      // Unread counts only the visible outbound reply.
+      expect(listSessions(f.db, 'alice', 'agent:work', 'all', 50).find((s) => s['is_main'])).toMatchObject({ unread_count: 1 });
+      expect(quotableMessage(f.db, 'alice', 'agent:work', 'hidden')).toBeNull();
+      expect(quotableMessage(f.db, 'alice', 'agent:work', 'reply')).not.toBeNull();
+      // Still in the DB.
+      expect(f.db.prepare(`SELECT COUNT(*) AS n FROM transcripts WHERE json_extract(metadata,'$.context_only') = 1`).get()).toEqual({ n: 2 });
+    } finally { f.db.close(); }
+  });
+
+  it('does not count a hidden row as unread on a thread session either', () => {
+    const f = fixture();
+    try {
+      const topic = f.addSession('alice', 'agent:work', 'app', 'thread:trip', 'trip');
+      f.addMessage('alice', 'trip', topic, 'note', 'outbound', 'Hidden', shared);
+      expect(listSessions(f.db, 'alice', 'agent:work', 'all', 50).find((s) => s['session_id'] === 'trip')).toMatchObject({ unread_count: 0 });
+      f.addMessage('alice', 'trip', topic, 'shown', 'outbound', 'Shown');
+      expect(listSessions(f.db, 'alice', 'agent:work', 'all', 50).find((s) => s['session_id'] === 'trip')).toMatchObject({ unread_count: 1 });
+    } finally { f.db.close(); }
+  });
+});
+
 describe('app reply references (E72)', () => {
   it('resolves quotable messages by contact and agent, newest row first, and truncates', () => {
     const f = fixture();

@@ -3,7 +3,7 @@
  * and cc-headless. Pure: no config load, no I/O.
  */
 import type { MessageEnvelope } from '../types/envelope.js';
-import { isSystemOnly, neutralizeSystemMarkers, readSystemBlocks } from '../core/system-block.js';
+import { isSystemOnly, neutralizeSystemMarkers, readPendingContext, readSystemBlocks } from '../core/system-block.js';
 
 function fmtTs(iso: string, full: boolean): string {
   const d = new Date(iso);
@@ -67,6 +67,24 @@ function formatQuoteLine(quoted: Record<string, unknown>): string {
     : `${str('sender_name') ?? 'someone'}'s message`;
   const when = createdAt ? ` sent ${fmtLocalDateTime(createdAt)}` : '';
   return `[Replying to ${who}${when}: "${text}"]`;
+}
+
+/**
+ * E83 — the pending-context blocks to show for a batch: one per conversation.
+ * Envelopes polled together were built against the same unadvanced watermark,
+ * so their blocks overlap; the one with the newest watermark covers the rest.
+ */
+function pendingContextBlocks(envelopes: MessageEnvelope[]): string[] {
+  const newest = new Map<string, { through: { created_at: string; id: string }; block: string | null }>();
+  for (const env of envelopes) {
+    const a = readPendingContext(env.metadata);
+    if (!a) continue;
+    const have = newest.get(a.conversation_id);
+    const later = !have || a.through.created_at > have.through.created_at
+      || (a.through.created_at === have.through.created_at && a.through.id > have.through.id);
+    if (later) newest.set(a.conversation_id, a);
+  }
+  return [...newest.values()].flatMap((a) => (a.block ? [a.block] : []));
 }
 
 /**
@@ -148,7 +166,11 @@ export function formatMessagesForSampling(envelopes: MessageEnvelope[]): string 
     parts.push(`New message from ${env.sender} ${routeLabel}${ts} [id:${env.id}]:\n${bodyWithImages}`);
   }
 
-  return [...systemBlocks, ...parts.map(neutralizeSystemMarkers)].join('\n\n');
+  // E83 — pending context for a primary conversation, after any system block and
+  // before the messages. It quotes other sessions, so it is not a system block.
+  const pendingContext = pendingContextBlocks(envelopes).map(neutralizeSystemMarkers);
+
+  return [...systemBlocks, ...pendingContext, ...parts.map(neutralizeSystemMarkers)].join('\n\n');
 }
 
 /**

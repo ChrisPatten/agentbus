@@ -62,6 +62,45 @@ export const LAUNCH_READY_TIMEOUT_MS = 30_000;
  */
 const ACK_RETRY_BACKOFF_MS = 500;
 
+/**
+ * E54 — detector for Claude Code's "Switch model?" prompt, shown when `/model
+ * <id>` is typed into a live session whose context is cached for the current
+ * model. Real capture (Oct 28, 2026):
+ *
+ *   Switch model?
+ *   Your next response will be slower and use more tokens
+ *   This conversation is cached for the current model. Switching to Opus 5.5
+ *   means the full history gets re-read.
+ *   ❯ 1. Yes, switch to Opus 5.5
+ *     2. No, go back
+ *
+ * The prompt counts as present only when the capture matches
+ * `model_confirm_pattern` (a case-insensitive regex source, default below)
+ * AND a numbered line `1. Yes, switch to <model>` is on screen. The only key
+ * ever sent is `1`; option 2 ("No, go back") is never selected.
+ */
+export const DEFAULT_MODEL_CONFIRM_PATTERN = 'switch model\\?';
+
+/** The affirmative option of the real prompt, optionally behind the selection marker. */
+const CONFIRM_OPTION_RE = /^\s*[❯>›]?\s*1[.)]\s+Yes,\s+switch to\s+\S/im;
+
+/** A composer line (idle input box), optionally inside box-drawing borders, that is not a numbered option. */
+const IDLE_COMPOSER_RE = /^[\s│┃]*[❯>]\s*(?!\d+[.)]\s)/m;
+
+/** How long to wait for the prompt to appear after typing `/model`, and for the composer to return after answering. */
+const MODEL_PROMPT_WAIT_MS = 10_000;
+const MODEL_IDLE_WAIT_MS = 5_000;
+const MODEL_POLL_MS = 250;
+
+/** Result of {@link PaneLifecycle.switchModelInPane}. */
+export type InPaneSwitchResult = { status: 'switched' } | { status: 'failed'; reason: string };
+
+/** Outcome of {@link PaneLifecycle.confirmModelPrompt}. */
+export type ModelConfirmResult =
+  | { status: 'absent' }
+  | { status: 'confirmed'; attempts: number }
+  | { status: 'failed'; reason: string };
+
 /** Poll interval for the post-ack readiness check against `/last-poll`. */
 const READINESS_POLL_INTERVAL_MS = 500;
 
@@ -331,8 +370,8 @@ export class PaneLifecycle {
       const line = this.buildLaunchLine(params, mcpConfigPath, systemPromptPath);
       await this.tmux.sendCommand(params.paneId, line);
 
-      await this.ackHandshake(params.paneId, params.paneAgentId, launchStartedAt);
-      await this.pollReadiness(params.paneAgentId, launchStartedAt);
+      await this.ackHandshake(params.paneId, params.paneAgentId, launchStartedAt, params.model !== undefined);
+      await this.pollReadiness(params.paneAgentId, launchStartedAt, params.model ? params.paneId : undefined);
       launchSucceeded = true;
     } catch (err) {
       if (err instanceof PaneLaunchError) throw err;
@@ -345,6 +384,90 @@ export class PaneLifecycle {
         if (systemPromptPath) cleanTmpFile(systemPromptPath);
       }
     }
+  }
+
+  /**
+   * E54 — answers Claude Code's model-confirmation prompt, if (and only if)
+   * it is on screen. Reads `capture-pane`; when the prompt text is present it
+   * sends the key `1` via tmux and rechecks, up to `launch_ack_max_attempts`
+   * presses with a short backoff. No key is sent when the prompt is absent.
+   * Never throws for a prompt that will not clear: that is `status: 'failed'`
+   * so the caller can report it instead of hanging.
+   */
+  async confirmModelPrompt(paneId: string): Promise<ModelConfirmResult> {
+    const maxAttempts = this.cfg.launch_ack_max_attempts;
+    let sent = 0;
+    while (sent < maxAttempts) {
+      const captured = await this.tmux.capturePane(paneId, 30);
+      if (!this.modelPromptShowing(captured)) {
+        return sent === 0 ? { status: 'absent' } : { status: 'confirmed', attempts: sent };
+      }
+      await this.tmux.sendKeys(paneId, '1');
+      sent++;
+      await this.sleepFn(ACK_RETRY_BACKOFF_MS);
+    }
+    const finalCapture = await this.tmux.capturePane(paneId, 30);
+    if (!this.modelPromptShowing(finalCapture)) return { status: 'confirmed', attempts: sent };
+    return {
+      status: 'failed',
+      reason: `the model confirmation prompt in ${paneId} was still showing after ${maxAttempts} attempt(s) to answer it`,
+    };
+  }
+
+  /**
+   * E54 — switch the model of the LIVE session in `paneId` without losing it:
+   * type `/model <model>` (same `sendCommand` helper the pool uses for
+   * `/clear`), wait a bounded time for the "Switch model?" prompt, answer it
+   * with the key `1` only when {@link modelPromptShowing} matches, then wait
+   * for the idle composer to return. Never types into a pane that already
+   * shows the prompt or is sitting at a shell. Any failure (prompt never
+   * appears, will not clear, composer does not return) is returned, not
+   * thrown, so the caller can fall back to a relaunch.
+   */
+  async switchModelInPane(paneId: string, model: string): Promise<InPaneSwitchResult> {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._\-\[\]]*$/.test(model)) {
+      return { status: 'failed', reason: `refusing to type an unexpected model id "${model}"` };
+    }
+    if (isShellCommand(await this.tmux.paneCommand(paneId))) {
+      return { status: 'failed', reason: `${paneId} is at a shell, not a Claude session` };
+    }
+    if (this.modelPromptShowing(await this.tmux.capturePane(paneId, 30))) {
+      return { status: 'failed', reason: `a model prompt is already showing in ${paneId}` };
+    }
+
+    await this.tmux.sendCommand(paneId, `/model ${model}`);
+
+    let appeared = false;
+    for (let waited = 0; waited < MODEL_PROMPT_WAIT_MS; waited += MODEL_POLL_MS) {
+      if (this.modelPromptShowing(await this.tmux.capturePane(paneId, 30))) {
+        appeared = true;
+        break;
+      }
+      await this.sleepFn(MODEL_POLL_MS);
+    }
+    if (!appeared) {
+      return { status: 'failed', reason: `the "Switch model?" prompt did not appear in ${paneId} within ${MODEL_PROMPT_WAIT_MS / 1000}s` };
+    }
+
+    const confirm = await this.confirmModelPrompt(paneId);
+    if (confirm.status === 'failed') return { status: 'failed', reason: confirm.reason };
+
+    for (let waited = 0; waited < MODEL_IDLE_WAIT_MS; waited += MODEL_POLL_MS) {
+      const captured = await this.tmux.capturePane(paneId, 30);
+      if (!this.modelPromptShowing(captured) && IDLE_COMPOSER_RE.test(captured)) return { status: 'switched' };
+      await this.sleepFn(MODEL_POLL_MS);
+    }
+    return { status: 'failed', reason: `${paneId} did not return to its idle composer after the model prompt was answered` };
+  }
+
+  private modelPromptShowing(captured: string): boolean {
+    let re: RegExp;
+    try {
+      re = new RegExp(this.cfg.model_confirm_pattern ?? DEFAULT_MODEL_CONFIRM_PATTERN, 'i');
+    } catch {
+      return false; // an invalid operator pattern must never cause a key press
+    }
+    return re.test(captured) && CONFIRM_OPTION_RE.test(captured);
   }
 
   /**
@@ -568,10 +691,15 @@ export class PaneLifecycle {
    * `cfg.launch_ack_max_attempts` times (backing off `ACK_RETRY_BACKOFF_MS`
    * between retries) if a press doesn't clear it.
    */
-  private async ackHandshake(paneId: string, paneAgentId: string, launchStartedAt: Date): Promise<void> {
+  private async ackHandshake(
+    paneId: string,
+    paneAgentId: string,
+    launchStartedAt: Date,
+    expectModelPrompt = false,
+  ): Promise<void> {
     const pattern = this.cfg.launch_ack_pattern.toLowerCase();
 
-    const promptShowing = await this.waitForAckPrompt(paneId, paneAgentId, pattern, launchStartedAt);
+    const promptShowing = await this.waitForAckPrompt(paneId, paneAgentId, pattern, launchStartedAt, expectModelPrompt);
     if (!promptShowing) return; // never rendered within the budget -- nothing to dismiss
 
     const maxAttempts = this.cfg.launch_ack_max_attempts;
@@ -606,10 +734,19 @@ export class PaneLifecycle {
    * at `cfg.launch_ack_delay_ms`: a slow start can render the prompt well
    * after that, and a prompt nobody dismisses stalls the launch.
    */
-  private async waitForAckPrompt(paneId: string, paneAgentId: string, pattern: string, launchStartedAt: Date): Promise<boolean> {
+  private async waitForAckPrompt(
+    paneId: string,
+    paneAgentId: string,
+    pattern: string,
+    launchStartedAt: Date,
+    expectModelPrompt = false,
+  ): Promise<boolean> {
     for (;;) {
       const captured = await this.tmux.capturePane(paneId, 30);
       if (captured.toLowerCase().includes(pattern)) return true;
+      // E54: the session is already past the ack stage and stopped at the model
+      // prompt; pollReadiness() answers it. Don't wait out the deadline here.
+      if (expectModelPrompt && this.modelPromptShowing(captured)) return false;
 
       // Already polling the bus: the session is up and no prompt is coming.
       // Raced against a sleep so a stalled request can't outlast the deadline.
@@ -656,8 +793,20 @@ export class PaneLifecycle {
    * empirically (both under Vitest fake timers AND real timers via a
    * standalone script) before landing this corrected version.
    */
-  private async pollReadiness(paneAgentId: string, launchStartedAt: Date): Promise<void> {
+  private async pollReadiness(paneAgentId: string, launchStartedAt: Date, confirmModelInPane?: string): Promise<void> {
+    // E54: a launch that carries `--model` may stop at a model-confirmation
+    // prompt, which blocks `cc.ts` from ever polling. Look for it on every
+    // iteration until it has been answered.
+    let modelConfirmed = confirmModelInPane === undefined;
     for (;;) {
+      if (!modelConfirmed && confirmModelInPane !== undefined) {
+        const confirm = await this.confirmModelPrompt(confirmModelInPane);
+        if (confirm.status === 'failed') {
+          throw new PaneLaunchError(`Pane launch failed: ${confirm.reason}`);
+        }
+        if (confirm.status === 'confirmed') modelConfirmed = true;
+      }
+
       if (this.elapsedSince(launchStartedAt) >= LAUNCH_READY_TIMEOUT_MS) {
         throw new PaneLaunchError(
           `Pane launch timed out waiting for "${paneAgentId}" readiness after ${LAUNCH_READY_TIMEOUT_MS}ms`,

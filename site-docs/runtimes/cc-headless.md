@@ -119,6 +119,7 @@ If `claude -p` crashes, exits with an error or produces nothing, and the agent h
 ## Things to know
 
 - **The first reply in a conversation is slower.** Claude Code needs a few seconds to start.
+- **You see what the agent is doing.** In Telegram and the Mac app, a short status line such as "Searching the web" updates as the agent works. See [Watching your agent work](/channels/telegram#watching-your-agent-work) and [`tool_status`](/reference/configuration#tool-status).
 - **Conversations are isolated.** The agent can't see what was said in another conversation, unless it looks it up with `search_transcripts` or keeps notes in its files.
 - **Don't turn off auto-compaction.** Long sessions rely on Claude Code's automatic context compaction. Leave `DISABLE_AUTO_COMPACT` unset.
 - **Claude Code's own auto memory is on and points at the agent's memory folder.** Each turn loads `CLAUDE.md` and `MEMORY.md` fresh from disk, so changes the agent or a journal run made are seen on the next turn. `recent.md` reaches the agent through an import in `CLAUDE.md` or, better for long conversations, through the recent-memory hook, which sends it once and then only new entries. See [How memory is organized](/features/agent-memory).

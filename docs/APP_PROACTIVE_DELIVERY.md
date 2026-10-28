@@ -45,6 +45,25 @@ the sender:
 See [MCP_TOOLS.md → Origin metadata](MCP_TOOLS.md#origin-metadata) and
 [CC_HEADLESS_ADAPTER.md → Pending context](CC_HEADLESS_ADAPTER.md#pending-context-main).
 
+## Context without a message
+
+`send_message` always shows up in the app as an outbound message. When the
+operator only wants Main to **know** something (a Claude Code session
+finished an artifact, a decision was made) and shouldn't see a bubble, an
+unread badge or a notification, use the `share_context` tool instead. It
+writes a hidden row into Main with no delivery, no activity and no wake;
+Main picks it up on its next turn under "Context shared with you (the user
+has not seen these)". It is for handing an outcome over, not for notifying
+the operator or asking something: those stay `send_message`. See
+[MCP_TOOLS.md → share_context](MCP_TOOLS.md#share_context) and
+[APP_ADAPTER.md → Hidden context](APP_ADAPTER.md#hidden-context-share_context).
+
+The same applies to an agent's Telegram DM on cc-pool when it is a primary
+conversation (E83): `share_context` with `channel: "telegram:peggy"` is hidden
+in Telegram, and a routine's visible `send_message` into the DM reaches the
+agent's next turn as dated context, as in Main. See
+[CC_POOL_ADAPTER.md → Primary conversations](CC_POOL_ADAPTER.md#primary-conversations-pending-context-and-shared-context-e83).
+
 ## Background work
 
 Run scheduled work in its own `sched:` topic. Its prompt and transcript stay in

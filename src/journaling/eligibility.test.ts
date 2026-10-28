@@ -68,6 +68,53 @@ describe('loadWindow (E66 S66.2)', () => {
     expect(w.messages.map((m) => [m.body, m.context])).toEqual([['old reply', true], ['new', false]]);
   });
 
+  describe('context-only handoffs (E82)', () => {
+    const shared = (label = 'Claude Code: baxter') => ({ context_only: true, origin: { kind: 'external', label } });
+
+    it('keeps a shared note in the window, rendered with its source and the not-shown marker', () => {
+      row({ at: T(1), dir: 'outbound', body: 'Here is your briefing' });
+      row({ at: T(2), dir: 'outbound', body: 'Finished the migration plan', meta: shared(), contact: 'chris' });
+      row({ at: T(3), body: 'Thanks, go ahead' });
+      const w = loadWindow(db, { sessionId: 's1', cursorAt: null, agentId: 'agent:baxter' });
+      // The briefing, not the note, is what the human replied to; the note still sits in the window.
+      expect(w.messages.map((m) => m.body)).toEqual([
+        'Here is your briefing',
+        '[Context shared by Claude Code: baxter, not shown to the user] Finished the migration plan',
+        'Thanks, go ahead',
+      ]);
+      expect(w.messages[1]).toMatchObject({ direction: 'outbound', context: true, author: { id: 'agent:baxter', is_human: false, is_agent: false } });
+      expect(w.messages[0]).toMatchObject({ author: { is_agent: true } });
+    });
+
+    it('does not count as a human message and does not open a window by itself', () => {
+      row({ at: T(1), dir: 'outbound', body: 'note', meta: shared() });
+      const alone = loadWindow(db, { sessionId: 's1', cursorAt: null, agentId: 'agent:baxter' });
+      expect(alone.humanTimes).toEqual([]);
+      expect(alone.messages).toEqual([]);
+      expect(alone.advanceTo).toBe(T(1));
+      expect(assessEligibility(alone, { minHumanMessages: 1, trigger: 'close', now: new Date(T(30)) })).toEqual({ kind: 'nothing' });
+      row({ at: T(2), body: 'hello' });
+      expect(loadWindow(db, { sessionId: 's1', cursorAt: null, agentId: 'agent:baxter' }).humanTimes).toEqual([T(2)]);
+    });
+
+    it('keeps a note shared since the cursor even when an older agent message anchors the window, and drops one before the cursor', () => {
+      row({ at: T(1), dir: 'outbound', body: 'already journaled note', meta: shared() });
+      row({ at: T(2), dir: 'outbound', body: 'new note', meta: shared('Claude Code: agentbus') });
+      row({ at: T(3), dir: 'outbound', body: 'agent answer' });
+      row({ at: T(4), body: 'follow up' });
+      const w = loadWindow(db, { sessionId: 's1', cursorAt: T(1), agentId: 'agent:baxter' });
+      expect(w.messages.map((m) => m.body)).toEqual([
+        '[Context shared by Claude Code: agentbus, not shown to the user] new note', 'agent answer', 'follow up']);
+    });
+
+    it('falls back to a generic label when the origin has none', () => {
+      row({ at: T(1), dir: 'outbound', body: 'note', meta: { context_only: true } });
+      row({ at: T(2), body: 'hello' });
+      const w = loadWindow(db, { sessionId: 's1', cursorAt: null, agentId: 'agent:baxter' });
+      expect(w.messages[0]!.body).toBe('[Context shared by another agent session, not shown to the user] note');
+    });
+  });
+
   it('passes attachments by path', () => {
     row({ at: T(1), meta: { attachments: [{ type: 'image', local_path: '/tmp/a.png', mime_type: 'image/png' }] } });
     const w = loadWindow(db, { sessionId: 's1', cursorAt: null, agentId: 'agent:baxter' });

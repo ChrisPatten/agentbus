@@ -35,7 +35,7 @@ import type { OwnerDirectory } from '../core/owners.js';
 import type { SessionRow } from '../memory/types.js';
 import type { JournalAdvisories } from './advisories.js';
 import { NATIVE_MEMORY_MAX_BYTES, resolveJournalingSettings, thresholdForChannel, type JournalingSettings } from './config.js';
-import { assessEligibility, eligibleSince, loadWindow, PENDING_MAX_AGE_MS } from './eligibility.js';
+import { assessEligibility, eligibleSince, loadSharedContext, loadWindow, PENDING_MAX_AGE_MS } from './eligibility.js';
 import type { JournalerRegistry } from './registry.js';
 import { runChain, type ChainRunSummary, type RunGuard } from './runner.js';
 import { JournalStore } from './store.js';
@@ -569,6 +569,10 @@ export class JournalEngine {
       window: { cursorAt: window.cursorAt, from: window.from, to: window.to, advanceTo: window.advanceTo },
       messages: window.messages,
       humanMessageCount: window.humanTimes.length,
+      sharedContext: loadSharedContext(this.deps.db, {
+        conversationId: session.conversation_id,
+        since: window.cursorAt ?? new Date(new Date(session.started_at).getTime() - PENDING_MAX_AGE_MS).toISOString(),
+      }),
       snapshots: this.store.pendingSnapshots(session.id).map((s) => ({ id: s.id, event: s.event, path: s.path, created_at: s.created_at })),
       prompt: settings.prompt,
       model: settings.model,
@@ -639,7 +643,8 @@ export class JournalEngine {
     const rows = this.deps.db
       .prepare(
         `SELECT s.*, js.last_turn_ended_at AS js_turn_ended,
-                (SELECT MAX(t.created_at) FROM transcripts t WHERE t.session_id = s.id AND t.direction = 'outbound') AS last_outbound,
+                (SELECT MAX(t.created_at) FROM transcripts t WHERE t.session_id = s.id AND t.direction = 'outbound'
+                   AND json_extract(t.metadata, '$.context_only') IS NOT 1) AS last_outbound,
                 (SELECT MAX(f.created_at) FROM feedback_events f
                    WHERE f.conversation_id = s.conversation_id AND f.consumed_at IS NULL
                      AND f.kind IN ('denied-approval', 'user-feedback')) AS last_feedback

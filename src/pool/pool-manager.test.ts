@@ -185,6 +185,25 @@ describe('PoolManager', () => {
       expect(paneLauncher.launch).not.toHaveBeenCalled();
     });
 
+    it('bound (E83): the message-less placeholder row share_context created gets a fresh --session-id, not a resume, and keeps the row', async () => {
+      const { manager, paneLauncher, db } = makeManager({ panes: 2 });
+      await manager.ensureStarted();
+      const now = new Date().toISOString();
+      db.prepare(`INSERT INTO conversation_registry(id,contact_id,channel,topic,first_seen,last_seen) VALUES ('conv-dm','alice','telegram:peggy','general',?,?)`).run(now, now);
+      db.prepare(`INSERT INTO sessions(id,conversation_id,channel,contact_id,started_at,last_activity,message_count,agent_id)
+        VALUES ('placeholder','conv-dm','telegram:peggy','alice',?,?,0,'agent:peggy')`).run(now, now);
+
+      const result = await manager.resolveRoute('conv-dm', { contact_id: 'alice', channel: 'telegram:peggy' });
+
+      expect(paneLauncher.launch).toHaveBeenCalledTimes(1);
+      const launchArgs = paneLauncher.launch.mock.calls[0]![0];
+      expect(launchArgs.resume).toBe(false);
+      expect(launchArgs.sessionId).toMatch(/^[0-9a-f-]{36}$/);
+      expect(result).toBe('agent:peggy-pool-1');
+      expect(db.prepare(`SELECT claude_session_id FROM sessions WHERE id = 'placeholder'`).get()).toEqual({ claude_session_id: launchArgs.sessionId });
+      expect(db.prepare('SELECT COUNT(*) AS n FROM sessions').get()).toEqual({ n: 1 });
+    });
+
     it('bound (new conversation, no prior session): launches fresh with a generated session id and persists it', async () => {
       const { manager, paneLauncher, cfg } = makeManager({ panes: 2 });
       await manager.ensureStarted();
@@ -964,7 +983,122 @@ describe('PoolManager', () => {
     });
   });
 
-  describe('journaling release hook (E66 S66.9)', () => {
+  describe('applyModelNow (E54 /model)', () => {
+  function setup(initial: string | undefined) {
+    let model = initial;
+    const cfg = makeCfg({ panes: 1, model: initial });
+    const db = makeDb();
+    const paneLauncher = makeFakeLauncher();
+    const manager = new PoolManager({
+      transcriptExists: () => true,
+      cfg,
+      db,
+      busBaseUrl: 'http://127.0.0.1:3000',
+      paneLauncher,
+      resolveModel: () => ({ model, source: model ? 'agent-override' : 'cli-default' }),
+    });
+    return { manager, paneLauncher, db, setModel: (m: string) => (model = m) };
+  }
+  const ctx = { contact_id: 'alice', channel: 'telegram' };
+
+  async function lease(manager: PoolManager, paneLauncher: ReturnType<typeof makeFakeLauncher>) {
+    await manager.ensureStarted();
+    await manager.resolveRoute('conv-1', ctx);
+    paneLauncher.launch.mockClear();
+    paneLauncher.release.mockClear();
+  }
+
+  it('without an in-pane switcher, relaunches the live pane on the new model right away and reports switched', async () => {
+    const { manager, paneLauncher, setModel } = setup('claude-old-model');
+    await lease(manager, paneLauncher);
+    setModel('claude-new-model');
+
+    const outcome = await manager.applyModelNow('conv-1', ctx);
+
+    expect(outcome).toEqual({ status: 'switched', paneId: 'peggy-pool:1', model: 'claude-new-model', method: 'relaunch' });
+    expect(paneLauncher.release).toHaveBeenCalledWith('peggy-pool:1', 'kill');
+    expect(paneLauncher.launch.mock.calls[0]![0]).toMatchObject({ resume: true, model: 'claude-new-model' });
+    expect(manager.leaseStore.findByConversation(manager.poolId, 'conv-1')?.model).toBe('claude-new-model');
+  });
+
+  function withSwitcher(paneLauncher: ReturnType<typeof makeFakeLauncher>, result: { status: 'switched' } | { status: 'failed'; reason: string }) {
+    const switchModel = vi.fn(async (_paneId: string, _model: string) => result);
+    (paneLauncher as unknown as { switchModel: typeof switchModel }).switchModel = switchModel;
+    return switchModel;
+  }
+
+  it('prefers switching in place: types into the pane, keeps the session, no kill or relaunch', async () => {
+    const { manager, paneLauncher, setModel } = setup('claude-old-model');
+    await lease(manager, paneLauncher);
+    const switchModel = withSwitcher(paneLauncher, { status: 'switched' });
+    setModel('claude-new-model');
+
+    const outcome = await manager.applyModelNow('conv-1', ctx);
+
+    expect(outcome).toEqual({ status: 'switched', paneId: 'peggy-pool:1', model: 'claude-new-model', method: 'in-pane' });
+    expect(switchModel).toHaveBeenCalledWith('peggy-pool:1', 'claude-new-model');
+    expect(paneLauncher.release).not.toHaveBeenCalled();
+    expect(paneLauncher.launch).not.toHaveBeenCalled();
+    const row = manager.leaseStore.findByConversation(manager.poolId, 'conv-1');
+    expect(row).toMatchObject({ state: 'leased', model: 'claude-new-model' });
+  });
+
+  it('falls back to a relaunch when the in-place switch fails, and says why', async () => {
+    const { manager, paneLauncher, setModel } = setup('claude-old-model');
+    await lease(manager, paneLauncher);
+    withSwitcher(paneLauncher, { status: 'failed', reason: 'the "Switch model?" prompt did not appear' });
+    setModel('claude-new-model');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const outcome = await manager.applyModelNow('conv-1', ctx);
+
+    expect(outcome).toMatchObject({ status: 'switched', method: 'relaunch', inPaneFailure: 'the "Switch model?" prompt did not appear' });
+    expect(paneLauncher.release).toHaveBeenCalledWith('peggy-pool:1', 'kill');
+    expect(paneLauncher.launch.mock.calls[0]![0]).toMatchObject({ resume: true, model: 'claude-new-model' });
+    warn.mockRestore();
+  });
+
+  it('never types into a pane with a turn in flight: deferred, switcher untouched', async () => {
+    const { manager, paneLauncher, setModel, db } = setup('claude-old-model');
+    await lease(manager, paneLauncher);
+    const switchModel = withSwitcher(paneLauncher, { status: 'switched' });
+    setModel('claude-new-model');
+    const row = manager.leaseStore.findByConversation(manager.poolId, 'conv-1')!;
+    db.prepare(
+      `INSERT INTO message_queue (id, recipient, channel, topic, sender, priority, payload, metadata, status, created_at, updated_at, acked_at)
+       VALUES ('msg-1', ?, 'telegram', 'general', 'contact:alice', 'normal', '{}', '{}', 'delivered', datetime('now'), datetime('now'), ?)`,
+    ).run(row.agent_id, new Date(Date.now() + 1000).toISOString());
+
+    expect(await manager.applyModelNow('conv-1', ctx)).toEqual({ status: 'deferred' });
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(paneLauncher.launch).not.toHaveBeenCalled();
+  });
+
+  it('reports no-pane when nothing holds a pane for the conversation, and unchanged when the model matches', async () => {
+    const { manager, paneLauncher } = setup('claude-old-model');
+    await manager.ensureStarted();
+    expect(await manager.applyModelNow('nobody', ctx)).toEqual({ status: 'no-pane' });
+    await lease(manager, paneLauncher);
+    expect(await manager.applyModelNow('conv-1', ctx)).toEqual({ status: 'unchanged' });
+    expect(paneLauncher.launch).not.toHaveBeenCalled();
+  });
+
+  it('reports failed with the launch error (e.g. the unanswered model prompt) instead of hanging', async () => {
+    const { manager, paneLauncher, setModel } = setup('claude-old-model');
+    await lease(manager, paneLauncher);
+    setModel('claude-new-model');
+    paneLauncher.launch.mockRejectedValueOnce(new Error('Pane launch failed: the model confirmation prompt in x was still showing'));
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const outcome = await manager.applyModelNow('conv-1', ctx);
+
+    expect(outcome).toMatchObject({ status: 'failed', paneId: 'peggy-pool:1' });
+    expect(outcome.status === 'failed' && outcome.reason).toContain('model confirmation prompt');
+    errSpy.mockRestore();
+  });
+});
+
+describe('journaling release hook (E66 S66.9)', () => {
     it('evict: fires the hook, then releases and seats the new conversation without waiting for it', async () => {
       const db = makeDb();
       const paneLauncher = makeFakeLauncher();
@@ -1038,6 +1172,74 @@ describe('PoolManager', () => {
     it('returns null when no pane is leased to the conversation', () => {
       const { manager } = makeManager();
       expect(manager.clearConversation('nope')).toBeNull();
+    });
+  });
+
+  describe('killConversation (E80, /pool kill)', () => {
+    it('detaches, kills (not clears) and frees the pane; the next message gets a fresh window and resumes the session', async () => {
+      const { manager, paneLauncher, db } = makeManager({ panes: 1, on_evict: 'clear' });
+      await manager.ensureStarted();
+      await manager.resolveRoute('conv-1', { contact_id: 'alice', channel: 'telegram' });
+      const pane = manager.leaseStore.findByConversation(manager.poolId, 'conv-1')!;
+      db.prepare(`INSERT INTO sessions (id, contact_id, channel, conversation_id, started_at, last_activity, claude_session_id)
+                  VALUES ('s1', 'alice', 'telegram', 'conv-1', ?, ?, ?)`)
+        .run(new Date().toISOString(), new Date().toISOString(), 'sess-uuid');
+
+      const killed = manager.killConversation('conv-1');
+      expect(killed?.paneId).toBe(pane.pane_id);
+      expect(manager.leaseStore.findByConversation(manager.poolId, 'conv-1')).toBeNull();
+      expect(manager.leaseStore.findByPane(manager.poolId, pane.pane_id)?.state).toBe('draining');
+      await killed!.done;
+      expect(paneLauncher.release).toHaveBeenCalledWith(pane.pane_id, 'kill');
+      expect(manager.leaseStore.findByPane(manager.poolId, pane.pane_id)?.state).toBe('free');
+
+      paneLauncher.launch.mockClear();
+      expect(await manager.resolveRoute('conv-1', { contact_id: 'alice', channel: 'telegram' })).toBe('agent:peggy-pool-1');
+      expect(paneLauncher.launch).toHaveBeenCalledTimes(1);
+      expect(paneLauncher.launch.mock.calls[0]![0].resume).toBe(true);
+      expect(manager.leaseStore.findByConversation(manager.poolId, 'conv-1')?.state).toBe('leased');
+    });
+
+    it('returns null when no pane serves the conversation and touches nothing', async () => {
+      const { manager, paneLauncher } = makeManager({ panes: 1 });
+      await manager.ensureStarted();
+      expect(manager.killConversation('nope')).toBeNull();
+      expect(paneLauncher.release).not.toHaveBeenCalled();
+    });
+
+    it('mid-turn: acks the in-flight message (no replay), re-parks pending ones, leaves other conversations alone', async () => {
+      const { manager, db } = makeManager({ panes: 2 });
+      await manager.ensureStarted();
+      await manager.resolveRoute('conv-1', { contact_id: 'alice', channel: 'telegram' });
+      await manager.resolveRoute('conv-2', { contact_id: 'bob', channel: 'telegram' });
+      const pane1 = manager.leaseStore.findByConversation(manager.poolId, 'conv-1')!;
+      const pane2 = manager.leaseStore.findByConversation(manager.poolId, 'conv-2')!;
+      const queue = new MessageQueue(db);
+      const inFlight = queue.enqueue({ ...parkEnvelope('conv-1'), recipient: pane1.agent_id });
+      queue.dequeue(pane1.agent_id); // now 'processing'
+      const pending = queue.enqueue({ ...parkEnvelope('conv-1'), recipient: pane1.agent_id });
+      const other = queue.enqueue({ ...parkEnvelope('conv-2'), recipient: pane2.agent_id });
+
+      const killed = manager.killConversation('conv-1');
+      expect(killed?.inFlight).toBe(true);
+      await killed!.done;
+
+      const status = (id: string) => (db.prepare(`SELECT status, recipient FROM message_queue WHERE id = ?`).get(id) as { status: string; recipient: string });
+      expect(status(inFlight).status).toBe('delivered');
+      expect(status(pending)).toEqual({ status: 'pending', recipient: manager.parkedRecipientId() });
+      expect(status(other)).toEqual({ status: 'pending', recipient: pane2.agent_id });
+      // recoverStuck must not resurrect the in-flight message.
+      expect(queue.recoverStuck(0)).toBe(0);
+      expect(manager.leaseStore.findByConversation(manager.poolId, 'conv-2')?.state).toBe('leased');
+    });
+
+    it('reports inFlight=false when no turn was running', async () => {
+      const { manager } = makeManager({ panes: 1 });
+      await manager.ensureStarted();
+      await manager.resolveRoute('conv-1', { contact_id: 'alice', channel: 'telegram' });
+      const killed = manager.killConversation('conv-1');
+      expect(killed?.inFlight).toBe(false);
+      await killed!.done;
     });
   });
 

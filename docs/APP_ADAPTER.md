@@ -16,7 +16,7 @@ adapters:
     event_retention_days: 30
     ping_interval_ms: 30000
     main_idle_rotation_ms: 43200000   # E69; 0 disables Main's idle rotation
-    pending_context:                  # E69; foreign messages injected into the next Main turn
+    pending_context:                  # E69; foreign messages (and E82 shared notes) injected into the next Main turn
       max_items: 10
       max_chars: 4000
   cc-headless:
@@ -53,7 +53,8 @@ pipeline:
 | `ping_interval_ms` | `30000` | WebSocket ping interval (minimum 1000) |
 | `main_idle_rotation_ms` | `43200000` (12 h) | Retire Main's Claude session after this long with no operator message and no send from a Main turn. `0` disables rotation. See [Main](#main-one-continuous-conversation) |
 | `pending_context.max_items` | `10` | Most foreign messages injected into one Main turn; older ones are counted as omitted |
-| `pending_context.max_chars` | `4000` | Character budget for the injected item lines (the intro line doesn't count) |
+| `pending_context.max_chars` | `4000` | Character budget for the injected item lines (the intro line doesn't count). Also the longest note `share_context` accepts |
+| `pending_context.context_ttl_ms` | `86400000` (24 h) | E82: a note shared with `share_context` is not injected once it is older than this when the Main turn starts. `0` disables the cutoff. Visible foreign sends are never expired. E83: a listed Telegram DM uses its agent's `agents.<id>.pending_context.context_ttl_ms` when set, and this value otherwise |
 
 When `adapters.app` is absent, code that needs these values uses the schema defaults.
 
@@ -171,6 +172,26 @@ Main (E69) behaves like a Telegram DM. The operator sees one conversation with a
 Not guarded: a single Main turn that runs longer than the whole rotation period can be rotated mid-turn.
 
 **Pending context.** On each `cc-headless` turn in Main, foreign messages that landed in Main since the agent last saw them are prepended to the prompt as a dated context block. See [CC_HEADLESS_ADAPTER.md → Pending context](CC_HEADLESS_ADAPTER.md#pending-context-main) for the rules and an example, and [MCP_TOOLS.md → Origin metadata](MCP_TOOLS.md#origin-metadata) for how sends are classified.
+
+### Hidden context (`share_context`)
+
+E82. A **context-only** row is an outbound transcript row in Main with `metadata.context_only = true`, written by [`POST /api/v1/context`](HTTP_API.md#post-apiv1context) (the [`share_context` tool](MCP_TOOLS.md#share_context)). It is how an operator's Claude Code session tells Main something without a message: Main reads it as [shared context](CC_HEADLESS_ADAPTER.md#shared-context-share_context), the app never shows it. It is a second hiding flag, separate from `system_only`:
+
+| Reader | `system_only` | `context_only` |
+|---|---|---|
+| App history, replay events, session-list previews and titles, unread counts, quote resolution (`reply_to`) | hidden | hidden |
+| `GET /api/v1/sessions/:id/transcript`, `GET /api/v1/transcripts/search` | hidden | hidden |
+| Pending context (`pendingMessages`) | hidden | **included** |
+| Journaling window (`loadWindow`) | hidden | **included**, rendered `[Context shared by <label>, not shown to the user] <body>`, not a human message |
+| Main's activity clock | not counted | not counted |
+
+The condition lives in `src/app/store.ts`: `VISIBLE_TRANSCRIPT` (every app-facing read) is `NOT_SYSTEM_ONLY AND NOT_CONTEXT_ONLY`, and pending context uses `NOT_SYSTEM_ONLY` alone, so the two can't drift. A future channel that reads rows for the agent but not the user should use the same split.
+
+**What the write does and doesn't do.** One row, no `message_queue` entry, no `DeliveryWorker`, no `AppAdapter.send`. `logOutboundTranscript` is called with `silent: true`, so it records no `session` event. It does not touch `sessions.last_activity` or `message_count`, so there is no `app_session_changed` event, no sidebar re-sort and no effect on Main's idle rotation clock (derived from visible inbound and `turn`-origin outbound rows only). The note joins Main's newest session row, open or ended, and nothing on that row changes: after an idle rotation, when the next turn hasn't started a new row yet, it attaches to the ended one and creates nothing. The one exception is a contact whose Main has never had a session row: `ensureOutboundAppSession` creates one, and its `app_session_created` event makes Main appear in the session list once, as for any first proactive send. Pending context reads every row of the conversation, so a note on an ended row is still injected into the next turn.
+
+**Replay.** The `app_transcript_event` trigger (migration 024) inserts an `app_events` row for every transcript insert, so a hidden row still takes a `seq`. `readEvents` joins each message event to its transcript through `VISIBLE_TRANSCRIPT`, finds nothing and skips it, and the WebSocket drain sets the client's cursor to the high-water `seq` it read, so the cursor advances over the gap. Clients already see `seq` gaps for hidden rows and other agents' sessions, so they must treat `seq` as ordered, not contiguous. `unread_count` in `sessionInfo` joins the same `app_events` rows, so it filters with `VISIBLE_TRANSCRIPT` too (this also stops an outbound `system_only` row counting as unread).
+
+Other readers that treat "the newest outbound row" as agent activity skip context-only rows: the feedback target (`latestAgentMessageId`), the hook-health activity check, the journaling pause clock (`last_outbound` in `JournalEngine.tickTimers`) and the System Message journaler's "has the agent answered" check.
 
 ## Agent guidance and proactive delivery
 

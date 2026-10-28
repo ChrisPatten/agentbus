@@ -218,13 +218,14 @@ export interface HookHealthEntry {
   count: number;
 }
 
-/** Newest agent message in the agent's open sessions (pane ids included for pools). */
+/** Newest agent message in the agent's open sessions (pane ids included for pools). E82: a hidden `context_only` handoff is not agent activity. */
 function lastAgentActivity(db: Database.Database, agentId: string): string | null {
   const row = db
     .prepare(
       `SELECT MAX(t.created_at) AS at FROM transcripts t JOIN sessions s ON s.id = t.session_id
        WHERE s.ended_at IS NULL AND t.direction = 'outbound'
          AND json_extract(t.metadata, '$.command_response') IS NOT 1
+         AND json_extract(t.metadata, '$.context_only') IS NOT 1
          AND (s.agent_id = ? OR s.agent_id LIKE ? ESCAPE '\\')`,
     )
     .get(agentId, `${agentId.replace(/[\\%_]/g, (c) => `\\${c}`)}-pool-%`) as { at: string | null };

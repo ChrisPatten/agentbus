@@ -10,9 +10,16 @@ Errors come back as `{ "content": [{ "type": "text", "text": "Error: ..." }], "i
 |---|---|---|
 | `reply` | Reply to a message by its bus ID | Always |
 | `send_message` | Send to any contact on any channel | Always |
+| `share_context` | Hand a Claude Code session's outcome to Main as hidden context (no message) | Always |
 | `send_email` | Start a new email thread to an allowlisted address | An email adapter is configured |
 | `react_to_message` | Emoji reaction on a message | Always |
 | `create_telegram_topic` | Create a forum topic in a Telegram group | A Telegram adapter is configured |
+| `send_location`, `send_venue`, `send_contact` | Map card, venue card or contact card (E81) | A Telegram adapter is configured |
+| `send_document` | Upload an allow-listed local file as a document or photo (E81) | A Telegram adapter is configured |
+| `ask_input` | Ask for a location, contact, person or free text (E81) | A Telegram adapter is configured |
+| `send_rich` | Rich message: tables, collapsible sections, buttons (E81) | A Telegram adapter is configured |
+| `edit_message` | Edit a message you sent, in place (E81) | A Telegram adapter is configured |
+| `pin_message`, `unpin_message` | Pin or unpin a message you sent (E81) | A Telegram adapter is configured |
 | `list_channels` | Adapters and their capabilities | Always |
 | `get_session`, `list_sessions` | Session metadata and topic | Always |
 | `get_transcript` | Full ordered transcript for one session | Always |
@@ -23,6 +30,7 @@ Errors come back as `{ "content": [{ "type": "text", "text": "Error: ..." }], "i
 | `write_knowledge`, `get_knowledge`, `forget_knowledge`, `search_knowledge` | Agent-managed structured knowledge store (Phase 1) | Always |
 | `advisory_ack` | Acknowledge a bus advisory after relaying it to the owner | Always |
 | `journal_complete` | Finish a System Message journal run | Polling adapter and cc-pool panes (not cc-headless) |
+| `status` | Set your own short live status line for the current turn | Always |
 | `propose_change` | Propose a change to a protected file (CLAUDE.md, skills, …) for an owner to approve | Always |
 | `get_adapter_status` | Health of the polling MCP adapter | Polling mode only |
 
@@ -32,7 +40,7 @@ Errors come back as `{ "content": [{ "type": "text", "text": "Error: ..." }], "i
 
 Fetches the original message, swaps sender and recipient, and posts the reply on the same channel and topic.
 
-Input: `{ "message_id": "<bus id from [id:...]>", "body": "..." }`
+Input: `{ "message_id": "<bus id from [id:...]>", "body": "...", "choices": ["A", "B"] }` (`choices` optional; see [Choice buttons](#choice-buttons))
 Output: `{ "success": true, "outbound_message_id": "<uuid>" }`
 
 The reply carries `metadata.origin` (see [Origin metadata](#origin-metadata)).
@@ -50,11 +58,94 @@ Sends to any contact on any channel. Validates the channel through `GET /api/v1/
 | `reply_to` | no | Bus message ID. On Telegram this becomes a native quote unless it is the latest inbound message in the conversation |
 | `priority` | no | `normal`, `high`, or `urgent` |
 | `metadata` | no | Free-form object. A caller-supplied `origin` key is replaced (see below) |
+| `choices` | no | 1-8 single-choice labels, each non-empty and at most 64 characters. See [Choice buttons](#choice-buttons) |
+| `silent`, `no_preview`, `pin` | no | Telegram delivery options, see [Send options](#send-options) |
 | `source` | no | Short label naming what is sending, for example `Ambient scan`. Stamped as `metadata.origin.label`; when the message lands in a conversation this session isn't running in, that conversation's agent sees it with this label as context (E69) |
 
 For a proactive send, call `get_session` or `list_sessions` first and use the `topic` it returns rather than guessing.
 
 Output: `{ "success": true, "message_id": "<uuid>" }`
+
+### `share_context`
+
+Hands a note to the contact's Main in the Mac app (E82), or to an agent's Telegram DM (E83), without sending a message. Use it from an interactive Claude Code session to pass on an outcome (a finished artifact, a decision) so Main knows about it on its next turn, the way it already learns what a scheduled routine sent. Nothing appears in the app: no message, no unread badge, no sidebar movement, no notification, and Main is not woken. It is a separate tool from `send_message` because it has different delivery semantics: no channel, topic, queue or adapter. It calls [`POST /api/v1/context`](HTTP_API.md#post-apiv1context).
+
+| Field | Required | Notes |
+|---|---|---|
+| `to` | yes | `contact:<id>`, as for `send_message` |
+| `body` | yes | The note. Self-contained and concise; one note per finished piece of work |
+| `source` | yes | Label shown to the agent, for example `Claude Code: baxter` |
+| `channel` | no | `app` (default): Main in the Mac app. E83: a primary channel such as `telegram:peggy`, the agent's Telegram DM; it must be listed in `agents.<id>.pending_context.channels` ([CC_POOL_ADAPTER.md](CC_POOL_ADAPTER.md#primary-conversations-pending-context-and-shared-context-e83)) |
+
+Output: `{ "success": true, "message_id": "<uuid>" }`
+
+The tool description tells the model what it is for (handing a session's outcome to Main) and what it is not for (notifying the operator or asking a question; use `send_message` for those). Rules:
+
+- **Primary conversations only.** The target is the `general` conversation of `channel`: Main for `app`, or a listed channel's DM. Named app topics, groups, forum threads and unlisted channels are rejected. Only `cc-headless` and `cc-pool` read shared context (cc-headless in `runBatch`, cc-pool through the pending-context stage), so the bus also rejects the call with a clear error when the route that serves the conversation targets another adapter (the polling `claude-code` adapter).
+- **Not from the conversation itself.** A call whose origin is a turn in the target conversation is rejected, since an agent should not hand itself context. That covers a cc-headless Main turn and, because the bus stamps a pane's origin from its lease, the pane leased to the DM. A call from a turn in another conversation (a scheduled routine, a pane leased elsewhere) is allowed and stamps that turn's origin.
+- **A quiet DM is fine.** If the DM has no session yet the bus creates a message-less placeholder session; the first real message still launches a fresh pane session.
+- **Too long is an error.** A note that doesn't fit `adapters.app.pending_context.max_chars` (default 4000, counting the label and timestamp Main sees) is rejected with a message asking the caller to summarize, so nothing is truncated silently.
+- **Expires.** The agent ignores a note older than `context_ttl_ms` (default 24 hours) when its next turn starts: `adapters.app.pending_context.context_ttl_ms` for Main, and for a listed DM the owning agent's `agents.<id>.pending_context.context_ttl_ms` when set, else the app's.
+- **Not in journal runs.** The headless journaling turns disallow it along with `reply`, `send_message` and `send_email`, and the bus rejects it while a System Message journal run is open for the sender.
+- **Search.** The note is hidden from `search_transcripts` and `get_transcript` like other hidden rows; it stays in the database and in journaling windows.
+
+Suggested wording for an agent's `CLAUDE.md` (for example Baxter's, in the project the Claude Code sessions run in; the bus does not edit it):
+
+```markdown
+### Handing context to Main
+
+When you finish a meaningful piece of work in this session (an artifact, a decision, a result Main
+should build on), call `share_context` once with `to="contact:chris"` and `source="Claude Code: <project>"`.
+Main reads it on its next turn; Chris does not see it and is not notified.
+
+- One note per finished piece of work, not a running log.
+- Write it so Main can act on it cold: what you did, where the result lives (file path or link),
+  what was decided, what is still open. Keep it to a few sentences; long notes are rejected.
+- Do not use it to ask Chris something or to get his attention. Use `send_message` for that.
+- Do not call it from Main. If you are Main, you already have the context.
+```
+
+For Peggy's Telegram DM (E83), in the `CLAUDE.md` of the project her operator's Claude Code sessions run in; the sessions can run on another machine if `AGENTBUS_URL` (and `AGENTBUS_BUS_TOKEN`) point at her bus:
+
+```markdown
+### Handing context to Peggy
+
+When you finish a meaningful piece of work in this session (an artifact, a decision, a result Peggy
+should build on), call `share_context` once with `to="contact:chris"`, `channel="telegram:peggy"` and
+`source="Claude Code: <project>"`. Peggy reads it at her next turn in the DM; Chris does not see it
+in Telegram and is not notified.
+
+- One note per finished piece of work, not a running log.
+- Write it so Peggy can act on it cold: what you did, where the result lives, what was decided, what
+  is still open. A few sentences; long notes are rejected, and notes older than 24 hours are skipped.
+- Do not use it to ask Chris something or to get his attention. Use `send_message` for that.
+- Peggy's own panes never call it for their own DM.
+```
+
+### Choice buttons
+
+`reply` and `send_message` both accept `choices` (E74) to offer single-choice answers:
+
+- On Telegram the labels render as inline buttons (one per row, or two per row when every label is 12 characters or fewer). The tap arrives back in the same conversation and topic as an ordinary inbound message `[tapped] <label>`, with `metadata.choice_prompt_id` and `reply_to` set to the prompt's bus message. Typed replies still work.
+- On every other channel the labels are appended to the body as a numbered list, and `metadata.choices` is not set.
+- More than 8 labels, an empty label or a label over 64 characters is rejected with an error and nothing is sent.
+- Use it for a real decision the user must make, not for routine messages. Single choice only; there is no multi-select.
+
+See [TELEGRAM_ADAPTER.md](TELEGRAM_ADAPTER.md#choice-buttons) for tap handling, expiry and limits.
+
+**Button objects (E81).** An item may be an object instead of a string: `{ "label": "...", "style": "primary|success|danger", "copy_text": "...", "url": "..." }`. `style` colors a normal button; `copy_text` (1-256 characters) makes a button that copies the text when tapped and sends nothing back; `url` (`http(s)://` or `tg://`) opens a link; `copy_text` and `url` are mutually exclusive. Strings and objects can be mixed. After a tap on a prompt that uses objects, the chosen button stays visible and disabled and the others are removed; a prompt of plain strings behaves exactly as before. Off Telegram an object renders as `N. label (copy_text or url)`.
+
+### Send options
+
+`reply` and `send_message` (E81) take three optional Telegram delivery flags, each independent and combinable with `choices`; other channels ignore them:
+
+| Field | Effect |
+|---|---|
+| `silent` | Deliver without a notification sound (`disable_notification`). Use for routine messages |
+| `no_preview` | Do not expand link cards (`link_preview_options.is_disabled`) |
+| `pin` | Pin the delivered message silently. A pin failure (for example missing the Pin Messages right) is logged, not returned; use `pin_message` to see the error |
+
+There is deliberately no `effect` option: Telegram rejects message effects in group chats (verified in the E81 spike).
 
 ### `send_email`
 
@@ -93,6 +184,26 @@ Input: `{ "message_id": "<bus id>", "emoji": "👍" }`
 Output: `{ "success": true, "emoji": "👍", "message_id": "..." }`, or `{ "success": false, "reason": "Reactions not supported on channel: email" }` on a channel without reactions.
 
 Telegram accepts a fixed set of about 74 reaction emoji. Anything else is sent as a plain text message instead. Variation selectors are stripped automatically.
+
+### E81 Telegram-native tools
+
+All of these enqueue the same envelope as `send_message` (so the contact allow-list and the delivery path are unchanged) and share its addressing: `to`, `channel`, optional `topic` and `reply_to`. Every send tool takes `silent` and `pin` as above. The body of the envelope is always a plain-text fallback, which is what every non-Telegram channel delivers; on a Telegram channel the native form rides `metadata.telegram_send`. Output: `{ "success": true, "message_id": "<uuid>" }`. Use that id with `edit_message` and `pin_message`.
+
+- `send_location { latitude, longitude }`: a map card (static coordinates only, no live location). Latitude -90..90 and longitude -180..180 are checked. Fallback text: `Location: <lat>, <lon>` plus an Apple Maps link.
+- `send_venue { latitude, longitude, title, address }`: a tappable venue card. Fallback: title, address and an Apple Maps link.
+- `send_contact { phone_number, first_name, last_name?, vcard? }`: a shareable contact card. The phone number is required. Fallback: `Contact: <name>, <number>`.
+- `send_document { path, caption?, as? }`: uploads a local file. `as` is `document` (default, 50 MB limit) or `photo` (10 MB). The caption is at most 1024 characters. The path must be absolute and, after symlinks are resolved, inside one of the adapter's `send_paths` (default: each agent's `data/` directory and its scratchpad root, `/tmp/claude-<uid>/<project slug>`); otherwise it is rejected before any upload, both here and again in the adapter. Telegram channels only: any other channel returns an "unsupported" error.
+- `ask_input { kind, prompt, placeholder? }`: `kind` is `location`, `contact`, `person` or `text`. In a private chat the first three show a one-time share button (`request_location`, `request_contact`, `request_users`); `text` shows a reply prompt. Telegram only allows the share buttons in private chats, so in a group topic they degrade to a reply prompt and the user shares from the attach menu. The answer is an ordinary inbound message linked by `reply_to` to the prompt: `[location] <lat>, <lon>` with `metadata.location`, `[contact] <name>, <number>` with `metadata.contact`, `[shared person] <name> @user` with `metadata.users_shared`, or the typed text. Each also carries `metadata.input_prompt_id` and `metadata.input_kind`. The keyboard is removed after the answer or at expiry (24 hours, `choice_ttl_hours`). On other channels the prompt is plain text.
+- `send_rich { markdown | html, choices? }`: a Telegram rich message (Rich Markdown preferred): headings, real tables, `<details><summary>` collapsible sections, quotes, lists and `<tg-button-row>` button rows. Up to 32768 characters; longer content is split at blank lines outside code fences and `<details>` blocks into parts ending `(part i of n)`, and one block over the limit is truncated with a marker. Off Telegram, and on Telegram if the rich call is rejected, the body is rendered to plain text: tables become `- label: value` lists, collapsible sections become `Summary:` followed by their content, buttons become `- Label: url` lines, and there are never markdown tables.
+- `edit_message { message_id, body, choices? }`: edits a text or rich message the bot sent in place (Telegram messages from the last 30 days that went out as a single piece). `choices` replaces the keyboard; omitting it removes the keyboard. Same text is a no-op that returns success. An unknown id, another adapter's message, a multi-part message, a document or location, or text over the limit (4096, or 32768 for rich) returns an error. Ordinary bot messages have no edit time window.
+- `pin_message { message_id, silent? }` and `unpin_message { message_id, unpin_all? }`: pin (silent by default) or unpin a message the bot sent. `unpin_all` unpins everything in that message's forum topic, or the whole chat outside a topic. Needs the bot's Pin Messages admin right; without it the error says how to grant it.
+
+### `status`
+
+Input: `{ "text": "Comparing the quotes" }`
+Output: `{ "success": true, "status": "Comparing the quotes" }`, or an error when the text is empty after cleaning, longer than 40 characters, or more than 5 words.
+
+Sets the short status line the user sees (Telegram's draft message) while you work. Use plain words about what you are doing; never paths, message text or other content. Letters, digits, spaces and `' , . & / -` survive; everything else (Markdown, control characters) is replaced by a space. The tool only validates: the layer that watches the turn's tool calls (cc-headless's stream parser, or the pool's tool-status hook) posts the text to the turn's chat and then keeps the automatic phrases quiet for the rest of the turn (turn-long, no timer) until your next `status` call. The call itself never shows a line of its own, and nothing is shown once you have delivered your reply, on email, or when `tool_status.mode` is `raw`. Optional: without it the automatic phrases are shown. See [TELEGRAM_ADAPTER.md](TELEGRAM_ADAPTER.md#live-tool-call-status-stream).
 
 ### `create_telegram_topic`
 

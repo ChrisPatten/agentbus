@@ -58,6 +58,20 @@ describe('Main idle rotation (E69)', () => {
     } finally { f.db.close(); }
   });
 
+  it('a hidden shared note neither moves the clock nor postpones rotation (E82)', () => {
+    const f = fixture();
+    try {
+      f.put('inbound', 3 * HOUR);
+      f.withClaude();
+      const clock = mainActivityClock(f.db, f.main.conversationId);
+      f.put('outbound', 0, { origin: { kind: 'external', label: 'Claude Code: baxter' }, context_only: true });
+      expect(mainActivityClock(f.db, f.main.conversationId)).toBe(clock);
+      const app = { main_idle_rotation_ms: 4 * HOUR };
+      expect(rotateIdleMainSessions(f.db, config(app))).toEqual([]); // 3h < 4h
+      expect(rotateIdleMainSessions(f.db, config(app), undefined, Date.now() + 2 * HOUR)).toEqual([f.main.sessionId]);
+    } finally { f.db.close(); }
+  });
+
   it('defaults to 12 hours when adapters.app is absent, and 0 disables it', () => {
     const f = fixture();
     try {

@@ -170,3 +170,34 @@ describe('topic-classify stage', () => {
     expect(result).not.toBeNull();
   });
 });
+
+describe('primary channels are exempt from topic_rules (E83)', () => {
+  const rules = [{ topic: 'code', keywords: ['bug', 'deploy'] }];
+  const withPrimary = () => ({ ...makeConfig({ topic_rules: rules }), agents: { 'agent:peggy': { pending_context: { channels: ['telegram:peggy'] } } } }) as unknown as AppConfig;
+
+  it('keeps a listed DM in general even when a rule matches, so it stays one conversation', async () => {
+    const config = withPrimary();
+    const stage = createTopicClassify(config);
+    const result = await stage(makeCtx({ channel: 'telegram:peggy', topic: 'general', payload: { type: 'text', body: 'there is a bug in the deploy' } }, config));
+    expect(result!.envelope.topic).toBe('general');
+    expect(result!.topics).toEqual(['general']);
+  });
+
+  it('still applies the rules to an unlisted channel, a group of the listed bot and a thread topic is preserved', async () => {
+    const config = withPrimary();
+    const stage = createTopicClassify(config);
+    for (const channel of ['telegram:pokeclaude', 'telegram:peggy:group:-1001']) {
+      const result = await stage(makeCtx({ channel, topic: 'general', payload: { type: 'text', body: 'there is a bug' } }, config));
+      expect(result!.envelope.topic).toBe('code');
+    }
+    const thread = await stage(makeCtx({ channel: 'telegram:peggy', topic: 'thread:0123456789abcdef', payload: { type: 'text', body: 'bug' } }, config));
+    expect(thread!.envelope.topic).toBe('thread:0123456789abcdef');
+  });
+
+  it('changes nothing when no channel is listed', async () => {
+    const config = makeConfig({ topic_rules: rules });
+    const result = await createTopicClassify(config)(makeCtx({ channel: 'telegram:peggy', payload: { type: 'text', body: 'bug' } }, config));
+    expect(result!.envelope.topic).toBe('code');
+  });
+});
+

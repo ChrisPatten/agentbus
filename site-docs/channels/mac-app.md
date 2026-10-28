@@ -18,7 +18,7 @@ The Mac app and its bus channel are built and tested, but haven't yet been throu
 - **Reply to part of a message.** Select the text you want to answer, then right-click and choose **Reply**, or press ⇧⌘R. The selection is added to your draft as a quote, with its bold, links, headings and lists intact, and the cursor is placed after it for your answer. Reply again to quote more, from the same message or others in the conversation. The agent receives the quote as part of your message.
 - **Reply to a message.** Right-click a message, with nothing selected, and choose **Reply**. A bar above the message box shows what you're replying to; press Esc or click ✕ to cancel. The agent sees what you replied to above your message. Your sent message shows a "Replying to…" note, and clicking it jumps to the original, loading older history if needed. When the agent replies to an earlier message rather than your latest one, the app shows the quote on the agent's message too. Replying needs a bus that supports it; update the bus along with the app.
 - **Run commands.** Type `/` to pick from the bus's [slash commands](/features/slash-commands). The **Session** menu has Stop (⌘.) and Clear Session (⇧⌘K), and **More** has Cost.
-- **See what the agent is doing.** While a turn runs, the conversation shows "Working" with a timer and the tools the agent is using. If all the agent's slots are busy, it shows "Waiting for a free slot". The sidebar marks conversations that are running, queued or unread.
+- **See what the agent is doing.** While a turn runs, the conversation shows "Working" with a timer and a short line saying what the agent is doing, such as "Reading a file" (see [`tool_status`](/reference/configuration#tool-status)). If all the agent's slots are busy, it shows "Waiting for a free slot". The sidebar marks conversations that are running, queued or unread.
 - **Get notified.** The app notifies you of agent messages in conversations you aren't looking at, and shows unread counts on its Dock icon. Message previews can be hidden in Settings.
 
 ## Main
@@ -26,6 +26,8 @@ The Mac app and its bus channel are built and tested, but haven't yet been throu
 Main keeps everything in one place. Your messages, the agent's replies, and the updates the agent sends on its own (a morning scan, a reminder from a scheduled job) all appear in Main in order, and the history never moves to **Earlier**.
 
 **The agent catches up when you reply.** Updates can come from a scheduled routine or another agent session, not from the agent you're chatting with in Main. The next time you send a message in Main, the agent first sees every such update it hasn't seen yet, with when it was sent and who sent it, so you can simply answer "yes, move it" to a scan from this morning. To answer one update in particular, right-click it and choose **Reply**; the agent sees which one you mean.
+
+**You can also brief Main without a message.** If you finish something in a Claude Code session yourself, that session can pass Main a note with `share_context`. You see nothing in the app, but the agent reads the note the next time you message Main and knows not to claim it told you. Notes older than 24 hours are skipped. See [Proactive messages](/features/proactive-messages#letting-main-know-without-a-message).
 
 **The agent's working memory refreshes after a quiet spell.** Behind Main, the agent runs a Claude session. After 12 hours with no messages from you and no replies from the agent, the bus journals that session and the next message you send starts a fresh one. Updates the agent sends on its own don't count as activity. The scrollback stays as it was, and a **New context** divider marks the spot, for example "New context · after 12 h idle". Messages above the divider are no longer in the agent's working context, though anything it journaled is still in its memory files.
 
@@ -83,7 +85,8 @@ Restart the bus.
 | `ping_interval_ms` | `30000` | How often the bus checks the connection is alive |
 | `main_idle_rotation_ms` | `43200000` (12 hours) | How long Main can go without a message from you or a reply from the agent before its Claude session is journaled and the next message starts a fresh one. `0` turns this off. |
 | `pending_context.max_items` | `10` | The most updates the agent catches up on in one go when you reply in Main. Older ones are summarized as "N older messages omitted". |
-| `pending_context.max_chars` | `4000` | How much text those updates can take up in total |
+| `pending_context.max_chars` | `4000` | How much text those updates can take up in total. It's also the longest note `share_context` accepts. |
+| `pending_context.context_ttl_ms` | `86400000` (24 hours) | How old a note passed with `share_context` can be before Main ignores it. `0` means notes never expire. Updates the agent sent you are never ignored for age. |
 
 For example, to refresh Main's session after a full day of quiet instead of 12 hours, and let the agent catch up on more updates:
 
