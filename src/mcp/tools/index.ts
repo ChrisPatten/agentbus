@@ -15,6 +15,8 @@
  *   - journal_complete (E66; live agents only — not registered for cc-headless)
  *   - propose_change (E68)
  *   - status (E79)
+ *   - send_location, send_venue, send_contact, send_document, ask_input, send_rich, edit_message,
+ *     pin_message, unpin_message (E81; only when a Telegram adapter is configured)
  */
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -32,6 +34,7 @@ import { registerReactionTools } from './reactions.js';
 import { registerScheduleTools } from './scheduling.js';
 import { registerAttachmentTools } from './attachments.js';
 import { registerTelegramTools } from './telegram.js';
+import { registerTelegramSendTools } from './telegram-send.js';
 import { registerModelOverrideTools } from './model-overrides.js';
 import { registerAdvisoryTools } from './advisories.js';
 import { registerJournalTools } from './journal.js';
@@ -112,6 +115,8 @@ function maybeRegisterTelegramTools(
   if (!config) return;
   if (getTelegramInstances(config).length === 0) return;
   registerTelegramTools(server, busBaseUrl);
+  // E81: location/venue/contact/document/rich/ask_input sends plus edit/pin by message id.
+  registerTelegramSendTools(server, busBaseUrl, agentId, config);
 }
 
 /**
