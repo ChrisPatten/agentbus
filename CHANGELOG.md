@@ -10,6 +10,8 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-10-28
+
 ### Added
 - **`share_context`: tell Main something without sending a message (E82).** A new MCP tool (`to`, `body`, `source`, all required) and `POST /api/v1/context` hand a note from an interactive Claude Code session to the Mac app's Main. The app shows nothing: no message, notification, unread badge or sidebar movement, and Main isn't woken. Main's next turn gets the note in its own section of the pending-context block, headed "Context shared with you since your last turn (the user has not seen these)", with its time, age and label, sharing `max_items` and `max_chars` with E69's visible items. The note survives Main's session rotation, `/clear` and a bus restart. Notes older than `adapters.app.pending_context.context_ttl_ms` (default 24 hours, `0` disables) are skipped. A note too long for `pending_context.max_chars` is rejected, not truncated, and a call from a turn in Main itself is rejected. The note attaches to Main's newest session row, open or ended, and changes nothing on it, so it never moves the sidebar (only a Main that has never had a session row gets one created). The call is refused with a clear error unless the app channel routes to `cc-headless` or `cc-pool`, the runtimes that read shared context. Journaling keeps the note: windows render it as `[Context shared by <label>, not shown to the user] <body>` (never a human message), and every journaler, including the ones that resume the agent's own session, gets the notes since the journal cursor in its prompt. Main only; Telegram DMs and named topics are not reached.
 
@@ -29,6 +31,9 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 ### Changed
 - **The transcript visibility filter is split (E82).** `VISIBLE_TRANSCRIPT` (app history, replay, unread, the transcript API and search, quotes) now also hides `metadata.context_only` rows; the new `NOT_SYSTEM_ONLY` is what pending context uses. `context_only` joins the metadata keys dropped at `POST /api/v1/messages` and `POST /api/v1/inbound`.
 - **Unread counts ignore hidden outbound rows (E82).** A session's `unread_count` now applies the visibility filter, so an outbound `system_only` or `context_only` row no longer counts as unread.
+
+### Fixed
+- **The Mac app's composer handles long drafts properly.** Your draft stays where you left it when you click away (for example to copy text from a message) instead of jumping back to its start. The scroll wheel scrolls it, focused or not. When focus returns by keyboard or Reply, the insertion point is at the end of the draft; a click puts it where you click. Text re-wraps when you resize the window instead of running under the send button, and the caret and the bottom of the last line are no longer clipped.
 
 ## [0.16.0] - 2026-10-27
 
@@ -1033,7 +1038,8 @@ Baseline release. Core bus, pipeline, adapters, memory, scheduling.
 - Built-in slash commands + plugin command registry. (E6)
 - Scheduled messages (cron + one-shot) via background scheduler. (E18)
 
-[Unreleased]: https://github.com/ChrisPatten/agentbus/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/ChrisPatten/agentbus/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/ChrisPatten/agentbus/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/ChrisPatten/agentbus/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/ChrisPatten/agentbus/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/ChrisPatten/agentbus/compare/v0.13.0...v0.14.0
