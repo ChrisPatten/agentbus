@@ -37,6 +37,9 @@ The `journaling` summary has its own `status`: `critical` when an agent's journa
 | `GET /api/v1/sessions/<id>/transcript` | The session's messages, oldest first. `limit` (default 200, up to 1,000), `since`, `before`. |
 | `GET /api/v1/transcripts/search?q=<words>` | Messages matching a keyword search, across all sessions. Filters: `channel`, `since`, `limit` (default 10, up to 100). |
 | `GET /api/v1/messages/<id>` | One message by ID, including messages that failed delivery |
+| `POST /api/v1/messages/<id>/edit` | Used by the `edit_message` tool: changes a Telegram message the agent sent, `{"body": "..."}` |
+| `POST /api/v1/messages/<id>/pin`, `/unpin` | Used by the `pin_message` and `unpin_message` tools |
+| `POST /api/v1/context` | Used by the `share_context` tool: hands a note to Main, or a listed private chat, without a message. `{"to": "contact:me", "body": "...", "source": "Claude Code: my-project"}`, plus an optional `channel`. |
 
 ## Schedules
 

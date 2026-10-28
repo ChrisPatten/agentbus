@@ -53,6 +53,7 @@ Set `bus.host: 0.0.0.0` to accept connections from other hosts, for example a re
 | POST | `/api/v1/messages` | Enqueue an outbound message |
 | GET | `/api/v1/messages/:id` | Fetch a message by ID |
 | POST | `/api/v1/messages/:id/react` | React to a message on its platform |
+| POST | `/api/v1/messages/:id/edit`, `/pin`, `/unpin` | Edit, pin or unpin a delivered Telegram message (E81) |
 | GET | `/api/v1/adapters` | List adapters and capabilities |
 | GET | `/api/v1/adapters/resolve` | Check whether a channel has an adapter |
 | POST | `/api/v1/adapters/:channel/typing` | Start a typing indicator |
@@ -377,6 +378,23 @@ Body `{ "emoji": "👍" }`. `:id` is a bus message ID. The route finds its trans
 | 400 | `{ "ok": false, "success": false, "reason": "Reactions not supported on channel: ..." }` |
 | 404 | Message not in transcripts, or no adapter for its channel |
 | 502 | `adapter.react()` threw; `error` holds the message |
+
+### `POST /api/v1/messages/:id/edit`, `/pin`, `/unpin`
+
+E81, used by the `edit_message`, `pin_message` and `unpin_message` tools. `:id` is the bus message ID `reply`/`send_message` returned. The route looks it up in the `outbound_messages` registry (Telegram deliveries from the last 30 days, migration 040) and calls the channel adapter's `editMessage`, `pinMessage` or `unpinMessage`. See [TELEGRAM_ADAPTER.md](TELEGRAM_ADAPTER.md#e81-additions).
+
+| Route | Body |
+|---|---|
+| `/edit` | `{ "body": "...", "choices"?: [...] }`. `choices` is validated like the tools' `choices`; omitting it removes the keyboard |
+| `/pin` | `{ "silent"?: boolean }`, default `true` |
+| `/unpin` | `{ "all"?: boolean }`: `true` unpins everything in the message's forum topic, or the whole chat outside a topic |
+
+| Status | Body |
+|---|---|
+| 200 | `{ "ok": true, "note"?: "..." }` (an edit to identical text succeeds) |
+| 400 | `{ "ok": false, "error" }`: missing `body`, invalid `choices`, a channel without the action, or the adapter refused (multi-part message, wrong kind, too long, missing Pin Messages right) |
+| 404 | No registry row for the id |
+| 502 | The adapter threw |
 
 ## Adapters
 

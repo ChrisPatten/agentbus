@@ -44,6 +44,15 @@ adapters:
 
 The adapter id is `telegram` and inbound messages use channel `telegram`.
 
+| Key | Default | Purpose |
+|---|---|---|
+| `token` | required | Bot token from @BotFather |
+| `poll_timeout` | `30` | `getUpdates` long-poll timeout, in seconds |
+| `choice_ttl_hours` | `24` | Hours before an unanswered choice-button prompt (E74) or `ask_input` prompt (E81) expires. See [Choice buttons](#choice-buttons) |
+| `send_paths` | each agent's `data/` directory and its Claude Code scratchpad root | Absolute directories `send_document` may upload from (E81). Symlinks are resolved before the check. See [E81 additions](#e81-additions) |
+
+The same keys apply to each named bot below. The live status line's top-level `tool_status` block (`mode: phrases | raw`, `phrases_file`) is described under [Live tool-call status stream](#live-tool-call-status-stream).
+
 ### Multiple bots
 
 Use a named record under `adapters.telegram`. Each key becomes the bot's name, which is appended to the adapter id and channel:
@@ -479,6 +488,13 @@ delivered — instead of just a typing indicator.
     phrases never overwrite it. Unchanged: nothing after delivery, no status on
     email, best-effort only. Config: `tool_status.mode: phrases | raw` and an
     optional `tool_status.phrases_file` (cc-headless).
+
+| Setting | Where | Default | Purpose |
+|---|---|---|---|
+| `tool_status.mode` | `config.yaml` (top level) | `phrases` | `phrases` or `raw` (the E29 lines). Read by cc-headless |
+| `tool_status.phrases_file` | `config.yaml` (top level) | `scripts/hooks/tool-status-phrases.json` | Phrase table for cc-headless |
+| `AGENTBUS_TOOL_STATUS_MODE` | pane environment (`pane_env`), or the shell that starts `claude` | `phrases` | The same switch for the pool hook, which doesn't read `config.yaml`; keep it in step with `tool_status.mode` |
+| `AGENTBUS_TOOL_STATUS_PHRASES` | pane environment | the JSON next to the hook (through the symlink) | Phrase table for the pool hook |
 
 **Known limitation:** if bus-core crashes mid-turn, a draft message can be
 left showing a stale tool-call trail on Telegram forever (the same exposure

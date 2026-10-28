@@ -75,9 +75,10 @@ Routes reach the pool with `adapterId: cc-pool` and `recipientId: agent:<agent_i
 | `lease.hard_idle_ms` | `21600000` (6 h) | How long a conversation can be idle before its pane is released anyway. |
 | `lease.park_timeout_ms` | `300000` (5 min) | How long a message waits for a pane before giving up. |
 | `on_evict` | `clear` | What happens to a released pane: `clear` sends `/clear` to the session; `kill` closes the window. Either way, when the pane is next given to a conversation, the bus starts a fresh Claude session in it for that conversation. |
-| `launch_ack_delay_ms` | `5000` | How long to watch for Claude Code's "Loading development channels" warning at start-up, which the bus confirms for you. |
-| `launch_ack_max_attempts` | `3` | How many times to try confirming that warning. |
+| `launch_ack_max_attempts` | `3` | How many times to try confirming Claude Code's "Loading development channels" warning at start-up, which the bus confirms for you. |
 | `launch_ack_pattern` | `loading development channels` | The text that identifies the warning, in case Claude Code rewords it. |
+| `model_confirm_pattern` | `switch model\?` | A pattern (regular expression, ignoring case) that identifies Claude Code's "Switch model?" question when [`/model`](/features/models#with-cc-pool) switches a pane in place. Change it only if Claude Code rewords the question. |
+| `launch_ack_delay_ms` | | No longer used. The bus now watches for the warning until the pane is ready. Older configs that set it still load. |
 
 You don't need `--dangerously-load-development-channels` in `launch_args`: the bus already starts every pane with the options it needs to connect. If your `launch_args` has it anyway (older example configs added it), the bus leaves out the copy, so it's only passed once.
 
@@ -89,8 +90,8 @@ Panes read their other MCP servers from the working folder's `.mcp.json`, so you
 
 | Command | Shows |
 |---|---|
+| `/pool` | Each pane, whether it's free or leased, the conversation it's leased to, its model and how long it's been idle, plus the number of parked messages. The pane serving this chat is marked `◀ this chat`. |
 | `/pool kill` | Kills the window serving this chat, even mid-turn. Your next message starts on a fresh window and resumes the same session |
-| `/pool` | Each pane, whether it's free or leased, the conversation it's leased to, its model and how long it's been idle, plus the number of parked messages |
 | `/pane` | A picture of your conversation's pane, as it looks right now |
 | `/pane 2` or `/pane all` | A picture of pane 2, or of every pane (up to 8) |
 | `/rc` | Sends `/remote-control` to your conversation's pane, so you can take it over in the Claude app |
@@ -120,6 +121,8 @@ And to see the pool's state as data:
 make pool
 ```
 
+`make pool-kill POOL_SESSION=sam-pool` ends the whole tmux session, closing every pane at once, even mid-turn. To replace just the pane serving one chat, send `/pool kill` from that chat instead.
+
 ## Optional hooks
 
 Claude Code hooks in `scripts/hooks/` in the AgentBus folder make a pool work better. Install them in your agent's working folder:
@@ -127,7 +130,7 @@ Claude Code hooks in `scripts/hooks/` in the AgentBus folder make a pool work be
 | Hook | Claude Code event | What it adds |
 |---|---|---|
 | `agentbus_approval_hook.sh` | `PermissionRequest` | Lets you answer permission prompts from Telegram. See [Approvals](/features/approvals). |
-| `agentbus_tool_status_hook.sh` | `UserPromptSubmit` and `PostToolUse` | Telegram's "typing…" indicator and live tool list while the agent works. |
+| `agentbus_tool_status_hook.sh` | `UserPromptSubmit` and `PostToolUse` | Telegram's "typing…" indicator and [status line](/channels/telegram#watching-your-agent-work) while the agent works, including lines the agent sets with the `status` tool. For the older lines with tool names and details, add `AGENTBUS_TOOL_STATUS_MODE: raw` to `pane_env`. |
 | `agentbus_journal_hook.sh` | `Stop`, `PreCompact` and `SessionEnd` | Tells the bus each time a turn finishes, so a long-running turn isn't mistaken for an idle conversation. Before the conversation's context is compacted or cleared, it saves a copy of the transcript for journaling. |
 | `agentbus_stop_hook.sh` | `Stop` | The older turn-finished hook. Keep it if you already have it, or use `agentbus_journal_hook.sh` instead. |
 | `agentbus_recent_memory_hook.sh` | `UserPromptSubmit` and `SessionStart` | Keeps a long-running pane up to date with the agent's latest journals (`memory/recent.md`): it adds only the new entries when they change, and, if the agent doesn't import `recent.md`, delivers the whole file when the pane starts. See [How memory is organized](/features/agent-memory#keeping-long-sessions-up-to-date). |
@@ -175,5 +178,5 @@ Parked messages and leases are stored in the bus database and survive a restart.
 
 - **Only conversations with a pane are fast.** A conversation's first message after it lost its pane waits for Claude Code to start, typically several seconds.
 - **Scheduled jobs use panes too.** A busy pool can delay them. Use `growth: dynamic` or more panes if `/pool` often shows parked messages.
-- **Changing a conversation's model restarts its pane.** If a [model override](/features/models) changes the model for a conversation that holds a pane, the pane relaunches its session with the new model between turns.
+- **Changing a conversation's model keeps its session.** `/model` switches an idle pane in place. A [model override](/features/models#with-cc-pool) set another way relaunches the pane's session with the new model at the next message, resuming where it was.
 - **Grown panes live in a different tmux session.** Panes added by `growth: dynamic` are in a tmux session named after `agent_id`, not `tmux_session`. `/pool` shows each pane's exact name. `/pane` and `/rc` only accept the numbered panes.
