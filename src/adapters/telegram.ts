@@ -1015,10 +1015,18 @@ export class TelegramAdapter implements AdapterInstance {
     const state = this.draftMessages.get(key);
     if (state) {
       if (state.placeholder) {
+        // E79: a transient line identical to the one shown needs no edit
+        // (Telegram rejects an unchanged edit).
+        if (state.lines.length === 1 && state.lines[0] === line) {
+          state.placeholder = placeholder ?? false;
+          return;
+        }
         state.lines = [line];
-        state.placeholder = false;
+        // E79: a transient line (phrase-mode status) is itself replaced by the next one.
+        state.placeholder = placeholder ?? false;
       } else {
         state.lines.push(line);
+        state.placeholder = placeholder ?? false;
       }
       if (state.messageId !== null) this.scheduleDraftFlush(chatId, key, state);
       // else: creation still in flight — createDraftMessage's post-await

@@ -38,6 +38,21 @@
 # means it isn't supposed to do real work after replying at all — so this
 # hook has to recreate the boundary by hand.
 #
+# E79 — the line posted for each tool is a short fixed phrase ("Checking the
+# calendar"), not the tool name and arguments. Phrases come from
+# tool-status-phrases.json next to this file (the same file cc-headless
+# reads; override with AGENTBUS_TOOL_STATUS_PHRASES), looked up with jq by
+# tool name and, for Bash, the command's first word. Nothing from the tool's
+# input is ever copied into the line. The agent can also call the
+# mcp__agentbus__status tool: this hook posts that text (sanitised, max 40
+# chars / 5 words) and then keeps fixed phrases quiet for the rest of the
+# turn (turn-long stickiness; reset by the next UserPromptSubmit). The status
+# tool never produces a line of its own beyond that text. Set
+# AGENTBUS_TOOL_STATUS_MODE=raw to restore the E29 raw lines (name plus
+# arguments); keep it in step with tool_status.mode in the bus config.
+# Phrase lines are posted with placeholder:true so each replaces the last
+# instead of piling up in the draft message.
+#
 # Best-effort throughout: never blocks or fails the actual tool call. A
 # missing state file (e.g. a tool ran outside of any inbound-message turn,
 # like an autonomous background sweep) is not an error — the hook just
@@ -80,6 +95,9 @@ EVENT="$(jq -r '.hook_event_name // empty' <<<"$INPUT")"
 SESSION_ID="$(jq -r '.session_id // "unknown"' <<<"$INPUT")"
 STATE_FILE="$STATE_DIR/route-${SESSION_ID}.json"
 DELIVERED_FLAG="$STATE_DIR/delivered-${SESSION_ID}"
+AGENT_STATUS_FLAG="$STATE_DIR/agent-status-${SESSION_ID}"
+MODE="${AGENTBUS_TOOL_STATUS_MODE:-phrases}"
+STATUS_TOOL="mcp__agentbus__status"
 
 # channel names this repo actually routes email through — kept in sync with
 # cc-headless's own `channel === 'email' || channel.startsWith('email:')` skip.
@@ -141,7 +159,7 @@ print(json.dumps(out))
 ' <<<"$PROMPT")"
 
     echo "$PAIRS_JSON" > "$STATE_FILE"
-    rm -f "$DELIVERED_FLAG"
+    rm -f "$DELIVERED_FLAG" "$AGENT_STATUS_FLAG"
 
     echo "$PAIRS_JSON" | jq -c '.[]' | while read -r pair; do
       channel="$(jq -r '.channel' <<<"$pair")"
@@ -168,9 +186,56 @@ print(json.dumps(out))
     # work (memory writes, follow-up cleanup, etc.) that should stay silent.
     [[ -f "$DELIVERED_FLAG" ]] && exit 0
 
-    TOOL_INPUT_JSON="$(jq -c '.tool_input // {}' <<<"$INPUT")"
-
-    STATUS_TEXT="$(python3 -c '
+    PLACEHOLDER=false
+    if [[ "$MODE" != raw ]]; then
+      PLACEHOLDER=true
+      if [[ "$TOOL_NAME" == "$STATUS_TOOL" ]]; then
+        # Agent-authored status: same rules as sanitizeStatusText in
+        # src/adapters/tool-status.ts. Invalid text (the tool call itself
+        # errored) posts nothing and does not make the status sticky.
+        STATUS_TEXT="$(jq -r '
+          (.tool_input.text // "")
+          | if type == "string" then . else "" end
+          | gsub("[^\\p{L}\\p{N} \u0027\u2019,.&/-]"; " ")
+          | gsub("\\s+"; " ")
+          | sub("^ +"; "") | sub(" +$"; "")
+          | if (length > 0 and length <= 40 and (split(" ") | length) <= 5) then . else "" end
+        ' <<<"$INPUT")"
+        [[ -n "$STATUS_TEXT" ]] || exit 0
+        touch "$AGENT_STATUS_FLAG"
+      else
+        # An agent-authored status holds for the rest of the turn.
+        [[ -f "$AGENT_STATUS_FLAG" ]] && exit 0
+        PHRASES_FILE="${AGENTBUS_TOOL_STATUS_PHRASES:-}"
+        if [[ -z "$PHRASES_FILE" ]]; then
+          HOOK_REAL="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "${BASH_SOURCE[0]}" 2>/dev/null)"
+          PHRASES_FILE="$(dirname "${HOOK_REAL:-${BASH_SOURCE[0]}}")/tool-status-phrases.json"
+        fi
+        BASH_CMD=""
+        [[ "$TOOL_NAME" == Bash ]] && BASH_CMD="$(jq -r '.tool_input.command // "" | if type == "string" then . else "" end' <<<"$INPUT")"
+        # $cmd is only ever matched against; it is never emitted.
+        STATUS_TEXT="$(jq -r --arg name "$TOOL_NAME" --arg cmd "$BASH_CMD" '
+          . as $t
+          | ( ( if $name == "Bash" then
+                  first($t.bash[]? | . as $e
+                    | select($cmd | test("^(cd\\s+\\S+\\s*(&&|;)\\s*)?(rtk\\s+(proxy\\s+)?)?(\\S+=\\S+\\s+)*(\\S*/)?(" + ($e.commands | map(gsub("[.]"; "\\.")) | join("|")) + ")(\\s|$)"))
+                    | $e.text)
+                else empty end )
+              // $t.tools[$name]
+              // first($t.prefixes[]? | . as $p
+                    | select($name | startswith($p.prefix))
+                    | ($p.tools[($name | ltrimstr($p.prefix))] // $p.default))
+              // $t.default
+              // "Working on it" )
+          | .[0:40]
+        ' "$PHRASES_FILE" 2>/dev/null)"
+        [[ -n "$STATUS_TEXT" ]] || STATUS_TEXT="Working on it"
+      fi
+    else
+      # The status tool has no raw form; it stays silent in raw mode.
+      [[ "$TOOL_NAME" == "$STATUS_TOOL" ]] && exit 0
+      TOOL_INPUT_JSON="$(jq -c '.tool_input // {}' <<<"$INPUT")"
+      STATUS_TEXT="$(python3 -c '
 import json, sys
 name = sys.argv[1]
 try:
@@ -213,13 +278,14 @@ else:
 
 print(trunc(text, 200))
 ' "$TOOL_NAME" "$TOOL_INPUT_JSON")"
+    fi
 
     jq -c '.[]' "$STATE_FILE" | while read -r pair; do
       channel="$(jq -r '.channel' <<<"$pair")"
       contact_id="$(jq -r '.contact_id' <<<"$pair")"
       topic="$(jq -r '.topic // "general"' <<<"$pair")"
       is_email_channel "$channel" && continue
-      body="$(jq -nc --arg cid "$contact_id" --arg text "$STATUS_TEXT" --arg topic "$topic" '{contact_id: $cid, text: $text, topic: $topic}')"
+      body="$(jq -nc --arg cid "$contact_id" --arg text "$STATUS_TEXT" --arg topic "$topic" --argjson ph "$PLACEHOLDER" '{contact_id: $cid, text: $text, topic: $topic} + (if $ph then {placeholder: true} else {} end)')"
       post_async "$AGENTBUS_BASE/api/v1/adapters/$channel/tool-status" "$body"
     done
     ;;

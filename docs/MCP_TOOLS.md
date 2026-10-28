@@ -23,6 +23,7 @@ Errors come back as `{ "content": [{ "type": "text", "text": "Error: ..." }], "i
 | `write_knowledge`, `get_knowledge`, `forget_knowledge`, `search_knowledge` | Agent-managed structured knowledge store (Phase 1) | Always |
 | `advisory_ack` | Acknowledge a bus advisory after relaying it to the owner | Always |
 | `journal_complete` | Finish a System Message journal run | Polling adapter and cc-pool panes (not cc-headless) |
+| `status` | Set your own short live status line for the current turn | Always |
 | `propose_change` | Propose a change to a protected file (CLAUDE.md, skills, …) for an owner to approve | Always |
 | `get_adapter_status` | Health of the polling MCP adapter | Polling mode only |
 
@@ -105,6 +106,13 @@ Input: `{ "message_id": "<bus id>", "emoji": "👍" }`
 Output: `{ "success": true, "emoji": "👍", "message_id": "..." }`, or `{ "success": false, "reason": "Reactions not supported on channel: email" }` on a channel without reactions.
 
 Telegram accepts a fixed set of about 74 reaction emoji. Anything else is sent as a plain text message instead. Variation selectors are stripped automatically.
+
+### `status`
+
+Input: `{ "text": "Comparing the quotes" }`
+Output: `{ "success": true, "status": "Comparing the quotes" }`, or an error when the text is empty after cleaning, longer than 40 characters, or more than 5 words.
+
+Sets the short status line the user sees (Telegram's draft message) while you work. Use plain words about what you are doing; never paths, message text or other content. Letters, digits, spaces and `' , . & / -` survive; everything else (Markdown, control characters) is replaced by a space. The tool only validates: the layer that watches the turn's tool calls (cc-headless's stream parser, or the pool's tool-status hook) posts the text to the turn's chat and then keeps the automatic phrases quiet for the rest of the turn (turn-long, no timer) until your next `status` call. The call itself never shows a line of its own, and nothing is shown once you have delivered your reply, on email, or when `tool_status.mode` is `raw`. Optional: without it the automatic phrases are shown. See [TELEGRAM_ADAPTER.md](TELEGRAM_ADAPTER.md#live-tool-call-status-stream).
 
 ### `create_telegram_topic`
 

@@ -913,6 +913,18 @@ const ScheduleEntrySchema = z
     { message: 'fire_at must be a valid ISO 8601 timestamp, and timezone a valid IANA time zone' },
   );
 
+/**
+ * E79 — live tool-status line style. `phrases` (default) shows short fixed
+ * phrases such as "Checking the calendar"; `raw` restores the E29 lines that
+ * name the tool and its arguments. `phrases_file` overrides the bundled
+ * scripts/hooks/tool-status-phrases.json for cc-headless (the pool hook reads
+ * AGENTBUS_TOOL_STATUS_PHRASES / AGENTBUS_TOOL_STATUS_MODE instead).
+ */
+const ToolStatusConfigSchema = z.object({
+  mode: z.enum(['phrases', 'raw']).default('phrases'),
+  phrases_file: z.string().optional(),
+});
+
 const SchedulerConfigSchema = z.object({
   tick_interval_ms: z.number().int().positive().default(30000),
   enabled: z.boolean().default(true),
@@ -928,6 +940,7 @@ const SchedulerConfigSchema = z.object({
  */
 export const AppConfigSchema = z.object({
   bus: BusConfigSchema,
+  tool_status: ToolStatusConfigSchema.default({ mode: 'phrases' }),
   adapters: AdaptersConfigSchema,
   contacts: z.record(z.string(), ContactSchema).default({}).superRefine((contacts, ctx) => {
     for (const [key, contact] of Object.entries(contacts)) {

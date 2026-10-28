@@ -757,3 +757,23 @@ describe('cc-pool watchdog config', () => {
     expect(parse(wd).success).toBe(false);
   });
 });
+
+describe('AppConfigSchema — tool_status (E79)', () => {
+  const base = {
+    bus: { db_path: ':memory:' },
+    adapters: {},
+    memory: {},
+  };
+
+  it('defaults to phrases mode', () => {
+    expect(AppConfigSchema.parse(base).tool_status).toEqual({ mode: 'phrases' });
+  });
+
+  it('accepts raw mode and a phrases file, and rejects other modes', () => {
+    expect(AppConfigSchema.parse({ ...base, tool_status: { mode: 'raw', phrases_file: '/x.json' } }).tool_status).toEqual({
+      mode: 'raw',
+      phrases_file: '/x.json',
+    });
+    expect(AppConfigSchema.safeParse({ ...base, tool_status: { mode: 'loud' } }).success).toBe(false);
+  });
+});

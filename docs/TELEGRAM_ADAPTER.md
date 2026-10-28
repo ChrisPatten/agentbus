@@ -460,6 +460,26 @@ delivered — instead of just a typing indicator.
     still applies unconditionally if the draft is still just the
     placeholder when the final reply arrives.
 
+11. **Succinct phrases (E79, the default).** The trail described in 2 above is the
+    `tool_status.mode: raw` behaviour. In the default `phrases` mode the line is a
+    fixed 2-5 word phrase ("Checking the calendar", "Reading a file", "Searching
+    the files", "Working on it") looked up from
+    [`scripts/hooks/tool-status-phrases.json`](../scripts/hooks/tool-status-phrases.json)
+    by tool name, MCP prefix, and, for `Bash`, the command's first word
+    (`calctl`, `imsg`, `capos`, `remindctl`, `mailwatch`, `grizzly`/`bear.sh`).
+    `src/adapters/tool-status.ts` (cc-headless) and the pool hook (jq) read the
+    same file; edit the phrases there, no code change. No tool input (path,
+    command, URL, query, message text) is ever copied into a line. Phrase lines
+    are sent with `placeholder: true`, so each replaces the previous one (one
+    evolving "current status" line, not a trail), and a line identical to the one
+    shown causes no edit. The agent can override with the `status` MCP tool
+    ([MCP_TOOLS.md](MCP_TOOLS.md#status)); that text is sticky for the rest of the
+    turn (chosen over a timed window because it is simpler and predictable: the
+    agent wrote it, so it stays until it writes another or the turn ends). Fixed
+    phrases never overwrite it. Unchanged: nothing after delivery, no status on
+    email, best-effort only. Config: `tool_status.mode: phrases | raw` and an
+    optional `tool_status.phrases_file` (cc-headless).
+
 **Known limitation:** if bus-core crashes mid-turn, a draft message can be
 left showing a stale tool-call trail on Telegram forever (the same exposure
 the persistent typing indicator already has, just visually stickier). No
