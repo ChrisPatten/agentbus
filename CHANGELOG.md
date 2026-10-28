@@ -11,6 +11,7 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 ## [Unreleased]
 
 ### Added
+- **Telegram choice buttons (E74).** `reply` and `send_message` take an optional `choices` argument (1-8 labels, each non-empty and at most 64 characters). On Telegram the labels render as tappable inline buttons; a tap edits the message to show `You chose: <label>`, removes the buttons, and reaches the agent as an ordinary inbound message `[tapped] <label>` in the same conversation and topic (with `metadata.choice_prompt_id` and `reply_to` set). Only the addressed contact can answer; a second tap, a tap after expiry and a tap by anyone else are rejected with a toast and deliver nothing. Prompts expire after 24 hours (`choice_ttl_hours` on the Telegram adapter config) and a sweep clears expired keyboards, also once after startup. On other channels `choices` is appended to the body as a numbered list. Migration 035 (`choice_prompts`). E51 Approve/Deny buttons are unchanged. See `docs/TELEGRAM_ADAPTER.md` and `docs/MCP_TOOLS.md`.
 - **Telegram forum topics now give a new session the topic's name and pinned message.** The bus records `pinned_message` / topic create and rename service updates, and the first message of each new session carries a `[Topic context]` block. Telegram offers no per-topic pin lookup, so pins made while the bus wasn't running are picked up on the next pin. See `docs/TELEGRAM_ADAPTER.md`.
 - **`make pool-kill`** ends the cc-pool tmux session, killing every pool pane.
 

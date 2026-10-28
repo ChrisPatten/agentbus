@@ -125,3 +125,63 @@ describe('reply tool — conversation_id forwarding (E48 S48.6)', () => {
     await client.close();
   });
 });
+
+describe('reply tool — choices (E74)', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    global.fetch = fetchMock as unknown as typeof fetch;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function queueReply(channel: string) {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ ok: true, message: { ...makeOriginalEnvelope({ conversation_id: 'conv-1' }), channel } }),
+    });
+    fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ ok: true, id: 'reply-1' }) });
+  }
+
+  it('carries 3 choices as metadata.choices on telegram, alongside conversation_id', async () => {
+    queueReply('telegram:peggy');
+    const client = await makeClient();
+    const result = await client.callTool({
+      name: 'reply',
+      arguments: { message_id: 'orig-msg-1', body: 'Which?', choices: ['A', 'B', 'C'] },
+    });
+    expect(result.isError).toBeFalsy();
+    const sent = JSON.parse((fetchMock.mock.calls[1]! as [string, { body: string }])[1].body) as {
+      metadata: Record<string, unknown>;
+    };
+    expect(sent.metadata).toEqual({ conversation_id: 'conv-1', choices: ['A', 'B', 'C'] });
+    await client.close();
+  });
+
+  it('appends a numbered list on a non-telegram channel', async () => {
+    queueReply('email');
+    const client = await makeClient();
+    await client.callTool({ name: 'reply', arguments: { message_id: 'orig-msg-1', body: 'Which?', choices: ['A', 'B'] } });
+    const sent = JSON.parse((fetchMock.mock.calls[1]! as [string, { body: string }])[1].body) as {
+      payload: { body: string };
+      metadata: Record<string, unknown>;
+    };
+    expect(sent.payload.body).toBe('Which?\n\n1. A\n2. B');
+    expect(sent.metadata).toEqual({ conversation_id: 'conv-1' });
+    await client.close();
+  });
+
+  it('rejects 9 choices before any fetch', async () => {
+    const client = await makeClient();
+    const result = await client.callTool({
+      name: 'reply',
+      arguments: { message_id: 'orig-msg-1', body: 'Which?', choices: Array.from({ length: 9 }, (_, i) => `L${i}`) },
+    });
+    expect(result.isError).toBe(true);
+    expect(fetchMock).not.toHaveBeenCalled();
+    await client.close();
+  });
+});

@@ -34,6 +34,9 @@ import { topicForThreadKey, isThreadTopic } from '../pipeline/types.js';
 import { getThread, upsertThread } from '../pipeline/thread-store.js';
 import type { ApprovalDecision, ApprovalRequest } from '../approvals/types.js';
 import type { ResolveApprovalOutcome } from '../approvals/resolve.js';
+import { ChoiceStore } from '../choices/store.js';
+import { DEFAULT_CHOICE_TTL_MS, MAX_CHOICES, type ChoicePrompt } from '../choices/types.js';
+import { choicesSchema } from '../choices/validate.js';
 import { renderApprovalOutcome, renderApprovalPending } from '../approvals/render.js';
 
 // Re-exported from the shared media module for backwards-compatible imports.
@@ -248,7 +251,13 @@ export interface TelegramAdapterDeps {
    * Pre-resolved per-instance config from getTelegramInstances().
    * When provided, the constructor uses this instead of reading from config.adapters.telegram.
    */
-  instanceConfig?: { token: string; poll_timeout: number; plugin?: string };
+  instanceConfig?: { token: string; poll_timeout: number; plugin?: string; choice_ttl_hours?: number };
+  /**
+   * Store for single-choice button prompts (E74). Defaults to one built over
+   * `db` on first use, so tests and deployments that never send `choices`
+   * never touch the table.
+   */
+  choiceStore?: ChoiceStore;
   /**
    * Answers an approval request when the human taps Approve/Deny (E51). Absent
    * in tests/deployments without approvals — taps are then acknowledged as
@@ -260,6 +269,25 @@ export interface TelegramAdapterDeps {
     resolvedBy: string,
     onlyContactId?: string,
   ) => Promise<ResolveApprovalOutcome>;
+}
+
+// ── Choice keyboard (E74) ─────────────────────────────────────────────────────
+
+/** Labels this short or shorter are paired two per row. */
+const CHOICE_SHORT_LABEL = 12;
+
+/**
+ * Inline keyboard for a choice prompt: one button per row, or two per row when
+ * every label is short. `callback_data` carries only the prompt id and index
+ * (`choice:<uuid>:<n>`, 45 bytes at most) — Telegram caps it at 64 bytes, so
+ * labels are stored server-side.
+ */
+export function buildChoiceKeyboard(promptId: string, labels: string[]): { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> } {
+  const buttons = labels.slice(0, MAX_CHOICES).map((text, i) => ({ text, callback_data: `choice:${promptId}:${i}` }));
+  const perRow = labels.every((l) => l.length <= CHOICE_SHORT_LABEL) ? 2 : 1;
+  const rows: Array<typeof buttons> = [];
+  for (let i = 0; i < buttons.length; i += perRow) rows.push(buttons.slice(i, i + perRow));
+  return { inline_keyboard: rows };
 }
 
 // ── Message splitting ─────────────────────────────────────────────────────────
@@ -562,11 +590,13 @@ export class TelegramAdapter implements AdapterInstance {
     text: string,
     editMessageId?: number,
     extraParams?: Record<string, unknown>,
+    replyMarkup?: unknown,
   ): Promise<number> {
     const method = editMessageId ? 'editMessageText' : 'sendMessage';
     const params: Record<string, unknown> = editMessageId
       ? { chat_id: chatId, message_id: editMessageId, text }
       : { chat_id: chatId, text, ...extraParams };
+    if (replyMarkup) params['reply_markup'] = replyMarkup;
 
     try {
       const result = await this.callTelegram<TelegramMessage>(method, { ...params, parse_mode: 'Markdown' });
@@ -658,6 +688,13 @@ export class TelegramAdapter implements AdapterInstance {
     const parts = splitMessage(envelope.payload.body);
     const key = this.draftKey(chatId, messageThreadId);
 
+    // E74: single-choice buttons ride the last part of the message. The
+    // prompt id is minted now (it goes in callback_data) and persisted only
+    // once Telegram has returned the message id.
+    const choices = this.parseChoices(envelope.metadata['choices']);
+    const choicePromptId = choices ? randomUUID() : undefined;
+    const choiceMarkup = choices && choicePromptId ? buildChoiceKeyboard(choicePromptId, choices) : undefined;
+
     // Stop the persistent typing loop for this chat/topic now that we're delivering
     this.stopTypingIndicator(chatId, messageThreadId);
 
@@ -677,7 +714,13 @@ export class TelegramAdapter implements AdapterInstance {
       if (draft.creating) await draft.creating.catch(() => {});
       if (draft.messageId !== null) {
         try {
-          const messageId = await this.deliverText(chatId, parts[0]!, draft.messageId);
+          const messageId = await this.deliverText(
+            chatId,
+            parts[0]!,
+            draft.messageId,
+            undefined,
+            parts.length === 1 ? choiceMarkup : undefined,
+          );
           sentParts = 1;
           platformMessageId = String(messageId);
           firstPartHandled = true;
@@ -698,7 +741,13 @@ export class TelegramAdapter implements AdapterInstance {
       const partParams = i === startIndex ? { ...extraParams, ...replyParams } : extraParams;
 
       try {
-        const messageId = await this.deliverText(chatId, parts[i]!, undefined, partParams);
+        const messageId = await this.deliverText(
+          chatId,
+          parts[i]!,
+          undefined,
+          partParams,
+          i === parts.length - 1 ? choiceMarkup : undefined,
+        );
         sentParts++;
         if (i === parts.length - 1) {
           platformMessageId = String(messageId);
@@ -711,6 +760,10 @@ export class TelegramAdapter implements AdapterInstance {
           retryable: true,
         };
       }
+    }
+
+    if (choices && choicePromptId && platformMessageId) {
+      this.persistChoicePrompt(envelope, choicePromptId, choices, `${chatId}:${platformMessageId}`);
     }
 
     this.lastActivity = new Date().toISOString();
@@ -1085,6 +1138,175 @@ export class TelegramAdapter implements AdapterInstance {
     return true;
   }
 
+  // ── Choice buttons (E74) ──────────────────────────────────────────────────
+
+  private choiceStoreInstance?: ChoiceStore;
+
+  private get choiceStore(): ChoiceStore {
+    this.choiceStoreInstance ??= this.deps.choiceStore ?? new ChoiceStore(this.deps.db);
+    return this.choiceStoreInstance;
+  }
+
+  /** `metadata.choices` if it is a valid label list (see choicesSchema), else undefined (message sent without buttons). */
+  private parseChoices(raw: unknown): string[] | undefined {
+    if (raw === undefined) return undefined;
+    const parsed = choicesSchema.safeParse(raw);
+    if (!parsed.success) {
+      console.warn(`${this.tag} Ignoring invalid metadata.choices: ${parsed.error.issues[0]?.message ?? 'invalid'}`);
+      return undefined;
+    }
+    return parsed.data;
+  }
+
+  private persistChoicePrompt(envelope: MessageEnvelope, id: string, labels: string[], platformMessageId: string): void {
+    const recipient = envelope.recipient.startsWith('contact:') ? envelope.recipient.slice('contact:'.length) : null;
+    const ttlMs = this.deps.instanceConfig?.choice_ttl_hours
+      ? this.deps.instanceConfig.choice_ttl_hours * 60 * 60 * 1000
+      : DEFAULT_CHOICE_TTL_MS;
+    try {
+      this.choiceStore.create(
+        {
+          id,
+          channel: envelope.channel,
+          topic: envelope.topic || 'general',
+          contactId: recipient,
+          labels,
+          platformMessageId,
+          busMessageId: envelope.id || null,
+        },
+        ttlMs,
+      );
+    } catch (err) {
+      // The message is already out; a failed insert means its buttons will
+      // answer "Prompt not found". Log loudly rather than fail the delivery.
+      console.error(`${this.tag} Failed to persist choice prompt ${id}: ${String(err)}`);
+    }
+  }
+
+  /** Removes the keyboard from an expired prompt's message (the sweep's path). */
+  async finalizeChoicePrompt(prompt: ChoicePrompt): Promise<void> {
+    const ref = prompt.platform_message_id?.split(':');
+    if (!ref || ref.length !== 2) return;
+    await this.clearKeyboard(Number(ref[0]), Number(ref[1]));
+  }
+
+  /** Empties a message's inline keyboard, leaving its text. A 400 (already cleared / message gone) is swallowed so the sweep never retries forever. */
+  private async clearKeyboard(chatId: number, messageId: number): Promise<void> {
+    try {
+      await this.callTelegram('editMessageReplyMarkup', {
+        chat_id: chatId,
+        message_id: messageId,
+        reply_markup: { inline_keyboard: [] },
+      });
+    } catch (err: unknown) {
+      if ((err as { status?: number }).status !== 400) throw err;
+    }
+  }
+
+  /**
+   * Handles a `choice:<id>:<index>` tap (the sender is already authenticated).
+   * Only the contact the prompt was addressed to may answer. The prompt is
+   * marked answered first (an atomic flip, so a double tap injects once),
+   * then the pick is injected as an ordinary inbound message in the
+   * prompt's conversation; if injection fails the prompt is reopened so the
+   * human can tap again.
+   */
+  private async processChoiceTap(
+    query: TelegramCallbackQuery,
+    promptId: string,
+    index: number,
+    contactId: string,
+    answer: (text: string) => Promise<unknown>,
+  ): Promise<void> {
+    const prompt = this.choiceStore.getById(promptId);
+    if (!prompt) {
+      await answer('Prompt not found');
+      return;
+    }
+    if (prompt.contact_id && prompt.contact_id !== contactId) {
+      console.error(`${this.tag} Choice ${promptId} tapped by ${contactId} but addressed to ${prompt.contact_id}`);
+      await answer('Not authorized');
+      return;
+    }
+
+    const chat = query.message?.chat.id;
+    const messageId = query.message?.message_id;
+    const result = this.choiceStore.answer(promptId, index, `contact:${contactId}`);
+    switch (result.outcome) {
+      case 'not_found':
+        await answer('Prompt not found');
+        return;
+      case 'already_answered':
+        await answer('Already answered');
+        return;
+      case 'invalid_choice':
+        await answer('Unrecognized choice');
+        return;
+      case 'expired':
+        if (chat !== undefined && messageId !== undefined) {
+          await this.clearKeyboard(chat, messageId).catch(() => {});
+          this.choiceStore.clearMessageRef(promptId);
+        }
+        await answer('Expired');
+        return;
+      case 'answered':
+        break;
+    }
+
+    try {
+      const message: InboundMessage = {
+        channel: prompt.channel,
+        ...(prompt.topic && prompt.topic !== 'general' ? { topic: prompt.topic } : {}),
+        sender: String(query.from.id),
+        reply_to: prompt.bus_message_id,
+        payload: { type: 'text', body: `[tapped] ${result.label}` },
+        metadata: {
+          choice_prompt_id: promptId,
+          choice_index: index,
+          ...(chat !== undefined && messageId !== undefined
+            ? {
+                telegram_chat_id: chat,
+                telegram_message_id: messageId,
+                platform_message_id: `${chat}:${messageId}`,
+              }
+            : {}),
+        },
+      };
+      await processInbound(message, this.deps);
+      this.lastActivity = new Date().toISOString();
+    } catch (err) {
+      console.error(`${this.tag} Failed to deliver choice ${promptId}: ${String(err)}`);
+      this.choiceStore.reopen(promptId);
+      await answer('Failed — try again');
+      return;
+    }
+
+    if (chat !== undefined && messageId !== undefined) {
+      await this.editChoiceMessage(chat, messageId, query.message?.text, result.label);
+      this.choiceStore.clearMessageRef(promptId);
+    }
+    await answer(`Chose: ${result.label}`.slice(0, 200));
+  }
+
+  /** Appends "You chose: <label>" to the prompt message and removes its buttons; falls back to just removing them. */
+  private async editChoiceMessage(chatId: number, messageId: number, text: string | undefined, label: string): Promise<void> {
+    const suffix = `\n\nYou chose: ${label}`;
+    try {
+      if (text) {
+        await this.callTelegram('editMessageText', {
+          chat_id: chatId,
+          message_id: messageId,
+          text: text.slice(0, 4096 - suffix.length) + suffix,
+          reply_markup: { inline_keyboard: [] },
+        });
+      } else {
+        await this.clearKeyboard(chatId, messageId);
+      }
+    } catch (err) {
+      console.error(`${this.tag} Failed to edit choice message ${chatId}:${messageId}: ${String(err)}`);
+    }
+  }
+
   // ── Interactive approvals (E51) ───────────────────────────────────────────
 
   /**
@@ -1153,20 +1375,30 @@ export class TelegramAdapter implements AdapterInstance {
         console.error(`${this.tag} answerCallbackQuery failed: ${String(err)}`),
       );
 
-    const match = query.data?.match(/^(approve|deny):([0-9a-f-]{36})$/);
-    if (!match) {
+    const choiceMatch = query.data?.match(/^choice:([0-9a-f-]{36}):(\d{1,2})$/);
+    const match = choiceMatch ? null : query.data?.match(/^(approve|deny):([0-9a-f-]{36})$/);
+    if (!choiceMatch && !match) {
       await answer('Unrecognized action');
       return true;
     }
-    const [, decision, requestId] = match as unknown as [string, ApprovalDecision, string];
 
     const senderId = String(query.from.id);
     const contactId = [...this.contactChatIdMap.entries()].find(([, userId]) => String(userId) === senderId)?.[0];
     if (!this.allowedSenderIds.has(senderId) || !contactId) {
-      console.log(`${this.tag} Dropped approval tap from unknown sender ${senderId}`);
+      console.log(`${this.tag} Dropped ${choiceMatch ? 'choice' : 'approval'} tap from unknown sender ${senderId}`);
       await answer('Not authorized');
       return true;
     }
+    if (choiceMatch) {
+      try {
+        await this.processChoiceTap(query, choiceMatch[1]!, Number(choiceMatch[2]), contactId, answer);
+      } catch (err) {
+        console.error(`${this.tag} Failed to handle choice tap: ${String(err)}`);
+        await answer('Failed — try again');
+      }
+      return true;
+    }
+    const [, decision, requestId] = match as unknown as [string, ApprovalDecision, string];
     if (!this.deps.resolveApproval) {
       await answer('Approvals are not enabled');
       return true;

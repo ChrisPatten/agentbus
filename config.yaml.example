@@ -18,6 +18,7 @@ adapters:
   telegram:
     token: ${TELEGRAM_BOT_TOKEN}
     poll_timeout: 30          # long-poll timeout in seconds
+    # choice_ttl_hours: 24    # hours before an unanswered choice-button prompt expires (E74)
   # Multi-bot form (ids "telegram:peggy", "telegram:jarvis"):
   # telegram:
   #   peggy:

@@ -104,6 +104,8 @@ const TelegramAdapterSchema = z.object({
   token: z.string(),
   poll_timeout: z.number().int().positive().default(30),
   plugin: z.string().optional(),
+  /** E74 — hours before an unanswered choice-button prompt expires (default 24). */
+  choice_ttl_hours: z.number().positive().optional(),
 });
 
 const BlueBubblesAdapterSchema = z.object({
@@ -987,6 +989,7 @@ export interface TelegramInstanceConfig {
   token: string;
   poll_timeout: number;
   plugin?: string;
+  choice_ttl_hours?: number;
 }
 
 /**
@@ -1004,12 +1007,12 @@ export function getTelegramInstances(config: AppConfig): TelegramInstanceConfig[
 
   // Discriminate: single-bot form has 'token' as a string at the top level.
   if (typeof (telegram as { token?: unknown }).token === 'string') {
-    const t = telegram as { token: string; poll_timeout: number; plugin?: string };
-    return [{ name: null, token: t.token, poll_timeout: t.poll_timeout, plugin: t.plugin }];
+    const t = telegram as { token: string; poll_timeout: number; plugin?: string; choice_ttl_hours?: number };
+    return [{ name: null, token: t.token, poll_timeout: t.poll_timeout, plugin: t.plugin, choice_ttl_hours: t.choice_ttl_hours }];
   }
 
   // Named-record form.
-  const record = telegram as Record<string, { token: string; poll_timeout: number; plugin?: string }>;
+  const record = telegram as Record<string, { token: string; poll_timeout: number; plugin?: string; choice_ttl_hours?: number }>;
   const seen = new Set<string>();
   const instances: TelegramInstanceConfig[] = [];
 
@@ -1027,7 +1030,7 @@ export function getTelegramInstances(config: AppConfig): TelegramInstanceConfig[
       );
     }
     seen.add(cfg.token);
-    instances.push({ name, token: cfg.token, poll_timeout: cfg.poll_timeout, plugin: cfg.plugin });
+    instances.push({ name, token: cfg.token, poll_timeout: cfg.poll_timeout, plugin: cfg.plugin, choice_ttl_hours: cfg.choice_ttl_hours });
   }
 
   return instances;

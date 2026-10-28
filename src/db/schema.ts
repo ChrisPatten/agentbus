@@ -174,6 +174,11 @@ function loadMigrations(): Migration[] {
       description: 'Feedback kind lapsed-proposal (E68)',
       sql: readFileSync(join(migrationsDir, '034_feedback_lapsed_proposal.sql'), 'utf-8'),
     },
+    {
+      version: 35,
+      description: 'Choice prompts (E74)',
+      sql: readFileSync(join(migrationsDir, '035_choice_prompts.sql'), 'utf-8'),
+    },
   ];
 }
 

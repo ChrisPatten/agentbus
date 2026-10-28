@@ -296,3 +296,59 @@ describe('send_message tool', () => {
     await client.close();
   });
 });
+
+describe('send_message tool — choices (E74)', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    global.fetch = fetchMock as unknown as typeof fetch;
+    fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ ok: true, exists: true }) });
+    fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ ok: true, id: 'msg-1' }) });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  async function send(channel: string, choices: unknown) {
+    const client = await makeClient();
+    const result = await client.callTool({
+      name: 'send_message',
+      arguments: { to: 'contact:alice', channel, body: 'Which?', choices },
+    });
+    await client.close();
+    return result;
+  }
+
+  it('yields metadata.choices of length 3 for a telegram send', async () => {
+    const result = await send('telegram', ['A', 'B', 'C']);
+    expect(result.isError).toBeFalsy();
+    const sent = JSON.parse((fetchMock.mock.calls[1]! as [string, { body: string }])[1].body) as {
+      metadata: { choices: string[] };
+      payload: { body: string };
+    };
+    expect(sent.metadata.choices).toEqual(['A', 'B', 'C']);
+    expect(sent.payload.body).toBe('Which?');
+  });
+
+  it('appends a numbered list for a non-telegram channel', async () => {
+    await send('email', ['A', 'B']);
+    const sent = JSON.parse((fetchMock.mock.calls[1]! as [string, { body: string }])[1].body) as {
+      metadata: Record<string, unknown>;
+      payload: { body: string };
+    };
+    expect(sent.payload.body).toBe('Which?\n\n1. A\n2. B');
+    expect(sent.metadata).not.toHaveProperty('choices');
+  });
+
+  it('rejects 9 choices and an empty label without sending', async () => {
+    const nine = await send('telegram', Array.from({ length: 9 }, (_, i) => `L${i}`));
+    expect(nine.isError).toBe(true);
+    expect(((nine.content as Array<{ text: string }>)[0]!).text).toMatch(/at most 8/);
+    const empty = await send('telegram', ['A', '']);
+    expect(empty.isError).toBe(true);
+    expect(((empty.content as Array<{ text: string }>)[0]!).text).toMatch(/must not be empty/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
