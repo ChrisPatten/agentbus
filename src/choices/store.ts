@@ -9,12 +9,17 @@
 import type Database from 'better-sqlite3';
 import type { AnswerChoiceOutcome, ChoicePrompt, ChoicePromptInput, ChoicePromptStatus } from './types.js';
 
-interface ChoicePromptRow extends Omit<ChoicePrompt, 'labels'> {
+interface ChoicePromptRow extends Omit<ChoicePrompt, 'labels' | 'commands'> {
   labels: string;
+  commands: string | null;
 }
 
 function toPrompt(row: ChoicePromptRow): ChoicePrompt {
-  return { ...row, labels: JSON.parse(row.labels) as string[] };
+  return {
+    ...row,
+    labels: JSON.parse(row.labels) as string[],
+    commands: row.commands ? (JSON.parse(row.commands) as Array<string | null>) : null,
+  };
 }
 
 export class ChoiceStore {
@@ -29,8 +34,8 @@ export class ChoiceStore {
     this.db
       .prepare(
         `INSERT INTO choice_prompts
-           (id, channel, topic, contact_id, labels, platform_message_id, bus_message_id, status, created_at, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)`,
+           (id, channel, topic, contact_id, labels, commands, platform_message_id, bus_message_id, status, created_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)`,
       )
       .run(
         input.id,
@@ -38,6 +43,7 @@ export class ChoiceStore {
         input.topic,
         input.contactId,
         JSON.stringify(input.labels),
+        input.commands && input.commands.some((c) => c) ? JSON.stringify(input.commands) : null,
         input.platformMessageId,
         input.busMessageId,
         now.toISOString(),

@@ -57,6 +57,8 @@ Temp files are written immediately before the spawn and deleted after the result
 
 `agent_id` is the full recipient ID, for example `agent:claude`, not the bare `agent_id` config value. Manage overrides through `POST`, `GET`, and `DELETE /api/v1/model-overrides` ([HTTP_API.md](HTTP_API.md#model-overrides)) or the `set_model_override`, `get_model_override`, `list_model_overrides`, and `delete_model_override` tools ([MCP_TOOLS.md](MCP_TOOLS.md#model-overrides)). The store only ever holds agent-scoped and global rows — a job's own model lives on its schedule, not here.
 
+To set this agent's override from chat, send `/model` in a chat routed to it, for example `/model sonnet`. The next spawn uses it. See [SLASH_COMMANDS.md](SLASH_COMMANDS.md#model-query--reset--list).
+
 The resolved model and its source are logged on every spawn (`Resolved model: <model> (source=<schedule|agent-override|global-override|config|cli-default>)`).
 
 ### MCP config file

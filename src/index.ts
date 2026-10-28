@@ -51,6 +51,7 @@ import { createCommandSystem } from './commands/index.js';
 import { createTorrentCommand } from './commands/torrent.js';
 import { createCostCommand } from './commands/cost.js';
 import { createPoolCommand } from './commands/pool.js';
+import { createModelCommand } from './commands/model.js';
 import { createPaneCommand } from './commands/pane.js';
 import { createRcCommand } from './commands/rc.js';
 import { createJournalCommand } from './commands/journal.js';
@@ -280,6 +281,7 @@ const { registry: commandRegistry, pauseSet, headlessControl } = createCommandSy
 commandRegistry.register(createTorrentCommand({ commandRegistry, db, registry }));
 commandRegistry.register(createCostCommand({ db, headlessControl }));
 commandRegistry.register(createPoolCommand({ poolManagers }));
+commandRegistry.register(createModelCommand({ db, poolManagers }));
 commandRegistry.register(createPaneCommand({ poolManagers }));
 commandRegistry.register(createRcCommand({ poolManagers }));
 commandRegistry.register(createFeedbackCommand({ db, engine: journalEngine }));

@@ -105,6 +105,12 @@ const RECONCILE_CAPTURE_LINES = 50;
 export interface PaneLauncher {
   launch(params: LaunchParams): Promise<void>;
   release(paneId: string, onEvict: 'clear' | 'kill'): Promise<void>;
+  /**
+   * E54 — switch the model of the live session in `paneId` by typing
+   * `/model <model>` into it and answering the "Switch model?" prompt.
+   * Optional: a launcher without it always uses the relaunch path.
+   */
+  switchModel?(paneId: string, model: string): Promise<{ status: 'switched' } | { status: 'failed'; reason: string }>;
 }
 
 export interface PoolManagerDeps {
@@ -627,6 +633,71 @@ export class PoolManager {
     return { sessionId: randomUUID(), resume: false };
   }
 
+  /** Most recent launch failure message per pane, for `applyModelNow()` to report. */
+  private readonly lastLaunchError = new Map<string, string>();
+
+  /**
+   * E54 `/model` — apply the conversation's resolved model to its live pane
+   * right now, instead of at the next message. Prefers keeping the session:
+   * types `/model <id>` into the idle pane and answers the "Switch model?"
+   * prompt with the key `1` (`PaneLifecycle.switchModelInPane`). If that is
+   * unavailable or fails, falls back to the `handleReuse()` relaunch (kill,
+   * then `--resume` on the same Claude session with the new `--model`).
+   * A pane with a turn in flight is never typed into. Never throws.
+   *
+   * - `no-pane`: nothing holds a live pane for this conversation; the next
+   *   message launches on the new model anyway.
+   * - `unchanged`: the pane already runs the resolved model (or none resolves).
+   * - `deferred`: a turn is in flight; the switch happens on the next message.
+   * - `switched`: relaunched and confirmed ready on the new model.
+   * - `failed`: the relaunch did not complete (`reason` says why); the pane was
+   *   marked dead and the next message acquires a fresh one on the new model.
+   */
+  async applyModelNow(
+    conversationId: string,
+    promptContext: PoolPromptContext,
+  ): Promise<
+    | { status: 'no-pane' | 'unchanged' | 'deferred' }
+    | { status: 'switched'; paneId: string; model: string; method: 'in-pane' | 'relaunch'; inPaneFailure?: string }
+    | { status: 'failed'; paneId: string; reason: string }
+  > {
+    try {
+      const lease = this.leaseStore.findByConversation(this.poolId, conversationId);
+      if (!lease || lease.state !== 'leased') return { status: 'no-pane' };
+      const resolved = this.resolveModelFn(null);
+      if (resolved.model === undefined || resolved.model === lease.model) return { status: 'unchanged' };
+      if (getUnhandledSince(this.db, lease) !== null) return { status: 'deferred' };
+
+      if (!this.leaseStore.beginRelaunch(this.poolId, lease.pane_id, conversationId)) return { status: 'deferred' };
+      this.lastLaunchError.delete(lease.pane_id);
+      let inPane: { status: 'switched' } | { status: 'failed'; reason: string } | undefined;
+      const target = await this.relaunchClaimed(
+        conversationId,
+        lease,
+        { ...promptContext, background: true },
+        resolved,
+        { onResult: (r) => (inPane = r) },
+      );
+      const after = this.leaseStore.findByPane(this.poolId, lease.pane_id);
+      if (target !== this.parkedRecipientId() && after?.state === 'leased' && after.model === resolved.model) {
+        return {
+          status: 'switched',
+          paneId: lease.pane_id,
+          model: resolved.model,
+          method: inPane?.status === 'switched' ? 'in-pane' : 'relaunch',
+          ...(inPane?.status === 'failed' ? { inPaneFailure: inPane.reason } : {}),
+        };
+      }
+      return {
+        status: 'failed',
+        paneId: lease.pane_id,
+        reason: this.lastLaunchError.get(lease.pane_id) ?? 'the pane did not come back on the new model',
+      };
+    } catch (err) {
+      return { status: 'failed', paneId: '', reason: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
   private async handleReuse(
     conversationId: string,
     lease: PoolLeaseRow,
@@ -658,6 +729,22 @@ export class PoolManager {
       return this.awaitInFlightThenResolve(lease.pane_id, conversationId);
     }
 
+    return this.relaunchClaimed(conversationId, lease, promptContext, resolved);
+  }
+
+  /**
+   * The post-claim half of a model switch: `beginRelaunch()` already moved the
+   * row to `launching`. With `tryInPane`, first attempts the in-session switch
+   * (E54); only if that is absent or fails does it kill and `--resume` the
+   * pane on the new `--model`.
+   */
+  private async relaunchClaimed(
+    conversationId: string,
+    lease: PoolLeaseRow,
+    promptContext: PoolPromptContext,
+    resolved: PoolResolvedModel,
+    tryInPane?: { onResult: (r: { status: 'switched' } | { status: 'failed'; reason: string }) => void },
+  ): Promise<string> {
     // Bad-resume-id fix: `lease.claude_session_id` is the pane's transient
     // cache and is normally set (this is a relaunch of an already-`leased`
     // pane), but don't trust that alone — fall back to the durable
@@ -682,6 +769,24 @@ export class PoolManager {
     // that window would previously return this pane's id immediately, and
     // the caller could enqueue a message the dying session acks and loses.
     const launched = await this.trackPaneOperation(lease.pane_id, async () => {
+      if (tryInPane && resolved.model !== undefined && this.paneLauncher.switchModel) {
+        let result: { status: 'switched' } | { status: 'failed'; reason: string };
+        try {
+          result = await this.paneLauncher.switchModel(lease.pane_id, resolved.model);
+        } catch (err) {
+          result = { status: 'failed', reason: err instanceof Error ? err.message : String(err) };
+        }
+        tryInPane.onResult(result);
+        if (result.status === 'switched') {
+          this.leaseStore.confirmReady(this.poolId, lease.pane_id);
+          this.leaseStore.setModel(this.poolId, lease.pane_id, resolved.model);
+          console.log(`[pool:${this.poolId}] ${lease.pane_id} switched in place to model=${resolved.model} (source=${resolved.source})`);
+          return true;
+        }
+        console.warn(
+          `[pool:${this.poolId}] In-pane model switch failed for ${lease.pane_id} (${result.reason}) — falling back to a relaunch`,
+        );
+      }
       try {
         await this.paneLauncher.release(lease.pane_id, 'kill');
       } catch (err) {
@@ -809,6 +914,7 @@ export class PoolManager {
       return true;
     } catch (err) {
       console.error(`[pool:${this.poolId}] Pane launch failed for ${paneId}:`, err);
+      this.lastLaunchError.set(paneId, err instanceof Error ? err.message : String(err));
       this.leaseStore.markDead(this.poolId, paneId);
       return false;
     }

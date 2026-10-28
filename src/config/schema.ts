@@ -404,6 +404,13 @@ const CcPoolAdapterSchema = z.object({
    */
   launch_ack_pattern: z.string().default('loading development channels'),
   /**
+   * E54 — regex source (case-insensitive) matched in capture-pane output to
+   * detect Claude Code's model-confirmation prompt, which is answered by
+   * sending the key `1`. Only consulted when a pane is launched with
+   * `--model`. Unset uses DEFAULT_MODEL_CONFIRM_PATTERN in src/pool/pane.ts.
+   */
+  model_confirm_pattern: z.string().optional(),
+  /**
    * Extra env vars set on the tmux window at creation time
    * (`tmux new-window -e`). `TERM`/`COLORTERM` are added unconditionally by
    * later launch code, not defaulted here.
@@ -931,6 +938,29 @@ const SchedulerConfigSchema = z.object({
 });
 
 /**
+ * One `/model` catalog entry (E54). Mirrors `ModelEntry` in
+ * src/models/catalog.ts; entries here are merged over the built-in catalog,
+ * replacing a built-in entry with the same `id`.
+ */
+const ModelEntrySchema = z.object({
+  /** Concrete model id passed to `--model`, e.g. "claude-opus-5-5". */
+  id: z.string().min(1).max(100),
+  /** Model family, lower-case, e.g. "opus". */
+  family: z.string().min(1).max(50).transform((f) => f.toLowerCase()),
+  /** Dotted numeric version, e.g. "5.5". */
+  version: z.string().regex(/^\d+(\.\d+)*$/, 'version must be dotted numbers, e.g. "5.5"'),
+  /** Display label, e.g. "Opus 5.5". */
+  label: z.string().min(1).max(100),
+  /** Hidden from the picker; still resolvable by exact id or version. */
+  deprecated: z.boolean().optional(),
+});
+
+const ModelsConfigSchema = z.object({
+  /** Extra or overriding catalog entries for `/model` (E54). */
+  catalog: z.array(ModelEntrySchema).optional(),
+});
+
+/**
  * Root application config schema. Validated at startup; an error here is
  * fatal. All stage factories, adapters, and the HTTP server receive the
  * resulting AppConfig object.
@@ -1010,6 +1040,7 @@ export const AppConfigSchema = z.object({
       seen.add(id);
     }
   }),
+  models: ModelsConfigSchema.optional(),
   pipeline: PipelineConfigSchema.default({
     dedup_window_ms: 30000,
     drop_unrouted: false,

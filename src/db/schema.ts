@@ -194,6 +194,11 @@ function loadMigrations(): Migration[] {
       description: 'Choice prompts (E74)',
       sql: readFileSync(join(migrationsDir, '038_choice_prompts.sql'), 'utf-8'),
     },
+    {
+      version: 39,
+      description: 'choice_prompts.commands: per-choice slash-command payloads (E54 on E74)',
+      sql: readFileSync(join(migrationsDir, '039_choice_prompt_commands.sql'), 'utf-8'),
+    },
   ];
 }
 

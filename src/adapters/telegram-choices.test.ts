@@ -321,6 +321,83 @@ describe('TelegramAdapter choice buttons (E74)', () => {
     expect(inbound).toHaveLength(0);
   });
 
+  // ── command payloads (E54) ────────────────────────────────────────────────
+
+  it('persists choice_commands with the prompt; a plain prompt stores none', async () => {
+    await adapter.send(
+      makeEnvelope('Model?', { metadata: { choices: ['Opus', 'Reset'], choice_commands: ['/model claude-opus-5-5', '/model reset'] } }),
+    );
+    await adapter.send(makeEnvelope('Plain', { metadata: { choices: ['A'] } }));
+    const prompts = store.list().sort((a, b) => a.labels.length - b.labels.length);
+    expect(prompts[0]!.commands).toBeNull();
+    expect(prompts[1]!.commands).toEqual(['/model claude-opus-5-5', '/model reset']);
+  });
+
+  it('drops invalid or wrong-length choice_commands but still sends plain buttons', async () => {
+    await adapter.send(makeEnvelope('x', { metadata: { choices: ['A', 'B'], choice_commands: ['/model a'] } }));
+    await adapter.send(makeEnvelope('y', { metadata: { choices: ['A'], choice_commands: ['not a slash command'] } }));
+    expect(calls('sendMessage')).toHaveLength(2);
+    expect(store.list().every((p) => p.commands === null)).toBe(true);
+  });
+
+  it('a valid tap on a command choice injects the slash command instead of "[tapped] <label>"', async () => {
+    seedPrompt({ commands: ['/model claude-opus-5-5', null, '/model reset'] });
+    expect(await tap(12345, `choice:${PROMPT_ID}:0`)).toBe(true);
+
+    expect(inbound).toHaveLength(1);
+    expect(inbound[0]).toMatchObject({
+      channel: 'telegram',
+      sender: '12345',
+      reply_to: 'bus-msg-1',
+      payload: { type: 'text', body: '/model claude-opus-5-5' },
+      metadata: { choice_prompt_id: PROMPT_ID, choice_index: 0 },
+    });
+    expect(bodyOf(calls('editMessageText')[0]).text).toBe('Which one?\n\nYou chose: A');
+    expect(store.getById(PROMPT_ID)).toMatchObject({ status: 'answered', chosen_index: 0 });
+  });
+
+  it('a choice without a payload on a prompt that has commands stays "[tapped] <label>"', async () => {
+    seedPrompt({ commands: ['/model claude-opus-5-5', null, '/model reset'] });
+    await tap(12345, `choice:${PROMPT_ID}:1`);
+    expect(inbound[0]!.payload).toMatchObject({ body: '[tapped] B' });
+  });
+
+  it('a second tap, an expired prompt and a wrong sender do not run the command', async () => {
+    seedPrompt({ commands: ['/model claude-opus-5-5', null, null] });
+    await tap(12345, `choice:${PROMPT_ID}:0`);
+    await tap(12345, `choice:${PROMPT_ID}:0`);
+    expect(inbound).toHaveLength(1);
+    expect(toast()).toBe('Already answered');
+
+    const other = '99999999-2222-3333-4444-555555555555';
+    store.create(
+      { id: other, channel: 'telegram', topic: 'general', contactId: 'chris', labels: ['A'], commands: ['/model x'], platformMessageId: '12345:101', busMessageId: 'b2' },
+      60_000,
+      new Date(Date.now() - 3_600_000),
+    );
+    await tap(12345, `choice:${other}:0`);
+    expect(toast()).toBe('Expired');
+
+    const third = 'aaaaaaaa-2222-3333-4444-555555555555';
+    store.create(
+      { id: third, channel: 'telegram', topic: 'general', contactId: 'chris', labels: ['A'], commands: ['/model x'], platformMessageId: '12345:102', busMessageId: 'b3' },
+      60_000,
+    );
+    await tap(67890, `choice:${third}:0`); // Kate is allow-listed but not the addressee
+    expect(toast()).toBe('Not authorized');
+    expect(inbound).toHaveLength(1);
+  });
+
+  it('reopens a command prompt when injection fails', async () => {
+    seedPrompt({ commands: ['/model claude-opus-5-5', null, null] });
+    injectFails = true;
+    await tap(12345, `choice:${PROMPT_ID}:0`);
+    expect(store.getById(PROMPT_ID)).toMatchObject({ status: 'open' });
+    injectFails = false;
+    await tap(12345, `choice:${PROMPT_ID}:0`);
+    expect(inbound[0]!.payload).toMatchObject({ body: '/model claude-opus-5-5' });
+  });
+
   // ── cleanup ────────────────────────────────────────────────────────────────
 
   it('finalizeChoicePrompt clears the keyboard and swallows a 400', async () => {

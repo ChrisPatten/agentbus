@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { CommandRegistry } from './registry.js';
+import { CommandRegistry, matchChoice } from './registry.js';
 import type { CommandDefinition, CommandHandler } from './registry.js';
 
 function makeCmd(name: string, scope: 'bus' | 'agent' = 'bus'): CommandDefinition {
@@ -129,5 +129,35 @@ describe('CommandRegistry follow-up capture (E36)', () => {
     expect(result!.command).toBe('second');
     // Only one entry ever existed for the key — confirmed by the single consume above
     // already returning the latest, plus the single-shot test elsewhere covering delete-on-read.
+  });
+});
+
+describe('CommandRegistry choice follow-up (E54)', () => {
+  const choices = [
+    { label: 'Opus 5.5', args: 'claude-opus-5-5' },
+    { label: 'Haiku 5.5 (current)', args: 'claude-haiku-5-5' },
+  ];
+
+  it('matchChoice maps a number, an args value or a label (case-insensitive)', () => {
+    expect(matchChoice(choices, '2')).toBe(choices[1]);
+    expect(matchChoice(choices, ' CLAUDE-OPUS-5-5 ')).toBe(choices[0]);
+    expect(matchChoice(choices, 'opus 5.5')).toBe(choices[0]);
+    expect(matchChoice(choices, '3')).toBeNull();
+    expect(matchChoice(choices, '0')).toBeNull();
+    expect(matchChoice(choices, 'hello')).toBeNull();
+    expect(matchChoice(choices, '')).toBeNull();
+  });
+
+  it('registerChoiceFollowUp is consumed once and exposes match/validate', () => {
+    const reg = new CommandRegistry();
+    reg.registerChoiceFollowUp('email', 'contact:chris', 'model', choices, 60_000);
+    const f = reg.consumeFollowUp('email', 'contact:chris');
+    expect(f?.kind).toBe('choice');
+    if (f?.kind !== 'choice') return;
+    expect(f.command).toBe('model');
+    expect(f.validate('1')).toBe(true);
+    expect(f.validate('9')).toBe(false);
+    expect(f.match('2')).toBe(choices[1]);
+    expect(reg.consumeFollowUp('email', 'contact:chris')).toBeNull();
   });
 });

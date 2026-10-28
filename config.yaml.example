@@ -157,6 +157,7 @@ adapters:
   #   launch_ack_delay_ms: 5000       # deprecated, ignored: the prompt is now polled for until the launch deadline
   #   launch_ack_max_attempts: 3     # re-send Enter if capture-pane still shows the prompt after a dismiss attempt
   #   launch_ack_pattern: "loading development channels"  # prompt text to match; override if the CLI rewords it
+  #   model_confirm_pattern: "..."    # regex for Claude Code's "Switch model?" prompt (answered with key 1 only); default: switch model\\?
   #   pane_env:                      # set via `tmux new-window -e` (TERM/COLORTERM always added)
   #     CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: "50"
   #   lease:
@@ -256,6 +257,18 @@ pipeline:
   #     target:
   #       channel: telegram
   #       template: "Voice note:\n{{body}}"
+
+# models:                            # extra /model catalog entries; same id overrides a built-in
+#   catalog:
+#     - id: claude-opus-5-6
+#       family: opus
+#       version: "5.6"                # quote it so YAML keeps it a string
+#       label: Opus 5.6
+#     - id: claude-sonnet-4-6
+#       family: sonnet
+#       version: "4.6"
+#       label: Sonnet 4.6
+#       deprecated: true              # hidden from the picker; still resolvable
 
 scheduler:
   tick_interval_ms: 30000
