@@ -8,11 +8,24 @@
 import type { CommandDefinition } from './registry.js';
 import type { PoolManager } from '../pool/pool-manager.js';
 import { toBareAgentId, type PoolLeaseRow } from '../pool/types.js';
+import { commandConversationId } from './handlers.js';
+import type { SlashCommandContext } from './registry.js';
+import type Database from 'better-sqlite3';
 
 export interface PoolCommandDeps {
   poolManagers: Map<string, PoolManager>;
   /** Injectable for tests; defaults to `() => new Date()`. */
   now?: () => Date;
+}
+
+/** E80 — flags the pane serving the conversation the command was sent from. */
+export const THIS_CHAT_MARKER = '◀ this chat';
+
+/** The conversation a command was sent from (honours the Mac app's bound session). */
+function currentConversation(ctx: SlashCommandContext): string {
+  const contactId = ctx.sender.startsWith('contact:') ? ctx.sender.slice('contact:'.length) : ctx.sender;
+  // SafeDatabase exposes the .prepare().get() that commandConversationId needs.
+  return commandConversationId(ctx, ctx.db as unknown as Database.Database, contactId);
 }
 
 /**
@@ -41,7 +54,7 @@ function formatDurationMs(ms: number): string {
  * Claude session was launched with — `pool_leases.model`, `null` when the
  * pane launched with no `--model` flag (CLI default).
  */
-function formatPaneLine(pane: PoolLeaseRow, now: Date): string {
+function formatPaneLine(pane: PoolLeaseRow, now: Date, currentConversationId: string): string {
   const parts: string[] = [pane.state];
   if (pane.conversation_id) {
     parts.push(`conv=${pane.conversation_id.slice(0, 8)}`);
@@ -52,16 +65,17 @@ function formatPaneLine(pane: PoolLeaseRow, now: Date): string {
   if (pane.last_activity_at) {
     parts.push(`idle=${formatDurationMs(now.getTime() - new Date(pane.last_activity_at).getTime())}`);
   }
-  return `  ${pane.pane_id}: ${parts.join('  ')}`;
+  const marker = pane.state === 'leased' && pane.conversation_id === currentConversationId ? `  ${THIS_CHAT_MARKER}` : '';
+  return `  ${pane.pane_id}: ${parts.join('  ')}${marker}`;
 }
 
 /** One pool's full block: header line, one line per pane, one parked-queue line. */
-function formatPoolBlock(key: string, manager: PoolManager, now: Date): string {
+function formatPoolBlock(key: string, manager: PoolManager, now: Date, conversationId: string): string {
   const panes = manager.leaseStore.list(manager.poolId);
   const parked = manager.parkedStatus();
 
   const header = `Pool ${manager.poolId} (${key}) — ${panes.length} pane${panes.length === 1 ? '' : 's'}`;
-  const paneLines = panes.map((p) => formatPaneLine(p, now));
+  const paneLines = panes.map((p) => formatPaneLine(p, now, conversationId));
   const parkedLine = parked.oldestParkedAt
     ? `  parked: ${parked.count} (oldest ${formatDurationMs(now.getTime() - new Date(parked.oldestParkedAt).getTime())})`
     : `  parked: ${parked.count}`;
@@ -72,12 +86,30 @@ function formatPoolBlock(key: string, manager: PoolManager, now: Date): string {
 export function createPoolCommand(deps: PoolCommandDeps): CommandDefinition {
   return {
     name: 'pool',
-    description: 'Show cc-pool pane leases and parked-queue depth',
-    usage: '/pool [pool-agent-id]',
+    description: 'Show cc-pool panes (marks this chat\'s) or kill this chat\'s pane',
+    usage: '/pool [pool-agent-id] | /pool kill',
     scope: 'bus',
-    handler: async (args, _ctx) => {
+    handler: async (args, ctx) => {
       if (deps.poolManagers.size === 0) {
         return { body: 'No cc-pool instances configured.' };
+      }
+      const conversationId = currentConversation(ctx);
+
+      // E80 — `/pool kill`: kill the window serving this conversation, even
+      // mid-turn. The next message acquires a fresh window.
+      if (args[0]?.toLowerCase() === 'kill') {
+        if (args.length > 1) return { body: 'Usage: /pool kill' };
+        for (const manager of deps.poolManagers.values()) {
+          const killed = manager.killConversation(conversationId);
+          if (!killed) continue;
+          void killed.done.catch((err: unknown) => console.error(`[commands] /pool kill: ${killed.paneId} failed:`, err));
+          return {
+            body:
+              `Killed ${killed.paneId}${killed.inFlight ? ' (a turn was in flight and was cut off)' : ''}. ` +
+              'Your next message starts on a fresh window.',
+          };
+        }
+        return { body: 'No pane is serving this chat; nothing to kill.' };
       }
 
       const now = (deps.now ?? (() => new Date()))();
@@ -94,8 +126,12 @@ export function createPoolCommand(deps: PoolCommandDeps): CommandDefinition {
         return { body: `No cc-pool instance for "${filterArg}".` };
       }
 
-      const body = entries.map(([key, manager]) => formatPoolBlock(key, manager, now)).join('\n\n');
-      return { body };
+      const blocks = entries.map(([key, manager]) => formatPoolBlock(key, manager, now, conversationId));
+      const serving = entries.some(([, m]) =>
+        m.leaseStore.list(m.poolId).some((p) => p.state === 'leased' && p.conversation_id === conversationId),
+      );
+      if (!serving) blocks.push('This chat: no pane is serving it (none held; its next message takes a free pane or parks).');
+      return { body: blocks.join('\n\n') };
     },
   };
 }

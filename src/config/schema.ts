@@ -114,6 +114,14 @@ const TelegramAdapterSchema = z.object({
   token: z.string(),
   poll_timeout: z.number().int().positive().default(30),
   plugin: z.string().optional(),
+  /** E74 — hours before an unanswered choice-button prompt expires (default 24). */
+  choice_ttl_hours: z.number().positive().optional(),
+  /**
+   * E81 — directories `send_document` may upload from. Symlinks are resolved
+   * before the check, so a link out of one of these is rejected. Default: each
+   * agent's `data/` directory and its Claude Code scratchpad root.
+   */
+  send_paths: z.array(z.string().min(1)).optional(),
 });
 
 const BlueBubblesAdapterSchema = z.object({
@@ -401,6 +409,13 @@ const CcPoolAdapterSchema = z.object({
    * see docs/CC_POOL_ADAPTER.md's Troubleshooting section).
    */
   launch_ack_pattern: z.string().default('loading development channels'),
+  /**
+   * E54 — regex source (case-insensitive) matched in capture-pane output to
+   * detect Claude Code's model-confirmation prompt, which is answered by
+   * sending the key `1`. Only consulted when a pane is launched with
+   * `--model`. Unset uses DEFAULT_MODEL_CONFIRM_PATTERN in src/pool/pane.ts.
+   */
+  model_confirm_pattern: z.string().optional(),
   /**
    * Extra env vars set on the tmux window at creation time
    * (`tmux new-window -e`). `TERM`/`COLORTERM` are added unconditionally by
@@ -927,9 +942,44 @@ const ScheduleEntrySchema = z
     { message: 'fire_at must be a valid ISO 8601 timestamp, and timezone a valid IANA time zone' },
   );
 
+/**
+ * E79 — live tool-status line style. `phrases` (default) shows short fixed
+ * phrases such as "Checking the calendar"; `raw` restores the E29 lines that
+ * name the tool and its arguments. `phrases_file` overrides the bundled
+ * scripts/hooks/tool-status-phrases.json for cc-headless (the pool hook reads
+ * AGENTBUS_TOOL_STATUS_PHRASES / AGENTBUS_TOOL_STATUS_MODE instead).
+ */
+const ToolStatusConfigSchema = z.object({
+  mode: z.enum(['phrases', 'raw']).default('phrases'),
+  phrases_file: z.string().optional(),
+});
+
 const SchedulerConfigSchema = z.object({
   tick_interval_ms: z.number().int().positive().default(30000),
   enabled: z.boolean().default(true),
+});
+
+/**
+ * One `/model` catalog entry (E54). Mirrors `ModelEntry` in
+ * src/models/catalog.ts; entries here are merged over the built-in catalog,
+ * replacing a built-in entry with the same `id`.
+ */
+const ModelEntrySchema = z.object({
+  /** Concrete model id passed to `--model`, e.g. "claude-opus-5-5". */
+  id: z.string().min(1).max(100),
+  /** Model family, lower-case, e.g. "opus". */
+  family: z.string().min(1).max(50).transform((f) => f.toLowerCase()),
+  /** Dotted numeric version, e.g. "5.5". */
+  version: z.string().regex(/^\d+(\.\d+)*$/, 'version must be dotted numbers, e.g. "5.5"'),
+  /** Display label, e.g. "Opus 5.5". */
+  label: z.string().min(1).max(100),
+  /** Hidden from the picker; still resolvable by exact id or version. */
+  deprecated: z.boolean().optional(),
+});
+
+const ModelsConfigSchema = z.object({
+  /** Extra or overriding catalog entries for `/model` (E54). */
+  catalog: z.array(ModelEntrySchema).optional(),
 });
 
 /**
@@ -942,6 +992,7 @@ const SchedulerConfigSchema = z.object({
  */
 export const AppConfigSchema = z.object({
   bus: BusConfigSchema,
+  tool_status: ToolStatusConfigSchema.default({ mode: 'phrases' }),
   adapters: AdaptersConfigSchema,
   contacts: z.record(z.string(), ContactSchema).default({}).superRefine((contacts, ctx) => {
     for (const [key, contact] of Object.entries(contacts)) {
@@ -1011,6 +1062,7 @@ export const AppConfigSchema = z.object({
       seen.add(id);
     }
   }),
+  models: ModelsConfigSchema.optional(),
   pipeline: PipelineConfigSchema.default({
     dedup_window_ms: 30000,
     drop_unrouted: false,
@@ -1056,6 +1108,8 @@ export interface TelegramInstanceConfig {
   token: string;
   poll_timeout: number;
   plugin?: string;
+  choice_ttl_hours?: number;
+  send_paths?: string[];
 }
 
 /**
@@ -1073,12 +1127,12 @@ export function getTelegramInstances(config: AppConfig): TelegramInstanceConfig[
 
   // Discriminate: single-bot form has 'token' as a string at the top level.
   if (typeof (telegram as { token?: unknown }).token === 'string') {
-    const t = telegram as { token: string; poll_timeout: number; plugin?: string };
-    return [{ name: null, token: t.token, poll_timeout: t.poll_timeout, plugin: t.plugin }];
+    const t = telegram as { token: string; poll_timeout: number; plugin?: string; choice_ttl_hours?: number; send_paths?: string[] };
+    return [{ name: null, token: t.token, poll_timeout: t.poll_timeout, plugin: t.plugin, choice_ttl_hours: t.choice_ttl_hours, send_paths: t.send_paths }];
   }
 
   // Named-record form.
-  const record = telegram as Record<string, { token: string; poll_timeout: number; plugin?: string }>;
+  const record = telegram as Record<string, { token: string; poll_timeout: number; plugin?: string; choice_ttl_hours?: number; send_paths?: string[] }>;
   const seen = new Set<string>();
   const instances: TelegramInstanceConfig[] = [];
 
@@ -1096,7 +1150,7 @@ export function getTelegramInstances(config: AppConfig): TelegramInstanceConfig[
       );
     }
     seen.add(cfg.token);
-    instances.push({ name, token: cfg.token, poll_timeout: cfg.poll_timeout, plugin: cfg.plugin });
+    instances.push({ name, token: cfg.token, poll_timeout: cfg.poll_timeout, plugin: cfg.plugin, choice_ttl_hours: cfg.choice_ttl_hours, send_paths: cfg.send_paths });
   }
 
   return instances;

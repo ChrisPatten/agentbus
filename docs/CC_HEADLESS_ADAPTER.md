@@ -57,6 +57,8 @@ Temp files are written immediately before the spawn and deleted after the result
 
 `agent_id` is the full recipient ID, for example `agent:claude`, not the bare `agent_id` config value. Manage overrides through `POST`, `GET`, and `DELETE /api/v1/model-overrides` ([HTTP_API.md](HTTP_API.md#model-overrides)) or the `set_model_override`, `get_model_override`, `list_model_overrides`, and `delete_model_override` tools ([MCP_TOOLS.md](MCP_TOOLS.md#model-overrides)). The store only ever holds agent-scoped and global rows — a job's own model lives on its schedule, not here.
 
+To set this agent's override from chat, send `/model` in a chat routed to it, for example `/model sonnet`. The next spawn uses it. See [SLASH_COMMANDS.md](SLASH_COMMANDS.md#model-query--reset--list).
+
 The resolved model and its source are logged on every spawn (`Resolved model: <model> (source=<schedule|agent-override|global-override|config|cli-default>)`).
 
 ### MCP config file
@@ -114,7 +116,7 @@ The instance records `slash_commands` from each `init` event. The bus refuses to
 
 ## Typing indicator and tool-call status
 
-When a batch starts, the adapter calls `POST /api/v1/adapters/<channel>/typing` with the contact and topic, so the platform shows activity while `claude -p` starts. Each non-delivery tool call in the stream is summarized (`src/adapters/tool-call-summary.ts`) and sent to `POST /api/v1/adapters/<channel>/tool-status` until the first delivery call. Both are fire-and-forget, no-op on channels without the capability, and skipped for email. See [TELEGRAM_ADAPTER.md](TELEGRAM_ADAPTER.md#live-tool-call-status-stream).
+When a batch starts, the adapter calls `POST /api/v1/adapters/<channel>/typing` with the contact and topic, so the platform shows activity while `claude -p` starts. Each non-delivery tool call in the stream is turned into a short status phrase (E79, `src/adapters/tool-status.ts`; `tool_status.mode: raw` uses the older `src/adapters/tool-call-summary.ts` lines instead) and sent to `POST /api/v1/adapters/<channel>/tool-status` until the first delivery call. Both are fire-and-forget, no-op on channels without the capability, and skipped for email. See [TELEGRAM_ADAPTER.md](TELEGRAM_ADAPTER.md#live-tool-call-status-stream).
 
 ## Failure handling
 

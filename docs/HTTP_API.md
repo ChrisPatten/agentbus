@@ -394,7 +394,7 @@ Body `{ "contact_id"?: string, "topic"?: string }`. Starts the adapter's typing 
 
 ### `POST /api/v1/adapters/:channel/tool-status`
 
-Body `{ "contact_id"?: string, "text": string, "topic"?: string, "placeholder"?: boolean }`. Appends a line to the live tool-call status message on adapters that declare `toolStatus`. Always returns `{ "ok": true }`. See [TELEGRAM_ADAPTER.md](TELEGRAM_ADAPTER.md#live-tool-call-status-stream). `placeholder: true` marks the line as a cold-start stand-in — cc-pool posts one ("One moment…") right before a cold-starting pane launch begins, and the implementing adapter replaces rather than appends to it on the next call for the same contact/channel/topic. See [CC_POOL_ADAPTER.md#cold-start-placeholder](CC_POOL_ADAPTER.md#cold-start-placeholder).
+Body `{ "contact_id"?: string, "text": string, "topic"?: string, "placeholder"?: boolean }`. Appends a line to the live tool-call status message on adapters that declare `toolStatus`. Always returns `{ "ok": true }`. See [TELEGRAM_ADAPTER.md](TELEGRAM_ADAPTER.md#live-tool-call-status-stream). `placeholder: true` marks the line as a cold-start stand-in — cc-pool posts one ("One moment…") right before a cold-starting pane launch begins, and the implementing adapter replaces rather than appends to it on the next call for the same contact/channel/topic. See [CC_POOL_ADAPTER.md#cold-start-placeholder](CC_POOL_ADAPTER.md#cold-start-placeholder). Since E79 the same flag marks every phrase-mode status line ("Checking the calendar"), so each replaces the previous instead of appending.
 
 ### `POST /api/v1/adapters/:channel/topics`
 

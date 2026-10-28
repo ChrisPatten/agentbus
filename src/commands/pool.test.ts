@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { runMigrations } from '../db/schema.js';
 import { MessageQueue } from '../core/queue.js';
@@ -7,6 +7,7 @@ import { PoolManager } from '../pool/pool-manager.js';
 import type { CcPoolInstanceConfig } from '../config/schema.js';
 import type { SlashCommandContext } from './registry.js';
 import type { MessageEnvelope } from '../types/envelope.js';
+import { computeConversationId } from '../pipeline/conversation-id.js';
 import { createSafeDatabase } from '../db/safe-database.js';
 
 function makeDb(): Database.Database {
@@ -200,5 +201,86 @@ describe('/pool', () => {
     const result = await cmd.handler([], makeCtx(db));
 
     expect(result.body).toContain('parked: 1 (oldest 42s)');
+  });
+
+  describe('E80: serving-window marker and /pool kill', () => {
+    const CONV = computeConversationId('chris', 'telegram', 'general');
+
+    /** Two-pane pool with CONV leased on pane 1 and another conversation on pane 2. */
+    async function setup() {
+      const db = makeDb();
+      const launcher = { launch: vi.fn(async () => {}), release: vi.fn(async () => {}) };
+      const manager = new PoolManager({
+        cfg: makeCfg(), db, busBaseUrl: 'http://127.0.0.1:3000', paneLauncher: launcher, transcriptExists: () => true,
+      });
+      await manager.ensureStarted();
+      await manager.resolveRoute(CONV, { contact_id: 'chris', channel: 'telegram' });
+      await manager.resolveRoute('other-conversation', { contact_id: 'bob', channel: 'telegram' });
+      const cmd = createPoolCommand({ poolManagers: new Map([['agent:peggy', manager]]) });
+      return { db, manager, launcher, cmd };
+    }
+
+    it('marks only the pane serving this chat', async () => {
+      const { db, cmd } = await setup();
+      const lines = ((await cmd.handler([], makeCtx(db))).body ?? '').split('\n');
+      const mine = lines.find((l) => l.includes(`conv=${CONV.slice(0, 8)}`))!;
+      const theirs = lines.find((l) => l.includes('conv=other-co'))!;
+      expect(mine).toContain('◀ this chat');
+      expect(theirs).not.toContain('◀ this chat');
+      expect(lines.join('\n')).not.toContain('no pane is serving');
+    });
+
+    it('says so when no pane serves this chat', async () => {
+      const { db, manager, cmd } = await setup();
+      manager.killConversation(CONV);
+      const body = (await cmd.handler([], makeCtx(db))).body ?? '';
+      expect(body).not.toContain('◀ this chat');
+      expect(body).toContain('This chat: no pane is serving it');
+    });
+
+    it('/pool kill kills this chat\'s pane, names it, and leaves others alone', async () => {
+      const { db, manager, launcher, cmd } = await setup();
+      const pane = manager.leaseStore.findByConversation(manager.poolId, CONV)!;
+      const result = await cmd.handler(['kill'], makeCtx(db));
+      expect(result.body).toContain(`Killed ${pane.pane_id}`);
+      expect(result.body).toContain('fresh window');
+      await new Promise((r) => setTimeout(r, 0));
+      expect(launcher.release).toHaveBeenCalledWith(pane.pane_id, 'kill');
+      expect(manager.leaseStore.findByConversation(manager.poolId, 'other-conversation')?.state).toBe('leased');
+    });
+
+    it('/pool kill with no serving pane does nothing', async () => {
+      const { db, manager, launcher, cmd } = await setup();
+      manager.killConversation(CONV);
+      await new Promise((r) => setTimeout(r, 0));
+      launcher.release.mockClear();
+      const result = await cmd.handler(['kill'], makeCtx(db));
+      expect(result.body).toBe('No pane is serving this chat; nothing to kill.');
+      expect(launcher.release).not.toHaveBeenCalled();
+    });
+
+    it('/pool kill mid-turn says the turn was cut off, and the next message gets a fresh pane', async () => {
+      const { db, manager, launcher, cmd } = await setup();
+      const pane = manager.leaseStore.findByConversation(manager.poolId, CONV)!;
+      const queue = new MessageQueue(db);
+      queue.enqueue({
+        id: 'turn-1', timestamp: new Date().toISOString(), channel: 'telegram', topic: 'general',
+        sender: 'contact:chris', recipient: pane.agent_id, reply_to: null, priority: 'normal',
+        payload: { type: 'text', body: 'work on it' }, metadata: { conversation_id: CONV },
+      });
+      queue.dequeue(pane.agent_id);
+      const result = await cmd.handler(['kill'], makeCtx(db));
+      expect(result.body).toContain('a turn was in flight');
+      await new Promise((r) => setTimeout(r, 0));
+      launcher.launch.mockClear();
+      const recipient = await manager.resolveRoute(CONV, { contact_id: 'chris', channel: 'telegram' });
+      expect(recipient).toBe(pane.agent_id);
+      expect(launcher.launch).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects extra arguments to kill', async () => {
+      const { db, cmd } = await setup();
+      expect((await cmd.handler(['kill', 'peggy'], makeCtx(db))).body).toBe('Usage: /pool kill');
+    });
   });
 });

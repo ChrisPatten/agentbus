@@ -16,7 +16,9 @@ Slash commands let you operate AgentBus from any connected channel without SSH a
 | `/feedback <text>` | Tell the agent what to do differently; used when it next journals | `/feedback Use 24-hour time.` |
 | `/journal [runs [n] \| now \| consolidate]` | Journaling status, recent journal runs, journal this conversation now, or consolidate memory now | `/journal runs 10` |
 | `/cost` | Show day/week/month API cost for this agent | `/cost` |
-| `/pool [pool-agent-id]` | Show cc-pool pane leases and parked-queue depth | `/pool peggy` |
+| `/model [query \| reset \| list]` | Show or change the model of the agent this chat routes to | `/model haiku 4.5` |
+| `/pool [pool-agent-id]` | Show cc-pool pane leases and parked-queue depth; marks the pane serving this chat | `/pool peggy` |
+| `/pool kill` | Kill the pane window serving this chat (even mid-turn); the next message gets a fresh window | `/pool kill` |
 | `/pane [n\|all]` | Send a PNG snapshot of the cc-pool tmux pane(s) | `/pane 2` |
 | `/rc [n]` | Type `/remote-control` into a cc-pool Claude pane | `/rc` |
 | `/keys [@n] <key> [key...]` | Send keystrokes to a cc-pool Claude pane | `/keys Escape` |
@@ -194,7 +196,7 @@ Renders pane leases and parked-queue depth for each configured `cc-pool` instanc
 ```
 /pool
 -> Pool peggy (agent:peggy) — 2 panes
-     peggy-pool-1: leased  conv=a3f9c21e  model=claude-sonnet-5  idle=12s
+     peggy-pool-1: leased  conv=a3f9c21e  model=claude-sonnet-5  idle=12s  ◀ this chat
      peggy-pool-2: free
      parked: 1 (oldest 42s)
 ```
@@ -212,6 +214,12 @@ An optional first argument narrows the output to one pool, matched against eithe
      ...
 ```
 A name that matches no configured pool replies `No cc-pool instance for "<name>".` instead of silently showing nothing.
+
+The pane leased to the conversation you typed `/pool` in carries `◀ this chat` (E80). When no pane holds it, the output ends with `This chat: no pane is serving it (...)`.
+
+#### `/pool kill`
+
+Kills the pane window serving this conversation, even if a turn is in flight, and replies `Killed <pane>. Your next message starts on a fresh window.` (adding `(a turn was in flight and was cut off)` when one was). With no serving pane it replies `No pane is serving this chat; nothing to kill.` and does nothing. The pane is detached first, so the next message takes the normal acquire path (a free pane, or the same one once freed) and resumes the same Claude session with `--resume`; this is not `/clear`, the session stays open. The in-flight message is acked so it is not replayed into the new window, and messages still pending for the dead pane are moved to the parked queue and routed to a fresh pane by the next drain (within one sweep tick, 60s by default). Output the dead pane had not yet sent is lost. A late reply from the killed pane is refused by the reply-linked lease guard.
 
 Each pane line shows its state, then `conv=<first 8 hex chars of conversation_id>` when the pane is bound to a conversation, then `model=<name>` (E53) when the pane's current session was launched with a model, then `idle=<age>` when it has a recorded `last_activity_at` — all three are omitted for a `free` pane, which has none of them. See [CC_POOL_ADAPTER.md#model-selection](CC_POOL_ADAPTER.md#model-selection) for what `model=` means and when it changes. The trailing `parked: N` line adds `(oldest <age>)` only when `N > 0`.
 
@@ -276,6 +284,82 @@ Each space-separated word is one key. tmux sends a name it recognizes as that ke
 
 Unlike `/rc`, `/keys` also reaches a `launching` or `draining` pane, because a pane stuck at a prompt is the main reason to send keys. It refuses a `dead` pane, an unknown index, and an index shared by two pools. Check the pane with `/pane` first: the keys go to whatever the pane is showing.
 
+### `/model [query | reset | list]`
+
+Shows or changes the model of the agent this chat routes to. It writes the agent-scoped row in the model override store (`model_overrides`), so the change applies on every channel that reaches that agent. For `cc-headless` the agent uses it on its next spawn. For `cc-pool`, if this chat holds a live pane that is between turns, the pane is switched right away and the Claude session is kept: `/model <id>` is typed into the pane and Claude Code's `Switch model?` prompt is answered with the key `1` (see [Model-confirmation prompt](CC_POOL_ADAPTER.md#model-confirmation-prompt)). The reply says `Switched <pane> in place; the session is kept.` If the in-place switch fails (prompt never appears, will not clear, idle composer does not return) the pane is relaunched with `--resume` and the new `--model` instead, and the reply says why. If a turn is in flight nothing is typed into the pane and the switch happens at the next message; if no pane is held the next message launches on the new model. If both attempts fail, the reply says so plainly with the reason, the override stays saved, and the next message starts a fresh pane on the new model. No restart is needed. Registered in `src/index.ts` via `createModelCommand` in `src/commands/model.ts`.
+
+The target is the first route for this message whose adapter is `cc-pool` or `cc-headless`. For any other route, including `claude-code`, and for an unrouted chat, it replies `This chat isn't routed to an agent whose model I can change.`
+
+| Input | Result |
+|---|---|
+| (none) | The current model and its source, plus a picker of the latest non-deprecated model of each family (at most 7 entries, so the picker fits E74's 8-button limit). Adds `Reset to config (<model>)` when a `/model` override is set. |
+| `<query>` | Resolves the query against the model catalog and stores the concrete model ID. |
+| `reset` or `default` | Removes the agent's override and reports the model it falls back to. |
+| `list` | Every catalog model, grouped by family, with deprecated and current models tagged. |
+
+```
+/model
+-> Pokeclaude is on Sonnet 5.5 (claude-sonnet-5-5) — from config.
+
+   1. Fable 5.1
+   2. Opus 5.5
+   3. Sonnet 5.5 (current)
+   4. Haiku 5.5
+
+   Reply with a number to choose.
+2
+-> Pokeclaude → Opus 5.5 (claude-opus-5-5). Switched peggy-pool:1 in place; the session is kept.
+
+/model haiku 4.5
+-> Pokeclaude → Haiku 4.5 (claude-haiku-4-5). Takes effect on the next message.
+
+/model haiku 5.1
+-> No Haiku 5.1 — known: 5.5
+
+   1. Haiku 5.5
+
+   Reply with a number to choose.
+
+/model reset
+-> Override removed. Pokeclaude is now on Sonnet 5.5 (claude-sonnet-5-5) — from config. Takes effect on the next message.
+```
+
+On Telegram the picker is a set of inline buttons (the E74 mechanism); elsewhere it's a numbered list. See [Choices](#choices).
+
+**Queries.** Matching is case-insensitive. Spaces, `-`, and `_` between family and version are equivalent, and a leading `claude` is optional.
+
+- A family (`haiku`) picks that family's latest non-deprecated model.
+- A family and version prefix (`opus 5`, `haiku 4.5`) picks the highest matching version. Deprecated models are eligible.
+- An exact model ID (`claude-sonnet-5-5`) picks that model.
+- An ID that starts with `claude-` but isn't in the catalog is stored as-is, with a warning. Use this for a model released after the catalog was last updated.
+- Anything else replies with the error and a picker of close matches.
+
+The stored value is always the concrete ID, never the alias, so a catalog update never moves a running agent. If the agent's override already equals the resolved ID, the reply is `<Agent> is already on <model>.`
+
+**Source wording.** `set with /model` (agent override), `global override`, `from config` (the instance's `model`), or `CLI default — no model configured`. A config alias such as `sonnet` is shown as-is.
+
+**Scheduled jobs.** A schedule's own `model` still wins over the override (see [SCHEDULING.md](SCHEDULING.md)). When active schedules that route to this agent set their own model, the reply adds `Note: 2 scheduled jobs set their own model and aren't affected.` A schedule maps to an agent through the first `pipeline.routes` rule that matches its sender, channel, and topic.
+
+**Catalog.** The built-in catalog lives in `src/models/catalog.ts`. Add or replace entries with `models.catalog` in `config.yaml`:
+
+```yaml
+models:
+  catalog:
+    - id: claude-opus-5-6
+      family: opus
+      version: "5.6"        # quote it so YAML keeps it a string
+      label: Opus 5.6
+    - id: claude-sonnet-4-6
+      family: sonnet
+      version: "4.6"
+      label: Sonnet 4.6
+      deprecated: true      # hidden from the picker; still resolvable
+```
+
+An entry with the same `id` as a built-in replaces it. Each entry takes `id`, `family`, `version` (dotted, compared numerically), `label`, and an optional `deprecated`.
+
+Global overrides stay HTTP/MCP-only. See [HTTP_API.md](HTTP_API.md#model-overrides).
+
 ### `/torrent [magnet-link]`
 
 An operator-specific custom command (registered in `src/index.ts` via
@@ -327,6 +411,34 @@ check. On a match, the target command's handler runs with `[body]` as its
 args — the same response-send + transcript-log path as a normal command
 invocation. Any future command can call `registerFollowUp` for its own
 "what's the value?" prompt-and-capture flow.
+
+### Choices
+
+A handler can return `choices` to offer a picker. Telegram renders them with the E74 choice-button mechanism ([TELEGRAM_ADAPTER.md](TELEGRAM_ADAPTER.md#choice-buttons)); other channels get a numbered list.
+
+```typescript
+interface CommandChoice {
+  label: string; // button text or list line, at most 64 characters, e.g. 'Opus 5.5 (current)'
+  args: string;  // appended to the command when picked, e.g. 'claude-opus-5-5'
+}
+
+return {
+  body: 'Pick a model:',
+  choices: [
+    { label: 'Opus 5.5', args: 'claude-opus-5-5' },
+    { label: 'Haiku 5.5', args: 'claude-haiku-5-5' },
+  ],
+};
+```
+
+Picking a choice runs `/<command> <args>`, so the handler must accept its own `args` values. If `body` is omitted, the picker is headed `Choose an option:`. E74 limits apply: at most 8 choices and 64-character labels. `deliverCommandResponse` (`src/http/api.ts`) clips any excess as a backstop, but handlers should cap their own lists; `/model` shows the top entry of each family and reserves one slot for Reset.
+
+Rendering depends on the originating channel:
+
+- **Telegram channels (`telegram`, `telegram:...`).** The response goes out with `metadata.choices` (the labels) and `metadata.choice_commands` (the slash command each tap runs, e.g. `/model claude-opus-5-5`). The Telegram adapter stores both in the `choice_prompts` row (`labels` and the nullable `commands` JSON column, migration 039) and renders one inline button per choice with `choice:<uuid>:<index>` callback data. On a tap, after the usual E74 checks (allow-listed sender, addressee, not expired, atomic answer), the adapter injects the stored slash command as the tapping user's inbound message through the normal pipeline instead of `[tapped] <label>`, so it takes the same command path as a typed command. A choice with no command payload (plain E74 prompts, agent `choices`) still injects `[tapped] <label>`. Prompts expire after 24 hours.
+- **Every other channel.** The bus appends a numbered list and `Reply with a number to choose.` to the body, then registers a choice follow-up for the sender (`registerChoiceFollowUp`, in memory, 10 minutes). A reply of `2`, or text equal to a choice's `args` or `label` (case-insensitive), runs that choice. Any other reply consumes the capture and proceeds as a normal message, like [follow-up capture](#follow-up-capture-for-command-authors).
+
+**Known limitation.** The dedup stage (Stage 30) drops a message whose sender and text match one seen in the same 30-second window. Tapping the same command button twice within 30 seconds, or typing a command a button would inject, runs it only once.
 
 ---
 

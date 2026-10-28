@@ -43,7 +43,7 @@ import { runtimeCapabilities } from '../core/runtime-capabilities.js';
 import type { MessageEnvelope } from '../types/envelope.js';
 import { formatMessagesForSampling } from './message-format.js';
 import { isSystemOnly } from '../core/system-block.js';
-import { formatToolCallSummary } from './tool-call-summary.js';
+import { TurnStatusTracker, loadPhrases, DEFAULT_PHRASES_PATH, type PhrasesFile } from './tool-status.js';
 import { resolveModel } from './model-override-loader.js';
 import { hashBlock, shouldSendBlock, markBlockSent, clearLedger, detectCompaction } from './context-ledger.js';
 import { HeadlessLimiter, type TurnClass } from './headless-limiter.js';
@@ -476,6 +476,14 @@ class HeadlessInstance {
     this.limiter = new HeadlessLimiter(cfg.max_concurrent_turns, cfg.reserved_system_slots);
   }
 
+  private phrasesCache?: PhrasesFile;
+
+  /** E79: the fixed-phrase table (tool_status.phrases_file, else the bundled one), read once. */
+  private phrases(): PhrasesFile {
+    this.phrasesCache ??= loadPhrases(config.tool_status?.phrases_file ?? DEFAULT_PHRASES_PATH);
+    return this.phrasesCache;
+  }
+
   /** Environment for `claude -p` children. */
   private childEnv(): NodeJS.ProcessEnv {
     const env: NodeJS.ProcessEnv = {
@@ -874,12 +882,12 @@ class HeadlessInstance {
    * skip the call entirely, matching startTyping's existing email skip.
    * `topic` (E28) further targets a specific Telegram forum topic.
    */
-  private reportToolCall(channel: string, contactId: string, text: string, topic?: string, conversationId?: string): void {
+  private reportToolCall(channel: string, contactId: string, text: string, topic?: string, conversationId?: string, transient = false): void {
     if (channel === 'email' || channel.startsWith('email:')) return;
     this.busFetch(`${this.busBaseUrl}/api/v1/adapters/${channel}/tool-status`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contact_id: contactId, text, topic, conversation_id: conversationId }),
+      body: JSON.stringify({ contact_id: contactId, text, topic, conversation_id: conversationId, ...(transient ? { placeholder: true } : {}) }),
     }).catch(() => {});
   }
 
@@ -1177,6 +1185,7 @@ class HeadlessInstance {
     // Delivery can happen before child exit. Keep conversation ownership until
     // both exit and fallback delivery settle, so no two children ever resume
     // the same claude session concurrently.
+    const statusTracker = new TurnStatusTracker(config.tool_status?.mode ?? 'phrases', this.phrases());
     const { resultText, deliveredViaTool, error, stoppedByUser } = await this.runClaudeTurn({
       db,
       session,
@@ -1185,8 +1194,11 @@ class HeadlessInstance {
       channel,
       prompt,
       resumeId,
-      onToolCall: (call) =>
-        this.reportToolCall(channel, contactId, formatToolCallSummary(call.name, call.input), topic, conversationId),
+      onToolCall: (call) => {
+        // E79: succinct phrases (or raw lines, per tool_status.mode); a fresh tracker per turn.
+        const line = statusTracker.next(call);
+        if (line) this.reportToolCall(channel, contactId, line.text, topic, conversationId, line.transient);
+      },
       scheduleModel,
       sourceLabel,
       // E69: advance only once the turn is known to have started.

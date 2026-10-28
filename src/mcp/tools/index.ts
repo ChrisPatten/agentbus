@@ -15,11 +15,16 @@
  *   - advisory_ack (E65)
  *   - journal_complete (E66; live agents only — not registered for cc-headless)
  *   - propose_change (E68)
+ *   - status (E79)
+ *   - send_location, send_venue, send_contact, send_document, ask_input, send_rich, edit_message,
+ *     pin_message, unpin_message (E81; only when a Telegram adapter is configured)
  */
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { MessageEnvelope } from '../../types/envelope.js';
 import { toolError, toolSuccess } from './helpers.js';
+import { applyChoices, choicesSchema, CHOICES_DESCRIPTION } from '../../choices/validate.js';
+import { applySendOptions, sendOptionFields } from '../../outbound/send-options.js';
 import type { AppConfig } from '../../config/schema.js';
 import { registerChannelTools } from './channels.js';
 import { registerMessagingTools, registerEmailTool, buildEmailToolConfig } from './messaging.js';
@@ -30,10 +35,12 @@ import { registerReactionTools } from './reactions.js';
 import { registerScheduleTools } from './scheduling.js';
 import { registerAttachmentTools } from './attachments.js';
 import { registerTelegramTools } from './telegram.js';
+import { registerTelegramSendTools } from './telegram-send.js';
 import { registerModelOverrideTools } from './model-overrides.js';
 import { registerAdvisoryTools } from './advisories.js';
 import { registerJournalTools } from './journal.js';
 import { registerProposalTools } from './proposals.js';
+import { registerStatusTool } from './status.js';
 import { getTelegramInstances } from '../../config/schema.js';
 import { originFromEnv } from '../../core/origin.js';
 
@@ -82,8 +89,9 @@ export function registerAllTools(
   registerAdvisoryTools(server, busBaseUrl, agentId);
   registerJournalTools(server, busBaseUrl, agentId);
   registerProposalTools(server, busBaseUrl, agentId);
+  registerStatusTool(server);
   maybeRegisterEmailTool(server, busBaseUrl, agentId, config);
-  maybeRegisterTelegramTools(server, busBaseUrl, config);
+  maybeRegisterTelegramTools(server, busBaseUrl, agentId, config);
 }
 
 /** Register the `send_email` tool when an email adapter + allowlist is configured. */
@@ -102,11 +110,14 @@ function maybeRegisterEmailTool(
 function maybeRegisterTelegramTools(
   server: McpServer,
   busBaseUrl: string,
+  agentId: string,
   config?: AppConfig,
 ): void {
   if (!config) return;
   if (getTelegramInstances(config).length === 0) return;
   registerTelegramTools(server, busBaseUrl);
+  // E81: location/venue/contact/document/rich/ask_input sends plus edit/pin by message id.
+  registerTelegramSendTools(server, busBaseUrl, agentId, config);
 }
 
 /**
@@ -138,8 +149,9 @@ export function registerHeadlessTools(
   registerModelOverrideTools(server, busBaseUrl);
   registerAdvisoryTools(server, busBaseUrl, agentId);
   registerProposalTools(server, busBaseUrl, agentId);
+  registerStatusTool(server);
   maybeRegisterEmailTool(server, busBaseUrl, agentId, config);
-  maybeRegisterTelegramTools(server, busBaseUrl, config);
+  maybeRegisterTelegramTools(server, busBaseUrl, agentId, config);
 }
 
 // ── Core tools (E2) ───────────────────────────────────────────────────────────
@@ -179,13 +191,17 @@ function registerReplyTool(server: McpServer, busBaseUrl: string, agentId: strin
     'reply',
     {
       description:
-        'Send a reply to a message. Looks up the original by message_id, swaps sender/recipient, and posts the outbound message to AgentBus.',
+        'Send a reply to a message. Looks up the original by message_id, swaps sender/recipient, and posts the outbound message to AgentBus. ' +
+        'Pass `choices` to offer single-choice answers (tappable buttons on Telegram). ' +
+        '`silent`, `no_preview` and `pin` tune Telegram delivery (no notification sound, no link card, pin after sending).',
       inputSchema: {
         message_id: z.string().describe('ID of the message to reply to'),
         body: z.string().min(1).describe('Text body of the reply'),
+        choices: choicesSchema.optional().describe(CHOICES_DESCRIPTION),
+        ...sendOptionFields,
       },
     },
-    async ({ message_id, body }) => {
+    async ({ message_id, body, choices, silent, no_preview, pin }) => {
       let original: MessageEnvelope;
       try {
         const res = await fetch(`${busBaseUrl}/api/v1/messages/${message_id}`);
@@ -205,6 +221,14 @@ function registerReplyTool(server: McpServer, busBaseUrl: string, agentId: strin
       // transcripts DB join (that join still runs too, as a fallback/
       // cross-check — this is purely additive).
       const originalConversationId = original.metadata?.['conversation_id'];
+      const baseMetadata: Record<string, unknown> =
+        typeof originalConversationId === 'string' ? { conversation_id: originalConversationId } : {};
+      const withChoices = applyChoices(
+        original.channel,
+        body,
+        applySendOptions(baseMetadata, { silent, no_preview, pin }),
+        choices,
+      );
       const replyBody = {
         channel: original.channel,
         topic: original.topic,
@@ -212,9 +236,9 @@ function registerReplyTool(server: McpServer, busBaseUrl: string, agentId: strin
         recipient: original.sender,
         reply_to: original.id,
         priority: 'normal' as const,
-        payload: { type: 'text' as const, body },
+        payload: { type: 'text' as const, body: withChoices.body },
         metadata: {
-          ...(typeof originalConversationId === 'string' ? { conversation_id: originalConversationId } : {}),
+          ...withChoices.metadata,
           origin: originFromEnv(agentId), // E69
         },
       };

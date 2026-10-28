@@ -61,7 +61,8 @@ The adapter names are the ones `/status` lists. A pause lasts across restarts un
 
 | Command | What it does |
 |---|---|
-| `/pool` | Each pane: free or leased, its conversation, model and idle time, plus parked messages |
+| `/pool` | Each pane: free or leased, its conversation, model and idle time, plus parked messages. Marks the pane serving this chat |
+| `/pool kill` | Kill the window serving this chat, even mid-turn; your next message gets a fresh one |
 | `/pane` | A picture of this conversation's pane as it looks now |
 | `/pane <n>` or `/pane all` | A picture of pane `n`, or every pane (up to 8) |
 | `/rc` or `/rc <n>` | Sends `/remote-control` to this conversation's pane, or pane `n` |

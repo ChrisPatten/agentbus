@@ -55,14 +55,17 @@ import multipart from '@fastify/multipart';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { MessageQueue } from '../core/queue.js';
-import type { AdapterRegistry } from '../core/registry.js';
+import type { AdapterInstance, AdapterRegistry, OutboundActionResult } from '../core/registry.js';
 import type { AppConfig } from '../config/schema.js';
 import type { MessageEnvelope } from '../types/envelope.js';
 import type { PipelineEngine } from '../pipeline/engine.js';
 import type { PipelineContext, RouteTarget } from '../pipeline/types.js';
 import { PENDING_CONTEXT_KEY, SYSTEM_BLOCKS_KEY, SYSTEM_ONLY_KEY, attachSystemBlock, pendingContextFor, readPendingContext, stripSystemMetadata, systemBlocksFor } from '../core/system-block.js';
 import type Database from 'better-sqlite3';
-import type { CommandImage, CommandRegistry, SlashCommandContext } from '../commands/registry.js';
+import type { CommandChoice, CommandImage, CommandRegistry, CommandResponse, SlashCommandContext } from '../commands/registry.js';
+import { isTelegramChannel, choicesSchema } from '../choices/validate.js';
+import { OutboundStore } from '../outbound/store.js';
+import { MAX_CHOICES, MAX_CHOICE_LABEL_LENGTH } from '../choices/types.js';
 import {
   PROVIDER_COMMAND_NAME_RE,
   providerCommandLine,
@@ -430,6 +433,63 @@ export async function sendCommandResponse(
   }
 }
 
+/** How long a numbered-list choice capture stays open (E54). */
+const CHOICE_FOLLOW_UP_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * Deliver a bus-command handler's response, including any interactive
+ * `choices` (E54). On Telegram the choices ride the E74 button path
+ * (`metadata.choices` labels plus `metadata.choice_commands`, the slash command
+ * each tap runs); on every other channel they are appended to the body as a
+ * numbered list and a choice follow-up capture is registered so a reply like
+ * `2` picks one. Choices beyond E74's limit (8, labels of 64 characters) are
+ * clipped here as a backstop; handlers should already respect them.
+ */
+export async function deliverCommandResponse(
+  deps: { db: Database.Database; registry?: AdapterRegistry; commandRegistry?: CommandRegistry },
+  result: { envelope: MessageEnvelope; sessionId: string | null; conversationId: string | null },
+  commandName: string,
+  response: CommandResponse,
+): Promise<void> {
+  const choices: CommandChoice[] = (response.choices ?? []).slice(0, MAX_CHOICES).map((c) => ({
+    label: c.label.length > MAX_CHOICE_LABEL_LENGTH ? `${c.label.slice(0, MAX_CHOICE_LABEL_LENGTH - 1)}…` : c.label,
+    args: c.args,
+  }));
+  const body = response.body ?? (choices.length > 0 ? 'Choose an option:' : '');
+  const images = response.images;
+  if (choices.length === 0) {
+    if (images?.length || response.body !== undefined) {
+      await sendCommandResponse(deps, result, commandName, body, {}, images);
+    }
+    return;
+  }
+
+  if (isTelegramChannel(result.envelope.channel)) {
+    await sendCommandResponse(
+      deps,
+      result,
+      commandName,
+      body,
+      {
+        choices: choices.map((c) => c.label),
+        choice_commands: choices.map((c) => `/${commandName}${c.args.trim() ? ` ${c.args.trim()}` : ''}`),
+      },
+      images,
+    );
+    return;
+  }
+
+  const list = choices.map((c, i) => `${i + 1}. ${c.label}`).join('\n');
+  deps.commandRegistry?.registerChoiceFollowUp(
+    result.envelope.channel,
+    result.envelope.sender,
+    commandName,
+    choices,
+    CHOICE_FOLLOW_UP_TTL_MS,
+  );
+  await sendCommandResponse(deps, result, commandName, `${body}\n\n${list}\n\nReply with a number to choose.`, {}, images);
+}
+
 /**
  * Process an inbound message through the pipeline and enqueue the results.
  *
@@ -522,7 +582,21 @@ export async function processInbound(
     const followUp = deps.commandRegistry.consumeFollowUp(result.envelope.channel, result.envelope.sender);
     if (followUp) {
       const body = result.envelope.payload.body;
-      if (followUp.validate(body)) {
+      // A choice capture (E54) maps the reply to that choice's args; a
+      // validator capture (E36) passes the trimmed body as the single arg.
+      let argsRaw: string | null = null;
+      let args: string[] = [];
+      if (followUp.kind === 'choice') {
+        const choice = followUp.match(body);
+        if (choice) {
+          argsRaw = choice.args.trim();
+          args = argsRaw.split(/\s+/).filter(Boolean);
+        }
+      } else if (followUp.validate(body)) {
+        argsRaw = body.trim();
+        args = [argsRaw];
+      }
+      if (argsRaw !== null) {
         const cmd = deps.commandRegistry.lookup(followUp.command);
         if (cmd && cmd.scope === 'bus') {
           const originAdapter = deps.registry?.lookupPrimaryByChannel(result.envelope.channel);
@@ -530,26 +604,21 @@ export async function processInbound(
             channel: result.envelope.channel,
             sender: result.envelope.sender,
             adapterId: originAdapter?.id ?? 'unknown',
-            argsRaw: body.trim(),
+            argsRaw,
             envelope: result.envelope,
             db: createSafeDatabase(deps.db),
             config: deps.config,
+            routes: result.routes.map((r) => ({ adapterId: r.adapterId, recipientId: r.recipientId })),
           };
 
-          let responseBody: string | undefined;
-          let responseImages: CommandImage[] | undefined;
+          let response: CommandResponse;
           try {
-            const response = await cmd.handler([body.trim()], cmdCtx);
-            responseBody = response.body;
-            responseImages = response.images;
+            response = await cmd.handler(args, cmdCtx);
           } catch (err) {
-            responseBody = `Command error: ${String(err)}`;
+            response = { body: `Command error: ${String(err)}` };
           }
 
-          if (responseImages?.length) responseBody ??= '';
-          if (responseBody !== undefined) {
-            await sendCommandResponse(deps, result, followUp.command, responseBody, {}, responseImages);
-          }
+          await deliverCommandResponse(deps, result, followUp.command, response);
 
           return { ok: true, queued: false, reason: 'command_handled' };
         }
@@ -587,16 +656,19 @@ export async function processInbound(
       envelope: result.envelope,
       db: createSafeDatabase(deps.db),
       config: deps.config,
+      routes: result.routes.map((r) => ({ adapterId: r.adapterId, recipientId: r.recipientId })),
     };
 
     let responseBody: string | undefined;
     let responseImages: CommandImage[] | undefined;
+    let responseChoices: CommandChoice[] | undefined;
 
     if (cmd && cmd.scope === 'bus' && !forced) {
       try {
         const response = await cmd.handler(result.slashCommand.args, cmdCtx);
         responseBody = response.body;
         responseImages = response.images;
+        responseChoices = response.choices;
       } catch (err) {
         responseBody = `Command error: ${String(err)}`;
       }
@@ -646,6 +718,14 @@ export async function processInbound(
     }
     // scope: 'agent' falls through to normal fan-out enqueue below
 
+    if (responseChoices?.length) {
+      await deliverCommandResponse(deps, result, commandName, {
+        body: responseBody,
+        images: responseImages,
+        choices: responseChoices,
+      });
+      return { ok: true, queued: false, reason: 'command_handled' };
+    }
     if (responseImages?.length) responseBody ??= '';
     if (responseBody !== undefined) {
       await sendCommandResponse(deps, result, commandName, responseBody, {}, responseImages);
@@ -1809,6 +1889,67 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
         });
       }
     }
+  );
+
+  // ── Edit / pin a previously sent message (E81) ──────────────────────────────
+  //
+  // `:id` is the bus message id the `reply` / `send_message` tools returned.
+  // The outbound_messages registry (written by the Telegram adapter's send path)
+  // maps it to the chat and platform message; the adapter does the real work.
+
+  const outboundAction = async (
+    id: string,
+    reply: import('fastify').FastifyReply,
+    method: 'editMessage' | 'pinMessage' | 'unpinMessage',
+    call: (adapter: AdapterInstance) => Promise<OutboundActionResult> | undefined,
+  ) => {
+    const row = new OutboundStore(db).get(id);
+    if (!row) {
+      return reply.status(404).send({
+        ok: false,
+        error: `No record of a delivered message for bus message "${id}". Only Telegram messages delivered in the last 30 days can be edited or pinned.`,
+      });
+    }
+    const adapter = registry.lookupPrimaryByChannel(row.channel);
+    if (!adapter || typeof adapter[method] !== 'function') {
+      return reply.status(400).send({ ok: false, error: `Channel "${row.channel}" does not support ${method}` });
+    }
+    try {
+      const result = await call(adapter);
+      if (!result) return reply.status(400).send({ ok: false, error: `Channel "${row.channel}" does not support ${method}` });
+      return result.ok
+        ? { ok: true, note: result.note }
+        : reply.status(400).send({ ok: false, error: result.error });
+    } catch (err) {
+      return reply.status(502).send({ ok: false, error: String(err) });
+    }
+  };
+
+  server.post<{ Params: { id: string }; Body: { body?: unknown; choices?: unknown } }>(
+    '/api/v1/messages/:id/edit',
+    async (req, reply) => {
+      const { body, choices } = req.body ?? {};
+      if (typeof body !== 'string' || body.length === 0) {
+        return reply.status(400).send({ ok: false, error: 'body is required' });
+      }
+      let parsedChoices: unknown[] | undefined;
+      if (choices !== undefined) {
+        const parsed = choicesSchema.safeParse(choices);
+        if (!parsed.success) {
+          return reply.status(400).send({ ok: false, error: parsed.error.issues[0]?.message ?? 'invalid choices' });
+        }
+        parsedChoices = parsed.data;
+      }
+      return outboundAction(req.params.id, reply, 'editMessage', (a) => a.editMessage?.(req.params.id, body, parsedChoices));
+    },
+  );
+
+  server.post<{ Params: { id: string }; Body: { silent?: boolean } }>('/api/v1/messages/:id/pin', async (req, reply) =>
+    outboundAction(req.params.id, reply, 'pinMessage', (a) => a.pinMessage?.(req.params.id, req.body?.silent !== false)),
+  );
+
+  server.post<{ Params: { id: string }; Body: { all?: boolean } }>('/api/v1/messages/:id/unpin', async (req, reply) =>
+    outboundAction(req.params.id, reply, 'unpinMessage', (a) => a.unpinMessage?.(req.params.id, req.body?.all === true)),
   );
 
   // ── Knowledge store endpoints (agent-managed structured knowledge, Phase 1) ──

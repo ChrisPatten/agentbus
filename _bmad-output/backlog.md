@@ -4,6 +4,14 @@ Feature ideas and future work that hasn't been scoped into an epic yet. Promote 
 
 ## Ideas
 
+### Agent status lines → promoted to E79 (backlog 2026-10-27)
+See `_bmad-output/epics/E79-agent-status-lines.md`. While an agent works, Telegram showed a draft line of raw tool usage (tool name plus arguments). E79 replaces it with 2-5 word human phrases ("Checking the calendar") from one shared data file, adds a `status` MCP tool so the agent can write its own line, and keeps a `tool_status.mode: raw` switch. Possible follow-up: show the same line in the Mac app channel.
+### /pool shows the serving window, and /pool kill → promoted to E80 (backlog 2026-10-27)
+See `_bmad-output/epics/E80-pool-current-and-kill.md`. `/pool` marks the pane serving the current chat (`◀ this chat`); `/pool kill` kills that pane regardless of an in-flight turn so the conversation restarts on a fresh window.
+
+### Telegram: multiple-choice buttons from the agent → promoted to E74 (backlog 2026-10-27)
+See `_bmad-output/epics/E74-telegram-choice-buttons.md`. Agents can only send plain text, so a multiple-choice question means the user types an answer. The Telegram adapter already renders inline keyboards and handles taps for E51 approvals, but `reply` / `send_message` cannot attach buttons. E74 adds an optional `choices` argument (1-8 labels) that renders as tappable buttons; a tap is injected back as an ordinary `[tapped] <label>` inbound message. Single choice only; multi-select is out of scope.
+
 ### ~~Route Pebble ring voice notes to a dedicated Telegram group topic~~ → promoted to E37 (backlog 2026-08-31)
 See `_bmad-output/epics/E37-pebble-relay-topic-routing.md`. Turned out smaller than first framed: ring messages already arrive on a distinct `channel: 'pebble'` before the existing Stage 25 channel-relay rule re-submits them onto `telegram:peggy` — no detection mechanism was actually missing. The real gap is that `RelayTargetSchema` has no `topic` field to pin on the re-submitted envelope, and `channel-relay.ts` doesn't forward one. Small, generic fix (2 stories).
 
