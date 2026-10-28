@@ -10,6 +10,10 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+### Added
+- **Succinct live status lines (E79).** While an agent works, Telegram's draft message now shows a short fixed phrase such as "Checking the calendar", "Reading a file" or "Searching the files" instead of the tool name and its arguments. One data file, `scripts/hooks/tool-status-phrases.json`, maps tools (generic tools, MCP tools by prefix, and `Bash` by its command word: `calctl`, `imsg`, `capos`, `remindctl`, ...) to 2-5 word phrases, and both `cc-headless` and the pool hook (`agentbus_tool_status_hook.sh`, read with jq) use it, so they say the same thing. Nothing from a tool's input (paths, commands, message text) is ever put in a line. Each phrase replaces the previous one instead of piling up, and an unchanged phrase causes no edit. `tool_status.mode: raw` (config) or `AGENTBUS_TOOL_STATUS_MODE=raw` (pool hook) restores the old raw lines.
+- **`status` MCP tool (E79).** An agent can set its own status line (`text`: 1-5 plain words, at most 40 characters, sanitised). It holds for the rest of the turn, replacing the fixed phrases, until the next `status` call; the `status` call itself never produces a line, and nothing is shown after delivery or on email. See `docs/MCP_TOOLS.md`.
+
 ## [0.16.0] - 2026-10-27
 
 ### Added

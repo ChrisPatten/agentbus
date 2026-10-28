@@ -1966,6 +1966,22 @@ describe('TelegramAdapter draft-message lifecycle (E29)', () => {
     expect(editedText).not.toContain('One moment');
   });
 
+  it('transient (E79 phrase) lines each replace the previous one, and an identical repeat causes no edit', async () => {
+    adapter.reportToolCall('chris', 'Reading a file', undefined, undefined, true);
+    const draft = getDraftState(adapter, 12345);
+    await draft?.creating;
+
+    adapter.reportToolCall('chris', 'Searching the files', undefined, undefined, true);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(callsTo(telegramFetch.fn, 'editMessageText')).toHaveLength(1);
+    const [, init] = callsTo(telegramFetch.fn, 'editMessageText')[0] as [string, { body: string }];
+    expect((JSON.parse(init.body) as { text: string }).text).toBe('Searching the files');
+
+    adapter.reportToolCall('chris', 'Searching the files', undefined, undefined, true);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(callsTo(telegramFetch.fn, 'editMessageText')).toHaveLength(1);
+  });
+
   it('lines after the placeholder-replacing line append normally', async () => {
     adapter.reportToolCall('chris', 'One moment', undefined, undefined, true);
     await getDraftState(adapter, 12345)?.creating;

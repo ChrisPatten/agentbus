@@ -14,6 +14,7 @@
  *   - advisory_ack (E65)
  *   - journal_complete (E66; live agents only — not registered for cc-headless)
  *   - propose_change (E68)
+ *   - status (E79)
  */
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -34,6 +35,7 @@ import { registerModelOverrideTools } from './model-overrides.js';
 import { registerAdvisoryTools } from './advisories.js';
 import { registerJournalTools } from './journal.js';
 import { registerProposalTools } from './proposals.js';
+import { registerStatusTool } from './status.js';
 import { getTelegramInstances } from '../../config/schema.js';
 import { originFromEnv } from '../../core/origin.js';
 
@@ -82,6 +84,7 @@ export function registerAllTools(
   registerAdvisoryTools(server, busBaseUrl, agentId);
   registerJournalTools(server, busBaseUrl, agentId);
   registerProposalTools(server, busBaseUrl, agentId);
+  registerStatusTool(server);
   maybeRegisterEmailTool(server, busBaseUrl, agentId, config);
   maybeRegisterTelegramTools(server, busBaseUrl, config);
 }
@@ -138,6 +141,7 @@ export function registerHeadlessTools(
   registerModelOverrideTools(server, busBaseUrl);
   registerAdvisoryTools(server, busBaseUrl, agentId);
   registerProposalTools(server, busBaseUrl, agentId);
+  registerStatusTool(server);
   maybeRegisterEmailTool(server, busBaseUrl, agentId, config);
   maybeRegisterTelegramTools(server, busBaseUrl, config);
 }

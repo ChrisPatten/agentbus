@@ -114,7 +114,7 @@ The instance records `slash_commands` from each `init` event. The bus refuses to
 
 ## Typing indicator and tool-call status
 
-When a batch starts, the adapter calls `POST /api/v1/adapters/<channel>/typing` with the contact and topic, so the platform shows activity while `claude -p` starts. Each non-delivery tool call in the stream is summarized (`src/adapters/tool-call-summary.ts`) and sent to `POST /api/v1/adapters/<channel>/tool-status` until the first delivery call. Both are fire-and-forget, no-op on channels without the capability, and skipped for email. See [TELEGRAM_ADAPTER.md](TELEGRAM_ADAPTER.md#live-tool-call-status-stream).
+When a batch starts, the adapter calls `POST /api/v1/adapters/<channel>/typing` with the contact and topic, so the platform shows activity while `claude -p` starts. Each non-delivery tool call in the stream is turned into a short status phrase (E79, `src/adapters/tool-status.ts`; `tool_status.mode: raw` uses the older `src/adapters/tool-call-summary.ts` lines instead) and sent to `POST /api/v1/adapters/<channel>/tool-status` until the first delivery call. Both are fire-and-forget, no-op on channels without the capability, and skipped for email. See [TELEGRAM_ADAPTER.md](TELEGRAM_ADAPTER.md#live-tool-call-status-stream).
 
 ## Failure handling
 
