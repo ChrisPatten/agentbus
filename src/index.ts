@@ -64,7 +64,9 @@ import { ApprovalStore } from './approvals/store.js';
 import { resolveApproval, type ApprovalResolveHooks } from './approvals/resolve.js';
 import { sweepApprovals } from './approvals/sweep.js';
 import { ChoiceStore } from './choices/store.js';
-import { sweepChoices } from './choices/sweep.js';
+import { sweepChoices, sweepInputPrompts } from './choices/sweep.js';
+import { InputPromptStore } from './choices/input-store.js';
+import { OutboundStore } from './outbound/store.js';
 import type { ApprovalDecision } from './approvals/types.js';
 import { OwnerDirectory } from './core/owners.js';
 import { AdvisoryStore } from './advisories/store.js';
@@ -414,11 +416,16 @@ const resolveApprovalFn = (id: string, decision: ApprovalDecision, resolvedBy: s
 // Choice-button prompts (E74): shared by the Telegram send/tap paths and the
 // expiry sweep below.
 const choiceStore = new ChoiceStore(db);
+// E81: ask_input prompts and the outbound-message registry, shared by the Telegram adapter and the sweep.
+const inputPromptStore = new InputPromptStore(db);
+const outboundStore = new OutboundStore(db);
 
 for (const inst of getTelegramInstances(config)) {
   const telegram = new TelegramAdapter({
     ...adapterDeps,
     choiceStore,
+    inputPromptStore,
+    outboundStore,
     instanceName: inst.name ?? undefined,
     instanceConfig: inst,
     resolveApproval: resolveApprovalFn,
@@ -506,6 +513,9 @@ const maintenanceTimer = setInterval(() => {
   sweepChoices({ registry, store: choiceStore }).catch((err) =>
     console.error(`[agentbus] Choice prompt sweep failed: ${String(err)}`),
   );
+  sweepInputPrompts({ registry, store: inputPromptStore }).catch((err) =>
+    console.error(`[agentbus] Input prompt sweep failed: ${String(err)}`),
+  );
   advisories.retryPending().catch((err) =>
     console.error(`[agentbus] Advisory retry failed: ${String(err)}`),
   );
@@ -515,6 +525,9 @@ const maintenanceTimer = setInterval(() => {
 setTimeout(() => {
   sweepChoices({ registry, store: choiceStore }).catch((err) =>
     console.error(`[agentbus] Startup choice prompt sweep failed: ${String(err)}`),
+  );
+  sweepInputPrompts({ registry, store: inputPromptStore }).catch((err) =>
+    console.error(`[agentbus] Startup input prompt sweep failed: ${String(err)}`),
   );
 }, 15_000).unref();
 

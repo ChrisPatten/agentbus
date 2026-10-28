@@ -54,7 +54,7 @@ import multipart from '@fastify/multipart';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { MessageQueue } from '../core/queue.js';
-import type { AdapterRegistry } from '../core/registry.js';
+import type { AdapterInstance, AdapterRegistry, OutboundActionResult } from '../core/registry.js';
 import type { AppConfig } from '../config/schema.js';
 import type { MessageEnvelope } from '../types/envelope.js';
 import type { PipelineEngine } from '../pipeline/engine.js';
@@ -62,7 +62,8 @@ import type { PipelineContext, RouteTarget } from '../pipeline/types.js';
 import { SYSTEM_BLOCKS_KEY, SYSTEM_ONLY_KEY, attachSystemBlock, stripSystemMetadata, systemBlocksFor } from '../core/system-block.js';
 import type Database from 'better-sqlite3';
 import type { CommandChoice, CommandImage, CommandRegistry, CommandResponse, SlashCommandContext } from '../commands/registry.js';
-import { isTelegramChannel } from '../choices/validate.js';
+import { isTelegramChannel, choicesSchema } from '../choices/validate.js';
+import { OutboundStore } from '../outbound/store.js';
 import { MAX_CHOICES, MAX_CHOICE_LABEL_LENGTH } from '../choices/types.js';
 import {
   PROVIDER_COMMAND_NAME_RE,
@@ -1828,6 +1829,67 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
         });
       }
     }
+  );
+
+  // ── Edit / pin a previously sent message (E81) ──────────────────────────────
+  //
+  // `:id` is the bus message id the `reply` / `send_message` tools returned.
+  // The outbound_messages registry (written by the Telegram adapter's send path)
+  // maps it to the chat and platform message; the adapter does the real work.
+
+  const outboundAction = async (
+    id: string,
+    reply: import('fastify').FastifyReply,
+    method: 'editMessage' | 'pinMessage' | 'unpinMessage',
+    call: (adapter: AdapterInstance) => Promise<OutboundActionResult> | undefined,
+  ) => {
+    const row = new OutboundStore(db).get(id);
+    if (!row) {
+      return reply.status(404).send({
+        ok: false,
+        error: `No record of a delivered message for bus message "${id}". Only Telegram messages delivered in the last 30 days can be edited or pinned.`,
+      });
+    }
+    const adapter = registry.lookupPrimaryByChannel(row.channel);
+    if (!adapter || typeof adapter[method] !== 'function') {
+      return reply.status(400).send({ ok: false, error: `Channel "${row.channel}" does not support ${method}` });
+    }
+    try {
+      const result = await call(adapter);
+      if (!result) return reply.status(400).send({ ok: false, error: `Channel "${row.channel}" does not support ${method}` });
+      return result.ok
+        ? { ok: true, note: result.note }
+        : reply.status(400).send({ ok: false, error: result.error });
+    } catch (err) {
+      return reply.status(502).send({ ok: false, error: String(err) });
+    }
+  };
+
+  server.post<{ Params: { id: string }; Body: { body?: unknown; choices?: unknown } }>(
+    '/api/v1/messages/:id/edit',
+    async (req, reply) => {
+      const { body, choices } = req.body ?? {};
+      if (typeof body !== 'string' || body.length === 0) {
+        return reply.status(400).send({ ok: false, error: 'body is required' });
+      }
+      let parsedChoices: unknown[] | undefined;
+      if (choices !== undefined) {
+        const parsed = choicesSchema.safeParse(choices);
+        if (!parsed.success) {
+          return reply.status(400).send({ ok: false, error: parsed.error.issues[0]?.message ?? 'invalid choices' });
+        }
+        parsedChoices = parsed.data;
+      }
+      return outboundAction(req.params.id, reply, 'editMessage', (a) => a.editMessage?.(req.params.id, body, parsedChoices));
+    },
+  );
+
+  server.post<{ Params: { id: string }; Body: { silent?: boolean } }>('/api/v1/messages/:id/pin', async (req, reply) =>
+    outboundAction(req.params.id, reply, 'pinMessage', (a) => a.pinMessage?.(req.params.id, req.body?.silent !== false)),
+  );
+
+  server.post<{ Params: { id: string }; Body: { all?: boolean } }>('/api/v1/messages/:id/unpin', async (req, reply) =>
+    outboundAction(req.params.id, reply, 'unpinMessage', (a) => a.unpinMessage?.(req.params.id, req.body?.all === true)),
   );
 
   // ── Knowledge store endpoints (agent-managed structured knowledge, Phase 1) ──

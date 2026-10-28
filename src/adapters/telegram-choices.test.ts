@@ -76,7 +76,7 @@ describe('buildChoiceKeyboard', () => {
     const buttons = kb.inline_keyboard.flat();
     expect(buttons).toHaveLength(8);
     buttons.forEach((b, i) => {
-      expect(Buffer.byteLength(b.callback_data, 'utf8')).toBeLessThanOrEqual(64);
+      expect(Buffer.byteLength(b.callback_data ?? "", 'utf8')).toBeLessThanOrEqual(64);
       expect(b.callback_data).toBe(`choice:${PROMPT_ID}:${i}`);
     });
   });

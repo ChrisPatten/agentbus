@@ -2,6 +2,13 @@
 
 export type ChoicePromptStatus = 'open' | 'answered' | 'expired';
 
+/** Non-label attributes of a button (E81 buttons v2). */
+export interface ChoiceButtonAttrs {
+  style?: 'primary' | 'success' | 'danger';
+  copy_text?: string;
+  url?: string;
+}
+
 /** A row of `choice_prompts`, with `labels` parsed. */
 export interface ChoicePrompt {
   id: string;
@@ -11,6 +18,8 @@ export interface ChoicePrompt {
   labels: string[];
   /** Per-choice slash-command payloads parallel to `labels` (E54); null/absent entries are plain choices. */
   commands: Array<string | null> | null;
+  /** Per-button style/copy_text/url (E81 buttons v2), parallel to `labels`; null = every button is a plain callback button. */
+  buttons: Array<ChoiceButtonAttrs | null> | null;
   platform_message_id: string | null;
   bus_message_id: string | null;
   status: ChoicePromptStatus;
@@ -30,6 +39,8 @@ export interface ChoicePromptInput {
   labels: string[];
   /** Optional per-choice command payloads, same length as `labels` (E54). */
   commands?: Array<string | null> | null;
+  /** Optional per-button attributes, same length as `labels` (E81). */
+  buttons?: Array<ChoiceButtonAttrs | null> | null;
   platformMessageId: string | null;
   busMessageId: string | null;
 }
@@ -49,3 +60,6 @@ export const MAX_CHOICE_LABEL_LENGTH = 64;
 
 /** Longest slash-command payload a choice may carry. */
 export const MAX_CHOICE_COMMAND_LENGTH = 200;
+
+/** Telegram's limit for a CopyTextButton's text. */
+export const MAX_COPY_TEXT_LENGTH = 256;

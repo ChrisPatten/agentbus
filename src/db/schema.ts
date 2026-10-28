@@ -199,6 +199,21 @@ function loadMigrations(): Migration[] {
       description: 'choice_prompts.commands: per-choice slash-command payloads (E54 on E74)',
       sql: readFileSync(join(migrationsDir, '039_choice_prompt_commands.sql'), 'utf-8'),
     },
+    {
+      version: 40,
+      description: 'outbound_messages registry for edit/pin by bus message id (E81)',
+      sql: readFileSync(join(migrationsDir, '040_outbound_messages.sql'), 'utf-8'),
+    },
+    {
+      version: 41,
+      description: 'choice_prompts.buttons: per-button style/copy_text/url for buttons v2 (E81)',
+      sql: readFileSync(join(migrationsDir, '041_choice_prompt_buttons.sql'), 'utf-8'),
+    },
+    {
+      version: 42,
+      description: 'input_prompts for the ask_input tool (E81)',
+      sql: readFileSync(join(migrationsDir, '042_input_prompts.sql'), 'utf-8'),
+    },
   ];
 }
 

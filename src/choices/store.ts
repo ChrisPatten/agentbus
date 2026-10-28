@@ -9,9 +9,10 @@
 import type Database from 'better-sqlite3';
 import type { AnswerChoiceOutcome, ChoicePrompt, ChoicePromptInput, ChoicePromptStatus } from './types.js';
 
-interface ChoicePromptRow extends Omit<ChoicePrompt, 'labels' | 'commands'> {
+interface ChoicePromptRow extends Omit<ChoicePrompt, 'labels' | 'commands' | 'buttons'> {
   labels: string;
   commands: string | null;
+  buttons: string | null;
 }
 
 function toPrompt(row: ChoicePromptRow): ChoicePrompt {
@@ -19,6 +20,7 @@ function toPrompt(row: ChoicePromptRow): ChoicePrompt {
     ...row,
     labels: JSON.parse(row.labels) as string[],
     commands: row.commands ? (JSON.parse(row.commands) as Array<string | null>) : null,
+    buttons: row.buttons ? (JSON.parse(row.buttons) as ChoicePrompt['buttons']) : null,
   };
 }
 
@@ -34,8 +36,8 @@ export class ChoiceStore {
     this.db
       .prepare(
         `INSERT INTO choice_prompts
-           (id, channel, topic, contact_id, labels, commands, platform_message_id, bus_message_id, status, created_at, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)`,
+           (id, channel, topic, contact_id, labels, commands, buttons, platform_message_id, bus_message_id, status, created_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)`,
       )
       .run(
         input.id,
@@ -44,6 +46,7 @@ export class ChoiceStore {
         input.contactId,
         JSON.stringify(input.labels),
         input.commands && input.commands.some((c) => c) ? JSON.stringify(input.commands) : null,
+        input.buttons && input.buttons.some((b) => b) ? JSON.stringify(input.buttons) : null,
         input.platformMessageId,
         input.busMessageId,
         now.toISOString(),
@@ -142,6 +145,17 @@ export class ChoiceStore {
         .prepare(`SELECT * FROM choice_prompts WHERE status = 'expired' AND platform_message_id IS NOT NULL`)
         .all() as ChoicePromptRow[]
     ).map(toPrompt);
+  }
+
+  /**
+   * E81 (`edit_message`): marks every `open` prompt on a message ref
+   * ("{chatId}:{messageId}") expired and drops the ref, because the message's
+   * keyboard has been replaced or cleared. Returns the number affected.
+   */
+  supersedeByMessageRef(ref: string): number {
+    return this.db
+      .prepare(`UPDATE choice_prompts SET status = 'expired', platform_message_id = NULL WHERE platform_message_id = ? AND status = 'open'`)
+      .run(ref).changes;
   }
 
   /** Marks a prompt's keyboard as cleaned up. */

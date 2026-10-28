@@ -10,7 +10,8 @@
  * Outbound: bus-core's delivery worker calls send(envelope) directly.
  */
 import { createWriteStream, unlinkSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFile } from 'node:fs/promises';
+import { basename, join } from 'node:path';
 import { pipeline as streamPipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { randomUUID } from 'node:crypto';
@@ -21,6 +22,7 @@ import type {
   DeliveryResult,
   HealthStatus,
   CommandManifest,
+  OutboundActionResult,
 } from '../core/registry.js';
 import type { AppConfig } from '../config/schema.js';
 import { processInbound, type InboundMessage, type Attachment } from '../http/api.js';
@@ -35,8 +37,14 @@ import { getThread, upsertThread } from '../pipeline/thread-store.js';
 import type { ApprovalDecision, ApprovalRequest } from '../approvals/types.js';
 import type { ResolveApprovalOutcome } from '../approvals/resolve.js';
 import { ChoiceStore } from '../choices/store.js';
-import { DEFAULT_CHOICE_TTL_MS, MAX_CHOICES, type ChoicePrompt } from '../choices/types.js';
-import { choicesSchema, choiceCommandsSchema } from '../choices/validate.js';
+import { DEFAULT_CHOICE_TTL_MS, MAX_CHOICES, type ChoiceButtonAttrs, type ChoicePrompt } from '../choices/types.js';
+import { choicesSchema, choiceCommandsSchema, choiceAttrs, choiceLabel } from '../choices/validate.js';
+import { InputPromptStore, type InputKind, type InputPrompt } from '../choices/input-store.js';
+import { OutboundStore, type OutboundKind } from '../outbound/store.js';
+import { readSendOptions, type SendOptions } from '../outbound/send-options.js';
+import { parseTelegramSend, type TelegramSend } from '../outbound/telegram-send.js';
+import { checkDocumentPath, resolveSendDirs, MAX_DOCUMENT_BYTES, MAX_PHOTO_BYTES } from '../outbound/documents.js';
+import { splitRichContent, RICH_MAX_CHARS } from '../outbound/rich.js';
 import { renderApprovalOutcome, renderApprovalPending } from '../approvals/render.js';
 
 // Re-exported from the shared media module for backwards-compatible imports.
@@ -144,6 +152,15 @@ interface TelegramMessage {
   pinned_message?: { message_id: number; text?: string; caption?: string; date?: number };
   /** Service message: a forum topic was created. */
   forum_topic_created?: { name: string };
+  /** A location the user shared (E81 ask_input). */
+  location?: { latitude: number; longitude: number; horizontal_accuracy?: number };
+  /** A contact the user shared (E81 ask_input). */
+  contact?: { phone_number: string; first_name: string; last_name?: string; user_id?: number; vcard?: string };
+  /** Users the user picked with a request_users button (E81 ask_input). */
+  users_shared?: {
+    request_id: number;
+    users: Array<{ user_id: number; first_name?: string; last_name?: string; username?: string }>;
+  };
   /** Service message: a forum topic was renamed (name absent if only the icon changed). */
   forum_topic_edited?: { name?: string };
 }
@@ -251,13 +268,17 @@ export interface TelegramAdapterDeps {
    * Pre-resolved per-instance config from getTelegramInstances().
    * When provided, the constructor uses this instead of reading from config.adapters.telegram.
    */
-  instanceConfig?: { token: string; poll_timeout: number; plugin?: string; choice_ttl_hours?: number };
+  instanceConfig?: { token: string; poll_timeout: number; plugin?: string; choice_ttl_hours?: number; send_paths?: string[] };
   /**
    * Store for single-choice button prompts (E74). Defaults to one built over
    * `db` on first use, so tests and deployments that never send `choices`
    * never touch the table.
    */
   choiceStore?: ChoiceStore;
+  /** Store for `ask_input` prompts (E81). Defaults to one built over `db` on first use. */
+  inputPromptStore?: InputPromptStore;
+  /** Registry of delivered messages for edit/pin by bus message id (E81). Defaults to one built over `db`. */
+  outboundStore?: OutboundStore;
   /**
    * Answers an approval request when the human taps Approve/Deny (E51). Absent
    * in tests/deployments without approvals — taps are then acknowledged as
@@ -282,12 +303,59 @@ const CHOICE_SHORT_LABEL = 12;
  * (`choice:<uuid>:<n>`, 45 bytes at most) — Telegram caps it at 64 bytes, so
  * labels are stored server-side.
  */
-export function buildChoiceKeyboard(promptId: string, labels: string[]): { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> } {
-  const buttons = labels.slice(0, MAX_CHOICES).map((text, i) => ({ text, callback_data: `choice:${promptId}:${i}` }));
+export interface InlineButton {
+  text: string;
+  callback_data?: string;
+  url?: string;
+  copy_text?: { text: string };
+  style?: string;
+  disabled?: Record<string, never>;
+}
+
+export function buildChoiceKeyboard(
+  promptId: string,
+  labels: string[],
+  buttons?: Array<ChoiceButtonAttrs | null> | null,
+): { inline_keyboard: InlineButton[][] } {
+  const built = labels.slice(0, MAX_CHOICES).map((text, i): InlineButton => {
+    const attrs = buttons?.[i];
+    // E81: a copy_text or url button has no tap to report back, so it carries no callback_data.
+    const button: InlineButton =
+      attrs?.copy_text !== undefined
+        ? { text, copy_text: { text: attrs.copy_text } }
+        : attrs?.url !== undefined
+          ? { text, url: attrs.url }
+          : { text, callback_data: `choice:${promptId}:${i}` };
+    if (attrs?.style) button.style = attrs.style;
+    return button;
+  });
   const perRow = labels.every((l) => l.length <= CHOICE_SHORT_LABEL) ? 2 : 1;
-  const rows: Array<typeof buttons> = [];
-  for (let i = 0; i < buttons.length; i += perRow) rows.push(buttons.slice(i, i + perRow));
+  const rows: InlineButton[][] = [];
+  for (let i = 0; i < built.length; i += perRow) rows.push(built.slice(i, i + perRow));
   return { inline_keyboard: rows };
+}
+
+/** True if at least one of `count` buttons is a callback button (not copy_text/url) — only then is there anything to answer. */
+function hasCallbackButton(buttons: Array<ChoiceButtonAttrs | null> | undefined, count: number): boolean {
+  if (!buttons) return count > 0;
+  return buttons.some((b) => !b || (b.copy_text === undefined && b.url === undefined));
+}
+
+/** Telegram's description from a failed call, without the "Telegram API error:" boilerplate or any token. */
+function describeTelegramError(err: unknown): string {
+  return String(err instanceof Error ? err.message : err).replace(/^Telegram API error:\s*/, '');
+}
+
+/** A readable pin/unpin failure; the missing-rights case names the exact fix. */
+function describePinError(err: unknown): string {
+  const text = describeTelegramError(err);
+  if (/not enough rights|CHAT_ADMIN_REQUIRED|administrator rights/i.test(text)) {
+    return (
+      'This bot lacks the "Pin Messages" admin right in this chat. In Telegram: open the group, ' +
+      'go to the member list, select this bot, "Edit Admin Rights", and enable "Pin Messages".'
+    );
+  }
+  return text;
 }
 
 // ── Message splitting ─────────────────────────────────────────────────────────
@@ -536,6 +604,14 @@ export class TelegramAdapter implements AdapterInstance {
       console.warn(`${this.tag} getMe failed, create_telegram_topic will be unavailable: ${String(err)}`);
     }
 
+    // E81: keep the outbound-message registry bounded.
+    try {
+      const pruned = this.outbound.prune();
+      if (pruned > 0) console.log(`${this.tag} Pruned ${pruned} old outbound message record(s)`);
+    } catch (err) {
+      console.warn(`${this.tag} Outbound registry prune failed: ${String(err)}`);
+    }
+
     // Launch inbound loop in background (supervised)
     void this.supervise('inboundLoop', () => this.inboundLoop());
 
@@ -594,7 +670,13 @@ export class TelegramAdapter implements AdapterInstance {
   ): Promise<number> {
     const method = editMessageId ? 'editMessageText' : 'sendMessage';
     const params: Record<string, unknown> = editMessageId
-      ? { chat_id: chatId, message_id: editMessageId, text }
+      ? {
+          chat_id: chatId,
+          message_id: editMessageId,
+          text,
+          // The one send option that also applies to an edit (E81 `no_preview`).
+          ...(extraParams?.['link_preview_options'] ? { link_preview_options: extraParams['link_preview_options'] } : {}),
+        }
       : { chat_id: chatId, text, ...extraParams };
     if (replyMarkup) params['reply_markup'] = replyMarkup;
 
@@ -657,7 +739,14 @@ export class TelegramAdapter implements AdapterInstance {
       return { success: false, error: target.error, retryable: false };
     }
     const { chatId, messageThreadId } = target;
-    const extraParams = messageThreadId ? { message_thread_id: messageThreadId } : undefined;
+    // E81 (S81.2): silent / no_preview ride metadata and are applied to the Telegram call.
+    const opts = readSendOptions(envelope.metadata);
+    const extraBase: Record<string, unknown> = {
+      ...(messageThreadId ? { message_thread_id: messageThreadId } : {}),
+      ...(opts.silent ? { disable_notification: true } : {}),
+      ...(opts.no_preview ? { link_preview_options: { is_disabled: true } } : {}),
+    };
+    const extraParams = Object.keys(extraBase).length > 0 ? extraBase : undefined;
 
     // Native reply quote (E28): reply_to_platform_message_id is "chatId:messageId",
     // the same encoding processUpdate uses for platform_message_id everywhere else.
@@ -685,16 +774,28 @@ export class TelegramAdapter implements AdapterInstance {
       };
     }
 
+    // E81: a tool-built Telegram-native message (location, venue, contact,
+    // document, rich message, input prompt). Absent or invalid falls through to
+    // the plain-text body, which is also what every other channel delivers.
+    const special = parseTelegramSend(envelope.metadata['telegram_send']);
+    if (special === null) {
+      console.warn(`${this.tag} Ignoring invalid metadata.telegram_send on ${envelope.id}; sending the plain-text body`);
+    } else if (special) {
+      return this.sendSpecial(envelope, special, { chatId, messageThreadId }, opts, replyParams);
+    }
+
     const parts = splitMessage(envelope.payload.body);
     const key = this.draftKey(chatId, messageThreadId);
 
     // E74: single-choice buttons ride the last part of the message. The
     // prompt id is minted now (it goes in callback_data) and persisted only
     // once Telegram has returned the message id.
-    const choices = this.parseChoices(envelope.metadata['choices']);
+    const parsedChoices = this.parseChoices(envelope.metadata['choices']);
+    const choices = parsedChoices?.labels;
     const choiceCommands = choices ? this.parseChoiceCommands(envelope.metadata['choice_commands'], choices.length) : undefined;
     const choicePromptId = choices ? randomUUID() : undefined;
-    const choiceMarkup = choices && choicePromptId ? buildChoiceKeyboard(choicePromptId, choices) : undefined;
+    const choiceMarkup =
+      choices && choicePromptId ? buildChoiceKeyboard(choicePromptId, choices, parsedChoices?.buttons) : undefined;
 
     // Stop the persistent typing loop for this chat/topic now that we're delivering
     this.stopTypingIndicator(chatId, messageThreadId);
@@ -719,7 +820,7 @@ export class TelegramAdapter implements AdapterInstance {
             chatId,
             parts[0]!,
             draft.messageId,
-            undefined,
+            opts.no_preview ? { link_preview_options: { is_disabled: true } } : undefined,
             parts.length === 1 ? choiceMarkup : undefined,
           );
           sentParts = 1;
@@ -763,8 +864,20 @@ export class TelegramAdapter implements AdapterInstance {
       }
     }
 
-    if (choices && choicePromptId && platformMessageId) {
-      this.persistChoicePrompt(envelope, choicePromptId, choices, `${chatId}:${platformMessageId}`, choiceCommands);
+    if (choices && choicePromptId && platformMessageId && hasCallbackButton(parsedChoices?.buttons, choices.length)) {
+      this.persistChoicePrompt(
+        envelope,
+        choicePromptId,
+        choices,
+        `${chatId}:${platformMessageId}`,
+        choiceCommands,
+        parsedChoices?.buttons,
+      );
+    }
+
+    if (platformMessageId) {
+      this.recordOutbound(envelope, { chatId, threadId: messageThreadId, messageId: Number(platformMessageId), kind: 'text', parts: parts.length });
+      if (opts.pin) await this.pinQuietly(chatId, Number(platformMessageId));
     }
 
     this.lastActivity = new Date().toISOString();
@@ -800,6 +913,496 @@ export class TelegramAdapter implements AdapterInstance {
       return { success: true, platformMessageId: String(data.result?.message_id) };
     } catch (err) {
       return { success: false, error: String(err), retryable: true };
+    }
+  }
+
+  // ── E81 outbound registry ─────────────────────────────────────────────────
+
+  private outboundStoreInstance?: OutboundStore;
+
+  private get outbound(): OutboundStore {
+    this.outboundStoreInstance ??= this.deps.outboundStore ?? new OutboundStore(this.deps.db);
+    return this.outboundStoreInstance;
+  }
+
+  private inputStoreInstance?: InputPromptStore;
+
+  private get inputStore(): InputPromptStore {
+    this.inputStoreInstance ??= this.deps.inputPromptStore ?? new InputPromptStore(this.deps.db);
+    return this.inputStoreInstance;
+  }
+
+  /** Records a delivered message so edit_message / pin_message can find it by bus message id. Never throws. */
+  private recordOutbound(
+    envelope: MessageEnvelope,
+    sent: { chatId: number; threadId?: number | undefined; messageId: number; kind: OutboundKind; parts?: number },
+  ): void {
+    if (!envelope.id || !Number.isInteger(sent.messageId)) return;
+    try {
+      this.outbound.record({
+        busMessageId: envelope.id,
+        channel: envelope.channel,
+        chatId: sent.chatId,
+        threadId: sent.threadId ?? null,
+        platformMessageId: sent.messageId,
+        kind: sent.kind,
+        parts: sent.parts ?? 1,
+      });
+    } catch (err) {
+      console.error(`${this.tag} Failed to record outbound message ${envelope.id}: ${String(err)}`);
+    }
+  }
+
+  /** Pins right after a send (the `pin` option). A failure is logged: the message itself was delivered. */
+  private async pinQuietly(chatId: number, messageId: number): Promise<void> {
+    try {
+      await this.callTelegram('pinChatMessage', { chat_id: chatId, message_id: messageId, disable_notification: true });
+    } catch (err) {
+      console.error(`${this.tag} Pin after send failed for ${chatId}:${messageId}: ${describeTelegramError(err)}`);
+    }
+  }
+
+  // ── E81 Telegram-native sends ─────────────────────────────────────────────
+
+  /**
+   * Deletes a pending tool-status draft so a native message (which cannot
+   * overwrite it the way text can) does not leave a stale status line behind.
+   */
+  private async discardDraft(chatId: number, messageThreadId?: number): Promise<void> {
+    const key = this.draftKey(chatId, messageThreadId);
+    const draft = this.draftMessages.get(key);
+    if (!draft) return;
+    if (draft.timer) clearTimeout(draft.timer);
+    this.draftMessages.delete(key);
+    if (draft.creating) await draft.creating.catch(() => {});
+    if (draft.messageId !== null) {
+      await this.callTelegram('deleteMessage', { chat_id: chatId, message_id: draft.messageId }).catch(() => {});
+    }
+  }
+
+  /** Delivers one `metadata.telegram_send` message (location, venue, contact, document, photo, rich, input prompt). */
+  private async sendSpecial(
+    envelope: MessageEnvelope,
+    spec: TelegramSend,
+    target: { chatId: number; messageThreadId?: number | undefined },
+    opts: SendOptions,
+    replyParams: { reply_parameters: { message_id: number; allow_sending_without_reply: true } } | undefined,
+  ): Promise<DeliveryResult> {
+    const { chatId, messageThreadId } = target;
+    this.stopTypingIndicator(chatId, messageThreadId);
+    await this.discardDraft(chatId, messageThreadId);
+
+    const base: Record<string, unknown> = {
+      chat_id: chatId,
+      ...(messageThreadId ? { message_thread_id: messageThreadId } : {}),
+      ...(opts.silent ? { disable_notification: true } : {}),
+      ...replyParams,
+    };
+    const fallbackToText = async (reason: string): Promise<DeliveryResult> => {
+      console.warn(`${this.tag} ${spec.kind} send for ${envelope.id} fell back to the plain-text body: ${reason}`);
+      const metadata = { ...envelope.metadata };
+      delete metadata['telegram_send'];
+      return this.send({ ...envelope, metadata });
+    };
+
+    try {
+      let sent: { messageId: number; kind: OutboundKind; parts?: number } | DeliveryResult;
+      switch (spec.kind) {
+        case 'location': {
+          const m = await this.callTelegram<TelegramMessage>('sendLocation', { ...base, latitude: spec.latitude, longitude: spec.longitude });
+          sent = { messageId: m.message_id, kind: 'location' };
+          break;
+        }
+        case 'venue': {
+          const m = await this.callTelegram<TelegramMessage>('sendVenue', {
+            ...base,
+            latitude: spec.latitude,
+            longitude: spec.longitude,
+            title: spec.title,
+            address: spec.address,
+          });
+          sent = { messageId: m.message_id, kind: 'venue' };
+          break;
+        }
+        case 'contact': {
+          const m = await this.callTelegram<TelegramMessage>('sendContact', {
+            ...base,
+            phone_number: spec.phone_number,
+            first_name: spec.first_name,
+            ...(spec.last_name ? { last_name: spec.last_name } : {}),
+            ...(spec.vcard ? { vcard: spec.vcard } : {}),
+          });
+          sent = { messageId: m.message_id, kind: 'contact' };
+          break;
+        }
+        case 'document':
+        case 'photo':
+          sent = await this.sendFile(envelope, spec, base);
+          break;
+        case 'rich':
+          sent = await this.sendRichSpecial(envelope, spec, base, chatId);
+          break;
+        case 'ask_input':
+          sent = await this.sendAskInput(envelope, spec, base, target);
+          break;
+      }
+      if ('success' in sent) {
+        // A rich message Telegram rejected degrades to the plain-text body (S81.9 fallback).
+        if (!sent.success && spec.kind === 'rich' && sent.retryable === false && sent.error?.startsWith('rich-fallback')) {
+          return fallbackToText(sent.error);
+        }
+        return sent;
+      }
+      this.recordOutbound(envelope, { chatId, threadId: messageThreadId, ...sent });
+      if (opts.pin) await this.pinQuietly(chatId, sent.messageId);
+      this.lastActivity = new Date().toISOString();
+      return { success: true, platformMessageId: String(sent.messageId) };
+    } catch (err) {
+      const status = (err as { status?: number }).status;
+      return { success: false, error: describeTelegramError(err), retryable: status === undefined || status >= 500 || status === 429 };
+    }
+  }
+
+  /** `sendDocument` / `sendPhoto` of an allow-listed local file; every rejection happens before any upload. */
+  private async sendFile(
+    envelope: MessageEnvelope,
+    spec: Extract<TelegramSend, { kind: 'document' | 'photo' }>,
+    base: Record<string, unknown>,
+  ): Promise<{ messageId: number; kind: OutboundKind } | DeliveryResult> {
+    const limit = spec.kind === 'photo' ? MAX_PHOTO_BYTES : MAX_DOCUMENT_BYTES;
+    const check = checkDocumentPath(
+      spec.path,
+      resolveSendDirs(this.deps.config, this.deps.instanceConfig?.send_paths),
+      limit,
+    );
+    if (!check.ok) {
+      console.error(`${this.tag} Refused to send ${spec.kind} for ${envelope.id}: ${check.error}`);
+      return { success: false, error: `send_${spec.kind} refused: ${check.error}`, retryable: false };
+    }
+    const bytes = await readFile(check.realPath);
+    if (bytes.length > limit) {
+      return { success: false, error: `send_${spec.kind} refused: file grew past the ${limit} byte upload limit`, retryable: false };
+    }
+    const form = new FormData();
+    for (const [k, v] of Object.entries(base)) form.append(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
+    if (spec.caption) form.append('caption', spec.caption);
+    form.append(spec.kind, new Blob([new Uint8Array(bytes)]), basename(spec.path));
+    const m = await this.callTelegramForm<TelegramMessage>(spec.kind === 'photo' ? 'sendPhoto' : 'sendDocument', form);
+    return { messageId: m.message_id, kind: spec.kind };
+  }
+
+  /**
+   * `sendRichMessage` in chunks (S81.9). The choice keyboard rides the last
+   * chunk. If Telegram rejects the rich call itself (feature unavailable or
+   * unparsable markup) before anything was sent, signals the caller to send the
+   * plain-text body instead.
+   */
+  private async sendRichSpecial(
+    envelope: MessageEnvelope,
+    spec: Extract<TelegramSend, { kind: 'rich' }>,
+    base: Record<string, unknown>,
+    chatId: number,
+  ): Promise<{ messageId: number; kind: OutboundKind; parts: number } | DeliveryResult> {
+    const chunks = splitRichContent(spec.content, spec.format);
+    const parsedChoices = this.parseChoices(envelope.metadata['choices']);
+    const promptId = parsedChoices ? randomUUID() : undefined;
+    const markup = parsedChoices && promptId ? buildChoiceKeyboard(promptId, parsedChoices.labels, parsedChoices.buttons) : undefined;
+
+    let lastId = 0;
+    for (let i = 0; i < chunks.length; i++) {
+      if (i > 0) await this.sleep(200);
+      const params: Record<string, unknown> = {
+        ...base,
+        rich_message: { [spec.format]: chunks[i] },
+        ...(i === chunks.length - 1 && markup ? { reply_markup: markup } : {}),
+      };
+      if (i > 0) delete params['reply_parameters'];
+      try {
+        const m = await this.callTelegram<TelegramMessage>('sendRichMessage', params);
+        lastId = m.message_id;
+      } catch (err) {
+        const status = (err as { status?: number }).status;
+        if (i === 0 && (status === 400 || status === 404)) {
+          return { success: false, error: `rich-fallback: ${describeTelegramError(err)}`, retryable: false };
+        }
+        const prefix = i > 0 ? `Partial delivery (${i}/${chunks.length} parts sent): ` : '';
+        return { success: false, error: `${prefix}${describeTelegramError(err)}`, retryable: true };
+      }
+    }
+    if (parsedChoices && promptId && hasCallbackButton(parsedChoices.buttons, parsedChoices.labels.length)) {
+      this.persistChoicePrompt(envelope, promptId, parsedChoices.labels, `${chatId}:${lastId}`, undefined, parsedChoices.buttons);
+    }
+    return { messageId: lastId, kind: 'rich', parts: chunks.length };
+  }
+
+  // ── E81 ask_input ─────────────────────────────────────────────────────────
+
+  private inputTtlMs(): number {
+    const hours = this.deps.instanceConfig?.choice_ttl_hours;
+    return hours ? hours * 60 * 60 * 1000 : DEFAULT_CHOICE_TTL_MS;
+  }
+
+  /**
+   * Sends an input prompt: a one-time reply keyboard with request_location /
+   * request_contact / request_users in a private chat, otherwise a force_reply
+   * prompt. Telegram only allows the keyboard buttons in private chats (S81.1),
+   * so a group topic degrades to force_reply and the user shares from the
+   * attach menu.
+   */
+  private async sendAskInput(
+    envelope: MessageEnvelope,
+    spec: Extract<TelegramSend, { kind: 'ask_input' }>,
+    base: Record<string, unknown>,
+    target: { chatId: number; messageThreadId?: number | undefined },
+  ): Promise<{ messageId: number; kind: OutboundKind }> {
+    const { chatId, messageThreadId } = target;
+    const useKeyboard = chatId > 0 && spec.input !== 'text';
+    const requestId = spec.input === 'person' ? Math.floor(Math.random() * 2_000_000_000) + 1 : undefined;
+    let markup: Record<string, unknown>;
+    if (useKeyboard) {
+      const button =
+        spec.input === 'location'
+          ? { text: 'Share my location', request_location: true }
+          : spec.input === 'contact'
+            ? { text: 'Share my contact', request_contact: true }
+            : {
+                text: 'Choose a person',
+                request_users: { request_id: requestId, max_quantity: 1, request_name: true, request_username: true },
+              };
+      markup = { keyboard: [[button]], one_time_keyboard: true, resize_keyboard: true };
+    } else {
+      markup = { force_reply: true, ...(spec.placeholder ? { input_field_placeholder: spec.placeholder } : {}) };
+    }
+    const hint =
+      !useKeyboard && spec.input !== 'text'
+        ? `\n\n(Reply with the ${spec.input === 'person' ? 'person\'s name' : spec.input}; in this chat use the attach menu to share a ${spec.input === 'person' ? 'contact' : spec.input}.)`
+        : '';
+    const extra: Record<string, unknown> = { ...base };
+    delete extra['chat_id'];
+    const messageId = await this.deliverText(chatId, `${envelope.payload.type === 'text' ? envelope.payload.body : ''}${hint}`, undefined, extra, markup);
+
+    const recipient = envelope.recipient.startsWith('contact:') ? envelope.recipient.slice('contact:'.length) : null;
+    try {
+      this.inputStore.create(
+        {
+          id: randomUUID(),
+          channel: envelope.channel,
+          topic: envelope.topic || 'general',
+          contactId: recipient,
+          kind: spec.input as InputKind,
+          chatId,
+          threadId: messageThreadId ?? null,
+          platformMessageId: messageId,
+          busMessageId: envelope.id || null,
+          requestId: requestId ?? null,
+          keyboard: useKeyboard,
+        },
+        this.inputTtlMs(),
+      );
+    } catch (err) {
+      console.error(`${this.tag} Failed to persist input prompt for ${envelope.id}: ${String(err)}`);
+    }
+    return { messageId, kind: 'input' };
+  }
+
+  /** Removes a lingering reply keyboard by sending then deleting a short message that carries remove_keyboard. */
+  private async removeReplyKeyboard(chatId: number, messageThreadId: number | null): Promise<void> {
+    const sent = await this.callTelegram<TelegramMessage>('sendMessage', {
+      chat_id: chatId,
+      ...(messageThreadId ? { message_thread_id: messageThreadId } : {}),
+      text: 'Done',
+      disable_notification: true,
+      reply_markup: { remove_keyboard: true },
+    });
+    await this.callTelegram('deleteMessage', { chat_id: chatId, message_id: sent.message_id }).catch(() => {});
+  }
+
+  /** The sweep's path for an answered or expired prompt whose reply keyboard may still show. */
+  async finalizeInputPrompt(prompt: InputPrompt): Promise<void> {
+    if (!prompt.keyboard) return;
+    await this.removeReplyKeyboard(prompt.chat_id, prompt.thread_id);
+  }
+
+  /** The contact id for a Telegram sender id, or undefined. */
+  private contactForSender(senderId: string): string | undefined {
+    return [...this.contactChatIdMap.entries()].find(([, userId]) => String(userId) === senderId)?.[0];
+  }
+
+  /** Text, structured metadata and prompt kind for an inbound location / contact / users_shared message. */
+  private describeSharedPayload(
+    msg: TelegramMessage,
+  ): { body: string; metadata: Record<string, unknown>; kind: InputKind } | undefined {
+    if (msg.location) {
+      const { latitude, longitude, horizontal_accuracy } = msg.location;
+      return {
+        body: `[location] ${latitude}, ${longitude}`,
+        metadata: { location: { latitude, longitude, ...(horizontal_accuracy !== undefined ? { horizontal_accuracy } : {}) } },
+        kind: 'location',
+      };
+    }
+    if (msg.contact) {
+      const c = msg.contact;
+      const name = [c.first_name, c.last_name].filter(Boolean).join(' ');
+      return {
+        body: `[contact] ${name}, ${c.phone_number}`,
+        metadata: {
+          contact: {
+            phone_number: c.phone_number,
+            first_name: c.first_name,
+            ...(c.last_name ? { last_name: c.last_name } : {}),
+            ...(c.user_id !== undefined ? { user_id: c.user_id } : {}),
+            ...(c.vcard ? { vcard: c.vcard } : {}),
+          },
+        },
+        kind: 'contact',
+      };
+    }
+    if (msg.users_shared) {
+      const people = msg.users_shared.users.map((u) => {
+        const name = [u.first_name, u.last_name].filter(Boolean).join(' ');
+        return [name || `user ${u.user_id}`, u.username ? `@${u.username}` : ''].filter(Boolean).join(' ');
+      });
+      return {
+        body: `[shared person] ${people.join('; ')}`,
+        metadata: { users_shared: { request_id: msg.users_shared.request_id, users: msg.users_shared.users } },
+        kind: 'person',
+      };
+    }
+    return undefined;
+  }
+
+  /** The open input prompt an inbound message answers, if any. */
+  private matchInputPrompt(msg: TelegramMessage, shared: { kind: InputKind } | undefined, contactId: string | undefined): InputPrompt | null {
+    if (!contactId) return null;
+    try {
+      const replyTo = msg.reply_to_message?.message_id;
+      if (replyTo !== undefined) {
+        const byMessage = this.inputStore.findOpenByMessage(msg.chat.id, replyTo, contactId);
+        if (byMessage) return byMessage;
+      }
+      if (!shared) return null;
+      const threadId = msg.is_topic_message && msg.message_thread_id ? msg.message_thread_id : null;
+      const prompt = this.inputStore.findOpen(shared.kind, msg.chat.id, threadId, contactId);
+      if (prompt && shared.kind === 'person' && prompt.request_id !== null && msg.users_shared?.request_id !== prompt.request_id) return null;
+      return prompt;
+    } catch (err) {
+      console.error(`${this.tag} Input prompt lookup failed: ${String(err)}`);
+      return null;
+    }
+  }
+
+  // ── E81 edit / pin by bus message id ──────────────────────────────────────
+
+  private lookupOutbound(busMessageId: string): { row: NonNullable<ReturnType<OutboundStore['get']>> } | { error: string } {
+    const row = this.outbound.get(busMessageId);
+    if (!row) {
+      return {
+        error: `No record of a Telegram message sent for bus message "${busMessageId}". Only messages this bot delivered recently (30 days) can be edited or pinned.`,
+      };
+    }
+    if (!this.ownsChannel(row.channel)) return { error: `Message "${busMessageId}" was not sent by adapter "${this.id}"` };
+    return { row };
+  }
+
+  async editMessage(busMessageId: string, body: string, choices?: unknown[]): Promise<OutboundActionResult> {
+    const found = this.lookupOutbound(busMessageId);
+    if ('error' in found) return { ok: false, error: found.error };
+    const { row } = found;
+    if (row.kind !== 'text' && row.kind !== 'rich') {
+      return { ok: false, error: `A ${row.kind} message cannot be edited; only text and rich messages can` };
+    }
+    if (row.parts > 1) {
+      return { ok: false, error: `That message was delivered in ${row.parts} parts and cannot be edited; send a new message instead` };
+    }
+    const limit = row.kind === 'rich' ? RICH_MAX_CHARS : MAX_MESSAGE_LENGTH;
+    if (body.length > limit) {
+      return { ok: false, error: `The new text is ${body.length} characters; an edit is limited to ${limit}` };
+    }
+    let parsed: ReturnType<TelegramAdapter['parseChoices']>;
+    if (choices !== undefined) {
+      parsed = this.parseChoices(choices);
+      if (!parsed) return { ok: false, error: 'Invalid choices: 1-8 labels of at most 64 characters (or button objects)' };
+    }
+    const promptId = parsed ? randomUUID() : undefined;
+    // editMessageText without a keyboard clears it, so "no choices" means "clear the keyboard".
+    const markup = parsed && promptId ? buildChoiceKeyboard(promptId, parsed.labels, parsed.buttons) : { inline_keyboard: [] };
+    const ref = `${row.chat_id}:${row.platform_message_id}`;
+
+    try {
+      if (row.kind === 'rich') {
+        await this.callTelegram('editMessageText', {
+          chat_id: row.chat_id,
+          message_id: row.platform_message_id,
+          rich_message: { markdown: body },
+          reply_markup: markup,
+        });
+      } else {
+        await this.deliverText(row.chat_id, body, row.platform_message_id, undefined, markup);
+      }
+    } catch (err) {
+      if (/not modified/i.test(String(err))) {
+        // Same text and keyboard: nothing to do, and not an error for the agent.
+        return { ok: true, note: 'The message already had that text; nothing changed' };
+      }
+      return { ok: false, error: describeTelegramError(err) };
+    }
+
+    // The old keyboard (and any prompt behind it) is gone either way.
+    this.choiceStore.supersedeByMessageRef(ref);
+    if (parsed && promptId && hasCallbackButton(parsed.buttons, parsed.labels.length)) {
+      const topic = row.thread_id ? topicForThreadKey(`${row.chat_id}:${row.thread_id}`) : 'general';
+      const contactId = row.chat_id > 0 ? (this.contactForChat(row.chat_id) ?? null) : null;
+      this.persistChoicePromptRow({
+        id: promptId,
+        channel: row.channel,
+        topic,
+        contactId,
+        labels: parsed.labels,
+        buttons: parsed.buttons ?? null,
+        platformMessageId: ref,
+        busMessageId: busMessageId,
+      });
+    }
+    this.lastActivity = new Date().toISOString();
+    return { ok: true };
+  }
+
+  private contactForChat(chatId: number): string | undefined {
+    return [...this.contactChatIdMap.entries()].find(([, id]) => id === chatId)?.[0];
+  }
+
+  async pinMessage(busMessageId: string, silent: boolean): Promise<OutboundActionResult> {
+    const found = this.lookupOutbound(busMessageId);
+    if ('error' in found) return { ok: false, error: found.error };
+    try {
+      await this.callTelegram('pinChatMessage', {
+        chat_id: found.row.chat_id,
+        message_id: found.row.platform_message_id,
+        disable_notification: silent,
+      });
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: describePinError(err) };
+    }
+  }
+
+  async unpinMessage(busMessageId: string, all: boolean): Promise<OutboundActionResult> {
+    const found = this.lookupOutbound(busMessageId);
+    if ('error' in found) return { ok: false, error: found.error };
+    const { row } = found;
+    try {
+      if (all) {
+        if (row.thread_id) {
+          await this.callTelegram('unpinAllForumTopicMessages', { chat_id: row.chat_id, message_thread_id: row.thread_id });
+        } else {
+          await this.callTelegram('unpinAllChatMessages', { chat_id: row.chat_id });
+        }
+      } else {
+        await this.callTelegram('unpinChatMessage', { chat_id: row.chat_id, message_id: row.platform_message_id });
+      }
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: describePinError(err) };
     }
   }
 
@@ -1156,15 +1759,20 @@ export class TelegramAdapter implements AdapterInstance {
     return this.choiceStoreInstance;
   }
 
-  /** `metadata.choices` if it is a valid label list (see choicesSchema), else undefined (message sent without buttons). */
-  private parseChoices(raw: unknown): string[] | undefined {
+  /**
+   * `metadata.choices` if valid (see choicesSchema), else undefined (message sent without buttons).
+   * `buttons` is parallel to `labels` and present only when some item is an E81 button object.
+   */
+  private parseChoices(raw: unknown): { labels: string[]; buttons?: Array<ChoiceButtonAttrs | null> } | undefined {
     if (raw === undefined) return undefined;
     const parsed = choicesSchema.safeParse(raw);
     if (!parsed.success) {
       console.warn(`${this.tag} Ignoring invalid metadata.choices: ${parsed.error.issues[0]?.message ?? 'invalid'}`);
       return undefined;
     }
-    return parsed.data;
+    const labels = parsed.data.map(choiceLabel);
+    const attrs = parsed.data.map(choiceAttrs);
+    return attrs.some((a) => a) ? { labels, buttons: attrs } : { labels };
   }
 
   /**
@@ -1189,29 +1797,32 @@ export class TelegramAdapter implements AdapterInstance {
     labels: string[],
     platformMessageId: string,
     commands?: Array<string | null>,
+    buttons?: Array<ChoiceButtonAttrs | null>,
   ): void {
     const recipient = envelope.recipient.startsWith('contact:') ? envelope.recipient.slice('contact:'.length) : null;
+    this.persistChoicePromptRow({
+      id,
+      channel: envelope.channel,
+      topic: envelope.topic || 'general',
+      contactId: recipient,
+      labels,
+      commands: commands ?? null,
+      buttons: buttons ?? null,
+      platformMessageId,
+      busMessageId: envelope.id || null,
+    });
+  }
+
+  private persistChoicePromptRow(input: Parameters<ChoiceStore['create']>[0]): void {
     const ttlMs = this.deps.instanceConfig?.choice_ttl_hours
       ? this.deps.instanceConfig.choice_ttl_hours * 60 * 60 * 1000
       : DEFAULT_CHOICE_TTL_MS;
     try {
-      this.choiceStore.create(
-        {
-          id,
-          channel: envelope.channel,
-          topic: envelope.topic || 'general',
-          contactId: recipient,
-          labels,
-          commands: commands ?? null,
-          platformMessageId,
-          busMessageId: envelope.id || null,
-        },
-        ttlMs,
-      );
+      this.choiceStore.create(input, ttlMs);
     } catch (err) {
       // The message is already out; a failed insert means its buttons will
       // answer "Prompt not found". Log loudly rather than fail the delivery.
-      console.error(`${this.tag} Failed to persist choice prompt ${id}: ${String(err)}`);
+      console.error(`${this.tag} Failed to persist choice prompt ${input.id}: ${String(err)}`);
     }
   }
 
@@ -1318,10 +1929,30 @@ export class TelegramAdapter implements AdapterInstance {
     }
 
     if (chat !== undefined && messageId !== undefined) {
-      await this.editChoiceMessage(chat, messageId, query.message?.text, result.label);
+      // E81 buttons v2: keep the chosen button, disabled, instead of dropping the keyboard;
+      // E74 prompts (plain labels) and any failure of the new edit keep the "You chose" text.
+      const kept = prompt.buttons ? await this.keepChosenButton(chat, messageId, result.label, prompt.buttons[index]) : false;
+      if (!kept) await this.editChoiceMessage(chat, messageId, query.message?.text, result.label);
       this.choiceStore.clearMessageRef(promptId);
     }
     await answer(`Chose: ${result.label}`.slice(0, 200));
+  }
+
+  /** Replaces the keyboard with just the chosen button, disabled (Bot API 10.3 `DisabledButton`). False if Telegram refused. */
+  private async keepChosenButton(chatId: number, messageId: number, label: string, attrs: ChoiceButtonAttrs | null | undefined): Promise<boolean> {
+    try {
+      await this.callTelegram('editMessageReplyMarkup', {
+        chat_id: chatId,
+        message_id: messageId,
+        reply_markup: {
+          inline_keyboard: [[{ text: `✓ ${label}`.slice(0, 64), disabled: {}, ...(attrs?.style ? { style: attrs.style } : {}) }]],
+        },
+      });
+      return true;
+    } catch (err) {
+      console.warn(`${this.tag} Could not keep the chosen button disabled on ${chatId}:${messageId}, falling back: ${String(err)}`);
+      return false;
+    }
   }
 
   /** Appends "You chose: <label>" to the prompt message and removes its buttons; falls back to just removing them. */
@@ -1484,6 +2115,16 @@ export class TelegramAdapter implements AdapterInstance {
       throw Object.assign(new Error(`Telegram API error: ${data.description ?? res.status}`), {
         status: res.status,
       });
+    }
+    return data.result as T;
+  }
+
+  /** Multipart variant of callTelegram, for file uploads. */
+  private async callTelegramForm<T>(method: string, form: FormData): Promise<T> {
+    const res = await fetch(`${TELEGRAM_API_BASE}/bot${this.token}/${method}`, { method: 'POST', body: form });
+    const data = (await res.json()) as TelegramApiResponse<T>;
+    if (!res.ok || !data.ok) {
+      throw Object.assign(new Error(`Telegram API error: ${data.description ?? res.status}`), { status: res.status });
     }
     return data.result as T;
   }
@@ -1791,7 +2432,10 @@ export class TelegramAdapter implements AdapterInstance {
     // Detect an inbound image or file attachment.
     const attachmentSource = this.extractAttachmentSource(msg);
 
-    const body = msg.text ?? msg.caption ?? '';
+    // E81 ask_input answers: a shared location, contact or picked user arrives as
+    // a structured message with no text.
+    const shared = this.describeSharedPayload(msg);
+    const body = msg.text ?? msg.caption ?? shared?.body ?? '';
     if (!body && !attachmentSource) {
       console.log(`${this.tag} Skipped non-text update ${update.update_id} from ${senderId}`);
       return true;
@@ -1856,13 +2500,18 @@ export class TelegramAdapter implements AdapterInstance {
         }
       : undefined;
 
+    const answeredPrompt = this.matchInputPrompt(msg, shared, this.contactForSender(senderId));
+
     try {
       const message: InboundMessage = {
         channel,
         ...(topic ? { topic } : {}),
         sender: senderId,
+        ...(answeredPrompt?.bus_message_id ? { reply_to: answeredPrompt.bus_message_id } : {}),
         payload: { type: 'text', body: effectiveBody },
         metadata: {
+          ...(shared?.metadata ?? {}),
+          ...(answeredPrompt ? { input_prompt_id: answeredPrompt.id, input_kind: answeredPrompt.kind } : {}),
           telegram_chat_id: msg.chat.id,
           telegram_message_id: msg.message_id,
           // Encodes both IDs so react() can call setMessageReaction without a separate lookup
@@ -1874,6 +2523,14 @@ export class TelegramAdapter implements AdapterInstance {
       };
 
       await processInbound(message, this.deps);
+      if (answeredPrompt) {
+        this.inputStore.markAnswered(answeredPrompt.id);
+        if (answeredPrompt.keyboard) {
+          this.finalizeInputPrompt(answeredPrompt)
+            .then(() => this.inputStore.clearKeyboard(answeredPrompt.id))
+            .catch((err) => console.error(`${this.tag} Could not remove the reply keyboard: ${String(err)}`));
+        }
+      }
       this.lastActivity = new Date().toISOString();
       return true;
     } catch (err) {

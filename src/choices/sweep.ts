@@ -9,6 +9,7 @@
  */
 import type { AdapterRegistry } from '../core/registry.js';
 import type { ChoiceStore } from './store.js';
+import type { InputPromptStore } from './input-store.js';
 import type { ChoicePrompt } from './types.js';
 
 export interface SweepChoicesDeps {
@@ -50,4 +51,36 @@ async function clearOne(deps: SweepChoicesDeps, prompt: ChoicePrompt): Promise<b
     console.error(`[choices] sweep: finalizeChoicePrompt failed for ${prompt.id}: ${String(err)}`);
     return false;
   }
+}
+
+// ── ask_input reply keyboards (E81 S81.8) ────────────────────────────────────
+
+export interface SweepInputPromptsDeps {
+  registry: AdapterRegistry;
+  store: InputPromptStore;
+}
+
+/**
+ * Expires every `open` input prompt past its `expires_at`, then asks the
+ * owning adapter (`finalizeInputPrompt`) to remove the reply keyboard of every
+ * answered or expired prompt that still shows one.
+ */
+export async function sweepInputPrompts(
+  deps: SweepInputPromptsDeps,
+  nowIso: string = new Date().toISOString(),
+): Promise<{ expired: number; keyboardsCleared: number }> {
+  const expired = deps.store.expireDue(nowIso);
+  let keyboardsCleared = 0;
+  for (const prompt of deps.store.listNeedingKeyboardCleanup()) {
+    const adapter = deps.registry.lookupPrimaryByChannel(prompt.channel);
+    if (!adapter?.finalizeInputPrompt) continue;
+    try {
+      await adapter.finalizeInputPrompt(prompt);
+      deps.store.clearKeyboard(prompt.id);
+      keyboardsCleared++;
+    } catch (err) {
+      console.error(`[choices] sweep: finalizeInputPrompt failed for ${prompt.id}: ${String(err)}`);
+    }
+  }
+  return { expired, keyboardsCleared };
 }

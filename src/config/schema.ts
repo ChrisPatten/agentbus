@@ -116,6 +116,12 @@ const TelegramAdapterSchema = z.object({
   plugin: z.string().optional(),
   /** E74 — hours before an unanswered choice-button prompt expires (default 24). */
   choice_ttl_hours: z.number().positive().optional(),
+  /**
+   * E81 — directories `send_document` may upload from. Symlinks are resolved
+   * before the check, so a link out of one of these is rejected. Default: each
+   * agent's `data/` directory and its Claude Code scratchpad root.
+   */
+  send_paths: z.array(z.string().min(1)).optional(),
 });
 
 const BlueBubblesAdapterSchema = z.object({
@@ -1087,6 +1093,7 @@ export interface TelegramInstanceConfig {
   poll_timeout: number;
   plugin?: string;
   choice_ttl_hours?: number;
+  send_paths?: string[];
 }
 
 /**
@@ -1104,12 +1111,12 @@ export function getTelegramInstances(config: AppConfig): TelegramInstanceConfig[
 
   // Discriminate: single-bot form has 'token' as a string at the top level.
   if (typeof (telegram as { token?: unknown }).token === 'string') {
-    const t = telegram as { token: string; poll_timeout: number; plugin?: string; choice_ttl_hours?: number };
-    return [{ name: null, token: t.token, poll_timeout: t.poll_timeout, plugin: t.plugin, choice_ttl_hours: t.choice_ttl_hours }];
+    const t = telegram as { token: string; poll_timeout: number; plugin?: string; choice_ttl_hours?: number; send_paths?: string[] };
+    return [{ name: null, token: t.token, poll_timeout: t.poll_timeout, plugin: t.plugin, choice_ttl_hours: t.choice_ttl_hours, send_paths: t.send_paths }];
   }
 
   // Named-record form.
-  const record = telegram as Record<string, { token: string; poll_timeout: number; plugin?: string; choice_ttl_hours?: number }>;
+  const record = telegram as Record<string, { token: string; poll_timeout: number; plugin?: string; choice_ttl_hours?: number; send_paths?: string[] }>;
   const seen = new Set<string>();
   const instances: TelegramInstanceConfig[] = [];
 
@@ -1127,7 +1134,7 @@ export function getTelegramInstances(config: AppConfig): TelegramInstanceConfig[
       );
     }
     seen.add(cfg.token);
-    instances.push({ name, token: cfg.token, poll_timeout: cfg.poll_timeout, plugin: cfg.plugin, choice_ttl_hours: cfg.choice_ttl_hours });
+    instances.push({ name, token: cfg.token, poll_timeout: cfg.poll_timeout, plugin: cfg.plugin, choice_ttl_hours: cfg.choice_ttl_hours, send_paths: cfg.send_paths });
   }
 
   return instances;

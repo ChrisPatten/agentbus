@@ -2,6 +2,7 @@ import type { MessageEnvelope } from '../types/envelope.js';
 import type { CommandManifest } from '../commands/registry.js';
 import type { ApprovalRequest } from '../approvals/types.js';
 import type { ChoicePrompt } from '../choices/types.js';
+import type { InputPrompt } from '../choices/input-store.js';
 
 /** Capabilities advertised by an adapter */
 export interface AdapterCapabilities {
@@ -163,7 +164,26 @@ export interface AdapterInstance {
    * choice buttons don't implement this.
    */
   finalizeChoicePrompt?(prompt: ChoicePrompt): Promise<void>;
+  /**
+   * Remove the reply keyboard left on screen by an answered or expired
+   * `ask_input` prompt (E81). Adapters that don't render reply keyboards
+   * don't implement this.
+   */
+  finalizeInputPrompt?(prompt: InputPrompt): Promise<void>;
+  /**
+   * Edit a message this adapter previously sent, found by the bus message id
+   * (E81 `edit_message`). `body` replaces the text; `choices` replaces the
+   * keyboard (absent = the keyboard is cleared).
+   */
+  editMessage?(busMessageId: string, body: string, choices?: unknown[]): Promise<OutboundActionResult>;
+  /** Pin a message this adapter previously sent (E81 `pin_message`). */
+  pinMessage?(busMessageId: string, silent: boolean): Promise<OutboundActionResult>;
+  /** Unpin one message, or with `all` every pinned message in that message's forum topic / chat (E81 `unpin_message`). */
+  unpinMessage?(busMessageId: string, all: boolean): Promise<OutboundActionResult>;
 }
+
+/** Result of an edit / pin / unpin action on an already-sent message (E81). */
+export type OutboundActionResult = { ok: true; note?: string } | { ok: false; error: string };
 
 export type { CommandManifest };
 

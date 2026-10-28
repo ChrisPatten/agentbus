@@ -27,6 +27,8 @@ adapters:
     token: ${TELEGRAM_BOT_TOKEN}
     poll_timeout: 30          # long-poll timeout in seconds
     # choice_ttl_hours: 24    # hours before an unanswered choice-button prompt expires (E74)
+    # send_paths:             # directories the send_document tool may upload from (E81); symlinks are resolved first
+    #   - /Users/me/agent/data  # default: each agent's data/ dir and its Claude Code scratchpad root
   # Multi-bot form (ids "telegram:peggy", "telegram:jarvis"):
   # telegram:
   #   peggy:
