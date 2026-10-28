@@ -28,9 +28,10 @@ channel.
 
 It writes the agent-scoped row in `model_overrides` (E53). cc-headless picks
 it up on its next spawn. For cc-pool, a chat that holds a live pane between
-turns has the pane relaunched on the new model at once (E53's relaunch, run
-immediately instead of at the next message), and the pane's model-confirmation
-prompt, if Claude Code shows one, is answered with the key `1` (see S54.5).
+turns has the pane switched at once (typing `/model` into the session and
+answering Claude Code's `Switch model?` prompt, else E53's relaunch run
+immediately), and that
+prompt is answered with the key `1` (see S54.5).
 Otherwise E53 applies it on the next message.
 
 ---
@@ -218,31 +219,45 @@ aren't affected.`
 
 ### cc-pool: applying the change and the model prompt (S54.5)
 
-How the pool applies a model today: `--model` is read only when the Claude
-process starts (`--session-id`) or resumes (`--resume`); there is no way to
-change a running session's model, and the pool never types `/model` into a
-pane. A change is always a relaunch (`handleReuse()`: `Ctrl-C` and kill, then
-`--resume` on the same Claude session with the new `--model`), normally at
-the conversation's next message.
+How the pool applies a model: `--model` is read only when the Claude process
+starts (`--session-id`) or resumes (`--resume`), so a *relaunch*
+(`handleReuse()`: `Ctrl-C` and kill, then `--resume` on the same Claude
+session with the new `--model`) is the baseline, normally at the
+conversation's next message.
 
-- `PoolManager.applyModelNow(conversationId, ctx)` runs that same relaunch
-  immediately for the chat's `leased` pane when the resolved model differs
-  and no turn is in flight. Outcomes: `switched`, `unchanged`, `deferred`
-  (turn in flight), `no-pane`, `failed` (with the launch error). `/model`
-  maps these onto its reply; the override is saved in every case. cc-headless
-  never reaches this path.
-- Claude Code can show a model-confirmation prompt; it is answered with the
-  key `1`. `PaneLifecycle.confirmModelPrompt(paneId)` reads `capture-pane` and
-  only when `model_confirm_pattern` (default in `pane.ts`) matches **and** a
-  numbered `1.` option is on screen does it send `1` via `tmux.sendKeys`,
-  re-reads, and retries up to `launch_ack_max_attempts`. It is called from
-  the readiness poll of any launch that carries `--model` (so the immediate
-  `/model` relaunch, a scheduled-model relaunch and a fresh launch are all
-  covered), and the ack-prompt wait ends early if the model prompt appears.
-  Prompt absent: no key. Prompt stuck: the launch fails with a plain message,
-  the pane is marked dead, and `/model` reports it.
-- The default prompt wording is a best guess and must be checked against a
-  real capture (live check below).
+Real prompt (screenshot from a live pane, typing `/model opus` mid-session):
+
+```
+Switch model?
+Your next response will be slower and use more tokens
+This conversation is cached for the current model. Switching to Opus 5.5
+means the full history gets re-read.
+❯ 1. Yes, switch to Opus 5.5
+  2. No, go back
+```
+
+- `PoolManager.applyModelNow(conversationId, ctx)` runs for the chat's
+  `leased` pane when the resolved model differs. It claims the row (`leased`
+  -> `launching`), then **prefers keeping the session**:
+  `PaneLifecycle.switchModelInPane()` types `/model <id>` (`tmux.sendCommand`),
+  waits up to 10 s for the prompt, sends `1` via `tmux.sendKeys` only while
+  `model_confirm_pattern` (default `switch model\?`) and a numbered
+  `1. Yes, switch to <model>` line both match, retries up to
+  `launch_ack_max_attempts`, then waits up to 5 s for the idle composer.
+  Only the key `1` is ever sent. On any failure it falls back to the relaunch.
+- A pane with a turn in flight is never typed into: `deferred`, applied at the
+  next message. `no-pane`, `unchanged`, `switched` (`in-pane` or `relaunch`)
+  and `failed` (with the error) complete the outcomes; `/model` maps each to a
+  plain reply and the override is saved in every case. cc-headless never
+  reaches this path.
+- A relaunch with `--model` is not expected to show this prompt: it is a
+  warning about the running session's cache, and a relaunch starts a new
+  process. Only the development-channels prompt is documented for launches.
+  The same guarded check stays in the launch path as a harmless safety net
+  (no match, no key).
+- Unverified: the idle-composer check (a `❯`/`>` input line) against a real
+  post-switch capture, and the fallback behavior when no prompt appears
+  because a short context has nothing cached (it then relaunches).
 
 ### Docs & changelog (S54.4)
 
@@ -272,9 +287,10 @@ the conversation's next message.
   `SlashCommandContext.routes`, wiring in `index.ts`.
 - **S54.4 — Docs and changelog.**
 - **S54.5 — cc-pool apply and model-confirmation prompt.** `applyModelNow`,
-  `confirmModelPrompt`, `model_confirm_pattern`. Tests with a fake tmux:
-  prompt present then `1` sent; prompt absent no key; stuck prompt reported;
-  non-pool agent untouched.
+  `switchModelInPane`, `confirmModelPrompt`, `model_confirm_pattern`. Tests with
+  a fake tmux and the real captured prompt as fixture: prompt present then `1`
+  sent; prompt absent or a similar prompt no key; stuck prompt reported; busy
+  pane deferred; fallback to relaunch; non-pool agent untouched.
 
 S54.1 and S54.2 are independent. S54.3 depends on the interfaces fixed above;
 S54.5 depends on S54.3.
@@ -287,10 +303,10 @@ S54.5 depends on S54.3.
   (`/pool` shows `model=claude-opus-5-5`).
 - `/model haiku` → latest Haiku. `/model haiku 4.5` → exactly 4.5.
   `/model haiku 5.1` → `No Haiku 5.1 — known: 5.5` with a picker.
-- **Live check (pending):** in a chat with a leased pool pane, `/model opus`
-  relaunches the pane and the pane really runs the new model; if Claude Code
-  shows a confirmation prompt, capture its exact text, confirm the default
-  `model_confirm_pattern` matches it, and confirm `1` dismisses it.
+- **Live check (pending):** in a chat with a leased, idle pool pane,
+  `/model opus` types into the pane, the `Switch model?` prompt is answered
+  with `1`, the pane returns to its composer and runs Opus 5.5 with the session
+  kept; `/model` mid-turn defers; a forced failure falls back to a relaunch.
 - On a non-Telegram channel, `/model` shows a numbered list, and replying
   `2` applies choice 2.
 - `/model reset` removes the override. `/model` then reports the config
@@ -310,8 +326,9 @@ S54.5 depends on S54.3.
   one answer/addressee/expiry state machine in SQLite. A tap carries a command
   payload instead of a label; nothing bypasses the tap checks. Not chosen: the
   first E54 draft's in-memory `cmd:` map with a 10-minute TTL.
-- **D5 — Relaunch, never type `/model` into a pane.** The model is fixed at
-  process start, and a typed `/model` could land in a turn in flight. The
-  confirmation prompt is handled where the pool already waits for a launch.
+- **D5 — Type `/model` into an idle pane first, relaunch as the fallback.**
+  Keeping the session avoids a cold start. Typing is allowed only when no turn
+  is in flight, the prompt is matched exactly before any key is sent, and only
+  `1` is ever sent. The `--resume --model` relaunch covers every failure.
 - **D3 — Static catalog + config extension, `claude-` escape hatch.** No
   API key dependency, and new models work the day they ship.

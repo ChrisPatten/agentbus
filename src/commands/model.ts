@@ -3,9 +3,10 @@
  *
  * Writes the agent-scoped `model_overrides` row (E53). cc-headless uses it on
  * its next spawn. For cc-pool, when this chat holds a live pane and it is
- * between turns, the pane is relaunched on the new model right away
- * (`PoolManager.applyModelNow`) and Claude Code's model-confirmation prompt is
- * answered with `1`; otherwise the pane switches at its next message. Factored into its own module, like `src/commands/pool.ts` and
+ * between turns, the pane is switched to the new model right away
+ * (`PoolManager.applyModelNow`): `/model <id>` is typed into it and Claude
+ * Code's "Switch model?" prompt is answered with `1`, falling back to a
+ * relaunch on `--model`; otherwise the pane switches at its next message. Factored into its own module, like `src/commands/pool.ts` and
  * `src/commands/cost.ts`, so it can carry its own deps and be unit-tested.
  */
 import type Database from 'better-sqlite3';
@@ -220,7 +221,10 @@ export function createModelCommand(deps: ModelCommandDeps): CommandDefinition {
         });
         switch (outcome.status) {
           case 'switched':
-            return `Relaunched ${outcome.paneId} on the new model.`;
+            if (outcome.method === 'in-pane') return `Switched ${outcome.paneId} in place; the session is kept.`;
+            return outcome.inPaneFailure
+              ? `Relaunched ${outcome.paneId} on the new model (switching in place failed: ${outcome.inPaneFailure}).`
+              : `Relaunched ${outcome.paneId} on the new model.`;
           case 'deferred':
             return 'A turn is in progress, so the pane switches after it, on the next message.';
           case 'failed':

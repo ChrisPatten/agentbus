@@ -63,19 +63,37 @@ export const LAUNCH_READY_TIMEOUT_MS = 30_000;
 const ACK_RETRY_BACKOFF_MS = 500;
 
 /**
- * E54 — default detector for Claude Code's model-confirmation prompt, shown
- * after a model change takes effect in a pane. Matched case-insensitively on
- * the last lines of `capture-pane` output, and only counts when a numbered
- * "1." option is also on screen (the prompt is answered by pressing `1`).
- * The wording is not verified against a real capture yet; override with
- * `model_confirm_pattern` (a regex source) if the CLI words it differently.
- * A pattern that never matches is safe: no key is ever sent.
+ * E54 — detector for Claude Code's "Switch model?" prompt, shown when `/model
+ * <id>` is typed into a live session whose context is cached for the current
+ * model. Real capture (Oct 28, 2026):
+ *
+ *   Switch model?
+ *   Your next response will be slower and use more tokens
+ *   This conversation is cached for the current model. Switching to Opus 5.5
+ *   means the full history gets re-read.
+ *   ❯ 1. Yes, switch to Opus 5.5
+ *     2. No, go back
+ *
+ * The prompt counts as present only when the capture matches
+ * `model_confirm_pattern` (a case-insensitive regex source, default below)
+ * AND a numbered line `1. Yes, switch to <model>` is on screen. The only key
+ * ever sent is `1`; option 2 ("No, go back") is never selected.
  */
-export const DEFAULT_MODEL_CONFIRM_PATTERN =
-  '(switch|chang|confirm|set)\\w*[^\\n]{0,80}\\bmodel\\b|\\bmodel\\b[^\\n]{0,80}(switch|chang|confirm)';
+export const DEFAULT_MODEL_CONFIRM_PATTERN = 'switch model\\?';
 
-/** A numbered option "1." / "1)" at the start of a capture line, optionally behind the selection marker. */
-const NUMBERED_OPTION_ONE_RE = /^\s*[❯>›]?\s*1[.)]\s+\S/m;
+/** The affirmative option of the real prompt, optionally behind the selection marker. */
+const CONFIRM_OPTION_RE = /^\s*[❯>›]?\s*1[.)]\s+Yes,\s+switch to\s+\S/im;
+
+/** A composer line (idle input box), optionally inside box-drawing borders, that is not a numbered option. */
+const IDLE_COMPOSER_RE = /^[\s│┃]*[❯>]\s*(?!\d+[.)]\s)/m;
+
+/** How long to wait for the prompt to appear after typing `/model`, and for the composer to return after answering. */
+const MODEL_PROMPT_WAIT_MS = 10_000;
+const MODEL_IDLE_WAIT_MS = 5_000;
+const MODEL_POLL_MS = 250;
+
+/** Result of {@link PaneLifecycle.switchModelInPane}. */
+export type InPaneSwitchResult = { status: 'switched' } | { status: 'failed'; reason: string };
 
 /** Outcome of {@link PaneLifecycle.confirmModelPrompt}. */
 export type ModelConfirmResult =
@@ -396,6 +414,52 @@ export class PaneLifecycle {
     };
   }
 
+  /**
+   * E54 — switch the model of the LIVE session in `paneId` without losing it:
+   * type `/model <model>` (same `sendCommand` helper the pool uses for
+   * `/clear`), wait a bounded time for the "Switch model?" prompt, answer it
+   * with the key `1` only when {@link modelPromptShowing} matches, then wait
+   * for the idle composer to return. Never types into a pane that already
+   * shows the prompt or is sitting at a shell. Any failure (prompt never
+   * appears, will not clear, composer does not return) is returned, not
+   * thrown, so the caller can fall back to a relaunch.
+   */
+  async switchModelInPane(paneId: string, model: string): Promise<InPaneSwitchResult> {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._\-\[\]]*$/.test(model)) {
+      return { status: 'failed', reason: `refusing to type an unexpected model id "${model}"` };
+    }
+    if (isShellCommand(await this.tmux.paneCommand(paneId))) {
+      return { status: 'failed', reason: `${paneId} is at a shell, not a Claude session` };
+    }
+    if (this.modelPromptShowing(await this.tmux.capturePane(paneId, 30))) {
+      return { status: 'failed', reason: `a model prompt is already showing in ${paneId}` };
+    }
+
+    await this.tmux.sendCommand(paneId, `/model ${model}`);
+
+    let appeared = false;
+    for (let waited = 0; waited < MODEL_PROMPT_WAIT_MS; waited += MODEL_POLL_MS) {
+      if (this.modelPromptShowing(await this.tmux.capturePane(paneId, 30))) {
+        appeared = true;
+        break;
+      }
+      await this.sleepFn(MODEL_POLL_MS);
+    }
+    if (!appeared) {
+      return { status: 'failed', reason: `the "Switch model?" prompt did not appear in ${paneId} within ${MODEL_PROMPT_WAIT_MS / 1000}s` };
+    }
+
+    const confirm = await this.confirmModelPrompt(paneId);
+    if (confirm.status === 'failed') return { status: 'failed', reason: confirm.reason };
+
+    for (let waited = 0; waited < MODEL_IDLE_WAIT_MS; waited += MODEL_POLL_MS) {
+      const captured = await this.tmux.capturePane(paneId, 30);
+      if (!this.modelPromptShowing(captured) && IDLE_COMPOSER_RE.test(captured)) return { status: 'switched' };
+      await this.sleepFn(MODEL_POLL_MS);
+    }
+    return { status: 'failed', reason: `${paneId} did not return to its idle composer after the model prompt was answered` };
+  }
+
   private modelPromptShowing(captured: string): boolean {
     let re: RegExp;
     try {
@@ -403,7 +467,7 @@ export class PaneLifecycle {
     } catch {
       return false; // an invalid operator pattern must never cause a key press
     }
-    return re.test(captured) && NUMBERED_OPTION_ONE_RE.test(captured);
+    return re.test(captured) && CONFIRM_OPTION_RE.test(captured);
   }
 
   /**

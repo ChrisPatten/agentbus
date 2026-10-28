@@ -286,7 +286,7 @@ Unlike `/rc`, `/keys` also reaches a `launching` or `draining` pane, because a p
 
 ### `/model [query | reset | list]`
 
-Shows or changes the model of the agent this chat routes to. It writes the agent-scoped row in the model override store (`model_overrides`), so the change applies on every channel that reaches that agent. For `cc-headless` the agent uses it on its next spawn. For `cc-pool`, if this chat holds a live pane that is between turns, the pane is relaunched on the new model right away (same path as a scheduled model switch: `Ctrl-C` and kill, then `--resume` on the same Claude session with the new `--model`) and the reply says so; if a turn is in flight the switch waits for the next message, and if no pane is held the next message launches on the new model. If the relaunch fails, the reply says so plainly with the reason, the override stays saved, and the next message starts a fresh pane on the new model. No restart is needed. See [Model-confirmation prompt](CC_POOL_ADAPTER.md#model-confirmation-prompt) for how the pane's confirmation prompt is answered. Registered in `src/index.ts` via `createModelCommand` in `src/commands/model.ts`.
+Shows or changes the model of the agent this chat routes to. It writes the agent-scoped row in the model override store (`model_overrides`), so the change applies on every channel that reaches that agent. For `cc-headless` the agent uses it on its next spawn. For `cc-pool`, if this chat holds a live pane that is between turns, the pane is switched right away and the Claude session is kept: `/model <id>` is typed into the pane and Claude Code's `Switch model?` prompt is answered with the key `1` (see [Model-confirmation prompt](CC_POOL_ADAPTER.md#model-confirmation-prompt)). The reply says `Switched <pane> in place; the session is kept.` If the in-place switch fails (prompt never appears, will not clear, idle composer does not return) the pane is relaunched with `--resume` and the new `--model` instead, and the reply says why. If a turn is in flight nothing is typed into the pane and the switch happens at the next message; if no pane is held the next message launches on the new model. If both attempts fail, the reply says so plainly with the reason, the override stays saved, and the next message starts a fresh pane on the new model. No restart is needed. Registered in `src/index.ts` via `createModelCommand` in `src/commands/model.ts`.
 
 The target is the first route for this message whose adapter is `cc-pool` or `cc-headless`. For any other route, including `claude-code`, and for an unrouted chat, it replies `This chat isn't routed to an agent whose model I can change.`
 
@@ -308,7 +308,7 @@ The target is the first route for this message whose adapter is `cc-pool` or `cc
 
    Reply with a number to choose.
 2
--> Pokeclaude → Opus 5.5 (claude-opus-5-5). Relaunched peggy-pool:1 on the new model.
+-> Pokeclaude → Opus 5.5 (claude-opus-5-5). Switched peggy-pool:1 in place; the session is kept.
 
 /model haiku 4.5
 -> Pokeclaude → Haiku 4.5 (claude-haiku-4-5). Takes effect on the next message.

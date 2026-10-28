@@ -930,8 +930,8 @@ epics:
       specificity (haiku = latest, haiku 4.5 = exact), command choices on
       the E74 Telegram buttons (choice_prompts.commands, migration 039; a
       numbered list plus reply capture elsewhere). cc-pool: relaunches the
-      live pane on the new model at once and answers Claude Code's
-      model-confirmation prompt with key 1. Implemented on
+      live pane at once (types /model into the idle session and answers
+      Claude Code's Switch model? prompt with key 1; relaunch fallback). Implemented on
       feat/e54-model-on-e74, awaiting live check. Epic:
       _bmad-output/epics/E54-model-slash-command.md.
     stories:

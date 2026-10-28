@@ -278,14 +278,21 @@ describe('/model — live cc-pool pane (E54 S54.3)', () => {
   const runWith = (db: Database.Database, poolManagers: Map<string, PoolManager>, args: string[], routes?: SlashCommandContext['routes']) =>
     createModelCommand({ db, poolManagers }).handler(args, makeCtx(db, makeConfig(), routes));
 
-  it('applies the change to the live pane and says the pane was relaunched', async () => {
+  it('applies the change to the live pane in place and says the session was kept', async () => {
     const db = makeDb();
-    const { manager, applyModelNow } = fakeManager({ status: 'switched', paneId: 'pokeclaude-pool:1', model: 'claude-opus-5-5' });
+    const { manager, applyModelNow } = fakeManager({ status: 'switched', paneId: 'pokeclaude-pool:1', model: 'claude-opus-5-5', method: 'in-pane' });
     const res = await runWith(db, new Map([['pokeclaude', manager]]), ['opus']);
     expect(override(db, 'agent:pokeclaude')).toBe('claude-opus-5-5');
     expect(applyModelNow).toHaveBeenCalledTimes(1);
     expect(applyModelNow.mock.calls[0]).toEqual([expect.any(String), expect.objectContaining({ contact_id: 'chris', channel: 'telegram' })]);
-    expect(res.body).toContain('Relaunched pokeclaude-pool:1 on the new model.');
+    expect(res.body).toContain('Switched pokeclaude-pool:1 in place; the session is kept.');
+  });
+
+  it('says so when it had to fall back to a relaunch', async () => {
+    const db = makeDb();
+    const { manager } = fakeManager({ status: 'switched', paneId: 'p:1', model: 'x', method: 'relaunch', inPaneFailure: 'the prompt did not appear' });
+    const res = await runWith(db, new Map([['pokeclaude', manager]]), ['opus']);
+    expect(res.body).toContain('Relaunched p:1 on the new model (switching in place failed: the prompt did not appear).');
   });
 
   it('reports a failed switch plainly while keeping the override', async () => {
@@ -309,7 +316,7 @@ describe('/model — live cc-pool pane (E54 S54.3)', () => {
   it('`reset` also applies to the live pane', async () => {
     const db = makeDb();
     setModelOverride(db, 'claude-opus-5-5', 'agent:pokeclaude');
-    const { manager, applyModelNow } = fakeManager({ status: 'switched', paneId: 'p:1', model: 'x' });
+    const { manager, applyModelNow } = fakeManager({ status: 'switched', paneId: 'p:1', model: 'x', method: 'relaunch' });
     const res = await runWith(db, new Map([['pokeclaude', manager]]), ['reset']);
     expect(applyModelNow).toHaveBeenCalledTimes(1);
     expect(res.body).toContain('Override removed.');
