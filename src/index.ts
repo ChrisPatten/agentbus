@@ -62,6 +62,8 @@ import { AttachmentSweeper } from './media/attachment-sweeper.js';
 import { ApprovalStore } from './approvals/store.js';
 import { resolveApproval, type ApprovalResolveHooks } from './approvals/resolve.js';
 import { sweepApprovals } from './approvals/sweep.js';
+import { ChoiceStore } from './choices/store.js';
+import { sweepChoices } from './choices/sweep.js';
 import type { ApprovalDecision } from './approvals/types.js';
 import { OwnerDirectory } from './core/owners.js';
 import { AdvisoryStore } from './advisories/store.js';
@@ -407,9 +409,14 @@ const approvalStore = new ApprovalStore(db);
 const resolveApprovalFn = (id: string, decision: ApprovalDecision, resolvedBy: string, onlyContactId?: string) =>
   resolveApproval({ store: approvalStore, poolManagers, ...approvalHooks }, id, decision, resolvedBy, undefined, onlyContactId);
 
+// Choice-button prompts (E74): shared by the Telegram send/tap paths and the
+// expiry sweep below.
+const choiceStore = new ChoiceStore(db);
+
 for (const inst of getTelegramInstances(config)) {
   const telegram = new TelegramAdapter({
     ...adapterDeps,
+    choiceStore,
     instanceName: inst.name ?? undefined,
     instanceConfig: inst,
     resolveApproval: resolveApprovalFn,
@@ -494,10 +501,20 @@ const maintenanceTimer = setInterval(() => {
   sweepApprovals({ registry, store: approvalStore }).catch((err) =>
     console.error(`[agentbus] Approval sweep failed: ${String(err)}`),
   );
+  sweepChoices({ registry, store: choiceStore }).catch((err) =>
+    console.error(`[agentbus] Choice prompt sweep failed: ${String(err)}`),
+  );
   advisories.retryPending().catch((err) =>
     console.error(`[agentbus] Advisory retry failed: ${String(err)}`),
   );
 }, SWEEP_INTERVAL_MS);
+// Keyboards left behind across a restart are cleared shortly after startup,
+// once adapters are up, rather than waiting for the first interval tick.
+setTimeout(() => {
+  sweepChoices({ registry, store: choiceStore }).catch((err) =>
+    console.error(`[agentbus] Startup choice prompt sweep failed: ${String(err)}`),
+  );
+}, 15_000).unref();
 
 // ── Shutdown ─────────────────────────────────────────────────────────────────
 

@@ -1,6 +1,7 @@
 import type { MessageEnvelope } from '../types/envelope.js';
 import type { CommandManifest } from '../commands/registry.js';
 import type { ApprovalRequest } from '../approvals/types.js';
+import type { ChoicePrompt } from '../choices/types.js';
 
 /** Capabilities advertised by an adapter */
 export interface AdapterCapabilities {
@@ -156,6 +157,12 @@ export interface AdapterInstance {
    * through this seam.
    */
   finalizeApproval?(request: ApprovalRequest): Promise<void>;
+  /**
+   * Clear the tappable choice buttons from a prompt that has expired (E74) —
+   * called by the choice-prompt expiry sweep. Adapters that don't render
+   * choice buttons don't implement this.
+   */
+  finalizeChoicePrompt?(prompt: ChoicePrompt): Promise<void>;
 }
 
 export type { CommandManifest };

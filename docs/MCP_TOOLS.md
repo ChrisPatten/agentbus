@@ -32,7 +32,7 @@ Errors come back as `{ "content": [{ "type": "text", "text": "Error: ..." }], "i
 
 Fetches the original message, swaps sender and recipient, and posts the reply on the same channel and topic.
 
-Input: `{ "message_id": "<bus id from [id:...]>", "body": "..." }`
+Input: `{ "message_id": "<bus id from [id:...]>", "body": "...", "choices": ["A", "B"] }` (`choices` optional; see [Choice buttons](#choice-buttons))
 Output: `{ "success": true, "outbound_message_id": "<uuid>" }`
 
 The reply carries `metadata.origin` (see [Origin metadata](#origin-metadata)).
@@ -50,11 +50,23 @@ Sends to any contact on any channel. Validates the channel through `GET /api/v1/
 | `reply_to` | no | Bus message ID. On Telegram this becomes a native quote unless it is the latest inbound message in the conversation |
 | `priority` | no | `normal`, `high`, or `urgent` |
 | `metadata` | no | Free-form object. A caller-supplied `origin` key is replaced (see below) |
+| `choices` | no | 1-8 single-choice labels, each non-empty and at most 64 characters. See [Choice buttons](#choice-buttons) |
 | `source` | no | Short label naming what is sending, for example `Ambient scan`. Stamped as `metadata.origin.label`; when the message lands in a conversation this session isn't running in, that conversation's agent sees it with this label as context (E69) |
 
 For a proactive send, call `get_session` or `list_sessions` first and use the `topic` it returns rather than guessing.
 
 Output: `{ "success": true, "message_id": "<uuid>" }`
+
+### Choice buttons
+
+`reply` and `send_message` both accept `choices` (E74) to offer single-choice answers:
+
+- On Telegram the labels render as inline buttons (one per row, or two per row when every label is 12 characters or fewer). The tap arrives back in the same conversation and topic as an ordinary inbound message `[tapped] <label>`, with `metadata.choice_prompt_id` and `reply_to` set to the prompt's bus message. Typed replies still work.
+- On every other channel the labels are appended to the body as a numbered list, and `metadata.choices` is not set.
+- More than 8 labels, an empty label or a label over 64 characters is rejected with an error and nothing is sent.
+- Use it for a real decision the user must make, not for routine messages. Single choice only; there is no multi-select.
+
+See [TELEGRAM_ADAPTER.md](TELEGRAM_ADAPTER.md#choice-buttons) for tap handling, expiry and limits.
 
 ### `send_email`
 

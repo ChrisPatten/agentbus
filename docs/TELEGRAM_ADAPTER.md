@@ -485,6 +485,19 @@ The adapter sends a permission request as a DM with **Approve** and **Deny** inl
 
 ---
 
+## Choice buttons
+
+When an outbound envelope carries `metadata.choices` (set by the `choices` argument of the `reply` and `send_message` tools, see [MCP_TOOLS.md](MCP_TOOLS.md#choice-buttons)), the adapter adds an inline keyboard to the last part of the message and stores a `choice_prompts` row (migration 038). Invalid `metadata.choices` is logged and ignored; the message goes out without buttons.
+
+- **Layout.** One button per row; two per row when every label is 12 characters or fewer.
+- **Callback data.** `choice:<prompt uuid>:<index>`, 45 bytes at most. Telegram caps `callback_data` at 64 bytes, so labels are kept in the database and never in the button.
+- **Tap.** Only the contact the message was addressed to may answer; another allow-listed contact gets "Not authorized" and the prompt stays open. The tap marks the prompt answered (an atomic flip, so a double tap acts once), edits the message to append `You chose: <label>` with no keyboard, and injects `[tapped] <label>` into the prompt's own channel and topic as a normal inbound message (`metadata.choice_prompt_id`, `metadata.choice_index`, `reply_to` = the prompt's bus message id). Existing routing and lease rules therefore apply as for any typed message. If the injection fails the prompt is reopened and the user is told to tap again.
+- **Rejections.** A second tap answers "Already answered"; a tap after expiry answers "Expired" and clears the keyboard; an unknown prompt answers "Prompt not found". None of these inject a message.
+- **Expiry.** Prompts expire 24 hours after sending; set `choice_ttl_hours` on the Telegram adapter config to change it. A sweep on bus-core's 60-second maintenance tick (and once 15 seconds after startup) marks overdue prompts expired and removes their keyboards, leaving the message text.
+- E51 Approve/Deny buttons are unaffected: they use `approve:` / `deny:` callback data and their own handler.
+
+---
+
 ## Capabilities
 
 | Capability | Supported |
@@ -493,6 +506,7 @@ The adapter sends a permission request as a DM with **Approve** and **Deny** inl
 | Live tool-call status stream | Yes — see [Live tool-call status stream](#live-tool-call-status-stream) |
 | Read receipts | No |
 | Interactive approvals | Yes — Approve/Deny inline buttons, see [APPROVALS.md](APPROVALS.md) |
+| Choice buttons | Yes — single-choice inline buttons, see [Choice buttons](#choice-buttons) |
 | Slash command registration | Yes (`setMyCommands`) |
 | Reactions | Yes (`sendReaction` with emoji) |
 | Message splitting | Yes (chunks <=4096 chars) |

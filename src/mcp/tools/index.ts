@@ -19,6 +19,7 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { MessageEnvelope } from '../../types/envelope.js';
 import { toolError, toolSuccess } from './helpers.js';
+import { applyChoices, choicesSchema, CHOICES_DESCRIPTION } from '../../choices/validate.js';
 import type { AppConfig } from '../../config/schema.js';
 import { registerChannelTools } from './channels.js';
 import { registerMessagingTools, registerEmailTool, buildEmailToolConfig } from './messaging.js';
@@ -178,13 +179,15 @@ function registerReplyTool(server: McpServer, busBaseUrl: string, agentId: strin
     'reply',
     {
       description:
-        'Send a reply to a message. Looks up the original by message_id, swaps sender/recipient, and posts the outbound message to AgentBus.',
+        'Send a reply to a message. Looks up the original by message_id, swaps sender/recipient, and posts the outbound message to AgentBus. ' +
+        'Pass `choices` to offer single-choice answers (tappable buttons on Telegram).',
       inputSchema: {
         message_id: z.string().describe('ID of the message to reply to'),
         body: z.string().min(1).describe('Text body of the reply'),
+        choices: choicesSchema.optional().describe(CHOICES_DESCRIPTION),
       },
     },
-    async ({ message_id, body }) => {
+    async ({ message_id, body, choices }) => {
       let original: MessageEnvelope;
       try {
         const res = await fetch(`${busBaseUrl}/api/v1/messages/${message_id}`);
@@ -204,6 +207,9 @@ function registerReplyTool(server: McpServer, busBaseUrl: string, agentId: strin
       // transcripts DB join (that join still runs too, as a fallback/
       // cross-check — this is purely additive).
       const originalConversationId = original.metadata?.['conversation_id'];
+      const baseMetadata: Record<string, unknown> =
+        typeof originalConversationId === 'string' ? { conversation_id: originalConversationId } : {};
+      const withChoices = applyChoices(original.channel, body, baseMetadata, choices);
       const replyBody = {
         channel: original.channel,
         topic: original.topic,
@@ -211,9 +217,9 @@ function registerReplyTool(server: McpServer, busBaseUrl: string, agentId: strin
         recipient: original.sender,
         reply_to: original.id,
         priority: 'normal' as const,
-        payload: { type: 'text' as const, body },
+        payload: { type: 'text' as const, body: withChoices.body },
         metadata: {
-          ...(typeof originalConversationId === 'string' ? { conversation_id: originalConversationId } : {}),
+          ...withChoices.metadata,
           origin: originFromEnv(agentId), // E69
         },
       };
