@@ -10,6 +10,7 @@ Errors come back as `{ "content": [{ "type": "text", "text": "Error: ..." }], "i
 |---|---|---|
 | `reply` | Reply to a message by its bus ID | Always |
 | `send_message` | Send to any contact on any channel | Always |
+| `share_context` | Hand a Claude Code session's outcome to Main as hidden context (no message) | Always |
 | `send_email` | Start a new email thread to an allowlisted address | An email adapter is configured |
 | `react_to_message` | Emoji reaction on a message | Always |
 | `create_telegram_topic` | Create a forum topic in a Telegram group | A Telegram adapter is configured |
@@ -55,6 +56,62 @@ Sends to any contact on any channel. Validates the channel through `GET /api/v1/
 For a proactive send, call `get_session` or `list_sessions` first and use the `topic` it returns rather than guessing.
 
 Output: `{ "success": true, "message_id": "<uuid>" }`
+
+### `share_context`
+
+Hands a note to the contact's Main in the Mac app (E79), or to an agent's Telegram DM (E80), without sending a message. Use it from an interactive Claude Code session to pass on an outcome (a finished artifact, a decision) so Main knows about it on its next turn, the way it already learns what a scheduled routine sent. Nothing appears in the app: no message, no unread badge, no sidebar movement, no notification, and Main is not woken. It is a separate tool from `send_message` because it has different delivery semantics: no channel, topic, queue or adapter. It calls [`POST /api/v1/context`](HTTP_API.md#post-apiv1context).
+
+| Field | Required | Notes |
+|---|---|---|
+| `to` | yes | `contact:<id>`, as for `send_message` |
+| `body` | yes | The note. Self-contained and concise; one note per finished piece of work |
+| `source` | yes | Label shown to the agent, for example `Claude Code: baxter` |
+| `channel` | no | `app` (default): Main in the Mac app. E80: a primary channel such as `telegram:peggy`, the agent's Telegram DM; it must be listed in `agents.<id>.pending_context.channels` ([CC_POOL_ADAPTER.md](CC_POOL_ADAPTER.md#primary-conversations-pending-context-and-shared-context-e80)) |
+
+Output: `{ "success": true, "message_id": "<uuid>" }`
+
+The tool description tells the model what it is for (handing a session's outcome to Main) and what it is not for (notifying the operator or asking a question; use `send_message` for those). Rules:
+
+- **Primary conversations only.** The target is the `general` conversation of `channel`: Main for `app`, or a listed channel's DM. Named app topics, groups, forum threads and unlisted channels are rejected. Only `cc-headless` and `cc-pool` read shared context (cc-headless in `runBatch`, cc-pool through the pending-context stage), so the bus also rejects the call with a clear error when the route that serves the conversation targets another adapter (the polling `claude-code` adapter).
+- **Not from the conversation itself.** A call whose origin is a turn in the target conversation is rejected, since an agent should not hand itself context. That covers a cc-headless Main turn and, because the bus stamps a pane's origin from its lease, the pane leased to the DM. A call from a turn in another conversation (a scheduled routine, a pane leased elsewhere) is allowed and stamps that turn's origin.
+- **A quiet DM is fine.** If the DM has no session yet the bus creates a message-less placeholder session; the first real message still launches a fresh pane session.
+- **Too long is an error.** A note that doesn't fit `adapters.app.pending_context.max_chars` (default 4000, counting the label and timestamp Main sees) is rejected with a message asking the caller to summarize, so nothing is truncated silently.
+- **Expires.** The agent ignores a note older than `context_ttl_ms` (default 24 hours) when its next turn starts: `adapters.app.pending_context.context_ttl_ms` for Main, and for a listed DM the owning agent's `agents.<id>.pending_context.context_ttl_ms` when set, else the app's.
+- **Not in journal runs.** The headless journaling turns disallow it along with `reply`, `send_message` and `send_email`, and the bus rejects it while a System Message journal run is open for the sender.
+- **Search.** The note is hidden from `search_transcripts` and `get_transcript` like other hidden rows; it stays in the database and in journaling windows.
+
+Suggested wording for an agent's `CLAUDE.md` (for example Baxter's, in the project the Claude Code sessions run in; the bus does not edit it):
+
+```markdown
+### Handing context to Main
+
+When you finish a meaningful piece of work in this session (an artifact, a decision, a result Main
+should build on), call `share_context` once with `to="contact:chris"` and `source="Claude Code: <project>"`.
+Main reads it on its next turn; Chris does not see it and is not notified.
+
+- One note per finished piece of work, not a running log.
+- Write it so Main can act on it cold: what you did, where the result lives (file path or link),
+  what was decided, what is still open. Keep it to a few sentences; long notes are rejected.
+- Do not use it to ask Chris something or to get his attention. Use `send_message` for that.
+- Do not call it from Main. If you are Main, you already have the context.
+```
+
+For Peggy's Telegram DM (E80), in the `CLAUDE.md` of the project her operator's Claude Code sessions run in; the sessions can run on another machine if `AGENTBUS_URL` (and `AGENTBUS_BUS_TOKEN`) point at her bus:
+
+```markdown
+### Handing context to Peggy
+
+When you finish a meaningful piece of work in this session (an artifact, a decision, a result Peggy
+should build on), call `share_context` once with `to="contact:chris"`, `channel="telegram:peggy"` and
+`source="Claude Code: <project>"`. Peggy reads it at her next turn in the DM; Chris does not see it
+in Telegram and is not notified.
+
+- One note per finished piece of work, not a running log.
+- Write it so Peggy can act on it cold: what you did, where the result lives, what was decided, what
+  is still open. A few sentences; long notes are rejected, and notes older than 24 hours are skipped.
+- Do not use it to ask Chris something or to get his attention. Use `send_message` for that.
+- Peggy's own panes never call it for their own DM.
+```
 
 ### `send_email`
 

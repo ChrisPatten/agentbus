@@ -7,8 +7,9 @@ import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { runMigrations } from '../db/schema.js';
 import { ensureOutboundAppSession } from '../app/outbound.js';
-import { readWatermark, buildPendingContext, PENDING_CONTEXT_INTRO, REPLY_TARGET_MARK } from '../app/pending-context.js';
+import { readWatermark, buildPendingContext, CONTEXT_SHARED_INTRO, PENDING_CONTEXT_INTRO, REPLY_TARGET_MARK } from '../app/pending-context.js';
 import type { AppConfig } from '../config/schema.js';
+import { computeConversationId } from '../pipeline/conversation-id.js';
 
 // E69 — cc-headless wiring for origin stamping (S69.1) and pending-context
 // injection (S69.4). Same module mocks as cc-headless.test.ts.
@@ -176,6 +177,80 @@ describe('cc-headless E69 wiring', () => {
     expect(readWatermark(db, conv)).toBeNull();
     // The error reply is still a turn send.
     expect(postedMessages()[0]!.metadata['origin']).toMatchObject({ kind: 'turn', conversation_id: conv });
+  });
+
+  // E79: hidden share_context notes arrive in their own section of the same block.
+  it('injects a context-only note in its own section and advances the watermark past it once the turn starts', async () => {
+    const { conversationId, sessionId } = ensureOutboundAppSession(db, 'chris', 'agent:peggy', 'general');
+    const at = new Date(Date.now() - 3_600_000).toISOString();
+    transcript({ conv: conversationId, session: sessionId, at, direction: 'outbound', messageId: 'note-1', body: 'Shipped the migration plan',
+      metadata: { origin: { kind: 'external', label: 'Claude Code: baxter' }, context_only: true } });
+    transcript({ conv: conversationId, session: sessionId, at: new Date().toISOString(), direction: 'inbound', messageId: 'm1' });
+    pollOnce(envelope('m1', 'app'));
+    const { startHeadless } = await import('./cc-headless.js');
+    startHeadless(db as unknown as Database.Database);
+    await tick();
+
+    expect(spawned!.prompt).toContain(CONTEXT_SHARED_INTRO);
+    expect(spawned!.prompt).toContain('the user has not seen these');
+    expect(spawned!.prompt).toContain('Claude Code: baxter: Shipped the migration plan');
+    expect(spawned!.prompt).not.toContain(PENDING_CONTEXT_INTRO);
+    expect(readWatermark(db, conversationId)).toBeNull();
+    writeEvent(child.stdout, { type: 'system', subtype: 'init', session_id: 'claude-1' });
+    await tick(10);
+    expect(readWatermark(db, conversationId)?.created_at).toBe(at);
+    child.emit('close', 0);
+  });
+
+  it('skips a note older than the TTL but still moves the watermark past it', async () => {
+    const { conversationId, sessionId } = ensureOutboundAppSession(db, 'chris', 'agent:peggy', 'general');
+    const at = new Date(Date.now() - 25 * 3_600_000).toISOString();
+    transcript({ conv: conversationId, session: sessionId, at, direction: 'outbound', messageId: 'note-1', body: 'Stale handoff',
+      metadata: { origin: { kind: 'external', label: 'Claude Code: baxter' }, context_only: true } });
+    transcript({ conv: conversationId, session: sessionId, at: new Date().toISOString(), direction: 'inbound', messageId: 'm1' });
+    pollOnce(envelope('m1', 'app'));
+    const { startHeadless } = await import('./cc-headless.js');
+    startHeadless(db as unknown as Database.Database);
+    await tick();
+
+    expect(spawned!.prompt).toBe('FORMATTED');
+    writeEvent(child.stdout, { type: 'system', subtype: 'init', session_id: 'claude-1' });
+    await tick(10);
+    expect(readWatermark(db, conversationId)?.created_at).toBe(at);
+    child.emit('close', 0);
+  });
+
+  // E80: a channel an agent lists in pending_context.channels is primary, whichever runtime serves it.
+  async function runDm(channel: string) {
+    (config as unknown as { agents: unknown }).agents = { 'agent:peggy': { pending_context: { channels: ['telegram:peggy'] } } };
+    const now = new Date().toISOString();
+    const conv = computeConversationId('chris', channel, 'general');
+    db.prepare(`INSERT INTO conversation_registry(id,contact_id,channel,topic,first_seen,last_seen) VALUES (?,?,?,?,?,?)`).run(conv, 'chris', channel, 'general', now, now);
+    db.prepare(`INSERT INTO sessions(id,conversation_id,channel,contact_id,started_at,last_activity,message_count,agent_id) VALUES ('s-dm',?,?,?,?,?,1,'agent:peggy')`)
+      .run(conv, channel, 'chris', now, now);
+    transcript({ conv, session: 's-dm', at: new Date(Date.now() - 60_000).toISOString(), direction: 'outbound', body: 'routine result',
+      metadata: { origin: { kind: 'external', label: 'Ambient scan' } } });
+    transcript({ conv, session: 's-dm', at: now, direction: 'inbound', messageId: 'm1' });
+    pollOnce(envelope('m1', channel));
+    const { startHeadless } = await import('./cc-headless.js');
+    startHeadless(db as unknown as Database.Database);
+    await tick();
+    child.emit('close', 0);
+  }
+
+  it('injects pending context into a listed Telegram DM served by cc-headless', async () => {
+    try {
+      await runDm('telegram:peggy');
+      expect(spawned!.prompt).toContain('Ambient scan: routine result');
+    } finally { (config as unknown as { agents: unknown }).agents = {}; }
+  });
+
+  it('injects nothing into an unlisted Telegram DM', async () => {
+    try {
+      await runDm('telegram:pokeclaude');
+      expect(spawned).not.toBeNull();
+      expect(spawned!.prompt).toBe('FORMATTED');
+    } finally { (config as unknown as { agents: unknown }).agents = {}; }
   });
 
   it('marks the pending message the operator is replying to', async () => {

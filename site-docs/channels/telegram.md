@@ -67,6 +67,8 @@ Each bot's channel is `telegram:<name>`. Names may use lowercase letters, digits
 
 Your private chat with the bot is one [conversation](/concepts/conversations-and-sessions). It keeps its Claude session until you send `/clear`, so you can pick up a topic days later.
 
+If your agent runs on [`cc-pool`](/runtimes/cc-pool#your-main-chat-with-the-agent), you can make this chat work like Main in the Mac app: the agent hears about routine messages sent into it, and your Claude Code sessions can brief it with notes you don't see in Telegram.
+
 ## Groups and forum topics
 
 Add the bot to a Telegram group and it works there too, with no extra configuration:

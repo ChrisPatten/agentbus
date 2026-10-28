@@ -115,6 +115,66 @@ export function registerMessagingTools(server: McpServer, busBaseUrl: string, ag
       }
     }
   );
+
+  registerShareContextTool(server, busBaseUrl, agentId); // E79
+}
+
+/**
+ * E79 — `share_context`: hand a Claude Code session's outcome to Main without
+ * a message. POSTs to `/api/v1/context`, which writes a hidden row; the app
+ * shows nothing and Main reads it on its next turn. Separate from
+ * `send_message` on purpose: it has no channel, topic, queue or delivery.
+ * Registered by `registerMessagingTools`, so both tool sets
+ * (`registerAllTools`, `registerHeadlessTools`) get it.
+ */
+function registerShareContextTool(server: McpServer, busBaseUrl: string, agentId: string): void {
+  server.registerTool(
+    'share_context',
+    {
+      description:
+        "Hand a note to Main (the operator's main conversation in the Mac app), or to an agent's Telegram DM when you pass `channel`, " +
+        'so that conversation knows about it on its next turn. ' +
+        'Nothing is shown to the user: no message, no notification, no unread badge, and the agent is not woken. ' +
+        'Use it to pass on the outcome of work you finished in a Claude Code session (an artifact you finished, ' +
+        'a decision you made, a result worth knowing). One note per finished piece of work; make it self-contained. ' +
+        'Do not use it to notify the operator, ask a question or request an answer: use send_message for that. ' +
+        'Notes older than 24 hours are not passed on, and a note too long for the context budget is rejected, ' +
+        'so summarize rather than paste. Cannot be called from a turn in the conversation it targets.',
+      inputSchema: {
+        to: z.string().min(1).describe('Contact whose conversation receives the note (e.g. "contact:chris")'),
+        body: z.string().min(1).describe('The note: what happened and what Main should know, self-contained and concise'),
+        source: z
+          .string()
+          .min(1)
+          .describe('Where the note comes from, shown to the agent as its label (e.g. "Claude Code: baxter")'),
+        channel: z
+          .string()
+          .min(1)
+          .optional()
+          .default('app')
+          .describe(
+            'Where the note goes: "app" (default) is Main in the Mac app. Pass an agent\'s Telegram DM channel ' +
+              '(e.g. "telegram:peggy") when that agent is set up to receive shared context there.',
+          ),
+      },
+    },
+    async ({ to, body, source, channel }) => {
+      try {
+        const res = await fetch(`${busBaseUrl}/api/v1/context`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ to, body, source, channel, sender: toPrefixedAgentId(agentId), origin: originFromEnv(agentId, source) }),
+        });
+        const data = (await res.json()) as { ok: boolean; id?: string; error?: string; reason?: string };
+        if (!data.ok) {
+          return toolError(`Bus rejected context: ${data.reason ?? data.error ?? 'unknown error'}`);
+        }
+        return toolSuccess({ success: true, message_id: data.id });
+      } catch (err) {
+        return toolError(`Failed to share context: ${String(err)}`);
+      }
+    },
+  );
 }
 
 /** Resolved configuration the `send_email` tool needs at registration time. */

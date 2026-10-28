@@ -118,6 +118,33 @@ describe('JournalEngine pause and ceiling triggers (E66 S66.3)', () => {
     expect(j.jobs).toHaveLength(1);
   });
 
+  it('a hidden shared note does not re-anchor the pause clock, and reaches the job (E79)', async () => {
+    const j = fakeJournaler();
+    const engine = engineFor(makeConfig(), [j]);
+    session('s1');
+    msg('s1', 20); msg('s1', 10);
+    msg('s1', 1, { dir: 'outbound', meta: { context_only: true, origin: { kind: 'external', label: 'Claude Code: baxter' } } });
+    await tickAndSettle(engine);
+    // 10 min of quiet since the last visible message passes the 5 min threshold; the note 1 min ago doesn't restart it.
+    expect(j.jobs).toHaveLength(1);
+    expect(j.jobs[0]!.sharedContext).toEqual([
+      { created_at: new Date(clock - MIN).toISOString(), label: 'Claude Code: baxter', body: expect.any(String) }]);
+  });
+
+  it('only hands the job notes newer than the journal cursor', async () => {
+    const j = fakeJournaler();
+    const engine = engineFor(makeConfig(), [j]);
+    session('s1');
+    const note = (minAgo: number) => msg('s1', minAgo, { dir: 'outbound', meta: { context_only: true, origin: { kind: 'external', label: `note ${minAgo}` } } });
+    note(30); msg('s1', 20); msg('s1', 15);
+    await tickAndSettle(engine);
+    expect(j.jobs[0]!.sharedContext!.map((n) => n.label)).toEqual(['note 30']);
+    note(10); msg('s1', 9); msg('s1', 8);
+    await tickAndSettle(engine);
+    expect(j.jobs).toHaveLength(2);
+    expect(j.jobs[1]!.sharedContext!.map((n) => n.label)).toEqual(['note 10']);
+  });
+
   it('keeps below-threshold content pending, then journals it once it is 24 h old', async () => {
     const j = fakeJournaler();
     const engine = engineFor(makeConfig(), [j]);

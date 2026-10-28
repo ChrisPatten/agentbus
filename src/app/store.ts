@@ -12,18 +12,49 @@ export interface AppEvent { seq: number; event: 'message' | 'session'; data: Rec
  * SQL condition (transcripts aliased `t`): not a bus-originated system-only
  * turn (E65 critical advisory turns, E66 journal instructions). Those rows
  * stay in the DB, flagged `metadata.system_only`, for debugging, but are
- * never shown to people.
+ * never shown to people. Also the condition the pending-context query uses
+ * for outbound rows (E79), which must still see context-only ones.
  */
-export const VISIBLE_TRANSCRIPT = `COALESCE(json_extract(t.metadata, '$.system_only'), 0) = 0`;
+export const NOT_SYSTEM_ONLY = `COALESCE(json_extract(t.metadata, '$.system_only'), 0) = 0`;
 
-export function routedAgent(config: AppConfig, contactId: string): string | null {
+/**
+ * SQL condition (transcripts aliased `t`): not a context-only handoff (E79).
+ * `share_context` writes outbound rows flagged `metadata.context_only` that
+ * Main reads as context but the app never shows.
+ */
+export const NOT_CONTEXT_ONLY = `COALESCE(json_extract(t.metadata, '$.context_only'), 0) = 0`;
+
+/**
+ * SQL condition (transcripts aliased `t`) for every app-facing read: history,
+ * replay events, session list previews, unread counts, the transcript API,
+ * transcript search and quote resolution. Hides both bus-internal
+ * `system_only` turns and E79 `context_only` handoffs. Pending context and
+ * journaling windows read around it on purpose (`NOT_SYSTEM_ONLY`).
+ */
+export const VISIBLE_TRANSCRIPT = `(${NOT_SYSTEM_ONLY} AND ${NOT_CONTEXT_ONLY})`;
+
+/**
+ * The route target that serves a contact's `general` conversation on `channel`
+ * (the first matching `pipeline.routes` rule, as stage 70 matches), or null.
+ * E80: any channel, not just the app.
+ */
+export function routedTarget(config: AppConfig, contactId: string, channel: string): { adapterId: string; recipientId: string } | null {
   for (const rule of config.pipeline.routes) {
     if (rule.match.sender && rule.match.sender !== `contact:${contactId}`) continue;
-    if (rule.match.channel && !channelMatches(rule.match.channel, 'app')) continue;
+    if (rule.match.channel && !channelMatches(rule.match.channel, channel)) continue;
     if (rule.match.topic && rule.match.topic !== 'general') continue;
-    return rule.target.recipientId;
+    return { adapterId: rule.target.adapterId, recipientId: rule.target.recipientId };
   }
   return null;
+}
+
+/** The route target that serves a contact's app conversations, or null. */
+export function routedAppTarget(config: AppConfig, contactId: string): { adapterId: string; recipientId: string } | null {
+  return routedTarget(config, contactId, 'app');
+}
+
+export function routedAgent(config: AppConfig, contactId: string): string | null {
+  return routedAppTarget(config, contactId)?.recipientId ?? null;
 }
 
 interface SessionRow {
@@ -106,7 +137,8 @@ export function sessionInfo(db: Database.Database, row: SessionRow, contactId: s
       ?? (row.channel === 'app' ? 'New Conversation' : row.channel);
   const marker = (db.prepare('SELECT seq FROM app_read_markers WHERE contact_id = ? AND session_id = ?').get(contactId, row.id) as {seq:number}|undefined)?.seq ?? 0;
   const unread = (db.prepare(`SELECT COUNT(*) AS n FROM app_events e JOIN transcripts t ON t.id = e.transcript_id
-    WHERE e.contact_id = ? AND e.session_id = ? AND e.kind = 'message' AND t.direction = 'outbound' AND e.seq > ?`).get(contactId, row.id, marker) as {n:number}).n;
+    WHERE e.contact_id = ? AND e.session_id = ? AND e.kind = 'message' AND t.direction = 'outbound' AND e.seq > ?
+      AND ${VISIBLE_TRANSCRIPT}`).get(contactId, row.id, marker) as {n:number}).n;
   return { session_id: row.id, conversation_id: row.conversation_id, channel: row.channel, topic: row.topic, title, started_at: row.started_at,
     last_activity: row.last_activity, ended_at: row.ended_at, message_count: row.message_count,
     unread_count: unread, resumable: row.ended_at === null || (!!config && sessionCanResume(db, config, row.id)),
@@ -126,7 +158,7 @@ function mainInfo(db: Database.Database, row: SessionRow, contactId: string): Re
     AND session_id IN (SELECT value FROM json_each(?))`).get(contactId, scope) as {seq:number|null}).seq ?? 0;
   const unread = (db.prepare(`SELECT COUNT(*) AS n FROM app_events e JOIN transcripts t ON t.id = e.transcript_id
     WHERE e.contact_id = ? AND e.session_id IN (SELECT value FROM json_each(?)) AND e.kind = 'message'
-      AND t.direction = 'outbound' AND e.seq > ?`).get(contactId, scope, marker) as {n:number}).n;
+      AND t.direction = 'outbound' AND e.seq > ? AND ${VISIBLE_TRANSCRIPT}`).get(contactId, scope, marker) as {n:number}).n;
   return { session_id: current.id, conversation_id: current.conversation_id, channel: 'app', topic: 'general', title: 'Main',
     started_at: rows.reduce((min, r) => r.started_at < min ? r.started_at : min, current.started_at),
     last_activity: current.last_activity, ended_at: null,

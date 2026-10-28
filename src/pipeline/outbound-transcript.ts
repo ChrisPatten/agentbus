@@ -24,9 +24,16 @@ export function logOutboundTranscript(
     contactId: string;
     body: string;
     metadata: Record<string, unknown>;
+    /**
+     * E79: the row is hidden from the app (`metadata.context_only`), so no
+     * `session` event is recorded. The transcript trigger still writes a
+     * `message` event, which the app's read paths skip as they do any hidden
+     * row.
+     */
+    silent?: boolean;
   },
 ): void {
-  const { messageId, conversationId, sessionId, channel, contactId, body, metadata } = params;
+  const { messageId, conversationId, sessionId, channel, contactId, body, metadata, silent } = params;
 
   if (!conversationId || !sessionId) {
     console.warn(
@@ -62,7 +69,7 @@ export function logOutboundTranscript(
   // Outbound rows don't touch sessions.last_activity, so nothing else tells app
   // clients the session's unread count rose. The session event follows the
   // message event, so its projection includes the new message.
-  if (inserted.changes > 0) recordSessionEvent(db, contactId, sessionId);
+  if (inserted.changes > 0 && !silent) recordSessionEvent(db, contactId, sessionId);
 }
 
 /**

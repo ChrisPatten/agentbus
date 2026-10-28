@@ -50,8 +50,8 @@ import { HeadlessLimiter, type TurnClass } from './headless-limiter.js';
 import { terminateProcessGroup } from '../journaling/process.js';
 import { busTokenEnv, resolveBusToken, withBusToken } from '../core/bus-auth.js';
 import { JOURNAL_TURN_DISALLOWED_TOOLS } from '../learning/protected-paths.js';
-import { SOURCE_LABEL_ENV, TURN_CONVERSATION_ENV, type Origin } from '../core/origin.js';
-import { isMainConversation } from '../app/main.js';
+import { SOURCE_LABEL_ENV, TURN_CONVERSATION_ENV, scheduleLabelFromMetadata, type Origin } from '../core/origin.js';
+import { pendingContextAgent, primaryConversationChannel } from '../app/main.js';
 import { advanceWatermark, buildPendingContext, pendingContextLimits } from '../app/pending-context.js';
 
 const configPath = resolve(process.env['AGENTBUS_CONFIG'] ?? 'config.yaml');
@@ -227,7 +227,7 @@ export interface JournalTurnOptions {
 }
 
 /** Delivery tools a journaling turn may never call (a journal run never messages anyone). */
-const JOURNAL_DISALLOWED_TOOLS = 'mcp__agentbus__reply,mcp__agentbus__send_message,mcp__agentbus__send_email';
+const JOURNAL_DISALLOWED_TOOLS = 'mcp__agentbus__reply,mcp__agentbus__send_message,mcp__agentbus__send_email,mcp__agentbus__share_context';
 
 /** MCP tool names (namespaced by the server key) that deliver to the user. */
 const DELIVERY_TOOL_NAMES = new Set(['mcp__agentbus__reply', 'mcp__agentbus__send_message']);
@@ -393,23 +393,12 @@ export interface HeadlessActivityEvent extends HeadlessCapacitySnapshot {
   turn_class: TurnClass;
 }
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 /**
  * E69 — the human name of the schedule that fired `env`, or null when it
- * isn't a scheduled fire. The scheduler stamps `schedule_label` (the
- * schedule's `label`) and `schedule_id`: the label wins, then a config id
- * (operator-chosen, e.g. "ambient-scan"), then "scheduled job <id8>" for a
- * generated UUID id. Never the prompt body.
+ * isn't a scheduled fire (see `scheduleLabelFromMetadata` for the rule).
  */
 export function scheduleSourceLabel(env: MessageEnvelope): string | null {
-  const meta = env.metadata;
-  if (meta?.['scheduled'] !== true) return null;
-  const label = typeof meta['schedule_label'] === 'string' ? meta['schedule_label'].trim() : '';
-  if (label) return label;
-  const id = typeof meta['schedule_id'] === 'string' ? meta['schedule_id'].trim() : '';
-  if (!id) return 'scheduled job';
-  return UUID_RE.test(id) ? `scheduled job ${id.slice(0, 8)}` : id;
+  return scheduleLabelFromMetadata(env.metadata);
 }
 
 /** The forwarded provider command an envelope carries, if any (E71). */
@@ -1169,10 +1158,12 @@ class HeadlessInstance {
 
     // E69 S69.4: in Main, prepend foreign messages the agent hasn't seen
     // (runClaudeTurn puts any memory prefix ahead of it). Queried at turn
-    // start, so anything arriving mid-turn waits for the next one.
+    // start, so anything arriving mid-turn waits for the next one. E79: also
+    // hidden share_context notes; `block` is null when only expired ones were
+    // pending, and the watermark still moves past them.
     const pending = this.pendingContextFor(db, conversationId, envelopes);
     const formatted = formatMessagesForSampling(envelopes);
-    const prompt = pending ? `${pending.block}\n\n${formatted}` : formatted;
+    const prompt = pending?.block ? `${pending.block}\n\n${formatted}` : formatted;
 
     // E53: the scheduler stamps metadata.schedule_model on the fired envelope
     // when the schedule that triggered this batch has its own `model`. Only
@@ -1218,14 +1209,16 @@ class HeadlessInstance {
   /** E69 S69.4 — Main's pending-context block for this batch, or null. Never throws. */
   private pendingContextFor(db: Database.Database, conversationId: string, envelopes: MessageEnvelope[]) {
     try {
-      if (!isMainConversation(db, conversationId)) return null;
+      // E80: Main, and any channel the agent lists in pending_context.channels.
+      const channel = primaryConversationChannel(db, conversationId, config);
+      if (!channel) return null;
       const replyTargets = new Set<string>();
       for (const env of envelopes) {
         const quotedId = (env.metadata?.['quoted_message'] as { message_id?: unknown } | undefined)?.message_id;
         if (typeof quotedId === 'string') replyTargets.add(quotedId);
       }
       return buildPendingContext(db, conversationId, {
-        limits: pendingContextLimits(config),
+        limits: pendingContextLimits(config, pendingContextAgent(config, channel)),
         batchMessageIds: envelopes.map((env) => env.id),
         replyTargets,
       });

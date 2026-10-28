@@ -290,7 +290,8 @@ export class SystemMessageJournaler implements Journaler {
     }
     const lastOut = (this.deps.db
       .prepare(`SELECT MAX(created_at) AS at FROM transcripts WHERE conversation_id = ? AND direction = 'outbound'
-        AND json_extract(metadata, '$.command_response') IS NOT 1`)
+        AND json_extract(metadata, '$.command_response') IS NOT 1
+        AND json_extract(metadata, '$.context_only') IS NOT 1`)
       .get(target.conversationId) as { at: string | null }).at;
     return lastOut && lastOut >= lastHuman ? null : 'agent has not answered the last message yet';
   }

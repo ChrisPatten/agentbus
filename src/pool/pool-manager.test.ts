@@ -185,6 +185,25 @@ describe('PoolManager', () => {
       expect(paneLauncher.launch).not.toHaveBeenCalled();
     });
 
+    it('bound (E80): the message-less placeholder row share_context created gets a fresh --session-id, not a resume, and keeps the row', async () => {
+      const { manager, paneLauncher, db } = makeManager({ panes: 2 });
+      await manager.ensureStarted();
+      const now = new Date().toISOString();
+      db.prepare(`INSERT INTO conversation_registry(id,contact_id,channel,topic,first_seen,last_seen) VALUES ('conv-dm','alice','telegram:peggy','general',?,?)`).run(now, now);
+      db.prepare(`INSERT INTO sessions(id,conversation_id,channel,contact_id,started_at,last_activity,message_count,agent_id)
+        VALUES ('placeholder','conv-dm','telegram:peggy','alice',?,?,0,'agent:peggy')`).run(now, now);
+
+      const result = await manager.resolveRoute('conv-dm', { contact_id: 'alice', channel: 'telegram:peggy' });
+
+      expect(paneLauncher.launch).toHaveBeenCalledTimes(1);
+      const launchArgs = paneLauncher.launch.mock.calls[0]![0];
+      expect(launchArgs.resume).toBe(false);
+      expect(launchArgs.sessionId).toMatch(/^[0-9a-f-]{36}$/);
+      expect(result).toBe('agent:peggy-pool-1');
+      expect(db.prepare(`SELECT claude_session_id FROM sessions WHERE id = 'placeholder'`).get()).toEqual({ claude_session_id: launchArgs.sessionId });
+      expect(db.prepare('SELECT COUNT(*) AS n FROM sessions').get()).toEqual({ n: 1 });
+    });
+
     it('bound (new conversation, no prior session): launches fresh with a generated session id and persists it', async () => {
       const { manager, paneLauncher, cfg } = makeManager({ panes: 2 });
       await manager.ensureStarted();

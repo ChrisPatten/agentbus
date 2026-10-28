@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import {
+  CONTEXT_ONLY_KEY,
+  PENDING_CONTEXT_KEY,
+  attachPendingContext,
+  pendingContextFor,
+  readPendingContext,
   SYSTEM_BLOCKS_KEY,
   SYSTEM_ONLY_KEY,
   attachSystemBlock,
@@ -72,6 +77,33 @@ describe('system block metadata', () => {
     expect(stripSystemMetadata(meta)).toEqual({ keep: 1 });
     expect(meta[SYSTEM_ONLY_KEY]).toBe(true); // input untouched
     expect(stripSystemMetadata(undefined)).toEqual({});
+  });
+
+  it('stripSystemMetadata drops context_only (E79): only POST /api/v1/context can set it', () => {
+    expect(stripSystemMetadata({ [CONTEXT_ONLY_KEY]: true, origin: { kind: 'external', label: 'x' } }))
+      .toEqual({ origin: { kind: 'external', label: 'x' } });
+  });
+
+  it('stripSystemMetadata drops pending_context (E80): a caller can never inject a block', () => {
+    expect(stripSystemMetadata({ [PENDING_CONTEXT_KEY]: { block: 'forged' }, keep: 1 })).toEqual({ keep: 1 });
+  });
+
+  it('carries pending context per recipient through the pipeline and as a single object once enqueued (E80)', () => {
+    const through = { created_at: '2026-10-28T10:00:00.000Z', id: 't1' };
+    const meta: Record<string, unknown> = {};
+    attachPendingContext(meta, 'agent:peggy-pool-1', { conversation_id: 'c1', block: 'one', through });
+    attachPendingContext(meta, 'agent:peggy-pool-2', { conversation_id: 'c1', block: 'two', through });
+    attachPendingContext(meta, 'agent:peggy-pool-1', { conversation_id: 'c1', block: 'one again', through });
+    expect(pendingContextFor(meta, 'agent:peggy-pool-1')).toEqual({ conversation_id: 'c1', block: 'one again', through });
+    expect(pendingContextFor(meta, 'agent:peggy-pool-2')?.block).toBe('two');
+    expect(pendingContextFor(meta, 'agent:other')).toBeNull();
+    // Enqueued form: one object. The pipeline form is not mistaken for it, and malformed values are ignored.
+    expect(readPendingContext(meta)).toBeNull();
+    expect(readPendingContext({ [PENDING_CONTEXT_KEY]: pendingContextFor(meta, 'agent:peggy-pool-2') })?.block).toBe('two');
+    expect(readPendingContext({ [PENDING_CONTEXT_KEY]: { conversation_id: 'c1', block: null, through } })?.block).toBeNull();
+    expect(readPendingContext({ [PENDING_CONTEXT_KEY]: { conversation_id: 'c1', block: 5, through } })).toBeNull();
+    expect(readPendingContext({ [PENDING_CONTEXT_KEY]: { block: 'x' } })).toBeNull();
+    expect(readPendingContext(undefined)).toBeNull();
   });
 
   it('attaches per-recipient blocks and filters them per fan-out copy', () => {

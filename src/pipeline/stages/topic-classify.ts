@@ -1,5 +1,6 @@
 import type { AppConfig } from '../../config/schema.js';
 import { isThreadTopic, type PipelineStage } from '../types.js';
+import { primaryChannels } from '../../app/main.js';
 
 /**
  * Stage 50 — Topic Classify
@@ -10,6 +11,11 @@ import { isThreadTopic, type PipelineStage } from '../types.js';
  * applies config.pipeline.topic_rules in order — first keyword or regex match
  * wins. Falls back to 'general'. Sets ctx.topics from the resolved topic.
  * Never aborts the pipeline.
+ *
+ * E80: a channel an agent lists in `pending_context.channels` (its Telegram
+ * DM) is exempt from the rules, as the app's bound sessions are: a message
+ * the rules moved to another topic would land in another conversation, and
+ * the primary conversation would miss the context sent into it.
  *
  * Regexes are compiled once at construction time (not per-message) to avoid
  * ReDoS risk from user-supplied patterns and to improve throughput.
@@ -22,6 +28,8 @@ export function createTopicClassify(config: AppConfig): PipelineStage {
     keywords: rule.keywords,
     pattern: rule.pattern != null ? new RegExp(rule.pattern, 'i') : null,
   }));
+
+  const primary = new Set(primaryChannels(config));
 
   return async (ctx) => {
     const e = ctx.envelope;
@@ -43,6 +51,13 @@ export function createTopicClassify(config: AppConfig): PipelineStage {
     // If already set to a non-default known topic, preserve it
     if (e.topic && e.topic !== 'general' && config.topics.includes(e.topic)) {
       ctx.topics = [e.topic];
+      return ctx;
+    }
+
+    // E80: a primary channel's conversation stays `general`; topic_rules don't split it.
+    if (primary.has(e.channel)) {
+      e.topic = 'general';
+      ctx.topics = ['general'];
       return ctx;
     }
 

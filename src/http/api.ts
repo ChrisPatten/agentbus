@@ -8,6 +8,7 @@
  * GET  /api/v1/messages/pending          — Poll pending messages for an agent.
  * POST /api/v1/messages/:id/ack          — Acknowledge or dead-letter a message.
  * POST /api/v1/messages                  — Direct enqueue (MCP reply tool).
+ * POST /api/v1/context                   — Hidden context handoff into a primary conversation (E79, E80, share_context).
  * GET  /api/v1/messages/:id              — Fetch a single message by ID.
  * POST /api/v1/inbound                   — Inbound pipeline entry point.
  * POST /api/v1/pool/:agentId/turn-ended  — Pool pane activity signal (Stop hook).
@@ -59,7 +60,7 @@ import type { AppConfig } from '../config/schema.js';
 import type { MessageEnvelope } from '../types/envelope.js';
 import type { PipelineEngine } from '../pipeline/engine.js';
 import type { PipelineContext, RouteTarget } from '../pipeline/types.js';
-import { SYSTEM_BLOCKS_KEY, SYSTEM_ONLY_KEY, attachSystemBlock, stripSystemMetadata, systemBlocksFor } from '../core/system-block.js';
+import { PENDING_CONTEXT_KEY, SYSTEM_BLOCKS_KEY, SYSTEM_ONLY_KEY, attachSystemBlock, pendingContextFor, readPendingContext, stripSystemMetadata, systemBlocksFor } from '../core/system-block.js';
 import type Database from 'better-sqlite3';
 import type { CommandImage, CommandRegistry, SlashCommandContext } from '../commands/registry.js';
 import {
@@ -72,6 +73,9 @@ import { logOutboundTranscript } from '../pipeline/outbound-transcript.js';
 import { validateAppDestination } from '../app/outbound.js';
 import { boundAppReply } from '../app/binding.js';
 import { routedAgent, VISIBLE_TRANSCRIPT } from '../app/store.js';
+import { shareContext } from '../app/context-share.js';
+import { paneTurnOrigin } from '../pool/pane-origin.js';
+import { advanceWatermark } from '../app/pending-context.js';
 import { journalingHealth, runForApi, type JournalStatusDeps } from '../journaling/status.js';
 import { logWebhookRequest } from './webhook-log.js';
 import { registerSiriRoutes } from './siri-routes.js';
@@ -153,6 +157,24 @@ const MessagePayloadSchema = z.discriminatedUnion('type', [
     args_raw: z.string(),
   }),
 ]);
+
+/**
+ * E79 — body of POST /api/v1/context. `origin` is what the caller's MCP
+ * server stamped (`originFromEnv`); its label is replaced by `source`. A
+ * sender that is a pane with a leased lease is stamped from the lease instead (E80).
+ */
+const ContextShareSchema = z.object({
+  to: z.string().regex(/^contact:.+/, 'to must be contact:<id>'),
+  body: z.string().min(1),
+  source: z.string().min(1).max(120),
+  /** E80: `app` (Main) or a primary channel such as `telegram:peggy`. */
+  channel: z.string().min(1).default('app'),
+  sender: z.string().min(1).optional(),
+  origin: z.discriminatedUnion('kind', [
+    z.object({ kind: z.literal('turn'), agent_id: z.string(), conversation_id: z.string().min(1), label: z.string().optional() }),
+    z.object({ kind: z.literal('external'), label: z.string().optional() }),
+  ]).optional(),
+});
 
 const MessageSubmitSchema = z.object({
   id: z.string().uuid().optional(),
@@ -668,7 +690,9 @@ export async function processInbound(
     // E65 — each fan-out copy carries only the system blocks meant for its
     // recipient (an advisory for agent A must not reach also_notify agent B).
     const blocks = systemBlocksFor(result.envelope.metadata, route.recipientId);
-    const { [SYSTEM_BLOCKS_KEY]: _pending, ...baseMetadata } = result.envelope.metadata;
+    // E80 — likewise the pending-context block built for this route's pane.
+    const pendingContext = pendingContextFor(result.envelope.metadata, route.recipientId);
+    const { [SYSTEM_BLOCKS_KEY]: _pending, [PENDING_CONTEXT_KEY]: _pendingContext, ...baseMetadata } = result.envelope.metadata;
     const fanEnvelope: MessageEnvelope = {
       ...result.envelope,
       payload: outboundPayload,
@@ -677,6 +701,7 @@ export async function processInbound(
       metadata: {
         ...baseMetadata,
         ...(blocks.length > 0 ? { [SYSTEM_BLOCKS_KEY]: blocks } : {}),
+        ...(pendingContext ? { [PENDING_CONTEXT_KEY]: pendingContext } : {}),
         adapter_id: route.adapterId,
         conversation_id: result.conversationId ?? undefined,
         ...(result.isSlashCommand && result.slashCommand
@@ -1194,10 +1219,13 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       const { id } = req.params;
       const { status } = req.body ?? {};
       if (status === 'delivered') {
+        // E80 — a pane's message carries the pending-context watermark; it moves only when the pane takes the message.
+        const pending = readPendingContext(queue.getById(id)?.envelope.metadata);
         const acked = queue.ack(id);
         if (!acked) {
           return reply.status(404).send({ ok: false, error: 'Message not found or not in processing state' });
         }
+        if (pending) advanceWatermark(db, pending.conversation_id, pending.through);
         return { ok: true, id, status: 'delivered' };
       } else if (status === 'failed') {
         const reason = req.body?.error ?? 'failed';
@@ -1242,6 +1270,10 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     // message instead of a native reply in that case.
     // E65 — only the bus adds system blocks; an agent or HTTP caller can't.
     const metadata: Record<string, unknown> = stripSystemMetadata(data.metadata);
+    // E80 — a pane with a leased lease is running a turn in that conversation, whatever origin it stamped.
+    // A reply names its conversation (metadata.conversation_id), which wins over a lease that has moved on.
+    const paneOrigin = paneTurnOrigin(db, data.sender, metadata['origin'], metadata['conversation_id']);
+    if (paneOrigin) metadata['origin'] = paneOrigin;
     // Captured alongside the reply_to lookup below so the E48 (S48.6)
     // stale-pane guard further down can reuse this same query result instead
     // of re-running it.
@@ -1346,6 +1378,34 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
 
     const id = queue.enqueue(envelope, data.expires_at);
     return reply.status(201).send({ ok: true, id, queued: true });
+  });
+
+  // POST /api/v1/context — hidden handoff into a primary conversation (E79
+  // Main, E80 a Telegram DM; share_context). Writes a context-only transcript
+  // row directly: no queue row, no delivery, no app event the client would
+  // show. The agent reads it on its next turn.
+  server.post<{ Body: unknown }>('/api/v1/context', (req, reply) => {
+    const parsed = ContextShareSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ ok: false, error: parsed.error.message });
+    }
+    const data = parsed.data;
+    const blockedBy = data.sender ? deps.journalGate?.blockedSend(data.sender) : undefined;
+    if (blockedBy) {
+      return reply.status(409).send({
+        ok: false,
+        error: 'journal_run_in_progress',
+        reason: `Outbound messages are blocked while journal run ${blockedBy.runId} is open. Finish journaling and call journal_complete; do not share context during the run.`,
+      });
+    }
+    // E80 — a cc-pool pane running a turn in the target conversation must not hand itself context.
+    const paneOrigin = data.sender ? paneTurnOrigin(db, data.sender, data.origin) : null;
+    const result = shareContext(db, config, {
+      contactId: data.to.replace(/^contact:/, ''), body: data.body, source: data.source, channel: data.channel,
+      origin: paneOrigin ?? data.origin,
+    });
+    if (!result.ok) return reply.status(result.status).send({ ok: false, error: result.error });
+    return reply.status(201).send({ ok: true, id: result.messageId, conversation_id: result.conversationId, session_id: result.sessionId });
   });
 
   // GET /api/v1/messages/:id

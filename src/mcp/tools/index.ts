@@ -5,6 +5,7 @@
  *   - reply, get_adapter_status (E2 core tools)
  *   - list_channels (S7.1)
  *   - send_message (S7.2)
+ *   - share_context (E79; hidden context handoff to Main)
  *   - search_transcripts (S7.3; recall_memory/log_memory removed after E66)
  *   - write_knowledge, get_knowledge, forget_knowledge, search_knowledge (agent-managed knowledge store, Phase 1)
  *   - get_session, list_sessions (S7.4)

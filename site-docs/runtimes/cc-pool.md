@@ -135,6 +135,29 @@ All five scripts read the bus address from `AGENTBUS_URL` (default `http://127.0
 
 Panes only pick up new hook settings when they next start.
 
+## Your main chat with the agent
+
+Your private Telegram chat with the bot is the conversation you come back to all day, like Main in the Mac app. You can tell the bus to treat it that way, so the agent learns what was sent into it from elsewhere:
+
+```yaml
+agents:
+  "agent:assistant":
+    pending_context:
+      channels: [telegram:assistant]   # the bot's channel; your private chat only
+```
+
+The setting is off until you list a channel. It never applies to groups, forum topics or other bots, even ones that share the same bus. Topic rules under `pipeline.topic_rules` no longer split the listed chat into separate topics.
+
+With it on:
+
+- **Routines that message you reach the agent.** When a scheduled routine sends you something in this chat, the agent's next turn starts with it, with its date and time, how long ago it was sent, and the name of the routine that sent it (the schedule's label, or its id). You still see the message in Telegram as usual. The agent's own replies are never fed back to it, including a reply that finishes after its pane was moved to another chat.
+- **Claude Code can brief the agent without a message.** A Claude Code session of yours can call `share_context` with this channel to hand the agent a note that you never see in Telegram. See [Proactive messages](/features/proactive-messages#letting-main-know-without-a-message). It works even when the agent has no pane right now, and the note waits for your next message. Notes older than 24 hours are skipped.
+- **A message that never reaches the agent leaves the context waiting.** If your message is held back because every pane is busy, or it can't be delivered, the context stays waiting for the next message. The context counts as delivered the moment the agent's pane process takes your message, which is just before Claude reads it, so if the pane crashes in that moment, that delivery's context is lost.
+
+The limits are the same as for the Mac app's Main (`max_items`, `max_chars`, `context_ttl_ms`). Anything you set under the agent's `pending_context` applies to this chat; whatever you leave out comes from `adapters.app.pending_context`.
+
+To send notes from a Claude Code session on another machine, point its AgentBus tools at the bus with `AGENTBUS_URL` and give it the bus token in `AGENTBUS_BUS_TOKEN`. The bus speaks plain HTTP, so reach it through an SSH tunnel or an HTTPS proxy rather than over an open network. The token in the session's own config is never sent to another host.
+
 ## What survives a restart
 
 Restarting the bus doesn't interrupt your conversations. tmux keeps the panes running, and when the bus starts again it picks up every pane that's still alive, with its lease. If a pane's window has disappeared, its lease is released and a notice with the pane's last screen is posted on the `system` channel; the conversation resumes its Claude session in a new pane with the next message.

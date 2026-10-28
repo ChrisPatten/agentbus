@@ -8,6 +8,7 @@ These are the tools AgentBus gives your agent. Claude Code loads them automatica
 |---|---|
 | `reply` | Answers a message. Takes the `message_id` shown in the incoming message as `[id:…]`, and a `body`. The answer goes back on the same channel, in the same thread or topic. |
 | `send_message` | Starts a message to a contact on any channel. See below. |
+| `share_context` | Hands a note to Main without showing you a message. See below. |
 | `send_email` | Starts a new email. See below. |
 | `react_to_message` | Adds an emoji reaction to a message, by `message_id`. On channels without reactions, it reports that instead of failing. |
 | `create_telegram_topic` | Opens a forum topic in a Telegram group. See below. |
@@ -31,6 +32,19 @@ Without `source`, a message sent during a scheduled job's turn uses the schedule
 The bus records where every message from `send_message`, `reply` and `send_email` came from. You can't set this yourself; it's what lets the agent in Main tell its own replies apart from messages sent by other sessions.
 
 See [Proactive messages](/features/proactive-messages).
+
+### `share_context`
+
+Gives the agent in the Mac app's Main a note about work you finished in another Claude Code session. You see nothing: no message, notification or unread badge, and Main isn't woken. Main reads the note on its next turn.
+
+| Parameter | Required | Meaning |
+|---|---|---|
+| `to` | yes | The contact, such as `contact:me` |
+| `body` | yes | The note: what happened, where the result is, what's still open |
+| `source` | yes | Where it comes from, such as `Claude Code: my-project`. Main sees this label. |
+| `channel` | no | `app` (default) is Main in the Mac app. Pass a listed private-chat channel such as `telegram:assistant` to brief an agent through its Telegram chat. |
+
+Notes older than 24 hours are skipped, a note too long for the context budget is refused (shorten it and try again), and it can't be called from Main itself. To tell you something or ask a question, use `send_message`. See [Proactive messages](/features/proactive-messages#letting-main-know-without-a-message).
 
 ### `send_email`
 

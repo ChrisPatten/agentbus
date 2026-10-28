@@ -36,10 +36,10 @@ function session(id: string, agentId: string, claude: string, endedAt: string | 
     VALUES (?, ?, 'telegram', 'chris', ?, ?, ?, ?, ?)`).run(id, `conv-${id}`, '2026-10-06T10:00:00.000Z', '2026-10-06T10:00:00.000Z', endedAt, agentId, claude);
 }
 
-function msg(sessionId: string, at: string, dir: 'inbound' | 'outbound' = 'inbound') {
+function msg(sessionId: string, at: string, dir: 'inbound' | 'outbound' = 'inbound', meta: Record<string, unknown> = {}) {
   db.prepare(`INSERT INTO transcripts (id, message_id, conversation_id, session_id, created_at, channel, contact_id, direction, body, metadata)
-    VALUES (?, ?, (SELECT conversation_id FROM sessions WHERE id = ?), ?, ?, 'telegram', 'chris', ?, 'hi', '{}')`)
-    .run(`${sessionId}-${at}-${dir}`, `${sessionId}-${at}`, sessionId, sessionId, at, dir);
+    VALUES (?, ?, (SELECT conversation_id FROM sessions WHERE id = ?), ?, ?, 'telegram', 'chris', ?, 'hi', ?)`)
+    .run(`${sessionId}-${at}-${dir}`, `${sessionId}-${at}`, sessionId, sessionId, at, dir, JSON.stringify(meta));
 }
 
 function setup() {
@@ -177,6 +177,15 @@ describe('hook health (E66 S66.4)', () => {
     msg('p1', ago(TURN_ENDED_GRACE_MS + 1000), 'outbound');
     db.prepare(`UPDATE journal_hook_events SET last_seen_at = ? WHERE event = 'turn-ended'`).run(ago(3 * TURN_ENDED_GRACE_MS));
     expect(hookHealth(db, store, 'agent:peggy', pool, now)[0]!.status).toBe('stopped');
+  });
+
+  it('a hidden shared note is not agent activity (E79)', () => {
+    const store = new JournalStore(db);
+    session('p1', 'agent:peggy-pool-2', 'claude-p1');
+    msg('p1', ago(TURN_ENDED_GRACE_MS + 60_000), 'outbound', { context_only: true, origin: { kind: 'external', label: 'Claude Code: baxter' } });
+    expect(hookHealth(db, store, 'agent:peggy', pool, now)[0]!.status).toBe('idle');
+    msg('p1', ago(TURN_ENDED_GRACE_MS + 30_000), 'outbound');
+    expect(hookHealth(db, store, 'agent:peggy', pool, now)[0]!.status).toBe('never-seen');
   });
 
   it('the ticker raises a warning for a stopped hook and resolves it when it reports again', () => {

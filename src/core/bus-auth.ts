@@ -14,6 +14,8 @@
  * changes any request.
  */
 
+import { readFileSync } from 'node:fs';
+
 export const BUS_TOKEN_HEADER = 'X-Bus-Token';
 export const BUS_TOKEN_ENV = 'AGENTBUS_BUS_TOKEN';
 
@@ -26,6 +28,27 @@ export function resolveBusToken(
   if (fromConfig) return fromConfig;
   const fromEnv = env[BUS_TOKEN_ENV];
   return fromEnv ? fromEnv : undefined;
+}
+
+/**
+ * E80 — the token for a bus at an `AGENTBUS_URL` override, which is not the
+ * bus the loaded config describes. `bus.auth_token` of the local config is
+ * never used, so it can't leak to a remote host. The hook scripts' convention
+ * applies: `AGENTBUS_BUS_TOKEN`, else the older `AGENTBUS_TOKEN`, else the
+ * first line of the file named by `AGENTBUS_TOKEN_FILE`. Empty values count as
+ * unset; an unreadable file means no token.
+ */
+export function resolveRemoteBusToken(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const fromEnv = env[BUS_TOKEN_ENV] || env['AGENTBUS_TOKEN'];
+  if (fromEnv) return fromEnv;
+  const file = env['AGENTBUS_TOKEN_FILE'];
+  if (!file) return undefined;
+  try {
+    const first = readFileSync(file, 'utf-8').split(/\r?\n/, 1)[0]?.trim();
+    return first ? first : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** `{ AGENTBUS_BUS_TOKEN: token }` when a token is set, else `{}` — for spreading into a child env. */

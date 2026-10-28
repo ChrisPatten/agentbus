@@ -39,6 +39,25 @@ export function originFromEnv(agentId: string, source?: string, env: NodeJS.Proc
     : { kind: 'external', label: label ?? DEFAULT_ORIGIN_LABEL };
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * E69 — the human name of the schedule that fired a message, from its
+ * metadata, or null when it isn't a scheduled fire. The scheduler stamps
+ * `schedule_label` (the schedule's `label`) and `schedule_id`: the label wins,
+ * then a config id (operator-chosen, e.g. "ambient-scan"), then "scheduled job
+ * <id8>" for a generated UUID id. Never the prompt body. Shared by cc-headless
+ * (`scheduleSourceLabel`) and the bus-side pane origin (E80).
+ */
+export function scheduleLabelFromMetadata(meta: Record<string, unknown> | null | undefined): string | null {
+  if (meta?.['scheduled'] !== true) return null;
+  const label = typeof meta['schedule_label'] === 'string' ? meta['schedule_label'].trim() : '';
+  if (label) return label;
+  const id = typeof meta['schedule_id'] === 'string' ? meta['schedule_id'].trim() : '';
+  if (!id) return 'scheduled job';
+  return UUID_RE.test(id) ? `scheduled job ${id.slice(0, 8)}` : id;
+}
+
 /** `metadata` with `origin` set, replacing any caller-supplied value. */
 export function withOrigin(metadata: Record<string, unknown> | undefined, origin: Origin): Record<string, unknown> {
   return { ...(metadata ?? {}), origin };

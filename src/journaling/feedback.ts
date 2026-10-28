@@ -208,12 +208,17 @@ export class FeedbackStore {
   }
 }
 
-/** The agent message a feedback event in `conversationId` most likely refers to: the latest non-command outbound row. */
+/**
+ * The agent message a feedback event in `conversationId` most likely refers
+ * to: the latest non-command outbound row. E79: not a hidden `context_only`
+ * handoff, which the user never saw.
+ */
 export function latestAgentMessageId(db: Database.Database, conversationId: string): string | null {
   const row = db
     .prepare(
       `SELECT message_id FROM transcripts WHERE conversation_id = ? AND direction = 'outbound'
          AND json_extract(metadata, '$.command_response') IS NOT 1
+         AND json_extract(metadata, '$.context_only') IS NOT 1
        ORDER BY created_at DESC, rowid DESC LIMIT 1`,
     )
     .get(conversationId) as { message_id: string } | undefined;

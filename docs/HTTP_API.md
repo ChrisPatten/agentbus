@@ -43,6 +43,7 @@ Set `bus.host: 0.0.0.0` to accept connections from other hosts, for example a re
 | GET | `/api/v1/advisories` | List bus advisories, by agent and state |
 | GET | `/api/v1/advisories/:id` | Fetch one advisory |
 | POST | `/api/v1/advisories/:id/ack` | Acknowledge a bus advisory (the `advisory_ack` tool) |
+| POST | `/api/v1/context` | Hand a hidden context note to Main or a primary Telegram DM (the `share_context` tool, E79, E80) |
 | POST | `/api/v1/inbound` | Submit an inbound message to the pipeline |
 | POST | `/api/v1/webhooks/pebble` | Pebble Ring voice-memo ingress (when configured) |
 | POST | `/api/v1/siri/ask` | Siri ask: submit a question and wait for the agent's reply (when configured) |
@@ -289,7 +290,7 @@ Responses (both `200`):
 
 `reason` is one of `invalid_payload`, `command_handled`, `adapter_paused`, `no_matching_route` (an in-process system turn whose route filter matched nothing), `Aborted at stage "<name>"` (for example `dedup`), or `Stage "<name>" error: ...`. A body that fails validation returns `400`.
 
-`metadata.system_blocks` and `metadata.system_only` are reserved for the bus and are dropped from the request (E65, see [ADVISORIES.md](ADVISORIES.md)). The same applies to `POST /api/v1/messages`.
+`metadata.system_blocks`, `metadata.system_only`, `metadata.journal_run_id`, `metadata.context_only` and `metadata.pending_context` are reserved for the bus and are dropped from the request (E65, E79, see [ADVISORIES.md](ADVISORIES.md)). The same applies to `POST /api/v1/messages`.
 
 ### `POST /api/v1/webhooks/pebble`
 
@@ -330,12 +331,37 @@ Enqueues an outbound message for the delivery worker. The `reply`, `send_message
 | `topic` | no | Default `general`. Use a `thread:<hash>` value to target a thread |
 | `reply_to` | no | Bus message ID. Resolved to the platform message ID so Telegram can quote it, unless it is the latest inbound message in the conversation |
 | `priority` | no | `normal` (default), `high`, or `urgent` |
-| `metadata` | no | Free-form object. The reserved keys `system_blocks`, `system_only` and `journal_run_id` are dropped. `origin` is stamped by the MCP tools and cc-headless's fallback delivery ([MCP_TOOLS.md → Origin metadata](MCP_TOOLS.md#origin-metadata)); the route stores it on the outbound transcript row as given |
+| `metadata` | no | Free-form object. The reserved keys `system_blocks`, `system_only`, `journal_run_id`, `context_only` and `pending_context` are dropped (only `POST /api/v1/context` can write `context_only`). `origin` is stamped by the MCP tools and cc-headless's fallback delivery ([MCP_TOOLS.md → Origin metadata](MCP_TOOLS.md#origin-metadata)); the route stores it on the outbound transcript row as given |
 | `expires_at` | no | ISO 8601, in the future. Expired pending messages are dead-lettered by the sweep |
+
+E80: when the sender is a cc-pool pane with a `leased` lease, the route replaces `metadata.origin` with `{ kind: 'turn', agent_id, conversation_id: <lease conversation>, label? }` (an explicit label is kept), so a pane's reply to its own conversation is its own and a send into another conversation is foreign to it. The conversation is the send's own `metadata.conversation_id` when it has one (a `reply` does), in any lease state, so a reply that outlived its pane's lease is still its conversation's own turn; otherwise the lease's conversation, only while `leased`. With no conversation id on the send, a `free`, `dead`, `launching` or `draining` lease or a sender with no lease row leaves the origin as sent. The label is the caller's `source` if given, else the name of the schedule that fired the conversation's newest inbound message. The stale-pane `409` for a reply whose pane is now leased to another conversation is unchanged. The reserved key `pending_context` is dropped too. `POST /api/v1/messages/:id/ack` with `delivered` also advances the pending-context watermark carried by a pane's message ([CC_POOL_ADAPTER.md](CC_POOL_ADAPTER.md#primary-conversations-pending-context-and-shared-context-e80)).
 
 On the `app` channel, a `reply_to` that names an earlier message rather than the operator's latest one makes the stored message carry a quote ([APP_ADAPTER.md](APP_ADAPTER.md#replying-to-a-message-reply_to)).
 
 Returns `201 { "ok": true, "id": "<uuid>", "queued": true }`. While a System Message journal run is open for the sending agent (E66), returns `409 { ok: false, error: "journal_run_in_progress", reason }` and enqueues nothing.
+
+### `POST /api/v1/context`
+
+E79, E80. Hands a note to a contact's primary conversation (Main, or with `channel` the DM of an agent that lists it in `pending_context.channels`) without sending a message. The `share_context` tool calls this route. It writes one outbound transcript row with `metadata = { origin, context_only: true }` directly: no `message_queue` row, no delivery worker, no adapter. The row changes neither `sessions.last_activity` nor `message_count` and records no `session` event, so the Mac app shows nothing: no message, no unread badge, no sidebar move. Main reads the note on its next turn as [pending context](CC_HEADLESS_ADAPTER.md#shared-context-share_context), and journaling windows keep it ([JOURNALING.md](JOURNALING.md#shared-context)). The row joins the conversation's newest session row, open or ended, and changes nothing on it, so a note written after an idle rotation doesn't create a row or move Main in the sidebar. Only a conversation that has never had a session row gets one created: for Main (as for any proactive app send) which emits the usual `session` event once; for a Telegram DM a message-less placeholder (no `claude_session_id`) that the first real message reuses and that the session tracker leaves open ([CC_POOL_ADAPTER.md](CC_POOL_ADAPTER.md#primary-conversations-pending-context-and-shared-context-e80)).
+
+| Field | Required | Notes |
+|---|---|---|
+| `to` | yes | `contact:<id>`. The contact must exist, and the route that serves `channel` for them (`app` for Main, else that channel's route) must target a `cc-headless` or `cc-pool` agent, the runtimes that read pending context. For a Telegram channel the bot must be configured and the contact must have `platforms.telegram` |
+| `body` | yes | Non-blank. The note as Main will read it, rendered with its timestamp and label, must fit `adapters.app.pending_context.max_chars` (default 4000); otherwise the call fails with `413` rather than truncating |
+| `source` | yes | Up to 120 characters, whitespace collapsed to one line. Becomes `origin.label`, the label the agent sees (for example `Claude Code: baxter`) |
+| `channel` | no | `app` (default, Main) or a primary channel such as `telegram:peggy` (exact; not a group or thread). Unlisted or unrouted channels are `400` |
+| `sender` | no | The calling agent's id. Used for the journal-run gate below, and (E80) to stamp the origin from the sender's pane lease: a pane leased to the target conversation is rejected with `409` |
+| `origin` | no | What the caller's MCP server stamped (`kind: 'turn'` with `agent_id` and `conversation_id`, or `kind: 'external'`). Its label is replaced by `source`; without it the origin is `{ kind: 'external', label: source }` |
+
+Returns `201 { "ok": true, "id": "<uuid>", "conversation_id": "…", "session_id": "…" }`. Errors are `{ ok: false, error }`:
+
+| Status | When |
+|---|---|
+| `400` | Invalid body, a blank `source` or `body`, an unknown contact, no `app` route for the contact, or a route whose target is not `cc-headless` or `cc-pool` (`Main is served by <adapter>, which does not read shared context`; `<channel>` for a Telegram DM). The route refuses rather than store a note nobody will read |
+| `409` | `origin` is a turn in this contact's Main (an agent should not hand itself context), or a System Message journal run is open for `sender` (`error: "journal_run_in_progress"`, with a `reason`) |
+| `413` | The note does not fit the `max_chars` budget |
+
+`POST /api/v1/messages` and `POST /api/v1/inbound` drop `context_only` from caller metadata, so this is the only way to create such a row. App history, replay, unread counts, `GET /api/v1/sessions/:id/transcript`, `GET /api/v1/transcripts/search` and quote resolution all hide context-only rows ([APP_ADAPTER.md → Hidden context](APP_ADAPTER.md#hidden-context-share_context)).
 
 ### `GET /api/v1/messages/:id`
 
@@ -419,7 +445,7 @@ Every transcript row for the session, oldest first: `{ message_id, session_id, c
 
 Returns `{ "ok": true, "transcript": [...], "count": n }`, or `404` for an unknown session.
 
-Bus-originated system-only turns (advisory turns, journal instructions) are left out here and in `GET /api/v1/transcripts/search`; they stay in the database.
+Bus-originated system-only turns (advisory turns, journal instructions) and E79 context-only handoffs are left out here and in `GET /api/v1/transcripts/search`; they stay in the database.
 
 ### `GET /api/v1/transcripts/search`
 

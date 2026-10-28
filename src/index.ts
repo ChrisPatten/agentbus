@@ -42,6 +42,7 @@ import { SiriAdapter } from './adapters/siri.js';
 import { SlackAdapter } from './adapters/slack.js';
 import { AppAdapter } from './adapters/app.js';
 import { routedAgent } from './app/store.js';
+import { primaryChannels } from './app/main.js';
 import { startHeadless, stopHeadless, getHeadlessSnapshots, buildMcpConfig } from './adapters/cc-headless.js';
 import { createPoolManagers } from './pool/pool-manager.js';
 import { RuntimeResolver } from './core/runtime-resolver.js';
@@ -69,6 +70,7 @@ import { AdvisoryService } from './advisories/service.js';
 import { createBusAdvisoryTransport } from './advisories/transport.js';
 import { createTopicContextInject } from './pipeline/stages/topic-context-inject.js';
 import { createAdvisoryInject } from './pipeline/stages/advisory-inject.js';
+import { createPendingContextInject } from './pipeline/stages/pending-context-inject.js';
 import { resolveJournalingSettings } from './journaling/config.js';
 import { reviewChains } from './journaling/advisories.js';
 import { JournalEngine } from './journaling/engine.js';
@@ -318,6 +320,10 @@ pipeline.use({ slot: 86, name: 'advisory-inject',  stage: createAdvisoryInject(a
 // E66 — a message held by a System Message journal run tells its sender,
 // once per hold, that the agent is busy.
 pipeline.use({ slot: 87, name: 'journal-hold',     stage: createJournalHoldNotice(journalGate, (run, target) => notifyBusy(run, target)), critical: false });
+// E80 — a cc-pool pane serving a primary conversation (Main, or a channel an
+// agent lists in pending_context.channels) gets the pending-context block on
+// the envelope; the ack advances the watermark. (87 is taken by journal-hold.)
+pipeline.use({ slot: 88, name: 'pending-context-inject', stage: createPendingContextInject(db, config), critical: false });
 
 // ── Siri channel (E42) ───────────────────────────────────────────────────────
 // Registered before the HTTP server is built because the /api/v1/siri routes
@@ -431,7 +437,7 @@ for (const inst of getEmailInstances(config)) {
 // Agent-bound messages (agent:*) stay in the queue for CC adapter to poll.
 
 const deliveryWorker = new DeliveryWorker({
-  queue, registry, db,
+  queue, registry, db, primaryChannels: primaryChannels(config),
   onFailed: (envelope, reason) => safeFeedback(() => recordDeliveryFailure(feedbackProducers, envelope, reason)),
 });
 

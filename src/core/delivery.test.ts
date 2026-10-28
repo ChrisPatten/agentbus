@@ -168,3 +168,52 @@ describe('DeliveryWorker — outbound transcript logging (E31)', () => {
     expect(getOutboundRows(db)).toHaveLength(0);
   });
 });
+
+describe('DeliveryWorker — sends into a primary channel (E80)', () => {
+  /** A DM conversation (older) and a forum-topic conversation (newer) for the same contact and channel, each with an open session. */
+  function seedTwo(db: Database.Database, channel: string) {
+    const add = (topic: string, seen: string) => {
+      const conversationId = randomUUID();
+      const sessionId = randomUUID();
+      db.prepare(`INSERT INTO conversation_registry (id, contact_id, channel, topic, first_seen, last_seen) VALUES (?, 'alice', ?, ?, ?, ?)`)
+        .run(conversationId, channel, topic, seen, seen);
+      db.prepare(`INSERT INTO sessions (id, conversation_id, channel, contact_id, started_at, last_activity, message_count) VALUES (?, ?, ?, 'alice', ?, ?, 1)`)
+        .run(sessionId, conversationId, channel, seen, seen);
+      return conversationId;
+    };
+    return { dm: add('general', '2026-10-01T10:00:00.000Z'), thread: add('thread:0123456789abcdef', '2026-10-02T10:00:00.000Z') };
+  }
+
+  async function deliverOne(db: Database.Database, primaryChannels: string[] | undefined, envelope: MessageEnvelope) {
+    const queue = new MessageQueue(db);
+    const registry = new AdapterRegistry();
+    registry.register(makeAdapter(envelope.channel, envelope.channel, vi.fn().mockResolvedValue({ success: true })));
+    const worker = new DeliveryWorker({ queue, registry, db, ...(primaryChannels ? { primaryChannels } : {}) });
+    const id = queue.enqueue(envelope);
+    const [message] = queue.dequeueByPrefix('contact:', 10);
+    await (worker as unknown as { deliver: (id: string, e: MessageEnvelope) => Promise<void> }).deliver(id, message!.envelope);
+    return getOutboundRows(db);
+  }
+
+  it('logs a send with no topic or general into the general conversation, not the newest registry row', async () => {
+    for (const topic of ['general', '']) {
+      const db = makeDb();
+      const { dm } = seedTwo(db, 'telegram:peggy');
+      const rows = await deliverOne(db, ['telegram:peggy'], makeEnvelope({ channel: 'telegram:peggy', topic }));
+      expect(rows.map((r) => r.conversation_id)).toEqual([dm]);
+    }
+  });
+
+  it('leaves a thread topic and every unlisted channel as before: the newest conversation for the contact and channel', async () => {
+    const db = makeDb();
+    const { thread } = seedTwo(db, 'telegram:peggy');
+    expect((await deliverOne(db, ['telegram:peggy'], makeEnvelope({ channel: 'telegram:peggy', topic: 'thread:0123456789abcdef' }))).map((r) => r.conversation_id)).toEqual([thread]);
+    const db2 = makeDb();
+    const two = seedTwo(db2, 'telegram:pokeclaude');
+    expect((await deliverOne(db2, ['telegram:peggy'], makeEnvelope({ channel: 'telegram:pokeclaude', topic: 'general' }))).map((r) => r.conversation_id)).toEqual([two.thread]);
+    const db3 = makeDb();
+    const three = seedTwo(db3, 'telegram:peggy');
+    expect((await deliverOne(db3, undefined, makeEnvelope({ channel: 'telegram:peggy', topic: 'general' }))).map((r) => r.conversation_id)).toEqual([three.thread]);
+  });
+});
+

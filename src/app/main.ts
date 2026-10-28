@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
 import { AppAdapterSchema, type AppConfig } from '../config/schema.js';
+import { toPrefixedAgentId } from '../pool/types.js';
 import type { JournalEngine, TriggerHandle } from '../journaling/engine.js';
 import { appConversationId } from './outbound.js';
 import { VISIBLE_TRANSCRIPT } from './store.js';
@@ -19,6 +20,53 @@ export function mainConversationId(contactId: string): string {
 export function isMainConversation(db: Database.Database, conversationId: string): boolean {
   return !!db.prepare(`SELECT 1 FROM conversation_registry WHERE id = ? AND channel = 'app' AND topic = ?`)
     .get(conversationId, MAIN_TOPIC);
+}
+
+/**
+ * E80 — the exact channels agents list in `agents.<id>.pending_context.channels`
+ * (for example `telegram:peggy`). Exact: `telegram:peggy:group:*` chats don't
+ * match the way `channelMatches` would let a route rule match them.
+ */
+export function primaryChannels(config: AppConfig): string[] {
+  const out = new Set<string>();
+  for (const agent of Object.values(config.agents ?? {})) for (const c of agent.pending_context?.channels ?? []) out.add(c);
+  return [...out];
+}
+
+/** E80 — the agent (prefixed id) that lists `channel` as a primary channel, or null. */
+export function primaryAgentForChannel(config: AppConfig, channel: string): string | null {
+  for (const [key, agent] of Object.entries(config.agents ?? {})) {
+    if (agent.pending_context?.channels?.includes(channel)) return toPrefixedAgentId(key);
+  }
+  return null;
+}
+
+/**
+ * E80 — a primary conversation is one whose agent learns what was sent into
+ * it from elsewhere: Main, and the `general` conversation of each channel an
+ * agent lists in `pending_context.channels`. Gates pending context and the
+ * hidden `share_context` write. Rotation and teardown stay Main-only
+ * (`isMainConversation`).
+ */
+export function isPrimaryConversation(db: Database.Database, conversationId: string, config: AppConfig): boolean {
+  return primaryConversationChannel(db, conversationId, config) !== null;
+}
+
+/** E80 — the channel of a primary conversation (`app` for Main), or null when it isn't one. */
+export function primaryConversationChannel(db: Database.Database, conversationId: string, config: AppConfig): string | null {
+  const row = db.prepare(`SELECT channel, topic FROM conversation_registry WHERE id = ?`)
+    .get(conversationId) as { channel: string; topic: string } | undefined;
+  if (!row || row.topic !== MAIN_TOPIC) return null;
+  return row.channel === 'app' || primaryChannels(config).includes(row.channel) ? row.channel : null;
+}
+
+/**
+ * E80 — whose `agents.<id>.pending_context` limits govern a primary
+ * conversation on `channel`: the agent that lists the channel. The app's Main
+ * keeps `adapters.app.pending_context` (undefined: no agent override).
+ */
+export function pendingContextAgent(config: AppConfig, channel: string): string | undefined {
+  return channel === 'app' ? undefined : primaryAgentForChannel(config, channel) ?? undefined;
 }
 
 /** Whether a session row belongs to some contact's Main. */

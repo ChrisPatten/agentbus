@@ -109,6 +109,7 @@ describe('FeedbackStore (S68.2)', () => {
     session();
     const reply = msg(10, { dir: 'outbound' });
     msg(5, { dir: 'outbound', meta: { command_response: true } });
+    msg(3, { dir: 'outbound', meta: { context_only: true } }); // E79: a hidden handoff the user never saw
     expect(latestAgentMessageId(db, conv)).toBe(reply);
     expect(latestAgentMessageId(db, 'nope')).toBeNull();
   });
