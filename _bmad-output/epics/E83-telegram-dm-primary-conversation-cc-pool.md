@@ -6,7 +6,7 @@
 | Dependencies | E82 (hidden `context_only` rows, `share_context`, visibility split), E69 (origin stamping, pending context), E48 (cc-pool), E65 (advisory injection stage, system blocks), E66 (journaling) |
 | Story Count | 6 |
 | Estimated Complexity | M |
-| Status | Implemented; spike and live check on Peggy pending |
+| Status | Complete (0.17.0; live check on Peggy passed 2026-10-28) |
 
 Source: operator request, 2026-10-28.
 

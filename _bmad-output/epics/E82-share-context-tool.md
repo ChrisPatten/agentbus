@@ -6,7 +6,7 @@
 | Dependencies | E69 (origin stamping, Main pending context), E59 (app replay events), E66 (journaling windows), E65 (`system_only` precedent) |
 | Story Count | 6 |
 | Estimated Complexity | M |
-| Status | Implemented; live check on baxter-mac-test pending |
+| Status | Complete (0.17.0; live check on baxter-mac-test passed 2026-10-28) |
 
 Source: operator request, 2026-10-27.
 
