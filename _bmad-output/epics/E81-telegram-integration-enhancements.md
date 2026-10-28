@@ -6,7 +6,7 @@
 | Dependencies | E74 (choice buttons: `choice_prompts`, `processCallbackQuery` routing), E79 (status lines), E51 (inline keyboard plumbing) |
 | Story Count | 9 |
 | Estimated Complexity | L |
-| Status | Scoped 2026-10-28, awaiting Chris's go |
+| Status | Implemented on feat/e81-telegram-enhancements (S81.1-S81.9 code and tests done; live check after safe restart pending) |
 
 Source: Chris's request of 2026-10-28 after the Bot API review (Bot API 10.3, Aug 24, 2026; core.telegram.org/bots/api, /bots/features, /bots/api-changelog).
 
@@ -26,6 +26,32 @@ Agents can currently send plain text with single-choice buttons. Telegram offers
 ## Verified baseline (adapter inspection, 2026-10-28)
 
 `src/adapters/telegram.ts` already calls sendMessage, editMessageText, editMessageReplyMarkup, answerCallbackQuery, sendChatAction, sendPhoto, getFile, createForumTopic, setMyCommands, setChatMenuButton and setMessageReaction. Polling requests `allowed_updates: ['message','message_reaction','callback_query']`. No pin, location, contact, document or rich-message calls exist yet.
+
+## Verified Behavior (S81.1 spike, 2026-10-28)
+
+Method: Bot API docs (core.telegram.org/bots/api/*.md) plus a minimum of live calls from a scratch forum topic in the Peggy group (created and deleted by the spike; no existing topic was touched; no `getUpdates` was issued, so the running bus-core poller was undisturbed). The bot is an administrator of the group with `can_pin_messages` and `can_manage_topics` already true. Not verifiable without a client or a private chat (so left to the live check): button taps, `users_shared`/location/contact answers, and anything in Chris's DM.
+
+- PASS rich messages exist (Bot API 10.1). `sendRichMessage {chat_id, message_thread_id, rich_message, reply_markup?, disable_notification?, reply_parameters?}`; works inside a forum topic. `rich_message` takes exactly one of `markdown`, `html`, `blocks`. Working shape: `{"rich_message":{"markdown":"# Brief\n\n| Item | Time |\n|:--|--:|\n| Dentist | 10:00 |\n\n<details><summary>Calendar</summary>\n\n- Dentist\n\n</details>\n\n<tg-button-row align=\"left\"><tg-button type=\"copy_text\" text=\"hello\">Copy</tg-button><tg-button type=\"url\" url=\"https://t.me\">Link</tg-button></tg-button-row>"}}`.
+- PASS Rich Markdown is the most reliable input (native tables, `<details>`, button rows in one string). HTML (`<table>`, `<details>`) and `blocks` (`heading`/`paragraph`/`details`) also worked. Decision: `send_rich` accepts `markdown` or `html`; `blocks` is not exposed.
+- PASS rich edit: `editMessageText {chat_id, message_id, rich_message}` edits a rich message, converts plain to rich and back.
+- PASS rich limits: 5000 characters accepted (the 4096 plain limit does not apply); 32769 rejected with `RICH_MESSAGE_TEXT_TOO_LONG`. Documented limits: 32768 characters, 500 blocks, 50 media, 20 table columns.
+- PASS inline keyboard on a rich message via `reply_markup` (with `style`, `copy_text`, `url`, `callback_data`).
+- PASS `style` on an inline button (`"success"`, `"danger"`, `"primary"`) accepted.
+- PASS `copy_text` button `{text, copy_text:{text}}` accepted (taps produce no update).
+- PASS `DisabledButton`: `editMessageReplyMarkup` with `{"text":"A","disabled":{}}` accepted, also combined with `style`.
+- PASS `disable_notification` and `link_preview_options {is_disabled:true}` accepted on sendMessage (the response echoes `link_preview_options`).
+- PASS edit text; PASS no-op edit returns `400 Bad Request: message is not modified` (the adapter must catch it).
+- PASS pin/unpin in a topic: `pinChatMessage {chat_id, message_id, disable_notification}`, `unpinChatMessage {chat_id, message_id}`, `unpinAllForumTopicMessages {chat_id, message_thread_id}`; unpinning a message that is not pinned is a silent success. Required right: `can_pin_messages` (the bot already has it). The "not enough rights" error text could not be provoked live; handled by substring match (`not enough rights`) from the documented error.
+- PASS `sendLocation`, `sendVenue`, `sendContact` (with `vcard`) in a topic. `latitude: 99` returns `400 invalid location specified` (the adapter range-checks first).
+- PASS `sendDocument` multipart with a caption; caption of 1025 characters rejected (`message caption is too long`).
+- PASS text of 4097 characters rejected (`message is too long`), confirming the 4096 limit for plain sends and edits.
+- PASS `force_reply` with `input_field_placeholder` works inside a forum topic.
+- PASS remove-keyboard trick: `sendMessage` with `reply_markup {remove_keyboard:true}` followed by `deleteMessage` works.
+- FAIL (limitation) `request_location`, `request_contact` and `request_users` reply-keyboard buttons: `400 ... can be requested in private chats only`. `ask_input` for `location`/`contact`/`person` therefore works only in a private chat; in a group topic it degrades to a `force_reply` text prompt (the user can still send a location or contact from the attach menu; the adapter forwards those). Private-chat behavior is documented but was not exercised live (would message Chris).
+- FAIL `message_effect_id` in the group: `400 can't use message effects in the chat`. Private chats are documented as supported but unverified, so the `effect` parameter of S81.2 is NOT built.
+- Fallbacks used: none of the rich features was unavailable. S81.8 uses the stated degrade for group chats (above); S81.2 omits `effect`.
+- BotFather toggles: none found necessary. No new `allowed_updates` are needed (location, contact and `users_shared` arrive as `message` updates).
+- Edit window: ordinary bot messages in groups have no edit window (the 48 hour limit applies only to business messages), so `edit_message` enforces none.
 
 ## Design notes
 
