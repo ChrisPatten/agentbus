@@ -11,7 +11,7 @@ describe('migration 038 — choice_prompts table', () => {
     expect(columns.map((c) => c.name).sort()).toEqual(
       [
         'id', 'channel', 'topic', 'contact_id', 'labels', 'platform_message_id', 'bus_message_id',
-        'status', 'chosen_index', 'answered_by', 'answered_at', 'created_at', 'expires_at',
+        'status', 'chosen_index', 'answered_by', 'answered_at', 'created_at', 'expires_at', 'commands',
       ].sort(),
     );
     const idx = db.prepare(`SELECT name FROM sqlite_master WHERE type='index' AND name='idx_choice_prompts_status'`).get();

@@ -58,6 +58,7 @@ Every field of `adapters.cc-pool`:
 | `on_evict` | `clear` \| `kill` | `clear` | What happens to a pane on release: type `/clear` (drop context, leave the session running until the pane is next claimed) or send `Ctrl-C` and kill the window. Either way, the next launch starts from a fresh window: a launch reuses a live window only when it's at a shell prompt, and otherwise kills and recreates it. |
 | `launch_ack_delay_ms` | number (ms) | `5000` | Deprecated and ignored; accepted so existing configs load. The pane now polls for the `--dangerously-load-development-channels` prompt until it appears, the pane starts polling the bus, or the 30-second launch deadline passes. |
 | `launch_ack_max_attempts` | number | `3` | Maximum `Enter` presses to dismiss the ack prompt, once it's confirmed showing, before giving up. |
+| `model_confirm_pattern` | string (regex) | built-in (see [Model-confirmation prompt](#model-confirmation-prompt)) | Case-insensitive regex matched in pane output to detect Claude Code's model-confirmation prompt, which is answered by sending the key `1`. Only used when a pane is launched with `--model`. |
 | `launch_ack_pattern` | string | `"loading development channels"` | Text matched (case-insensitively) in pane output to detect the ack prompt — the real prompt's header reads "WARNING: Loading development channels". Override if a CLI update rewords it. |
 | `pane_env` | map of string to string | `{}` | Extra environment variables set at window-creation time (`tmux new-window -e`). `TERM` and `COLORTERM` are always added on top, unconditionally. |
 | `watchdog.enabled` | boolean | `true` | Turns the stall watchdog on or off. |
@@ -165,7 +166,7 @@ Every pane launch — a fresh `bound`/`grow`/`evict` claim, and every `reuse` of
 4. **The pool's own `model`** (`adapters.cc-pool.<name>.model`).
 5. **Nothing** — no `--model` flag at all. The CLI falls back to whatever `model` is set in `~/.claude/settings.json`, and any interactive `/model` typed into ANY Claude session (this pool's or an entirely unrelated one) rewrites that file — so which model a pane actually runs can change for reasons that have nothing to do with this pool's own configuration. bus-core logs a startup warning (`[pool:<id>] No 'model' configured for this pool — ...`) for every configured pool whose `model` is unset, precisely because this fallback is a leak, not a feature.
 
-Overrides (steps 2–3) live in the same store `cc-headless` uses (`src/adapters/model-override-loader.ts`) — see `docs/MCP_TOOLS.md` and [HTTP_API.md](HTTP_API.md#model-overrides) for managing them. The resolved model, and which of the five steps produced it, is logged on every launch: `[pool:<id>] launching <pane> model=<m> (source=<s>)`.
+To set the agent override (step 2) from chat, send `/model` in a chat routed to the pool — for example `/model opus` or `/model haiku 4.5` (see [SLASH_COMMANDS.md](SLASH_COMMANDS.md#model-query--reset--list)). It stores a concrete model ID and, if the chat holds a live pane between turns, relaunches that pane on it immediately; otherwise the change applies at the next message. New model IDs can be added to `/model`'s catalog under `models.catalog` in `config.yaml`. Overrides (steps 2–3) live in the same store `cc-headless` uses (`src/adapters/model-override-loader.ts`) — see `docs/MCP_TOOLS.md` and [HTTP_API.md](HTTP_API.md#model-overrides) for managing them. The resolved model, and which of the five steps produced it, is logged on every launch: `[pool:<id>] launching <pane> model=<m> (source=<s>)`.
 
 **The model is fixed per Claude session, not per message.** `--model` only takes effect at process start (fresh `--session-id`) or resume (`--resume`) — there is no way to change a running session's model mid-turn. `pool_leases.model` (migration 023) records what the pane's *current* session was actually launched with, so a `reuse` can compare against it without re-deriving anything.
 
@@ -177,6 +178,19 @@ Overrides (steps 2–3) live in the same store `cc-headless` uses (`src/adapters
 - If the relaunch itself fails, the pane is marked `dead` and the message is parked — the same failure path a fresh launch failure takes; `reconcileLiveness()` revives a `dead` pane back to `free` on the next sweep tick.
 
 **Using `/model` inside a pane is not a supported way to switch.** It only rewrites `~/.claude/settings.json` — exactly the leak this feature exists to close — and has no effect on what `PoolManager` resolves or persists to `pool_leases.model` for the next relaunch; a later resolution can silently override it back.
+
+### Model-confirmation prompt
+
+A model can only be changed by restarting the Claude session (`--model` applies at process start or `--resume`), so the pool never types `/model` into a running pane: a model switch is always the relaunch described above. `/model` in chat calls `PoolManager.applyModelNow()`, which runs the same relaunch immediately for the chat's live, idle pane instead of waiting for its next message (`deferred` if a turn is in flight, `no-pane` if the chat holds none, `unchanged` if the pane already runs that model).
+
+Claude Code may show a model-confirmation prompt when a session starts on a changed model, and the prompt is answered by pressing `1`. Any launch carrying `--model` therefore checks for it, in `PaneLifecycle.confirmModelPrompt()`:
+
+1. Each readiness poll iteration (every 500 ms, inside the 30-second launch deadline) reads `capture-pane`. The ack-prompt wait also stops early when the model prompt is on screen, so it cannot stall behind it.
+2. The prompt counts as present only when the capture matches `model_confirm_pattern` (default: the words switch/change/confirm near the word "model") **and** a numbered option `1.` is on screen.
+3. Only then does the pane send the key `1` through `tmux send-keys`, wait a short backoff, and re-read the pane. This repeats up to `launch_ack_max_attempts` presses.
+4. If the prompt is absent, no key is sent. If it is still showing after the last press, the launch fails with `Pane launch failed: the model confirmation prompt in <pane> was still showing after N attempt(s) to answer it`, the pane is marked `dead`, and `/model` reports `switching the live pane failed (<reason>)` instead of hanging. The override stays saved and the next message starts a fresh pane on the new model.
+
+The prompt wording has not been verified against a real capture; if the CLI words it differently, set `model_confirm_pattern` (use `/pane` or `tmux capture-pane -p` on a pane showing it). A pattern that never matches is safe: no key is sent and the launch behaves as before. `cc-headless` has no pane and is unaffected.
 
 ## Allocation and eviction
 

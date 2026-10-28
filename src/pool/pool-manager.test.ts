@@ -964,7 +964,69 @@ describe('PoolManager', () => {
     });
   });
 
-  describe('journaling release hook (E66 S66.9)', () => {
+  describe('applyModelNow (E54 /model)', () => {
+  function setup(initial: string | undefined) {
+    let model = initial;
+    const cfg = makeCfg({ panes: 1, model: initial });
+    const db = makeDb();
+    const paneLauncher = makeFakeLauncher();
+    const manager = new PoolManager({
+      transcriptExists: () => true,
+      cfg,
+      db,
+      busBaseUrl: 'http://127.0.0.1:3000',
+      paneLauncher,
+      resolveModel: () => ({ model, source: model ? 'agent-override' : 'cli-default' }),
+    });
+    return { manager, paneLauncher, db, setModel: (m: string) => (model = m) };
+  }
+  const ctx = { contact_id: 'alice', channel: 'telegram' };
+
+  async function lease(manager: PoolManager, paneLauncher: ReturnType<typeof makeFakeLauncher>) {
+    await manager.ensureStarted();
+    await manager.resolveRoute('conv-1', ctx);
+    paneLauncher.launch.mockClear();
+    paneLauncher.release.mockClear();
+  }
+
+  it('relaunches the live pane on the new model right away and reports switched', async () => {
+    const { manager, paneLauncher, setModel } = setup('claude-old-model');
+    await lease(manager, paneLauncher);
+    setModel('claude-new-model');
+
+    const outcome = await manager.applyModelNow('conv-1', ctx);
+
+    expect(outcome).toEqual({ status: 'switched', paneId: 'peggy-pool:1', model: 'claude-new-model' });
+    expect(paneLauncher.release).toHaveBeenCalledWith('peggy-pool:1', 'kill');
+    expect(paneLauncher.launch.mock.calls[0]![0]).toMatchObject({ resume: true, model: 'claude-new-model' });
+    expect(manager.leaseStore.findByConversation(manager.poolId, 'conv-1')?.model).toBe('claude-new-model');
+  });
+
+  it('reports no-pane when nothing holds a pane for the conversation, and unchanged when the model matches', async () => {
+    const { manager, paneLauncher } = setup('claude-old-model');
+    await manager.ensureStarted();
+    expect(await manager.applyModelNow('nobody', ctx)).toEqual({ status: 'no-pane' });
+    await lease(manager, paneLauncher);
+    expect(await manager.applyModelNow('conv-1', ctx)).toEqual({ status: 'unchanged' });
+    expect(paneLauncher.launch).not.toHaveBeenCalled();
+  });
+
+  it('reports failed with the launch error (e.g. the unanswered model prompt) instead of hanging', async () => {
+    const { manager, paneLauncher, setModel } = setup('claude-old-model');
+    await lease(manager, paneLauncher);
+    setModel('claude-new-model');
+    paneLauncher.launch.mockRejectedValueOnce(new Error('Pane launch failed: the model confirmation prompt in x was still showing'));
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const outcome = await manager.applyModelNow('conv-1', ctx);
+
+    expect(outcome).toMatchObject({ status: 'failed', paneId: 'peggy-pool:1' });
+    expect(outcome.status === 'failed' && outcome.reason).toContain('model confirmation prompt');
+    errSpy.mockRestore();
+  });
+});
+
+describe('journaling release hook (E66 S66.9)', () => {
     it('evict: fires the hook, then releases and seats the new conversation without waiting for it', async () => {
       const db = makeDb();
       const paneLauncher = makeFakeLauncher();

@@ -9,6 +9,8 @@ export interface ChoicePrompt {
   topic: string;
   contact_id: string | null;
   labels: string[];
+  /** Per-choice slash-command payloads parallel to `labels` (E54); null/absent entries are plain choices. */
+  commands: Array<string | null> | null;
   platform_message_id: string | null;
   bus_message_id: string | null;
   status: ChoicePromptStatus;
@@ -26,6 +28,8 @@ export interface ChoicePromptInput {
   topic: string;
   contactId: string | null;
   labels: string[];
+  /** Optional per-choice command payloads, same length as `labels` (E54). */
+  commands?: Array<string | null> | null;
   platformMessageId: string | null;
   busMessageId: string | null;
 }
@@ -42,3 +46,6 @@ export const DEFAULT_CHOICE_TTL_MS = 24 * 60 * 60 * 1000;
 
 export const MAX_CHOICES = 8;
 export const MAX_CHOICE_LABEL_LENGTH = 64;
+
+/** Longest slash-command payload a choice may carry. */
+export const MAX_CHOICE_COMMAND_LENGTH = 200;

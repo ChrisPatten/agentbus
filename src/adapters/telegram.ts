@@ -36,7 +36,7 @@ import type { ApprovalDecision, ApprovalRequest } from '../approvals/types.js';
 import type { ResolveApprovalOutcome } from '../approvals/resolve.js';
 import { ChoiceStore } from '../choices/store.js';
 import { DEFAULT_CHOICE_TTL_MS, MAX_CHOICES, type ChoicePrompt } from '../choices/types.js';
-import { choicesSchema } from '../choices/validate.js';
+import { choicesSchema, choiceCommandsSchema } from '../choices/validate.js';
 import { renderApprovalOutcome, renderApprovalPending } from '../approvals/render.js';
 
 // Re-exported from the shared media module for backwards-compatible imports.
@@ -692,6 +692,7 @@ export class TelegramAdapter implements AdapterInstance {
     // prompt id is minted now (it goes in callback_data) and persisted only
     // once Telegram has returned the message id.
     const choices = this.parseChoices(envelope.metadata['choices']);
+    const choiceCommands = choices ? this.parseChoiceCommands(envelope.metadata['choice_commands'], choices.length) : undefined;
     const choicePromptId = choices ? randomUUID() : undefined;
     const choiceMarkup = choices && choicePromptId ? buildChoiceKeyboard(choicePromptId, choices) : undefined;
 
@@ -763,7 +764,7 @@ export class TelegramAdapter implements AdapterInstance {
     }
 
     if (choices && choicePromptId && platformMessageId) {
-      this.persistChoicePrompt(envelope, choicePromptId, choices, `${chatId}:${platformMessageId}`);
+      this.persistChoicePrompt(envelope, choicePromptId, choices, `${chatId}:${platformMessageId}`, choiceCommands);
     }
 
     this.lastActivity = new Date().toISOString();
@@ -1166,7 +1167,29 @@ export class TelegramAdapter implements AdapterInstance {
     return parsed.data;
   }
 
-  private persistChoicePrompt(envelope: MessageEnvelope, id: string, labels: string[], platformMessageId: string): void {
+  /**
+   * `metadata.choice_commands` (E54): per-choice slash-command payloads, parallel
+   * to the labels. Invalid or wrong-length input is dropped (plain E74 buttons).
+   */
+  private parseChoiceCommands(raw: unknown, labelCount: number): Array<string | null> | undefined {
+    if (raw === undefined) return undefined;
+    const parsed = choiceCommandsSchema.safeParse(raw);
+    if (!parsed.success || parsed.data.length !== labelCount) {
+      console.warn(
+        `${this.tag} Ignoring invalid metadata.choice_commands: ${parsed.success ? 'length does not match choices' : (parsed.error.issues[0]?.message ?? 'invalid')}`,
+      );
+      return undefined;
+    }
+    return parsed.data;
+  }
+
+  private persistChoicePrompt(
+    envelope: MessageEnvelope,
+    id: string,
+    labels: string[],
+    platformMessageId: string,
+    commands?: Array<string | null>,
+  ): void {
     const recipient = envelope.recipient.startsWith('contact:') ? envelope.recipient.slice('contact:'.length) : null;
     const ttlMs = this.deps.instanceConfig?.choice_ttl_hours
       ? this.deps.instanceConfig.choice_ttl_hours * 60 * 60 * 1000
@@ -1179,6 +1202,7 @@ export class TelegramAdapter implements AdapterInstance {
           topic: envelope.topic || 'general',
           contactId: recipient,
           labels,
+          commands: commands ?? null,
           platformMessageId,
           busMessageId: envelope.id || null,
         },
@@ -1261,13 +1285,17 @@ export class TelegramAdapter implements AdapterInstance {
         break;
     }
 
+    // E54: a choice that carries a command payload runs that slash command as
+    // the user's own message (through the normal inbound/command path, after
+    // all of the checks above); every other choice stays "[tapped] <label>".
+    const command = prompt.commands?.[index] ?? null;
     try {
       const message: InboundMessage = {
         channel: prompt.channel,
         ...(prompt.topic && prompt.topic !== 'general' ? { topic: prompt.topic } : {}),
         sender: String(query.from.id),
         reply_to: prompt.bus_message_id,
-        payload: { type: 'text', body: `[tapped] ${result.label}` },
+        payload: { type: 'text', body: command ?? `[tapped] ${result.label}` },
         metadata: {
           choice_prompt_id: promptId,
           choice_index: index,

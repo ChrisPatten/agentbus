@@ -656,3 +656,104 @@ describe('processInbound — provider command forwarding (E71)', () => {
     expect(sent().length).toBeGreaterThanOrEqual(lines.length);
   });
 });
+
+describe('processInbound — command choices (E54 on E74)', () => {
+  let db: Database.Database;
+  let queue: MessageQueue;
+  let adapterRegistry: AdapterRegistry;
+  let pipeline: PipelineEngine;
+  let telegramAdapter: AdapterInstance;
+  let emailAdapter: AdapterInstance;
+
+  const pick = vi.fn(async (args: string[]) => ({ body: `picked ${args.join(' ')}` }));
+  const choices = [
+    { label: 'Opus 5.5', args: 'claude-opus-5-5' },
+    { label: 'Haiku 5.5', args: 'claude-haiku-5-5' },
+  ];
+
+  beforeEach(() => {
+    pick.mockClear();
+    db = makeDb();
+    queue = new MessageQueue(db);
+    adapterRegistry = new AdapterRegistry();
+    telegramAdapter = makeStubAdapter('telegram', 'telegram');
+    emailAdapter = makeStubAdapter('email', 'email');
+    adapterRegistry.register(telegramAdapter);
+    adapterRegistry.register(emailAdapter);
+    pipeline = new PipelineEngine();
+    pipeline.use({ slot: 10, name: 'normalize', stage: normalize });
+    pipeline.use({ slot: 40, name: 'slash-command', stage: slashCommandDetect });
+    pipeline.use({ slot: 70, name: 'route-resolve', stage: createRouteResolve(stubConfig, db) });
+    pipeline.use({ slot: 80, name: 'transcript-log', stage: createTranscriptLog(db, stubConfig), critical: false });
+  });
+
+  function system() {
+    const sys = createCommandSystem({ adapterRegistry, queue, db, config: stubConfig });
+    sys.registry.register({
+      name: 'pickme',
+      description: 'test picker',
+      usage: '/pickme [x]',
+      scope: 'bus',
+      handler: async (args) => (args.length === 0 ? { body: 'Pick one', choices } : pick(args)),
+    });
+    return sys;
+  }
+
+  const send = (channel: string, body: string, sys: ReturnType<typeof system>) =>
+    processInbound(
+      { channel, sender: 'contact:chris', payload: { type: 'text', body } },
+      { queue, pipeline, config: stubConfig, db, registry: adapterRegistry, commandRegistry: sys.registry, pauseSet: sys.pauseSet },
+    );
+
+  it('on Telegram, choices ride the E74 path: label list plus the slash command each tap runs', async () => {
+    const sys = system();
+    await send('telegram', '/pickme', sys);
+    const env = (telegramAdapter.send as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    expect(env.payload.body).toBe('Pick one');
+    expect(env.metadata.choices).toEqual(['Opus 5.5', 'Haiku 5.5']);
+    expect(env.metadata.choice_commands).toEqual(['/pickme claude-opus-5-5', '/pickme claude-haiku-5-5']);
+    // No numbered-list fallback state on Telegram.
+    expect(sys.registry.consumeFollowUp('telegram', 'contact:chris')).toBeNull();
+  });
+
+  it('clips choices to E74 limits (8 labels, 64 characters) before sending', async () => {
+    const sys = createCommandSystem({ adapterRegistry, queue, db, config: stubConfig });
+    sys.registry.register({
+      name: 'many',
+      description: 'many',
+      usage: '/many',
+      scope: 'bus',
+      handler: async () => ({
+        body: 'Lots',
+        choices: Array.from({ length: 12 }, (_, i) => ({ label: `${'L'.repeat(80)}${i}`, args: `a${i}` })),
+      }),
+    });
+    await send('telegram', '/many', sys);
+    const env = (telegramAdapter.send as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    expect(env.metadata.choices).toHaveLength(8);
+    for (const l of env.metadata.choices as string[]) expect(l.length).toBeLessThanOrEqual(64);
+    expect(env.metadata.choice_commands).toHaveLength(8);
+  });
+
+  it('on other channels, appends a numbered list and a reply of "2" runs the command with that choice', async () => {
+    const sys = system();
+    await send('email', '/pickme', sys);
+    const first = (emailAdapter.send as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    expect(first.payload.body).toBe('Pick one\n\n1. Opus 5.5\n2. Haiku 5.5\n\nReply with a number to choose.');
+    expect(first.metadata.choices).toBeUndefined();
+
+    const result = await send('email', '2', sys);
+    expect('reason' in result && result.reason).toBe('command_handled');
+    expect(pick).toHaveBeenCalledWith(['claude-haiku-5-5']);
+    expect((emailAdapter.send as ReturnType<typeof vi.fn>).mock.calls[1]![0].payload.body).toBe('picked claude-haiku-5-5');
+  });
+
+  it('a reply that matches no choice falls through to normal processing, and the capture is gone', async () => {
+    const sys = system();
+    await send('email', '/pickme', sys);
+    const result = await send('email', 'never mind', sys);
+    expect('reason' in result && result.reason).not.toBe('command_handled');
+    expect(pick).not.toHaveBeenCalled();
+    expect(sys.registry.consumeFollowUp('email', 'contact:chris')).toBeNull();
+  });
+});

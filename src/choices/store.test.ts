@@ -100,4 +100,15 @@ describe('ChoiceStore', () => {
     expect(store.list('answered').map((p) => p.id)).toEqual(['b']);
     expect(store.list()).toHaveLength(2);
   });
+
+  it('round-trips per-choice command payloads and stores NULL when there are none (E54)', () => {
+    const store = makeStore();
+    const withCmds = store.create(input('c1', { commands: ['/model claude-opus-5-5', null, '/model reset'] }), HOUR, T0);
+    expect(withCmds.commands).toEqual(['/model claude-opus-5-5', null, '/model reset']);
+    expect(store.getById('c1')!.commands).toEqual(['/model claude-opus-5-5', null, '/model reset']);
+    expect(store.create(input('c2'), HOUR, T0).commands).toBeNull();
+    expect(store.create(input('c3', { commands: [null, null, null] }), HOUR, T0).commands).toBeNull();
+    const answered = store.answer('c1', 0, 'contact:chris', T0);
+    expect(answered.outcome === 'answered' && answered.prompt.commands?.[0]).toBe('/model claude-opus-5-5');
+  });
 });

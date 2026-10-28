@@ -62,6 +62,27 @@ export const LAUNCH_READY_TIMEOUT_MS = 30_000;
  */
 const ACK_RETRY_BACKOFF_MS = 500;
 
+/**
+ * E54 — default detector for Claude Code's model-confirmation prompt, shown
+ * after a model change takes effect in a pane. Matched case-insensitively on
+ * the last lines of `capture-pane` output, and only counts when a numbered
+ * "1." option is also on screen (the prompt is answered by pressing `1`).
+ * The wording is not verified against a real capture yet; override with
+ * `model_confirm_pattern` (a regex source) if the CLI words it differently.
+ * A pattern that never matches is safe: no key is ever sent.
+ */
+export const DEFAULT_MODEL_CONFIRM_PATTERN =
+  '(switch|chang|confirm|set)\\w*[^\\n]{0,80}\\bmodel\\b|\\bmodel\\b[^\\n]{0,80}(switch|chang|confirm)';
+
+/** A numbered option "1." / "1)" at the start of a capture line, optionally behind the selection marker. */
+const NUMBERED_OPTION_ONE_RE = /^\s*[❯>›]?\s*1[.)]\s+\S/m;
+
+/** Outcome of {@link PaneLifecycle.confirmModelPrompt}. */
+export type ModelConfirmResult =
+  | { status: 'absent' }
+  | { status: 'confirmed'; attempts: number }
+  | { status: 'failed'; reason: string };
+
 /** Poll interval for the post-ack readiness check against `/last-poll`. */
 const READINESS_POLL_INTERVAL_MS = 500;
 
@@ -331,8 +352,8 @@ export class PaneLifecycle {
       const line = this.buildLaunchLine(params, mcpConfigPath, systemPromptPath);
       await this.tmux.sendCommand(params.paneId, line);
 
-      await this.ackHandshake(params.paneId, params.paneAgentId, launchStartedAt);
-      await this.pollReadiness(params.paneAgentId, launchStartedAt);
+      await this.ackHandshake(params.paneId, params.paneAgentId, launchStartedAt, params.model !== undefined);
+      await this.pollReadiness(params.paneAgentId, launchStartedAt, params.model ? params.paneId : undefined);
       launchSucceeded = true;
     } catch (err) {
       if (err instanceof PaneLaunchError) throw err;
@@ -345,6 +366,44 @@ export class PaneLifecycle {
         if (systemPromptPath) cleanTmpFile(systemPromptPath);
       }
     }
+  }
+
+  /**
+   * E54 — answers Claude Code's model-confirmation prompt, if (and only if)
+   * it is on screen. Reads `capture-pane`; when the prompt text is present it
+   * sends the key `1` via tmux and rechecks, up to `launch_ack_max_attempts`
+   * presses with a short backoff. No key is sent when the prompt is absent.
+   * Never throws for a prompt that will not clear: that is `status: 'failed'`
+   * so the caller can report it instead of hanging.
+   */
+  async confirmModelPrompt(paneId: string): Promise<ModelConfirmResult> {
+    const maxAttempts = this.cfg.launch_ack_max_attempts;
+    let sent = 0;
+    while (sent < maxAttempts) {
+      const captured = await this.tmux.capturePane(paneId, 30);
+      if (!this.modelPromptShowing(captured)) {
+        return sent === 0 ? { status: 'absent' } : { status: 'confirmed', attempts: sent };
+      }
+      await this.tmux.sendKeys(paneId, '1');
+      sent++;
+      await this.sleepFn(ACK_RETRY_BACKOFF_MS);
+    }
+    const finalCapture = await this.tmux.capturePane(paneId, 30);
+    if (!this.modelPromptShowing(finalCapture)) return { status: 'confirmed', attempts: sent };
+    return {
+      status: 'failed',
+      reason: `the model confirmation prompt in ${paneId} was still showing after ${maxAttempts} attempt(s) to answer it`,
+    };
+  }
+
+  private modelPromptShowing(captured: string): boolean {
+    let re: RegExp;
+    try {
+      re = new RegExp(this.cfg.model_confirm_pattern ?? DEFAULT_MODEL_CONFIRM_PATTERN, 'i');
+    } catch {
+      return false; // an invalid operator pattern must never cause a key press
+    }
+    return re.test(captured) && NUMBERED_OPTION_ONE_RE.test(captured);
   }
 
   /**
@@ -568,10 +627,15 @@ export class PaneLifecycle {
    * `cfg.launch_ack_max_attempts` times (backing off `ACK_RETRY_BACKOFF_MS`
    * between retries) if a press doesn't clear it.
    */
-  private async ackHandshake(paneId: string, paneAgentId: string, launchStartedAt: Date): Promise<void> {
+  private async ackHandshake(
+    paneId: string,
+    paneAgentId: string,
+    launchStartedAt: Date,
+    expectModelPrompt = false,
+  ): Promise<void> {
     const pattern = this.cfg.launch_ack_pattern.toLowerCase();
 
-    const promptShowing = await this.waitForAckPrompt(paneId, paneAgentId, pattern, launchStartedAt);
+    const promptShowing = await this.waitForAckPrompt(paneId, paneAgentId, pattern, launchStartedAt, expectModelPrompt);
     if (!promptShowing) return; // never rendered within the budget -- nothing to dismiss
 
     const maxAttempts = this.cfg.launch_ack_max_attempts;
@@ -606,10 +670,19 @@ export class PaneLifecycle {
    * at `cfg.launch_ack_delay_ms`: a slow start can render the prompt well
    * after that, and a prompt nobody dismisses stalls the launch.
    */
-  private async waitForAckPrompt(paneId: string, paneAgentId: string, pattern: string, launchStartedAt: Date): Promise<boolean> {
+  private async waitForAckPrompt(
+    paneId: string,
+    paneAgentId: string,
+    pattern: string,
+    launchStartedAt: Date,
+    expectModelPrompt = false,
+  ): Promise<boolean> {
     for (;;) {
       const captured = await this.tmux.capturePane(paneId, 30);
       if (captured.toLowerCase().includes(pattern)) return true;
+      // E54: the session is already past the ack stage and stopped at the model
+      // prompt; pollReadiness() answers it. Don't wait out the deadline here.
+      if (expectModelPrompt && this.modelPromptShowing(captured)) return false;
 
       // Already polling the bus: the session is up and no prompt is coming.
       // Raced against a sleep so a stalled request can't outlast the deadline.
@@ -656,8 +729,20 @@ export class PaneLifecycle {
    * empirically (both under Vitest fake timers AND real timers via a
    * standalone script) before landing this corrected version.
    */
-  private async pollReadiness(paneAgentId: string, launchStartedAt: Date): Promise<void> {
+  private async pollReadiness(paneAgentId: string, launchStartedAt: Date, confirmModelInPane?: string): Promise<void> {
+    // E54: a launch that carries `--model` may stop at a model-confirmation
+    // prompt, which blocks `cc.ts` from ever polling. Look for it on every
+    // iteration until it has been answered.
+    let modelConfirmed = confirmModelInPane === undefined;
     for (;;) {
+      if (!modelConfirmed && confirmModelInPane !== undefined) {
+        const confirm = await this.confirmModelPrompt(confirmModelInPane);
+        if (confirm.status === 'failed') {
+          throw new PaneLaunchError(`Pane launch failed: ${confirm.reason}`);
+        }
+        if (confirm.status === 'confirmed') modelConfirmed = true;
+      }
+
       if (this.elapsedSince(launchStartedAt) >= LAUNCH_READY_TIMEOUT_MS) {
         throw new PaneLaunchError(
           `Pane launch timed out waiting for "${paneAgentId}" readiness after ${LAUNCH_READY_TIMEOUT_MS}ms`,

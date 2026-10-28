@@ -627,6 +627,55 @@ export class PoolManager {
     return { sessionId: randomUUID(), resume: false };
   }
 
+  /** Most recent launch failure message per pane, for `applyModelNow()` to report. */
+  private readonly lastLaunchError = new Map<string, string>();
+
+  /**
+   * E54 `/model` — apply the conversation's resolved model to its live pane
+   * right now, instead of at the next message. Uses the same relaunch as
+   * `handleReuse()` (kill, then `--resume` on the same Claude session with the
+   * new `--model`); `PaneLifecycle.launch()` answers the model-confirmation
+   * prompt with the key `1` when it appears. Never throws.
+   *
+   * - `no-pane`: nothing holds a live pane for this conversation; the next
+   *   message launches on the new model anyway.
+   * - `unchanged`: the pane already runs the resolved model (or none resolves).
+   * - `deferred`: a turn is in flight; the switch happens on the next message.
+   * - `switched`: relaunched and confirmed ready on the new model.
+   * - `failed`: the relaunch did not complete (`reason` says why); the pane was
+   *   marked dead and the next message acquires a fresh one on the new model.
+   */
+  async applyModelNow(
+    conversationId: string,
+    promptContext: PoolPromptContext,
+  ): Promise<
+    | { status: 'no-pane' | 'unchanged' | 'deferred' }
+    | { status: 'switched'; paneId: string; model: string }
+    | { status: 'failed'; paneId: string; reason: string }
+  > {
+    try {
+      const lease = this.leaseStore.findByConversation(this.poolId, conversationId);
+      if (!lease || lease.state !== 'leased') return { status: 'no-pane' };
+      const resolved = this.resolveModelFn(null);
+      if (resolved.model === undefined || resolved.model === lease.model) return { status: 'unchanged' };
+      if (getUnhandledSince(this.db, lease) !== null) return { status: 'deferred' };
+
+      this.lastLaunchError.delete(lease.pane_id);
+      const target = await this.handleReuse(conversationId, lease, { ...promptContext, background: true });
+      const after = this.leaseStore.findByPane(this.poolId, lease.pane_id);
+      if (target !== this.parkedRecipientId() && after?.state === 'leased' && after.model === resolved.model) {
+        return { status: 'switched', paneId: lease.pane_id, model: resolved.model };
+      }
+      return {
+        status: 'failed',
+        paneId: lease.pane_id,
+        reason: this.lastLaunchError.get(lease.pane_id) ?? 'the pane did not come back on the new model',
+      };
+    } catch (err) {
+      return { status: 'failed', paneId: '', reason: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
   private async handleReuse(
     conversationId: string,
     lease: PoolLeaseRow,
@@ -809,6 +858,7 @@ export class PoolManager {
       return true;
     } catch (err) {
       console.error(`[pool:${this.poolId}] Pane launch failed for ${paneId}:`, err);
+      this.lastLaunchError.set(paneId, err instanceof Error ? err.message : String(err));
       this.leaseStore.markDead(this.poolId, paneId);
       return false;
     }

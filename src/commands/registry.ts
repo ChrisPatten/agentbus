@@ -46,6 +46,54 @@ export interface SlashCommandContext {
   db: SafeDatabase;
   /** Bus config */
   config: AppConfig;
+  /** Route targets the pipeline resolved for this message (Stage 70), e.g.
+   * `[{ adapterId: 'cc-pool', recipientId: 'agent:peggy' }]`. Lets a command
+   * act on the agent this chat is routed to (E54 `/model`). */
+  routes?: Array<{ adapterId: string; recipientId: string }>;
+}
+
+/** One option in an interactive picker returned by a command (E54). */
+export interface CommandChoice {
+  /** Button text / list line, e.g. 'Opus 5.5 (current)'. At most 64 characters (E74 limit). */
+  label: string;
+  /** What gets appended to the command when picked, e.g. 'claude-opus-5-5' */
+  args: string;
+}
+
+/** A pending follow-up returned by {@link CommandRegistry.consumeFollowUp}. */
+export type PendingFollowUp =
+  | {
+      /** Validator capture registered with `registerFollowUp` (E36) */
+      kind: 'validate';
+      command: string;
+      validate: (body: string) => boolean;
+    }
+  | {
+      /** Choice capture registered with `registerChoiceFollowUp` (E54) */
+      kind: 'choice';
+      command: string;
+      choices: CommandChoice[];
+      /** True if `body` selects one of `choices` */
+      validate: (body: string) => boolean;
+      /** The choice `body` selects, or null */
+      match: (body: string) => CommandChoice | null;
+    };
+
+/**
+ * Map a reply to one of `choices`: a bare number 1..n (1-based), or text
+ * equal (case-insensitive, trimmed) to a choice's `args` or `label`.
+ */
+export function matchChoice(choices: CommandChoice[], body: string): CommandChoice | null {
+  const text = body.trim();
+  if (/^\d+$/.test(text)) {
+    const n = Number(text);
+    if (n >= 1 && n <= choices.length) return choices[n - 1]!;
+  }
+  const lower = text.toLowerCase();
+  if (!lower) return null;
+  return (
+    choices.find((c) => c.args.trim().toLowerCase() === lower || c.label.trim().toLowerCase() === lower) ?? null
+  );
 }
 
 /** A PNG a command wants delivered as an image reply. */
@@ -64,6 +112,11 @@ export interface CommandResponse {
   metadata?: Record<string, unknown>;
   /** Images to send as photo replies, in order; `body`, if also set, is sent as text alongside them. */
   images?: CommandImage[];
+  /** Options for a picker (E54). On Telegram they ride the E74 choice-button
+   * path (a tap runs `/<command> <choice.args>`); on other channels they are
+   * appended as a numbered list and a reply like `2` picks one. At most 8
+   * (E74 `MAX_CHOICES`); labels at most 64 characters. */
+  choices?: CommandChoice[];
 }
 
 /** Async handler function — receives parsed args array and full context */
@@ -86,10 +139,7 @@ export class CommandRegistry {
    * `${channel}:${sender}`. Generic (command name + validator closure) so
    * any command can register one, not just /torrent (E36).
    */
-  private readonly followUps = new Map<
-    string,
-    { command: string; validate: (body: string) => boolean; expiresAt: number }
-  >();
+  private readonly followUps = new Map<string, { followUp: PendingFollowUp; expiresAt: number }>();
 
   /** Provider command forwarders, keyed by route `adapterId` (E71). */
   private readonly providers = new Map<string, ProviderCommandForwarder>();
@@ -134,8 +184,34 @@ export class CommandRegistry {
     ttlMs: number,
   ): void {
     this.followUps.set(`${channel}:${sender}`, {
-      command,
-      validate,
+      followUp: { kind: 'validate', command, validate },
+      expiresAt: Date.now() + ttlMs,
+    });
+  }
+
+  /**
+   * Register a pending choice capture for the very next message from
+   * `(channel, sender)` — the numbered-list fallback for channels that can't
+   * render E74 buttons (E54). A reply of `2`, or a choice's `args` or `label`
+   * (case-insensitive), selects that choice. Shares the single slot with
+   * `registerFollowUp`: latest registration wins.
+   */
+  registerChoiceFollowUp(
+    channel: string,
+    sender: string,
+    command: string,
+    choices: CommandChoice[],
+    ttlMs: number,
+  ): void {
+    const list = [...choices];
+    this.followUps.set(`${channel}:${sender}`, {
+      followUp: {
+        kind: 'choice',
+        command,
+        choices: list,
+        validate: (body) => matchChoice(list, body) !== null,
+        match: (body) => matchChoice(list, body),
+      },
       expiresAt: Date.now() + ttlMs,
     });
   }
@@ -148,13 +224,13 @@ export class CommandRegistry {
   consumeFollowUp(
     channel: string,
     sender: string,
-  ): { command: string; validate: (body: string) => boolean } | null {
+  ): PendingFollowUp | null {
     const key = `${channel}:${sender}`;
     const entry = this.followUps.get(key);
     if (!entry) return null;
     this.followUps.delete(key);
     if (Date.now() >= entry.expiresAt) return null;
-    return { command: entry.command, validate: entry.validate };
+    return entry.followUp;
   }
 
   /**

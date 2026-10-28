@@ -906,3 +906,130 @@ describe('PaneLifecycle — bus.auth_token', () => {
     expect(calls[0]![1]).toBeUndefined();
   });
 });
+
+// ── E54: model-confirmation prompt ───────────────────────────────────────────
+
+const MODEL_PROMPT = [
+  'Switch model?',
+  'Changing the model mid-conversation will reprocess the context.',
+  '',
+  '❯ 1. Yes, switch to claude-opus-5-5',
+  '  2. No, keep the current model',
+].join('\n');
+
+describe('PaneLifecycle.confirmModelPrompt (E54)', () => {
+  it('sends "1" via tmux when the prompt is on screen, then reports confirmed once it clears', async () => {
+    let cleared = false;
+    const capturePane = vi.fn(async () => (cleared ? 'Welcome back\n> ' : MODEL_PROMPT));
+    const sendKeys = vi.fn(async (_t: string, _k: string) => {
+      cleared = true;
+    });
+    const tmux = makeTmux({ capturePane, sendKeys });
+    const pl = new PaneLifecycle({ tmux, busBaseUrl: 'http://x', cfg: makeCfg(), scratchDir, sleepFn: async () => {} });
+
+    await expect(pl.confirmModelPrompt('peggy-pool:1')).resolves.toEqual({ status: 'confirmed', attempts: 1 });
+    expect(sendKeys).toHaveBeenCalledTimes(1);
+    expect(sendKeys).toHaveBeenCalledWith('peggy-pool:1', '1');
+  });
+
+  it('sends no key when the prompt is absent', async () => {
+    const tmux = makeTmux({ capturePane: vi.fn(async () => 'Working on the model refactor...\n> ') });
+    const pl = new PaneLifecycle({ tmux, busBaseUrl: 'http://x', cfg: makeCfg(), scratchDir, sleepFn: async () => {} });
+    await expect(pl.confirmModelPrompt('peggy-pool:1')).resolves.toEqual({ status: 'absent' });
+    expect(tmux.sendKeys).not.toHaveBeenCalled();
+  });
+
+  it('does not treat model talk without a numbered option 1 as the prompt', async () => {
+    const tmux = makeTmux({ capturePane: vi.fn(async () => 'Switching the model is easy: just ask.\n> ') });
+    const pl = new PaneLifecycle({ tmux, busBaseUrl: 'http://x', cfg: makeCfg(), scratchDir, sleepFn: async () => {} });
+    await expect(pl.confirmModelPrompt('peggy-pool:1')).resolves.toEqual({ status: 'absent' });
+    expect(tmux.sendKeys).not.toHaveBeenCalled();
+  });
+
+  it('reports failure after launch_ack_max_attempts presses when the prompt will not clear', async () => {
+    const tmux = makeTmux({ capturePane: vi.fn(async () => MODEL_PROMPT) });
+    const pl = new PaneLifecycle({
+      tmux,
+      busBaseUrl: 'http://x',
+      cfg: makeCfg({ launch_ack_max_attempts: 2 }),
+      scratchDir,
+      sleepFn: async () => {},
+    });
+    const result = await pl.confirmModelPrompt('peggy-pool:1');
+    expect(result.status).toBe('failed');
+    expect(result.status === 'failed' && result.reason).toContain('still showing after 2 attempt(s)');
+    expect(tmux.sendKeys).toHaveBeenCalledTimes(2);
+    expect(tmux.sendKeys).toHaveBeenNthCalledWith(1, 'peggy-pool:1', '1');
+  });
+
+  it('honours model_confirm_pattern and never presses a key on an invalid pattern', async () => {
+    const custom = makeTmux({ capturePane: vi.fn(async () => 'Different wording\n1. Go\n2. Stop') });
+    const withPattern = new PaneLifecycle({
+      tmux: custom,
+      busBaseUrl: 'http://x',
+      cfg: makeCfg({ model_confirm_pattern: 'different wording' }),
+      scratchDir,
+      sleepFn: async () => {},
+    });
+    custom.sendKeys.mockImplementation(async () => {
+      custom.capturePane.mockImplementation(async () => '> ');
+    });
+    await expect(withPattern.confirmModelPrompt('p:1')).resolves.toEqual({ status: 'confirmed', attempts: 1 });
+
+    const bad = makeTmux({ capturePane: vi.fn(async () => MODEL_PROMPT) });
+    const invalid = new PaneLifecycle({
+      tmux: bad,
+      busBaseUrl: 'http://x',
+      cfg: makeCfg({ model_confirm_pattern: '(' }),
+      scratchDir,
+      sleepFn: async () => {},
+    });
+    await expect(invalid.confirmModelPrompt('p:1')).resolves.toEqual({ status: 'absent' });
+    expect(bad.sendKeys).not.toHaveBeenCalled();
+  });
+});
+
+describe('PaneLifecycle.launch — model confirmation (E54)', () => {
+  it('a launch with --model answers the prompt with "1" before readiness, and the launch succeeds', async () => {
+    let confirmed = false;
+    let ready = false;
+    const capturePane = vi.fn(async () => (confirmed ? 'Welcome\n> ' : MODEL_PROMPT));
+    const sendKeys = vi.fn(async (_t: string, k: string) => {
+      if (k === '1') {
+        confirmed = true;
+        ready = true;
+      }
+    });
+    const fetchFn = vi.fn(async () =>
+      jsonResponse({ lastPollAt: ready ? new Date(Date.now() + 1000).toISOString() : null }),
+    );
+    const tmux = makeTmux({ paneAlive: vi.fn(async () => true), capturePane, sendKeys });
+    const pl = new PaneLifecycle({ tmux, busBaseUrl: 'http://x', cfg: makeCfg(), scratchDir, fetchFn });
+
+    const p = pl.launch(makeLaunchParams({ resume: true, model: 'claude-opus-5-5' }));
+    await vi.advanceTimersByTimeAsync(5000);
+    await p;
+    expect(sendKeys).toHaveBeenCalledWith('peggy-pool:1', '1');
+  });
+
+  it('fails the launch plainly when the confirmation prompt will not clear', async () => {
+    const tmux = makeTmux({ paneAlive: vi.fn(async () => true), capturePane: vi.fn(async () => MODEL_PROMPT) });
+    const fetchFn = vi.fn(async () => jsonResponse({ lastPollAt: null }));
+    const pl = new PaneLifecycle({ tmux, busBaseUrl: 'http://x', cfg: makeCfg(), scratchDir, fetchFn });
+
+    const p = pl.launch(makeLaunchParams({ resume: true, model: 'claude-opus-5-5' }));
+    const assertion = expect(p).rejects.toThrow(/model confirmation prompt .* still showing/);
+    await vi.advanceTimersByTimeAsync(10_000);
+    await assertion;
+  });
+
+  it('a launch without --model never looks for the model prompt', async () => {
+    const tmux = makeTmux({ paneAlive: vi.fn(async () => true), capturePane: vi.fn(async () => MODEL_PROMPT.replace('Switch model?', 'x')) });
+    const ready = makeReadyFetch();
+    const pl = new PaneLifecycle({ tmux, busBaseUrl: 'http://x', cfg: makeCfg({ launch_ack_pattern: 'zzz-never' }), scratchDir, fetchFn: ready });
+    const p = pl.launch(makeLaunchParams({ resume: true }));
+    await vi.advanceTimersByTimeAsync(3000);
+    await p;
+    expect(tmux.sendKeys).not.toHaveBeenCalledWith(expect.anything(), '1');
+  });
+});
