@@ -115,7 +115,7 @@ export class SessionTracker {
     // E69: Main rows are exempt. A Main row with no claude_session_id (only
     // proactive sends so far) stays open; Main has its own idle rotation.
     //
-    // E80: so is the message-less placeholder row `share_context` creates for
+    // E83: so is the message-less placeholder row `share_context` creates for
     // a primary channel's conversation (a Telegram DM with no session yet).
     // The first real message reuses it and gives it a Claude session.
     const idleSessions = this.db

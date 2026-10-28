@@ -13,7 +13,7 @@
  * that message as context. Slash commands and their replies, and bus
  * system-only turns, are left out of the window entirely.
  *
- * E79: hidden `context_only` handoffs (`share_context`) are real conversation
+ * E82: hidden `context_only` handoffs (`share_context`) are real conversation
  * content, so the window keeps them. They are rendered as
  * `[Context shared by <label>, not shown to the user] <body>` so a journaler
  * doesn't read them as the agent's own words, never count as a human message,
@@ -77,7 +77,7 @@ const isNonHumanSender = (contactId: string) => contactId.startsWith('agent:') |
 
 const isContextOnly = (meta: Record<string, unknown>) => meta['context_only'] === true;
 
-/** E79: how a context-only row reads in a journal window. */
+/** E82: how a context-only row reads in a journal window. */
 function contextOnlyBody(row: TranscriptRowLite, meta: Record<string, unknown>): string {
   const origin = meta['origin'] as { label?: unknown } | undefined;
   const label = typeof origin?.label === 'string' && origin.label.trim() ? origin.label.trim() : 'another agent session';
@@ -194,7 +194,7 @@ export function loadWindow(
 }
 
 /**
- * E79: the hidden notes shared into a conversation after `since`, oldest
+ * E82: the hidden notes shared into a conversation after `since`, oldest
  * first. Read by conversation, not session, because a note written after an
  * idle rotation sits on the ended row while the next turn starts a new one.
  */

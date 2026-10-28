@@ -6,7 +6,7 @@ import { computeConversationId } from '../pipeline/conversation-id.js';
 import { isMainConversation, isPrimaryConversation, pendingContextAgent, primaryAgentForChannel, primaryChannels, primaryConversationChannel } from './main.js';
 import { pendingContextLimits } from './pending-context.js';
 
-// E80 S80.2 — primary conversations and the agent-level pending_context block.
+// E83 S83.2 — primary conversations and the agent-level pending_context block.
 
 const parse = (agents: Record<string, unknown>, app?: Record<string, unknown>) => AppConfigSchema.parse({
   bus: { db_path: ':memory:' }, adapters: app ? { app } : {}, memory: {}, agents,
@@ -26,7 +26,7 @@ function fixture() {
   return { db, conv };
 }
 
-describe('isPrimaryConversation (E80)', () => {
+describe('isPrimaryConversation (E83)', () => {
   it('is true for Main, a listed DM and another contact\'s listed DM or Main', () => {
     const f = fixture();
     try {
@@ -79,7 +79,7 @@ describe('isPrimaryConversation (E80)', () => {
   });
 });
 
-describe('agents.<id>.pending_context (E80)', () => {
+describe('agents.<id>.pending_context (E83)', () => {
   it('defaults channels to [] and leaves the limits to fall back', () => {
     const c = parse({ 'agent:peggy': { pending_context: {} } });
     expect(c.agents['agent:peggy']!.pending_context).toEqual({ channels: [] });

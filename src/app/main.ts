@@ -23,7 +23,7 @@ export function isMainConversation(db: Database.Database, conversationId: string
 }
 
 /**
- * E80 — the exact channels agents list in `agents.<id>.pending_context.channels`
+ * E83 — the exact channels agents list in `agents.<id>.pending_context.channels`
  * (for example `telegram:peggy`). Exact: `telegram:peggy:group:*` chats don't
  * match the way `channelMatches` would let a route rule match them.
  */
@@ -33,7 +33,7 @@ export function primaryChannels(config: AppConfig): string[] {
   return [...out];
 }
 
-/** E80 — the agent (prefixed id) that lists `channel` as a primary channel, or null. */
+/** E83 — the agent (prefixed id) that lists `channel` as a primary channel, or null. */
 export function primaryAgentForChannel(config: AppConfig, channel: string): string | null {
   for (const [key, agent] of Object.entries(config.agents ?? {})) {
     if (agent.pending_context?.channels?.includes(channel)) return toPrefixedAgentId(key);
@@ -42,7 +42,7 @@ export function primaryAgentForChannel(config: AppConfig, channel: string): stri
 }
 
 /**
- * E80 — a primary conversation is one whose agent learns what was sent into
+ * E83 — a primary conversation is one whose agent learns what was sent into
  * it from elsewhere: Main, and the `general` conversation of each channel an
  * agent lists in `pending_context.channels`. Gates pending context and the
  * hidden `share_context` write. Rotation and teardown stay Main-only
@@ -52,7 +52,7 @@ export function isPrimaryConversation(db: Database.Database, conversationId: str
   return primaryConversationChannel(db, conversationId, config) !== null;
 }
 
-/** E80 — the channel of a primary conversation (`app` for Main), or null when it isn't one. */
+/** E83 — the channel of a primary conversation (`app` for Main), or null when it isn't one. */
 export function primaryConversationChannel(db: Database.Database, conversationId: string, config: AppConfig): string | null {
   const row = db.prepare(`SELECT channel, topic FROM conversation_registry WHERE id = ?`)
     .get(conversationId) as { channel: string; topic: string } | undefined;
@@ -61,7 +61,7 @@ export function primaryConversationChannel(db: Database.Database, conversationId
 }
 
 /**
- * E80 — whose `agents.<id>.pending_context` limits govern a primary
+ * E83 — whose `agents.<id>.pending_context` limits govern a primary
  * conversation on `channel`: the agent that lists the channel. The app's Main
  * keeps `adapters.app.pending_context` (undefined: no agent override).
  */

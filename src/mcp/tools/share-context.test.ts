@@ -5,7 +5,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { registerAllTools, registerHeadlessTools, type HealthState } from './index.js';
 import { registerMessagingTools } from './messaging.js';
 
-// E79 S79.3 — the share_context MCP tool.
+// E82 S82.3 — the share_context MCP tool.
 
 const BUS_URL = 'http://bus:4000';
 const healthState: HealthState = { status: 'healthy', busReachable: true, lastPollAt: null, consecutiveFailures: 0 };
@@ -23,7 +23,7 @@ async function connect(register: (server: McpServer) => void) {
 const ok = (json: unknown) => ({ ok: true, json: async () => json });
 const text = (result: unknown) => (((result as { content: unknown }).content as Array<{ text: string }>)[0]!).text;
 
-describe('share_context tool (E79)', () => {
+describe('share_context tool (E82)', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
@@ -74,7 +74,7 @@ describe('share_context tool (E79)', () => {
     const tool = (await client.listTools()).tools.find((t) => t.name === 'share_context')!;
     expect(tool.inputSchema.required).toEqual(expect.arrayContaining(['to', 'body', 'source']));
     expect(Object.keys(tool.inputSchema.properties!).sort()).toEqual(['body', 'channel', 'source', 'to']);
-    expect(tool.inputSchema.required).not.toContain('channel'); // E80: defaults to app
+    expect(tool.inputSchema.required).not.toContain('channel'); // E83: defaults to app
     for (const missing of ['to', 'body', 'source']) {
       const args: Record<string, unknown> = { to: 'contact:chris', body: 'x', source: 'y' };
       delete args[missing];

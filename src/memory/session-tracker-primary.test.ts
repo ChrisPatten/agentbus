@@ -4,7 +4,7 @@ import { runMigrations } from '../db/schema.js';
 import { SessionTracker } from './session-tracker.js';
 import type { AppConfig } from '../config/schema.js';
 
-// E80 — the message-less placeholder row share_context creates for a primary channel's conversation.
+// E83 — the message-less placeholder row share_context creates for a primary channel's conversation.
 
 const config = {
   bus: { http_port: 0, db_path: ':memory:', log_level: 'info' },
@@ -30,7 +30,7 @@ function fixture() {
 
 afterEach(() => { vi.restoreAllMocks(); });
 
-describe('SessionTracker and primary-channel placeholders (E80)', () => {
+describe('SessionTracker and primary-channel placeholders (E83)', () => {
   it('keeps the placeholder for a listed channel\'s general conversation, and closes the same row elsewhere', () => {
     vi.spyOn(SessionTracker.prototype as unknown as { runOnSessionCloseHook: () => void }, 'runOnSessionCloseHook').mockImplementation(() => {});
     const f = fixture();

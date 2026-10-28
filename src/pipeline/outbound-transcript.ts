@@ -25,7 +25,7 @@ export function logOutboundTranscript(
     body: string;
     metadata: Record<string, unknown>;
     /**
-     * E79: the row is hidden from the app (`metadata.context_only`), so no
+     * E82: the row is hidden from the app (`metadata.context_only`), so no
      * `session` event is recorded. The transcript trigger still writes a
      * `message` event, which the app's read paths skip as they do any hidden
      * row.

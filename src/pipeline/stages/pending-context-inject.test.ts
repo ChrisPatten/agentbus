@@ -8,7 +8,7 @@ import { JOURNAL_RUN_KEY, SYSTEM_ONLY_KEY, pendingContextFor } from '../../core/
 import { loadWindow } from '../../journaling/eligibility.js';
 import type { PipelineContext } from '../types.js';
 
-// E80 S80.4 — the stage in isolation: which envelopes it ignores. The end-to-end cases live in src/http/pool-context.test.ts.
+// E83 S83.4 — the stage in isolation: which envelopes it ignores. The end-to-end cases live in src/http/pool-context.test.ts.
 
 const config = AppConfigSchema.parse({
   bus: { db_path: ':memory:' }, adapters: {}, memory: {},
@@ -35,7 +35,7 @@ function fixture() {
   return { db, conv, ctx };
 }
 
-describe('createPendingContextInject (E80)', () => {
+describe('createPendingContextInject (E83)', () => {
   it('attaches for the pane route only, not for a cc-headless route or any other recipient', async () => {
     const f = fixture();
     const stage = createPendingContextInject(f.db, config);
@@ -67,7 +67,7 @@ describe('createPendingContextInject (E80)', () => {
   });
 });
 
-describe('journaling window for a Telegram DM note (E80)', () => {
+describe('journaling window for a Telegram DM note (E83)', () => {
   it('keeps the note, marked as not shown to the user, as for Main', () => {
     const f = fixture();
     f.db.prepare(`INSERT INTO transcripts (id, message_id, conversation_id, session_id, created_at, channel, contact_id, direction, body, metadata)

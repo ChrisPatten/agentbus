@@ -4,7 +4,7 @@ import { LeaseStore } from './lease-store.js';
 import { toBareAgentId } from './types.js';
 
 /**
- * E80 S80.3 — bus-side origin for sends from a cc-pool pane.
+ * E83 S83.3 — bus-side origin for sends from a cc-pool pane.
  *
  * A pane's MCP server has no per-turn conversation (`AGENTBUS_TURN_CONVERSATION_ID`
  * is a cc-headless mechanism) and no schedule label (`AGENTBUS_SOURCE_LABEL`),

@@ -12,7 +12,7 @@ import { primaryChannels } from '../../app/main.js';
  * wins. Falls back to 'general'. Sets ctx.topics from the resolved topic.
  * Never aborts the pipeline.
  *
- * E80: a channel an agent lists in `pending_context.channels` (its Telegram
+ * E83: a channel an agent lists in `pending_context.channels` (its Telegram
  * DM) is exempt from the rules, as the app's bound sessions are: a message
  * the rules moved to another topic would land in another conversation, and
  * the primary conversation would miss the context sent into it.
@@ -54,7 +54,7 @@ export function createTopicClassify(config: AppConfig): PipelineStage {
       return ctx;
     }
 
-    // E80: a primary channel's conversation stays `general`; topic_rules don't split it.
+    // E83: a primary channel's conversation stays `general`; topic_rules don't split it.
     if (primary.has(e.channel)) {
       e.topic = 'general';
       ctx.topics = ['general'];

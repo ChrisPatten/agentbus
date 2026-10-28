@@ -70,7 +70,7 @@ function formatQuoteLine(quoted: Record<string, unknown>): string {
 }
 
 /**
- * E80 — the pending-context blocks to show for a batch: one per conversation.
+ * E83 — the pending-context blocks to show for a batch: one per conversation.
  * Envelopes polled together were built against the same unadvanced watermark,
  * so their blocks overlap; the one with the newest watermark covers the rest.
  */
@@ -166,7 +166,7 @@ export function formatMessagesForSampling(envelopes: MessageEnvelope[]): string 
     parts.push(`New message from ${env.sender} ${routeLabel}${ts} [id:${env.id}]:\n${bodyWithImages}`);
   }
 
-  // E80 — pending context for a primary conversation, after any system block and
+  // E83 — pending context for a primary conversation, after any system block and
   // before the messages. It quotes other sessions, so it is not a system block.
   const pendingContext = pendingContextBlocks(envelopes).map(neutralizeSystemMarkers);
 

@@ -48,14 +48,14 @@ export const SYSTEM_ONLY_KEY = 'system_only';
 export const JOURNAL_RUN_KEY = 'journal_run_id';
 
 /**
- * E79 — transcript metadata flag marking a hidden handoff (`share_context`):
+ * E82 — transcript metadata flag marking a hidden handoff (`share_context`):
  * Main reads the row as context, the app never shows it. Reserved: stripped
  * at ingress, so only `POST /api/v1/context` can set it.
  */
 export const CONTEXT_ONLY_KEY = 'context_only';
 
 /**
- * E80 — envelope metadata key carrying a pending-context block for a cc-pool
+ * E83 — envelope metadata key carrying a pending-context block for a cc-pool
  * pane (see `PendingContextAttachment`). Unlike a system block it is quoted
  * text from other sessions, rendered outside `<agentbus-system>`. Reserved:
  * stripped at ingress, so a caller can never inject one.
@@ -162,7 +162,7 @@ export function readSystemBlocks(metadata: Record<string, unknown> | undefined):
 }
 
 /**
- * E80 — what the pending-context stage attaches to a pane's copy of a message:
+ * E83 — what the pending-context stage attaches to a pane's copy of a message:
  * the rendered block (null when every pending item had expired, so there is
  * nothing to show) and the watermark to advance to once the pane acks it. The
  * block is built against the watermark as it stood, so messages polled

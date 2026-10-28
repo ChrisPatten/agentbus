@@ -31,7 +31,7 @@ export function resolveBusToken(
 }
 
 /**
- * E80 — the token for a bus at an `AGENTBUS_URL` override, which is not the
+ * E83 — the token for a bus at an `AGENTBUS_URL` override, which is not the
  * bus the loaded config describes. `bus.auth_token` of the local config is
  * never used, so it can't leak to a remote host. The hook scripts' convention
  * applies: `AGENTBUS_BUS_TOKEN`, else the older `AGENTBUS_TOKEN`, else the

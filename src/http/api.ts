@@ -8,7 +8,7 @@
  * GET  /api/v1/messages/pending          — Poll pending messages for an agent.
  * POST /api/v1/messages/:id/ack          — Acknowledge or dead-letter a message.
  * POST /api/v1/messages                  — Direct enqueue (MCP reply tool).
- * POST /api/v1/context                   — Hidden context handoff into a primary conversation (E79, E80, share_context).
+ * POST /api/v1/context                   — Hidden context handoff into a primary conversation (E82, E83, share_context).
  * GET  /api/v1/messages/:id              — Fetch a single message by ID.
  * POST /api/v1/inbound                   — Inbound pipeline entry point.
  * POST /api/v1/pool/:agentId/turn-ended  — Pool pane activity signal (Stop hook).
@@ -159,15 +159,15 @@ const MessagePayloadSchema = z.discriminatedUnion('type', [
 ]);
 
 /**
- * E79 — body of POST /api/v1/context. `origin` is what the caller's MCP
+ * E82 — body of POST /api/v1/context. `origin` is what the caller's MCP
  * server stamped (`originFromEnv`); its label is replaced by `source`. A
- * sender that is a pane with a leased lease is stamped from the lease instead (E80).
+ * sender that is a pane with a leased lease is stamped from the lease instead (E83).
  */
 const ContextShareSchema = z.object({
   to: z.string().regex(/^contact:.+/, 'to must be contact:<id>'),
   body: z.string().min(1),
   source: z.string().min(1).max(120),
-  /** E80: `app` (Main) or a primary channel such as `telegram:peggy`. */
+  /** E83: `app` (Main) or a primary channel such as `telegram:peggy`. */
   channel: z.string().min(1).default('app'),
   sender: z.string().min(1).optional(),
   origin: z.discriminatedUnion('kind', [
@@ -690,7 +690,7 @@ export async function processInbound(
     // E65 — each fan-out copy carries only the system blocks meant for its
     // recipient (an advisory for agent A must not reach also_notify agent B).
     const blocks = systemBlocksFor(result.envelope.metadata, route.recipientId);
-    // E80 — likewise the pending-context block built for this route's pane.
+    // E83 — likewise the pending-context block built for this route's pane.
     const pendingContext = pendingContextFor(result.envelope.metadata, route.recipientId);
     const { [SYSTEM_BLOCKS_KEY]: _pending, [PENDING_CONTEXT_KEY]: _pendingContext, ...baseMetadata } = result.envelope.metadata;
     const fanEnvelope: MessageEnvelope = {
@@ -1219,7 +1219,7 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       const { id } = req.params;
       const { status } = req.body ?? {};
       if (status === 'delivered') {
-        // E80 — a pane's message carries the pending-context watermark; it moves only when the pane takes the message.
+        // E83 — a pane's message carries the pending-context watermark; it moves only when the pane takes the message.
         const pending = readPendingContext(queue.getById(id)?.envelope.metadata);
         const acked = queue.ack(id);
         if (!acked) {
@@ -1270,7 +1270,7 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     // message instead of a native reply in that case.
     // E65 — only the bus adds system blocks; an agent or HTTP caller can't.
     const metadata: Record<string, unknown> = stripSystemMetadata(data.metadata);
-    // E80 — a pane with a leased lease is running a turn in that conversation, whatever origin it stamped.
+    // E83 — a pane with a leased lease is running a turn in that conversation, whatever origin it stamped.
     // A reply names its conversation (metadata.conversation_id), which wins over a lease that has moved on.
     const paneOrigin = paneTurnOrigin(db, data.sender, metadata['origin'], metadata['conversation_id']);
     if (paneOrigin) metadata['origin'] = paneOrigin;
@@ -1380,8 +1380,8 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     return reply.status(201).send({ ok: true, id, queued: true });
   });
 
-  // POST /api/v1/context — hidden handoff into a primary conversation (E79
-  // Main, E80 a Telegram DM; share_context). Writes a context-only transcript
+  // POST /api/v1/context — hidden handoff into a primary conversation (E82
+  // Main, E83 a Telegram DM; share_context). Writes a context-only transcript
   // row directly: no queue row, no delivery, no app event the client would
   // show. The agent reads it on its next turn.
   server.post<{ Body: unknown }>('/api/v1/context', (req, reply) => {
@@ -1398,7 +1398,7 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
         reason: `Outbound messages are blocked while journal run ${blockedBy.runId} is open. Finish journaling and call journal_complete; do not share context during the run.`,
       });
     }
-    // E80 — a cc-pool pane running a turn in the target conversation must not hand itself context.
+    // E83 — a cc-pool pane running a turn in the target conversation must not hand itself context.
     const paneOrigin = data.sender ? paneTurnOrigin(db, data.sender, data.origin) : null;
     const result = shareContext(db, config, {
       contactId: data.to.replace(/^contact:/, ''), body: data.body, source: data.source, channel: data.channel,

@@ -59,10 +59,10 @@ the operator or asking something: those stay `send_message`. See
 [APP_ADAPTER.md → Hidden context](APP_ADAPTER.md#hidden-context-share_context).
 
 The same applies to an agent's Telegram DM on cc-pool when it is a primary
-conversation (E80): `share_context` with `channel: "telegram:peggy"` is hidden
+conversation (E83): `share_context` with `channel: "telegram:peggy"` is hidden
 in Telegram, and a routine's visible `send_message` into the DM reaches the
 agent's next turn as dated context, as in Main. See
-[CC_POOL_ADAPTER.md → Primary conversations](CC_POOL_ADAPTER.md#primary-conversations-pending-context-and-shared-context-e80).
+[CC_POOL_ADAPTER.md → Primary conversations](CC_POOL_ADAPTER.md#primary-conversations-pending-context-and-shared-context-e83).
 
 ## Background work
 

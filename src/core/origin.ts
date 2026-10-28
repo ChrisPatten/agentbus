@@ -47,7 +47,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  * `schedule_label` (the schedule's `label`) and `schedule_id`: the label wins,
  * then a config id (operator-chosen, e.g. "ambient-scan"), then "scheduled job
  * <id8>" for a generated UUID id. Never the prompt body. Shared by cc-headless
- * (`scheduleSourceLabel`) and the bus-side pane origin (E80).
+ * (`scheduleSourceLabel`) and the bus-side pane origin (E83).
  */
 export function scheduleLabelFromMetadata(meta: Record<string, unknown> | null | undefined): string | null {
   if (meta?.['scheduled'] !== true) return null;

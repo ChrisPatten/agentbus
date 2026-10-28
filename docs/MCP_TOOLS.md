@@ -59,14 +59,14 @@ Output: `{ "success": true, "message_id": "<uuid>" }`
 
 ### `share_context`
 
-Hands a note to the contact's Main in the Mac app (E79), or to an agent's Telegram DM (E80), without sending a message. Use it from an interactive Claude Code session to pass on an outcome (a finished artifact, a decision) so Main knows about it on its next turn, the way it already learns what a scheduled routine sent. Nothing appears in the app: no message, no unread badge, no sidebar movement, no notification, and Main is not woken. It is a separate tool from `send_message` because it has different delivery semantics: no channel, topic, queue or adapter. It calls [`POST /api/v1/context`](HTTP_API.md#post-apiv1context).
+Hands a note to the contact's Main in the Mac app (E82), or to an agent's Telegram DM (E83), without sending a message. Use it from an interactive Claude Code session to pass on an outcome (a finished artifact, a decision) so Main knows about it on its next turn, the way it already learns what a scheduled routine sent. Nothing appears in the app: no message, no unread badge, no sidebar movement, no notification, and Main is not woken. It is a separate tool from `send_message` because it has different delivery semantics: no channel, topic, queue or adapter. It calls [`POST /api/v1/context`](HTTP_API.md#post-apiv1context).
 
 | Field | Required | Notes |
 |---|---|---|
 | `to` | yes | `contact:<id>`, as for `send_message` |
 | `body` | yes | The note. Self-contained and concise; one note per finished piece of work |
 | `source` | yes | Label shown to the agent, for example `Claude Code: baxter` |
-| `channel` | no | `app` (default): Main in the Mac app. E80: a primary channel such as `telegram:peggy`, the agent's Telegram DM; it must be listed in `agents.<id>.pending_context.channels` ([CC_POOL_ADAPTER.md](CC_POOL_ADAPTER.md#primary-conversations-pending-context-and-shared-context-e80)) |
+| `channel` | no | `app` (default): Main in the Mac app. E83: a primary channel such as `telegram:peggy`, the agent's Telegram DM; it must be listed in `agents.<id>.pending_context.channels` ([CC_POOL_ADAPTER.md](CC_POOL_ADAPTER.md#primary-conversations-pending-context-and-shared-context-e83)) |
 
 Output: `{ "success": true, "message_id": "<uuid>" }`
 
@@ -96,7 +96,7 @@ Main reads it on its next turn; Chris does not see it and is not notified.
 - Do not call it from Main. If you are Main, you already have the context.
 ```
 
-For Peggy's Telegram DM (E80), in the `CLAUDE.md` of the project her operator's Claude Code sessions run in; the sessions can run on another machine if `AGENTBUS_URL` (and `AGENTBUS_BUS_TOKEN`) point at her bus:
+For Peggy's Telegram DM (E83), in the `CLAUDE.md` of the project her operator's Claude Code sessions run in; the sessions can run on another machine if `AGENTBUS_URL` (and `AGENTBUS_BUS_TOKEN`) point at her bus:
 
 ```markdown
 ### Handing context to Peggy

@@ -11,18 +11,18 @@ import { pendingContextLimits, pendingItemLine } from './pending-context.js';
 import { routedTarget } from './store.js';
 
 /**
- * E79, E80 — `share_context`: a hidden handoff into a primary conversation.
+ * E82, E83 — `share_context`: a hidden handoff into a primary conversation.
  *
  * Writes one outbound transcript row flagged `metadata.context_only` straight
- * into the contact's primary conversation: Main (`channel: 'app'`, E79) or a
+ * into the contact's primary conversation: Main (`channel: 'app'`, E82) or a
  * channel an agent lists in `pending_context.channels`, such as its Telegram
- * DM (E80). There is no `message_queue` row, no delivery and no adapter send,
+ * DM (E83). There is no `message_queue` row, no delivery and no adapter send,
  * and the row touches neither `last_activity` nor `message_count`, so the
  * user sees nothing and the agent isn't woken. The row joins the
  * conversation's newest session row, open or ended (after an idle rotation or
  * eviction the next turn starts a new one), and changes nothing on it. Only a
  * conversation with no session row at all gets one created: Main's visible
- * event (E79), or a placeholder for a Telegram DM (`ensurePrimarySession`).
+ * event (E82), or a placeholder for a Telegram DM (`ensurePrimarySession`).
  * The agent's next turn reads the note through pending context (E69) in its
  * own section, and journaling windows keep it. The reserved key is stripped
  * at every ingress (`stripSystemMetadata`), so this is the only writer.

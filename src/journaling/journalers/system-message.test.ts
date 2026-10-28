@@ -101,7 +101,7 @@ describe('SystemMessageJournaler.canJournal (S66.8)', () => {
     expect(j.canJournal(job())).toMatchObject({ ok: false, reason: expect.stringContaining('waiting') });
   });
 
-  it('a hidden shared note does not count as the agent answering (E79)', () => {
+  it('a hidden shared note does not count as the agent answering (E82)', () => {
     const { j } = make(okDeliver);
     transcript('t1', 'inbound', '2026-10-06T10:00:00.000Z');
     transcript('t2', 'outbound', '2026-10-06T10:01:00.000Z', { context_only: true, origin: { kind: 'external', label: 'Claude Code: baxter' } });
@@ -149,7 +149,7 @@ describe('SystemMessageJournaler.run (S66.8)', () => {
     expect(gate.blockedSend('agent:peggy-pool-1')).toBeNull();
   });
 
-  it('puts unconsumed shared notes in the instruction block, quoted as data (E79)', async () => {
+  it('puts unconsumed shared notes in the instruction block, quoted as data (E82)', async () => {
     let seenBlock = '';
     const gate = new JournalRunGate();
     const { j } = make(async (req) => {

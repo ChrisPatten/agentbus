@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { jobContextLines, promptWithJobContext, sharedContextLines } from './prompt.js';
 import type { JournalJob, SharedContextNote } from './types.js';
 
-// E79 — notes shared with `share_context` reach journalers that resume the agent's own session through the prompt.
+// E82 — notes shared with `share_context` reach journalers that resume the agent's own session through the prompt.
 
 const note = (i: number, body = `note ${i}`): SharedContextNote => ({
   created_at: new Date(Date.UTC(2026, 9, 27, 12, i)).toISOString(), label: 'Claude Code: baxter', body,
@@ -13,7 +13,7 @@ const job = (sharedContext?: SharedContextNote[]) => ({
   memoryDir: null, workingDir: null, ...(sharedContext ? { sharedContext } : {}),
 }) as unknown as JournalJob;
 
-describe('sharedContextLines (E79)', () => {
+describe('sharedContextLines (E82)', () => {
   it('is empty without notes', () => {
     expect(sharedContextLines(undefined)).toEqual([]);
     expect(sharedContextLines([])).toEqual([]);
@@ -53,7 +53,7 @@ describe('sharedContextLines (E79)', () => {
   });
 });
 
-describe('job prompt (E79)', () => {
+describe('job prompt (E82)', () => {
   it('includes shared notes in the context a resuming journaler receives', () => {
     const text = promptWithJobContext('Journal now.', job([note(1, 'Shipped the migration plan')]));
     expect(text).toContain('Notes shared with you from other sessions');

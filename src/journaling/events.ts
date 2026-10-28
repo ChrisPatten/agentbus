@@ -218,7 +218,7 @@ export interface HookHealthEntry {
   count: number;
 }
 
-/** Newest agent message in the agent's open sessions (pane ids included for pools). E79: a hidden `context_only` handoff is not agent activity. */
+/** Newest agent message in the agent's open sessions (pane ids included for pools). E82: a hidden `context_only` handoff is not agent activity. */
 function lastAgentActivity(db: Database.Database, agentId: string): string | null {
   const row = db
     .prepare(

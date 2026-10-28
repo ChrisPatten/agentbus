@@ -17,7 +17,7 @@ import { mainActivityClock, mainConversationId, rotateMainSession } from '../app
 import { buildPendingContext, pendingContextLimits } from '../app/pending-context.js';
 import { logOutboundTranscript } from '../pipeline/outbound-transcript.js';
 
-// E79 — POST /api/v1/context: the hidden write behind share_context.
+// E82 — POST /api/v1/context: the hidden write behind share_context.
 
 const TOKEN = 'app-contact-token-0123456789';
 const baseConfig = {
@@ -262,7 +262,7 @@ describe('POST /api/v1/context', () => {
   });
 });
 
-describe('replay cursor across a hidden event (E79)', () => {
+describe('replay cursor across a hidden event (E82)', () => {
   it('advances the cursor past the hidden event without a gap a client would notice', async () => {
     const { server, db, share } = await fixture();
     const main = ensureOutboundAppSession(db, 'alice', 'agent:work', 'general');

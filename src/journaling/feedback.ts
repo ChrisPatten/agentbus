@@ -210,7 +210,7 @@ export class FeedbackStore {
 
 /**
  * The agent message a feedback event in `conversationId` most likely refers
- * to: the latest non-command outbound row. E79: not a hidden `context_only`
+ * to: the latest non-command outbound row. E82: not a hidden `context_only`
  * handoff, which the user never saw.
  */
 export function latestAgentMessageId(db: Database.Database, conversationId: string): string | null {

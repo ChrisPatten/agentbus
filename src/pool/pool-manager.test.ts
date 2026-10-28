@@ -185,7 +185,7 @@ describe('PoolManager', () => {
       expect(paneLauncher.launch).not.toHaveBeenCalled();
     });
 
-    it('bound (E80): the message-less placeholder row share_context created gets a fresh --session-id, not a resume, and keeps the row', async () => {
+    it('bound (E83): the message-less placeholder row share_context created gets a fresh --session-id, not a resume, and keeps the row', async () => {
       const { manager, paneLauncher, db } = makeManager({ panes: 2 });
       await manager.ensureStarted();
       const now = new Date().toISOString();

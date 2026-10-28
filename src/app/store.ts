@@ -13,12 +13,12 @@ export interface AppEvent { seq: number; event: 'message' | 'session'; data: Rec
  * turn (E65 critical advisory turns, E66 journal instructions). Those rows
  * stay in the DB, flagged `metadata.system_only`, for debugging, but are
  * never shown to people. Also the condition the pending-context query uses
- * for outbound rows (E79), which must still see context-only ones.
+ * for outbound rows (E82), which must still see context-only ones.
  */
 export const NOT_SYSTEM_ONLY = `COALESCE(json_extract(t.metadata, '$.system_only'), 0) = 0`;
 
 /**
- * SQL condition (transcripts aliased `t`): not a context-only handoff (E79).
+ * SQL condition (transcripts aliased `t`): not a context-only handoff (E82).
  * `share_context` writes outbound rows flagged `metadata.context_only` that
  * Main reads as context but the app never shows.
  */
@@ -28,7 +28,7 @@ export const NOT_CONTEXT_ONLY = `COALESCE(json_extract(t.metadata, '$.context_on
  * SQL condition (transcripts aliased `t`) for every app-facing read: history,
  * replay events, session list previews, unread counts, the transcript API,
  * transcript search and quote resolution. Hides both bus-internal
- * `system_only` turns and E79 `context_only` handoffs. Pending context and
+ * `system_only` turns and E82 `context_only` handoffs. Pending context and
  * journaling windows read around it on purpose (`NOT_SYSTEM_ONLY`).
  */
 export const VISIBLE_TRANSCRIPT = `(${NOT_SYSTEM_ONLY} AND ${NOT_CONTEXT_ONLY})`;
@@ -36,7 +36,7 @@ export const VISIBLE_TRANSCRIPT = `(${NOT_SYSTEM_ONLY} AND ${NOT_CONTEXT_ONLY})`
 /**
  * The route target that serves a contact's `general` conversation on `channel`
  * (the first matching `pipeline.routes` rule, as stage 70 matches), or null.
- * E80: any channel, not just the app.
+ * E83: any channel, not just the app.
  */
 export function routedTarget(config: AppConfig, contactId: string, channel: string): { adapterId: string; recipientId: string } | null {
   for (const rule of config.pipeline.routes) {

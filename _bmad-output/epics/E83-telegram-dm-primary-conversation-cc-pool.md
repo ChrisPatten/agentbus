@@ -1,9 +1,9 @@
-# E80 — Telegram DM as a Primary Conversation on cc-pool
+# E83 — Telegram DM as a Primary Conversation on cc-pool
 
 | Field | Value |
 |---|---|
-| Epic ID | E80 |
-| Dependencies | E79 (hidden `context_only` rows, `share_context`, visibility split), E69 (origin stamping, pending context), E48 (cc-pool), E65 (advisory injection stage, system blocks), E66 (journaling) |
+| Epic ID | E83 |
+| Dependencies | E82 (hidden `context_only` rows, `share_context`, visibility split), E69 (origin stamping, pending context), E48 (cc-pool), E65 (advisory injection stage, system blocks), E66 (journaling) |
 | Story Count | 6 |
 | Estimated Complexity | M |
 | Status | Implemented; spike and live check on Peggy pending |
@@ -14,16 +14,16 @@ Source: operator request, 2026-10-28.
 
 ## Epic Summary
 
-The operator's personal agent, Peggy, runs on `cc-pool`, and her 1:1 Telegram DM is the analogue of the Mac app's Main: one long conversation the operator comes back to all day. E69 gave Main two things: a message sent into it from elsewhere (a scheduled routine) reaches the agent as dated context on its next turn, and the agent can tell its own sends from foreign ones. E79 adds `share_context`, a hidden handoff from an interactive Claude Code session.
+The operator's personal agent, Peggy, runs on `cc-pool`, and her 1:1 Telegram DM is the analogue of the Mac app's Main: one long conversation the operator comes back to all day. E69 gave Main two things: a message sent into it from elsewhere (a scheduled routine) reaches the agent as dated context on its next turn, and the agent can tell its own sends from foreign ones. E82 adds `share_context`, a hidden handoff from an interactive Claude Code session.
 
-Both are wired to the app's Main and to `cc-headless` only. E80 makes the Telegram DM a **primary conversation** and brings both features to a cc-pool pane, so Peggy learns what her routines sent into the DM and what the operator shared from a Claude Code session, without that text appearing in Telegram.
+Both are wired to the app's Main and to `cc-headless` only. E83 makes the Telegram DM a **primary conversation** and brings both features to a cc-pool pane, so Peggy learns what her routines sent into the DM and what the operator shared from a Claude Code session, without that text appearing in Telegram.
 
 ## Problem
 
 1. **Detection is hard-coded to the app.** `isMainConversation` (`src/app/main.ts`) matches only `channel = 'app' AND topic = 'general'`. `cc-headless.ts` (`pendingContextFor`) returns no block for any other conversation.
 2. **cc-pool delivers differently.** A pane's `cc.ts` polls `GET /api/v1/messages/pending` and wakes the interactive session with a `notifications/claude/channel` event. `runBatch`, where E69 prepends the block, is not on that path.
 3. **Pane sends carry the wrong origin.** `src/pool/mcp-config.ts` sets only `AGENTBUS_CONFIG`, `AGENTBUS_AGENT_ID` and the poll interval. It does not set `AGENTBUS_TURN_CONVERSATION_ID`, so every send from a pane, including its `reply` to the DM, is stamped `origin.kind = 'external'`. With pending context on, Peggy would be handed her own replies back as foreign context.
-4. **A quiet DM has no session row to write into.** `resolveConversationForOutbound` returns nulls when the conversation has no active session, and `logOutboundTranscript` then skips the row. The app path avoids this with `ensureOutboundAppSession`. Telegram has no equivalent, so an E79 hidden write into a DM with no leased pane would be dropped.
+4. **A quiet DM has no session row to write into.** `resolveConversationForOutbound` returns nulls when the conversation has no active session, and `logOutboundTranscript` then skips the row. The app path avoids this with `ensureOutboundAppSession`. Telegram has no equivalent, so an E82 hidden write into a DM with no leased pane would be dropped.
 5. **Topic rules can split a DM.** `topic-classify` (Stage 50) applies `pipeline.topic_rules` to non-thread topics, so a DM message matching a rule is routed to another topic, hence another conversation and another pane lease. The app avoids this for bound sessions. Peggy's config (read 2026-10-28) has no `pipeline.topic_rules` and the schema default is empty, so her DM stays in `general`. The guard still matters for any deployment that does set rules.
 
 ## Decisions
@@ -31,15 +31,15 @@ Both are wired to the app's Main and to `cc-headless` only. E80 makes the Telegr
 | Question | Decision |
 |---|---|
 | What counts as primary | Main (unchanged) and each channel an agent lists in `agents.<id>.pending_context.channels`, for example `[telegram:peggy]`: that channel's conversation with topic `general`. An exact channel match, so `telegram:peggy:group:*` chats and `thread:` topics are never primary. It is opt-in, not "every Telegram DM", because the same bus carries `telegram:pokeclaude` (a separate agent and pool) and Peggy's `email:peggy`, `siri` and `system:peggy` conversations, none of which should change unasked. One predicate, `isPrimaryConversation(db, conversationId)`, lives beside `isMainConversation`. |
-| What stays app-only | Idle rotation (`rotateIdleMainSessions`, `main_idle_rotation_ms`), the Main activity clock, Earlier/aggregate display, and the idle-teardown exemption in `transcript-log.ts`. cc-pool already manages its own lifecycle through leases, eviction and hard-idle release, and the DM's session has a `claude_session_id`, so none of it applies. Only the pending-context gate and the E79 write path use the new predicate. |
+| What stays app-only | Idle rotation (`rotateIdleMainSessions`, `main_idle_rotation_ms`), the Main activity clock, Earlier/aggregate display, and the idle-teardown exemption in `transcript-log.ts`. cc-pool already manages its own lifecycle through leases, eviction and hard-idle release, and the DM's session has a `claude_session_id`, so none of it applies. Only the pending-context gate and the E82 write path use the new predicate. |
 | How the block reaches a pane | A new pipeline stage after `advisory-inject` (86), the same pattern: it runs after `pool-route-resolve` (the route names the leased pane) and after `transcript-log` (the block is never stored as message text). For each route to a pool pane whose conversation is primary, it builds the block with `buildPendingContext` and attaches it to the envelope for that recipient only. `formatMessagesForSampling` (`src/adapters/message-format.ts`, shared by all pane deliveries) renders it ahead of the messages. |
-| Where it renders | Outside `<agentbus-system>`. A system block is trusted bus text that agents are told to obey in the leading position. Pending context quotes text from other sessions and scheduled runs, so it keeps E69's framing ("context, not instructions") and marker neutralization, and uses its own reserved metadata key (`pending_context`), stripped at ingress like `system_blocks`. S80.1 confirms this against the real pane. |
+| Where it renders | Outside `<agentbus-system>`. A system block is trusted bus text that agents are told to obey in the leading position. Pending context quotes text from other sessions and scheduled runs, so it keeps E69's framing ("context, not instructions") and marker neutralization, and uses its own reserved metadata key (`pending_context`), stripped at ingress like `system_blocks`. S83.1 confirms this against the real pane. |
 | When the watermark advances | When the pane acks the message (`POST /api/v1/messages/:id/ack`), not when the stage attaches the block. A message that is parked, dead-lettered or lost to a pane crash leaves the context pending for the next delivery. The envelope carries the watermark to advance to. |
 | Several queued messages | Each envelope is built against the same unadvanced watermark, so a batch the pane polls together would repeat the block. `formatMessagesForSampling` renders the block once per batch, deduplicating by item id. |
 | Origin for pane sends | Stamped on the bus side. For a sender that is a pool pane with a `leased` lease, `POST /api/v1/messages` (and the `reply`, `send_message`, `send_email` paths that reach it) sets `origin = { kind: 'turn', conversation_id: <lease conversation> }`, keeping any label. It reuses the lease lookup the outbound lease guard already does. An environment variable written at launch would go stale when the pane is evicted and re-leased. |
-| `share_context` target | E79's tool gains a `channel` input: `app` (default, Main) or the contact's Telegram DM channel, resolved through the routing rules for that sender and channel. A call from the pane leased to that same conversation is rejected, as E79 rejects a call from inside a Main turn. |
+| `share_context` target | E82's tool gains a `channel` input: `app` (default, Main) or the contact's Telegram DM channel, resolved through the routing rules for that sender and channel. A call from the pane leased to that same conversation is rejected, as E82 rejects a call from inside a Main turn. |
 | Telegram write | The hidden row needs a session row. `share_context` creates the conversation registry row and an open session row for the DM if none exists (no `claude_session_id`, `agent_id` as the pool stamps it). `SessionTracker.closeIdleSessions` must not close it, and `PoolManager` must still start a fresh `--session-id` for it on the first real message. |
-| Visible foreign sends | Peggy's scheduled routines already deliver to the DM through `send_message`; the operator sees them in Telegram. With E80 they also appear in her next-turn context, labelled with the schedule's name, exactly as in the app. |
+| Visible foreign sends | Peggy's scheduled routines already deliver to the DM through `send_message`; the operator sees them in Telegram. With E83 they also appear in her next-turn context, labelled with the schedule's name, exactly as in the app. |
 | Config | The `pending_context` limits (`max_items`, `max_chars`, `context_ttl_ms`) move to an agent-level block, `agents.<id>.pending_context`, falling back to `adapters.app.pending_context` for the app. The block also holds `channels` (default `[]`). Defaults are unchanged (10 items, 4000 characters, 24 h TTL for context-only items). The agent key is matched with `toPrefixed`, as `agents.<id>.memory` is, so Peggy's existing `"agent:peggy"` entry works. |
 | Reply targeting | The app marks "the user is replying to this one" through `quoted_message`. Telegram native replies are not mapped in v1. |
 | Rotation | Not added. cc-pool's lease lifecycle and journaling triggers stand in for it. |
@@ -51,13 +51,13 @@ Both are wired to the app's Main and to `cc-headless` only. E80 makes the Telegr
 3. Peggy's own replies and proactive sends from the DM pane are never injected back. A send from a pane leased to another conversation (a scheduled-topic pane messaging the DM) is.
 4. Context survives pane eviction, hard-idle release and a bus restart, and a message that never reaches the pane (parked, dead-lettered) leaves it pending. A note shared more than 24 hours ago is skipped.
 5. A DM with no prior session accepts `share_context`; its first real message launches a fresh pane session, not a resume.
-6. Several messages polled together carry one block. `topic_rules` do not cause primary-conversation context to go missing (S80.1 settles how).
-7. Main and `cc-headless` behavior is unchanged; E69 and E79 tests still pass.
+6. Several messages polled together carry one block. `topic_rules` do not cause primary-conversation context to go missing (S83.1 settles how).
+7. Main and `cc-headless` behavior is unchanged; E69 and E82 tests still pass.
 8. Docs (`docs/CC_POOL_ADAPTER.md`, `docs/MCP_TOOLS.md`, `docs/HTTP_API.md`, `docs/APP_PROACTIVE_DELIVERY.md`, `docs/CC_HEADLESS_ADAPTER.md`), the cc-pool and Telegram pages under `site-docs/`, `CHANGELOG.md`, and the Peggy `CLAUDE.md` wording are updated.
 
 ## Stories
 
-### S80.1 — Spike: confirm the cc-pool assumptions
+### S83.1 — Spike: confirm the cc-pool assumptions
 
 Settle, with the real binary and a test pool on `baxter-mac-test` (or Peggy's pool with the operator's go-ahead), what the rest of the epic builds on. Record findings in this file.
 
@@ -67,19 +67,19 @@ Settle, with the real binary and a test pool on `baxter-mac-test` (or Peggy's po
 - **Topic rules.** Resolved for Peggy: her config has none. Keep a test that a deployment with `topic_rules` doesn't lose primary-conversation context; if one does, exempt the primary channel from classification and add that to this epic.
 - **Session placeholder.** What `PoolManager` does when the conversation's only session row has no `claude_session_id`, and what stamps `sessions.agent_id` for a pool conversation.
 
-### S80.2 — Primary-conversation predicate and config
+### S83.2 — Primary-conversation predicate and config
 
-- `isPrimaryConversation(db, conversationId, config)` in `src/app/main.ts` (or a neutral module), covering Main and the conversations on each agent's configured `pending_context.channels` (exact channel, topic `general`). Use it only at the pending-context gate (`pendingContextFor`) and in the E79 write path; the three `isMainConversation` call sites for rotation and teardown are left alone.
+- `isPrimaryConversation(db, conversationId, config)` in `src/app/main.ts` (or a neutral module), covering Main and the conversations on each agent's configured `pending_context.channels` (exact channel, topic `general`). Use it only at the pending-context gate (`pendingContextFor`) and in the E82 write path; the three `isMainConversation` call sites for rotation and teardown are left alone.
 - Add `agents.<id>.pending_context` with fallback to `adapters.app.pending_context`; update `pendingContextLimits` and the schema and example config.
 - Tests: predicate for Main, a listed DM, an unlisted DM (`telegram:pokeclaude` when only `telegram:peggy` is listed), a group, a forum thread, other contact; config fallback and override; `"agent:peggy"` and `peggy` keys both resolve.
 
-### S80.3 — Bus-side origin for pane sends
+### S83.3 — Bus-side origin for pane sends
 
 - In `POST /api/v1/messages`, for a sender whose agent id is a pool pane with a `leased` lease, replace `metadata.origin` with `{ kind: 'turn', agent_id, conversation_id: <lease conversation>, label? }`, keeping a caller-supplied label. No lease, a `free`/`dead` lease, or a non-pane sender leaves origin as today.
 - Cover the `reply`, `send_message` and `send_email` paths. `cc-headless` is unchanged, since its MCP child already sets the turn variable.
 - Tests: pane reply to its own conversation (own), pane send to a different conversation (foreign to the target), stale lease, spoofed `origin` replaced, label preserved.
 
-### S80.4 — Pending-context stage for pool panes
+### S83.4 — Pending-context stage for pool panes
 
 - New stage at slot 87, `critical: false`. For each `cc-pool` route resolved to a pane whose conversation is primary, call `buildPendingContext` with the envelope id as the batch, attach the block under reserved key `pending_context` for that recipient, and record the watermark to advance to. Skip slash commands, system-only and journaling envelopes, as `advisory-inject` does.
 - Add `pending_context` to the reserved keys stripped at ingress.
@@ -87,24 +87,24 @@ Settle, with the real binary and a test pool on `baxter-mac-test` (or Peggy's po
 - Advance the watermark in the ack handler when the acked message carries one. A parked message re-enqueued by `drainParked` keeps its attachment or has it rebuilt; either way nothing advances early.
 - Tests: injection for a leased pane, none for a non-primary conversation, none for a pane's own sends, watermark advances on ack only, a dead-lettered message leaves context pending, batch dedupe, TTL and budget honored.
 
-### S80.5 — `share_context` for the Telegram DM
+### S83.5 — `share_context` for the Telegram DM
 
-- Extend E79's route and tool with `channel` (default `app`). Resolve the target conversation and owning agent through the pipeline routes for the contact and channel; reject unknown or non-primary targets.
+- Extend E82's route and tool with `channel` (default `app`). Resolve the target conversation and owning agent through the pipeline routes for the contact and channel; reject unknown or non-primary targets.
 - Add `ensurePrimarySession` for the Telegram DM: create the conversation registry row and an open session row when missing, with the guarantees in the Decisions table (not closed by `SessionTracker`, first message starts a fresh pane session).
 - Reject a call from the pane leased to the target conversation.
 - **Reaching a remote bus.** Peggy's bus runs on BobaFett, but `src/adapters/cc.ts` builds `busBaseUrl` as `http://127.0.0.1:<http_port>`, so a Claude Code session on another machine can't call `share_context` (or any MCP tool) against it. Add an `AGENTBUS_URL` override to the tools-only MCP server, the same variable the hooks already use, and send the bus token with it (check how `bus-auth.ts` is applied there). Until then the workaround is an SSH tunnel to a free local port with a small config whose `http_port` matches, or running the Claude Code session on BobaFett.
-- Make sure E79's `context_only` filter also hides the row from Telegram-side reads: transcript API, search, journaling window rendering as in E79 S79.5.
+- Make sure E82's `context_only` filter also hides the row from Telegram-side reads: transcript API, search, journaling window rendering as in E82 S82.5.
 - Tests: write to a DM with no session, with an open session, with a leased pane; hidden from transcript reads; first inbound launches a fresh `--session-id`; own-pane rejection.
 
-### S80.6 — Docs, Peggy instruction and live check
+### S83.6 — Docs, Peggy instruction and live check
 
 - Update the docs and `site-docs/` pages listed in exit criterion 8, `CHANGELOG.md`, and run `npm run docs:build`.
-- Provide the Peggy `CLAUDE.md` wording for the Claude Code side, adapted from E79's, with `channel` set to her Telegram DM.
+- Provide the Peggy `CLAUDE.md` wording for the Claude Code side, adapted from E82's, with `channel` set to her Telegram DM.
 - Live check on Peggy (with the operator): a scheduled routine message into the DM and a reply to it; `share_context` from a Claude Code session with no pane leased; the same with the pane leased and busy; an eviction and `/clear` in between; confirm Telegram shows no shared note, Peggy's replies are not re-injected, and a dead-lettered message leaves the context for the next one.
 
 ## Findings (code reading)
 
-S80.1 needs the real `claude` binary and Peggy's pool, which was not available when E80 was built. These are the answers code reading settles; everything else is listed under **Still unverified** and needs the live spike.
+S83.1 needs the real `claude` binary and Peggy's pool, which was not available when E83 was built. These are the answers code reading settles; everything else is listed under **Still unverified** and needs the live spike.
 
 **Naming.** A Telegram DM envelope's channel is the adapter id: `telegram:<instance>` for a named bot (`telegram:peggy`), plain `telegram` for the single-bot form (`TelegramAdapter` sets `this.id`, and `processUpdate` uses it for a private chat and `${id}:group:<chatId>` for a group). `normalize` fills the missing topic with `general`, so a DM is the conversation `computeConversationId(contact, 'telegram:peggy', 'general')` and `transcript-log` upserts `conversation_registry(channel='telegram:peggy', topic='general')`. A forum topic gets a `thread:<hash>` topic and a group gets the `:group:` channel. Routes use `channelMatches`, so `match.channel: telegram:peggy` also matches `telegram:peggy:group:*`; `isPrimaryConversation` therefore compares the registry row's channel exactly. Peggy's real registry row was not read; the names above follow from the code and her routes.
 
@@ -133,8 +133,8 @@ S80.1 needs the real `claude` binary and Peggy's pool, which was not available w
 
 ## Risks
 
-- **Topic rules.** Not a risk for Peggy's current config (none set). Other deployments with `topic_rules` are covered by the S80.1 test and its fallback.
-- **Stage ordering and ack.** The watermark depends on the ack path carrying the message's metadata; if acks don't expose it, S80.4 stores the target in a small table keyed by message id instead.
+- **Topic rules.** Not a risk for Peggy's current config (none set). Other deployments with `topic_rules` are covered by the S83.1 test and its fallback.
+- **Stage ordering and ack.** The watermark depends on the ack path carrying the message's metadata; if acks don't expose it, S83.4 stores the target in a small table keyed by message id instead.
 - **`/clear` and resume.** A pane cleared on eviction resumes from the conversation's stored session id. If a clear starts a new Claude session id (as the E73 spike observed for `/clear`), context injected before the clear lives only in the old transcript. The live check covers this; the journal already carries what matters.
 - **Pool launch cost.** None added: no hidden write or injection starts a pane.
 
@@ -142,9 +142,9 @@ S80.1 needs the real `claude` binary and Peggy's pool, which was not available w
 
 From Peggy's `agentbus-config.yaml` on BobaFett, read 2026-10-28:
 
-- **Separate deployment.** Her bus (`~/.agentbus_data/agentbus.db`, port 3000) is not the local `baxter-mac-test` bus. E79 and E80 reach her only by deploying a build that has them there, then adding `agents."agent:peggy".pending_context.channels: [telegram:peggy]`.
+- **Separate deployment.** Her bus (`~/.agentbus_data/agentbus.db`, port 3000) is not the local `baxter-mac-test` bus. E82 and E83 reach her only by deploying a build that has them there, then adding `agents."agent:peggy".pending_context.channels: [telegram:peggy]`.
 - **Pool shape.** `peggy-pool` is 3 fixed panes growing to 8, `idle_evict_ms` 30 min, `hard_idle_ms` 6 h, `on_evict: clear`. The DM, `system:peggy` and Siri are the consistently active conversations, so a pending-context stage and an eviction-then-resume path both matter in daily use.
-- **Foreign senders.** Her routines run in `system:peggy` conversations and send into `telegram:peggy`, which is exactly the foreign case E69 and S80.3 cover.
+- **Foreign senders.** Her routines run in `system:peggy` conversations and send into `telegram:peggy`, which is exactly the foreign case E69 and S83.3 cover.
 - **`context:user` route.** `pipeline.routes` sends a `context:user` channel to her pool. The operator confirmed it is an abandoned proof of concept, so it plays no part in this epic. The route can be removed from her config as cleanup.
 - **Unauthenticated, LAN-bound bus.** `bus.host` is `0.0.0.0` and no `bus.auth_token` is set, and the schema comment advises setting one in that case. Anything that can reach port 3000 can already post messages. Setting a token is a prerequisite for pointing remote Claude Code sessions at it.
 - **PokeClaude.** `telegram:pokeclaude` has its own pool and is unaffected unless its channel is listed.
@@ -154,6 +154,6 @@ From Peggy's `agentbus-config.yaml` on BobaFett, read 2026-10-28:
 - Telegram groups, forum topics, email and other channels.
 - Mapping Telegram native replies to pending-context items.
 - Idle rotation for the DM's Claude session.
-- A hook-based delivery path (`UserPromptSubmit`); S80.1 only records whether it works.
+- A hook-based delivery path (`UserPromptSubmit`); S83.1 only records whether it works.
 - Waking Peggy or starting a pane for a shared note.
-- An audit view of hidden context (E79 decision).
+- An audit view of hidden context (E82 decision).

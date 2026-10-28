@@ -194,8 +194,8 @@ describe('buildPendingContext', () => {
   });
 });
 
-// E79 — hidden context-only rows (`share_context`) in the pending-context block.
-describe('context-only items (E79)', () => {
+// E82 — hidden context-only rows (`share_context`) in the pending-context block.
+describe('context-only items (E82)', () => {
   const shared = (label = 'Claude Code: baxter') => ({ ...external(label), context_only: true });
   const now = new Date('2026-10-05T19:06:00.000Z');
   const tz = 'America/New_York';

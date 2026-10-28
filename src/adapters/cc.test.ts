@@ -455,7 +455,7 @@ describe('resolvePollIntervalMs', () => {
   });
 });
 
-describe('resolveBusBaseUrl (E80)', () => {
+describe('resolveBusBaseUrl (E83)', () => {
   it('defaults to the local bus on http_port, as before', () => {
     expect(resolveBusBaseUrl(undefined, 3000)).toBe('http://127.0.0.1:3000');
     expect(resolveBusBaseUrl('', 3000)).toBe('http://127.0.0.1:3000');

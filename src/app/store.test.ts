@@ -174,7 +174,7 @@ describe('bus-originated turns are hidden (E65/E66)', () => {
   });
 });
 
-describe('context-only handoffs are hidden from the app (E79)', () => {
+describe('context-only handoffs are hidden from the app (E82)', () => {
   const shared = { context_only: true, origin: { kind: 'external', label: 'Claude Code: baxter' } };
 
   it('keeps a context-only row out of history, replay, unread counts and quote resolution, while the cursor still advances', () => {

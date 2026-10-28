@@ -171,7 +171,7 @@ describe('topic-classify stage', () => {
   });
 });
 
-describe('primary channels are exempt from topic_rules (E80)', () => {
+describe('primary channels are exempt from topic_rules (E83)', () => {
   const rules = [{ topic: 'code', keywords: ['bug', 'deploy'] }];
   const withPrimary = () => ({ ...makeConfig({ topic_rules: rules }), agents: { 'agent:peggy': { pending_context: { channels: ['telegram:peggy'] } } } }) as unknown as AppConfig;
 

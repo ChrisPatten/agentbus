@@ -1,7 +1,7 @@
 /**
- * Stage 88 — Pending Context Inject (critical: false) (E80 S80.4)
+ * Stage 88 — Pending Context Inject (critical: false) (E83 S83.4)
  *
- * cc-headless prepends pending context (E69, E79) to a Main turn in
+ * cc-headless prepends pending context (E69, E82) to a Main turn in
  * `runBatch`. A cc-pool pane is fed differently: its `cc.ts` polls
  * `GET /api/v1/messages/pending` and wakes the interactive session with a
  * channel event, so the block has to ride on the envelope. For each cc-pool

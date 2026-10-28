@@ -116,11 +116,11 @@ export function registerMessagingTools(server: McpServer, busBaseUrl: string, ag
     }
   );
 
-  registerShareContextTool(server, busBaseUrl, agentId); // E79
+  registerShareContextTool(server, busBaseUrl, agentId); // E82
 }
 
 /**
- * E79 — `share_context`: hand a Claude Code session's outcome to Main without
+ * E82 — `share_context`: hand a Claude Code session's outcome to Main without
  * a message. POSTs to `/api/v1/context`, which writes a hidden row; the app
  * shows nothing and Main reads it on its next turn. Separate from
  * `send_message` on purpose: it has no channel, topic, queue or delivery.

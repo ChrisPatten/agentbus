@@ -522,11 +522,11 @@ export const AppAdapterSchema = z.object({
   ping_interval_ms: z.number().int().min(1000).default(30_000),
   /** E69: retire Main's Claude session after this much operator/agent inactivity. 0 disables. */
   main_idle_rotation_ms: z.number().int().min(0).default(43_200_000),
-  /** E69: foreign messages injected into the next Main turn as dated context. E79 adds hidden `share_context` notes. */
+  /** E69: foreign messages injected into the next Main turn as dated context. E82 adds hidden `share_context` notes. */
   pending_context: z.object({
     max_items: z.number().int().positive().default(10),
     max_chars: z.number().int().positive().default(4000),
-    /** E79: context-only items (`share_context`) older than this are not injected. 0 disables the cutoff. */
+    /** E82: context-only items (`share_context`) older than this are not injected. 0 disables the cutoff. */
     context_ttl_ms: z.number().int().min(0).default(86_400_000),
   }).prefault({}),
 });
@@ -781,7 +781,7 @@ const AgentConfigSchema = z.object({
    */
   protected_paths: z.array(z.string().min(1)).optional(),
   /**
-   * E80 — pending context (E69) and shared context (E79) for this agent. The
+   * E83 — pending context (E69) and shared context (E82) for this agent. The
    * limits fall back, field by field, to `adapters.app.pending_context`.
    * `channels` lists the exact channels whose `general` conversation is a
    * primary conversation, like the Mac app's Main (for example

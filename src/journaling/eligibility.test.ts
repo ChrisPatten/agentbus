@@ -68,7 +68,7 @@ describe('loadWindow (E66 S66.2)', () => {
     expect(w.messages.map((m) => [m.body, m.context])).toEqual([['old reply', true], ['new', false]]);
   });
 
-  describe('context-only handoffs (E79)', () => {
+  describe('context-only handoffs (E82)', () => {
     const shared = (label = 'Claude Code: baxter') => ({ context_only: true, origin: { kind: 'external', label } });
 
     it('keeps a shared note in the window, rendered with its source and the not-shown marker', () => {

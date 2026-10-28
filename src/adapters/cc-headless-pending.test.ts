@@ -179,7 +179,7 @@ describe('cc-headless E69 wiring', () => {
     expect(postedMessages()[0]!.metadata['origin']).toMatchObject({ kind: 'turn', conversation_id: conv });
   });
 
-  // E79: hidden share_context notes arrive in their own section of the same block.
+  // E82: hidden share_context notes arrive in their own section of the same block.
   it('injects a context-only note in its own section and advances the watermark past it once the turn starts', async () => {
     const { conversationId, sessionId } = ensureOutboundAppSession(db, 'chris', 'agent:peggy', 'general');
     const at = new Date(Date.now() - 3_600_000).toISOString();
@@ -220,7 +220,7 @@ describe('cc-headless E69 wiring', () => {
     child.emit('close', 0);
   });
 
-  // E80: a channel an agent lists in pending_context.channels is primary, whichever runtime serves it.
+  // E83: a channel an agent lists in pending_context.channels is primary, whichever runtime serves it.
   async function runDm(channel: string) {
     (config as unknown as { agents: unknown }).agents = { 'agent:peggy': { pending_context: { channels: ['telegram:peggy'] } } };
     const now = new Date().toISOString();

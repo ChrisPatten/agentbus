@@ -79,7 +79,7 @@ export interface JournalMessage {
 }
 
 /**
- * E79 — a hidden note shared with the agent (`share_context`) that has not
+ * E82 — a hidden note shared with the agent (`share_context`) that has not
  * been journaled yet. Journalers that resume the agent's own session never
  * see the window's message bodies, so these reach them through the prompt.
  */
@@ -172,7 +172,7 @@ export interface JournalJob {
    */
   feedback?: FeedbackItem[];
   /**
-   * E79 — notes shared into the conversation since the journal cursor (or, with
+   * E82 — notes shared into the conversation since the journal cursor (or, with
    * no cursor, since 24 h before the session started), oldest first. Session jobs only.
    */
   sharedContext?: SharedContextNote[];

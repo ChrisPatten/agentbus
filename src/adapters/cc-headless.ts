@@ -1158,7 +1158,7 @@ class HeadlessInstance {
 
     // E69 S69.4: in Main, prepend foreign messages the agent hasn't seen
     // (runClaudeTurn puts any memory prefix ahead of it). Queried at turn
-    // start, so anything arriving mid-turn waits for the next one. E79: also
+    // start, so anything arriving mid-turn waits for the next one. E82: also
     // hidden share_context notes; `block` is null when only expired ones were
     // pending, and the watermark still moves past them.
     const pending = this.pendingContextFor(db, conversationId, envelopes);
@@ -1209,7 +1209,7 @@ class HeadlessInstance {
   /** E69 S69.4 — Main's pending-context block for this batch, or null. Never throws. */
   private pendingContextFor(db: Database.Database, conversationId: string, envelopes: MessageEnvelope[]) {
     try {
-      // E80: Main, and any channel the agent lists in pending_context.channels.
+      // E83: Main, and any channel the agent lists in pending_context.channels.
       const channel = primaryConversationChannel(db, conversationId, config);
       if (!channel) return null;
       const replyTargets = new Set<string>();

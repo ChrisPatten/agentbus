@@ -179,7 +179,7 @@ describe('hook health (E66 S66.4)', () => {
     expect(hookHealth(db, store, 'agent:peggy', pool, now)[0]!.status).toBe('stopped');
   });
 
-  it('a hidden shared note is not agent activity (E79)', () => {
+  it('a hidden shared note is not agent activity (E82)', () => {
     const store = new JournalStore(db);
     session('p1', 'agent:peggy-pool-2', 'claude-p1');
     msg('p1', ago(TURN_ENDED_GRACE_MS + 60_000), 'outbound', { context_only: true, origin: { kind: 'external', label: 'Claude Code: baxter' } });

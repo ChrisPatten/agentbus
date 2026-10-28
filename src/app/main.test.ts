@@ -58,7 +58,7 @@ describe('Main idle rotation (E69)', () => {
     } finally { f.db.close(); }
   });
 
-  it('a hidden shared note neither moves the clock nor postpones rotation (E79)', () => {
+  it('a hidden shared note neither moves the clock nor postpones rotation (E82)', () => {
     const f = fixture();
     try {
       f.put('inbound', 3 * HOUR);

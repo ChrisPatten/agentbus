@@ -201,7 +201,7 @@ agents:
     owners:                          # who receives bus advisories about this agent
       - channel: telegram            # exact channel of the owner's conversation
         contact_id: alice            # a key under contacts
-    # pending_context:               # E80: context from other sessions for a primary conversation (docs/CC_POOL_ADAPTER.md)
+    # pending_context:               # E83: context from other sessions for a primary conversation (docs/CC_POOL_ADAPTER.md)
     #   channels: [telegram:peggy]   # exact channels whose DM is a primary conversation, like the Mac app's Main; default []
     #   max_items: 10                # each limit falls back to adapters.app.pending_context
     #   max_chars: 4000

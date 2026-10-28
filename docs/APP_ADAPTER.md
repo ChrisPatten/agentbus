@@ -16,7 +16,7 @@ adapters:
     event_retention_days: 30
     ping_interval_ms: 30000
     main_idle_rotation_ms: 43200000   # E69; 0 disables Main's idle rotation
-    pending_context:                  # E69; foreign messages (and E79 shared notes) injected into the next Main turn
+    pending_context:                  # E69; foreign messages (and E82 shared notes) injected into the next Main turn
       max_items: 10
       max_chars: 4000
   cc-headless:
@@ -54,7 +54,7 @@ pipeline:
 | `main_idle_rotation_ms` | `43200000` (12 h) | Retire Main's Claude session after this long with no operator message and no send from a Main turn. `0` disables rotation. See [Main](#main-one-continuous-conversation) |
 | `pending_context.max_items` | `10` | Most foreign messages injected into one Main turn; older ones are counted as omitted |
 | `pending_context.max_chars` | `4000` | Character budget for the injected item lines (the intro line doesn't count). Also the longest note `share_context` accepts |
-| `pending_context.context_ttl_ms` | `86400000` (24 h) | E79: a note shared with `share_context` is not injected once it is older than this when the Main turn starts. `0` disables the cutoff. Visible foreign sends are never expired. E80: a listed Telegram DM uses its agent's `agents.<id>.pending_context.context_ttl_ms` when set, and this value otherwise |
+| `pending_context.context_ttl_ms` | `86400000` (24 h) | E82: a note shared with `share_context` is not injected once it is older than this when the Main turn starts. `0` disables the cutoff. Visible foreign sends are never expired. E83: a listed Telegram DM uses its agent's `agents.<id>.pending_context.context_ttl_ms` when set, and this value otherwise |
 
 When `adapters.app` is absent, code that needs these values uses the schema defaults.
 
@@ -175,7 +175,7 @@ Not guarded: a single Main turn that runs longer than the whole rotation period 
 
 ### Hidden context (`share_context`)
 
-E79. A **context-only** row is an outbound transcript row in Main with `metadata.context_only = true`, written by [`POST /api/v1/context`](HTTP_API.md#post-apiv1context) (the [`share_context` tool](MCP_TOOLS.md#share_context)). It is how an operator's Claude Code session tells Main something without a message: Main reads it as [shared context](CC_HEADLESS_ADAPTER.md#shared-context-share_context), the app never shows it. It is a second hiding flag, separate from `system_only`:
+E82. A **context-only** row is an outbound transcript row in Main with `metadata.context_only = true`, written by [`POST /api/v1/context`](HTTP_API.md#post-apiv1context) (the [`share_context` tool](MCP_TOOLS.md#share_context)). It is how an operator's Claude Code session tells Main something without a message: Main reads it as [shared context](CC_HEADLESS_ADAPTER.md#shared-context-share_context), the app never shows it. It is a second hiding flag, separate from `system_only`:
 
 | Reader | `system_only` | `context_only` |
 |---|---|---|

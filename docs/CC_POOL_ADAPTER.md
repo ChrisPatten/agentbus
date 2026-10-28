@@ -202,9 +202,9 @@ A pool never actually shrinks back down in row count. A grown pane that's later 
 
 Proactive sends (`send_message`, `send_email`) carry neither field and are not guarded. A pane leased to one conversation may message another, for example a scheduled-topic pane alerting the user's DM.
 
-## Primary conversations: pending context and shared context (E80)
+## Primary conversations: pending context and shared context (E83)
 
-Main in the Mac app gets two things a plain conversation doesn't: a message sent into it from elsewhere (a scheduled routine) reaches the agent as dated context on its next turn (E69), and an operator's Claude Code session can hand it a hidden note with `share_context` (E79). E80 gives a pool's Telegram DM both. Peggy's 1:1 DM is the Main analogue: one long conversation she comes back to all day.
+Main in the Mac app gets two things a plain conversation doesn't: a message sent into it from elsewhere (a scheduled routine) reaches the agent as dated context on its next turn (E69), and an operator's Claude Code session can hand it a hidden note with `share_context` (E82). E83 gives a pool's Telegram DM both. Peggy's 1:1 DM is the Main analogue: one long conversation she comes back to all day.
 
 **Opt in.** List the exact channel under the agent that serves it:
 
@@ -220,7 +220,7 @@ agents:
 
 A **primary conversation** (`isPrimaryConversation`, `src/app/main.ts`) is Main plus the `general` conversation of each listed channel. The match is exact: `channelMatches` would let `telegram:peggy` also match `telegram:peggy:group:*` for routing, but a group chat or a `thread:` forum topic is never primary. It is not "every Telegram DM" because the same bus carries other bots and Peggy's `email:peggy`, `siri` and `system:peggy` conversations, none of which change unasked. The agent key matches as `agents.<id>.memory` does (bare or `agent:` prefixed). `pipeline.topic_rules` don't apply to a listed channel's DM (`createTopicClassify`): a rule that moved a message to another topic would put it in another conversation, which isn't primary. Idle rotation, the Main activity clock and the idle-teardown exemption stay Main-only; cc-pool already has leases, eviction and hard-idle release.
 
-**How the block reaches a pane.** A pane's `cc.ts` polls `GET /api/v1/messages/pending` and wakes the interactive session with a `notifications/claude/channel` event, so cc-headless's `runBatch` is not on the path. Stage 88, `pending-context-inject` (`src/pipeline/stages/pending-context-inject.ts`, `critical: false`; 87 was already `journal-hold`), runs after `pool-route-resolve` (72), `transcript-log` (80) and `advisory-inject` (86). For each cc-pool route of an envelope in a primary conversation it calls `buildPendingContext` (the same builder as E69/E79) and attaches the result under the reserved metadata key `pending_context`, for that route's recipient only:
+**How the block reaches a pane.** A pane's `cc.ts` polls `GET /api/v1/messages/pending` and wakes the interactive session with a `notifications/claude/channel` event, so cc-headless's `runBatch` is not on the path. Stage 88, `pending-context-inject` (`src/pipeline/stages/pending-context-inject.ts`, `critical: false`; 87 was already `journal-hold`), runs after `pool-route-resolve` (72), `transcript-log` (80) and `advisory-inject` (86). For each cc-pool route of an envelope in a primary conversation it calls `buildPendingContext` (the same builder as E69/E82) and attaches the result under the reserved metadata key `pending_context`, for that route's recipient only:
 
 ```json
 { "conversation_id": "…", "block": "Since your last turn…", "through": { "created_at": "…", "id": "…" } }
@@ -238,15 +238,15 @@ A **primary conversation** (`isPrimaryConversation`, `src/app/main.ts`) is Main 
 
 **Reaching a remote bus.** A tools-only `cc.ts` builds its base URL as `http://127.0.0.1:<http_port>`. `AGENTBUS_URL` (the variable the hook scripts already use) overrides it, so a Claude Code session on another machine can call `share_context` against Peggy's bus. With the override set the token comes only from the environment, by the hook scripts' convention: `AGENTBUS_BUS_TOKEN`, else `AGENTBUS_TOKEN`, else the first line of `AGENTBUS_TOKEN_FILE`. The loaded config's `bus.auth_token` belongs to the local bus and is never sent to the remote host, and the token is attached only to requests under the configured URL (`withBusToken`). Unset, behavior is unchanged: `bus.auth_token`, else `AGENTBUS_BUS_TOKEN`. The bus serves plain HTTP, so reach a remote bus through an SSH tunnel or an HTTPS proxy, not across an open network. A bus bound to the LAN with no `bus.auth_token` accepts anything that can reach it: set a token before pointing remote sessions at it.
 
-**Config rollout (Peggy).** Her bus runs on BobaFett, separate from any local bus: deploy a build with E79 and E80 there, then add `agents."agent:peggy".pending_context.channels: [telegram:peggy]`. Routes on `telegram:peggy` already target her pool. The abandoned `context:user` route plays no part.
+**Config rollout (Peggy).** Her bus runs on BobaFett, separate from any local bus: deploy a build with E82 and E83 there, then add `agents."agent:peggy".pending_context.channels: [telegram:peggy]`. Routes on `telegram:peggy` already target her pool. The abandoned `context:user` route plays no part.
 
-**Not verified live.** The attached block's rendering in a real pane (where the channel turn shows leading text and whether the model reads it), whether `UserPromptSubmit` fires on a channel-injected turn, and what `/clear` and resume do to context injected earlier all need the spike on a real pool; see `_bmad-output/epics/E80-telegram-dm-primary-conversation-cc-pool.md`.
+**Not verified live.** The attached block's rendering in a real pane (where the channel turn shows leading text and whether the model reads it), whether `UserPromptSubmit` fires on a channel-injected turn, and what `/clear` and resume do to context injected earlier all need the spike on a real pool; see `_bmad-output/epics/E83-telegram-dm-primary-conversation-cc-pool.md`.
 
 ## Session-tracker interaction
 
 Writing `sessions.claude_session_id` for a pool-owned session — rather than leaving it `NULL` — is deliberate, not incidental. That column doubles as a flag `SessionTracker` reads two ways:
 
-- It opts the session **out of** `SessionTracker.closeIdleSessions()`'s legacy idle-close path, which only ever considers sessions where `claude_session_id IS NULL` (E80: and also skips the message-less placeholder `share_context` creates for a listed primary channel). Idle handling for a pool session is `cc-pool`'s own job — the hard-idle sweep and LRU eviction above — not the generic session-closer's.
+- It opts the session **out of** `SessionTracker.closeIdleSessions()`'s legacy idle-close path, which only ever considers sessions where `claude_session_id IS NULL` (E83: and also skips the message-less placeholder `share_context` creates for a listed primary channel). Idle handling for a pool session is `cc-pool`'s own job — the hard-idle sweep and LRU eviction above — not the generic session-closer's.
 - Since E66 it is also how the journaling engine and the journal hook find a pool session: `POST /api/v1/journal/events` resolves the hook's Claude session id to the bus session through it.
 
 **Journaling (E66).** Pool sessions journal through the shared journaling engine ([JOURNALING.md](JOURNALING.md)). A pane session belongs to the pool's logical agent, so configure `agents.<pool agent id>.journaling`; the default chain `[system-message, cc-headless, script]` fits a pool.

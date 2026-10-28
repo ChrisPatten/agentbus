@@ -24,7 +24,7 @@ import { isForeignOrigin, readOrigin } from '../core/origin.js';
 import { PENDING_CONTEXT_KEY, readPendingContext } from '../core/system-block.js';
 import type { MessageEnvelope } from '../types/envelope.js';
 
-// E80 S80.3-S80.5 — pending context and share_context for a Telegram DM served by cc-pool.
+// E83 S83.3-S83.5 — pending context and share_context for a Telegram DM served by cc-pool.
 
 const DM = 'telegram:peggy';
 const PANE = 'agent:peggy-pool-1';
@@ -88,7 +88,7 @@ async function fixture(config: AppConfig = makeConfig()) {
 const external = (label = 'Ambient scan') => ({ origin: { kind: 'external', label } });
 const attachment = (e: MessageEnvelope) => readPendingContext(e.metadata);
 
-describe('pending-context stage for a pane (E80 S80.4)', () => {
+describe('pending-context stage for a pane (E83 S83.4)', () => {
   it('attaches the block to a leased pane\'s copy: visible foreign sends first, then shared notes, outside any system block', async () => {
     const f = await fixture();
     expect((await f.share({ body: 'Chose SQLite for the store' })).statusCode).toBe(201);
@@ -267,7 +267,7 @@ describe('pending-context stage for a pane (E80 S80.4)', () => {
   });
 });
 
-describe('bus-side origin for pane sends (E80 S80.3)', () => {
+describe('bus-side origin for pane sends (E83 S83.3)', () => {
   /** A pool lease row for `pane` on `conversation`; `state` leased by default. */
   function lease(db: Database.Database, pane: string, conversation: string, state: 'leased' | 'free' | 'dead' = 'leased') {
     const store = new LeaseStore(db);
@@ -315,7 +315,7 @@ describe('bus-side origin for pane sends (E80 S80.3)', () => {
   });
 });
 
-describe('share_context into a Telegram DM (E80 S80.5)', () => {
+describe('share_context into a Telegram DM (E83 S83.5)', () => {
   it('creates the conversation and a message-less placeholder session when the DM has none, with no queue row and no visible event', async () => {
     const f = await fixture();
     const res = await f.share({});
@@ -392,7 +392,7 @@ describe('share_context into a Telegram DM (E80 S80.5)', () => {
     expect(f.sessionRows()).toHaveLength(0);
   });
 
-  it('defaults to Main, so E79 callers are unchanged', async () => {
+  it('defaults to Main, so E82 callers are unchanged', async () => {
     const f = await fixture();
     const res = await f.server.inject({ method: 'POST', url: '/api/v1/context',
       payload: { to: 'contact:alice', body: 'to Main', source: 'Claude Code: peggy' } });

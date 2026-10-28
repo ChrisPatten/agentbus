@@ -169,7 +169,7 @@ describe('DeliveryWorker — outbound transcript logging (E31)', () => {
   });
 });
 
-describe('DeliveryWorker — sends into a primary channel (E80)', () => {
+describe('DeliveryWorker — sends into a primary channel (E83)', () => {
   /** A DM conversation (older) and a forum-topic conversation (newer) for the same contact and channel, each with an open session. */
   function seedTwo(db: Database.Database, channel: string) {
     const add = (topic: string, seen: string) => {

@@ -26,7 +26,7 @@ import { isForeignOrigin, readOrigin } from '../core/origin.js';
 import { readPendingContext } from '../core/system-block.js';
 import type { MessageEnvelope } from '../types/envelope.js';
 
-// E80 review follow-ups: end-to-end paths through the real routes, delivery logging and (where noted) a real PoolManager.
+// E83 review follow-ups: end-to-end paths through the real routes, delivery logging and (where noted) a real PoolManager.
 
 const DM = 'telegram:peggy';
 const HOUR = 3_600_000;
@@ -122,7 +122,7 @@ async function fixture(opts: { config?: AppConfig; realPool?: boolean } = {}) {
 
 const block = (e: MessageEnvelope) => readPendingContext(e.metadata)?.block ?? null;
 
-describe('a routine pane messaging the DM reaches the DM\'s next turn, labelled (E80 exit criteria 1 and 3)', () => {
+describe('a routine pane messaging the DM reaches the DM\'s next turn, labelled (E83 exit criteria 1 and 3)', () => {
   const sched = 'sched-morning-conversation';
 
   it('end to end: real route, delivery logging into the DM conversation, then the DM turn\'s block names the schedule', async () => {
@@ -179,7 +179,7 @@ describe('a routine pane messaging the DM reaches the DM\'s next turn, labelled 
   });
 });
 
-describe('a reply that outlives its lease is still its conversation\'s own (E80 S80.3, review follow-up)', () => {
+describe('a reply that outlives its lease is still its conversation\'s own (E83 S83.3, review follow-up)', () => {
   it('stamps metadata.conversation_id as the turn\'s conversation when the pane was evicted (free, dead, launching, draining)', async () => {
     const f = await fixture();
     let pane = 0;
@@ -227,7 +227,7 @@ describe('a reply that outlives its lease is still its conversation\'s own (E80 
   });
 });
 
-describe('share_context target (E80 review follow-up)', () => {
+describe('share_context target (E83 review follow-up)', () => {
   it('writes nothing for a contact with no Telegram identity, or a bot that is not configured', async () => {
     const f = await fixture({ config: makeConfig([DM, 'telegram:ghost']) });
     const bob = await f.share({ to: 'contact:bob' });
@@ -243,7 +243,7 @@ describe('share_context target (E80 review follow-up)', () => {
   });
 });
 
-describe('with a real PoolManager (E80 exit criteria 4 and 5)', () => {
+describe('with a real PoolManager (E83 exit criteria 4 and 5)', () => {
   it('a placeholder session: the first real message launches a fresh --session-id on the same row, then carries the shared note', async () => {
     const f = await fixture({ realPool: true });
     const shared = await f.share({ body: 'Chose SQLite for the store' });
@@ -280,7 +280,7 @@ describe('with a real PoolManager (E80 exit criteria 4 and 5)', () => {
     expect(f.launcher.launch).toHaveBeenCalledTimes(3); // first, the other conversation, the DM resumed
     // Not asserted: whether the DM's own Claude session resumes. `sessions.claude_session_id` stays NULL in this
     // flow (the first-message gap noted in PoolManager.persistSessionId), so the pool launches fresh. That is
-    // pre-existing and the live spike's to examine; what E80 owns is that the pending context survives it.
+    // pre-existing and the live spike's to examine; what E83 owns is that the pending context survives it.
     const resumed = f.take().find((m) => m.envelope.channel === DM && m.envelope.payload.type === 'text' && m.envelope.payload.body === 'back again');
     expect(block(resumed!.envelope)).toContain('shared while evicted');
     await f.ack(resumed!.messageId);

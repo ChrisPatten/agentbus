@@ -118,7 +118,7 @@ describe('JournalEngine pause and ceiling triggers (E66 S66.3)', () => {
     expect(j.jobs).toHaveLength(1);
   });
 
-  it('a hidden shared note does not re-anchor the pause clock, and reaches the job (E79)', async () => {
+  it('a hidden shared note does not re-anchor the pause clock, and reaches the job (E82)', async () => {
     const j = fakeJournaler();
     const engine = engineFor(makeConfig(), [j]);
     session('s1');

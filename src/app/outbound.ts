@@ -48,7 +48,7 @@ export function ensureOutboundAppSession(db: Database.Database, contactId: strin
 }
 
 /**
- * E80 — the session row a hidden `share_context` note for a non-app primary
+ * E83 — the session row a hidden `share_context` note for a non-app primary
  * conversation (a Telegram DM) attaches to when the conversation has none: the
  * conversation registry row and an open placeholder session with no
  * `claude_session_id`, no messages and the owning agent's logical id.

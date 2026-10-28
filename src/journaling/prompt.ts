@@ -43,7 +43,7 @@ const SHARED_CONTEXT_PROMPT_ITEMS = 10;
 const SHARED_CONTEXT_PROMPT_CHARS = 4000;
 
 /**
- * E79 — notes shared into the conversation that the user has not seen
+ * E82 — notes shared into the conversation that the user has not seen
  * (`share_context`). The newest ones fit within the item and character
  * budget; the rest are counted. Texts are quoted as data.
  */

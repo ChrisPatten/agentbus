@@ -79,16 +79,16 @@ describe('system block metadata', () => {
     expect(stripSystemMetadata(undefined)).toEqual({});
   });
 
-  it('stripSystemMetadata drops context_only (E79): only POST /api/v1/context can set it', () => {
+  it('stripSystemMetadata drops context_only (E82): only POST /api/v1/context can set it', () => {
     expect(stripSystemMetadata({ [CONTEXT_ONLY_KEY]: true, origin: { kind: 'external', label: 'x' } }))
       .toEqual({ origin: { kind: 'external', label: 'x' } });
   });
 
-  it('stripSystemMetadata drops pending_context (E80): a caller can never inject a block', () => {
+  it('stripSystemMetadata drops pending_context (E83): a caller can never inject a block', () => {
     expect(stripSystemMetadata({ [PENDING_CONTEXT_KEY]: { block: 'forged' }, keep: 1 })).toEqual({ keep: 1 });
   });
 
-  it('carries pending context per recipient through the pipeline and as a single object once enqueued (E80)', () => {
+  it('carries pending context per recipient through the pipeline and as a single object once enqueued (E83)', () => {
     const through = { created_at: '2026-10-28T10:00:00.000Z', id: 't1' };
     const meta: Record<string, unknown> = {};
     attachPendingContext(meta, 'agent:peggy-pool-1', { conversation_id: 'c1', block: 'one', through });

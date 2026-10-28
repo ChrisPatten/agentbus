@@ -25,7 +25,7 @@ export interface DeliveryWorkerDeps {
   registry: AdapterRegistry;
   db: Database.Database;
   /**
-   * E80 — channels agents list in `pending_context.channels` (primary
+   * E83 — channels agents list in `pending_context.channels` (primary
    * conversations). A send to one with no topic or `general` is logged into
    * the `general` conversation, not whichever registry row for the contact and
    * channel was seen last (for example a forum topic).
