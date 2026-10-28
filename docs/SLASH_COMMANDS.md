@@ -16,7 +16,8 @@ Slash commands let you operate AgentBus from any connected channel without SSH a
 | `/feedback <text>` | Tell the agent what to do differently; used when it next journals | `/feedback Use 24-hour time.` |
 | `/journal [runs [n] \| now \| consolidate]` | Journaling status, recent journal runs, journal this conversation now, or consolidate memory now | `/journal runs 10` |
 | `/cost` | Show day/week/month API cost for this agent | `/cost` |
-| `/pool [pool-agent-id]` | Show cc-pool pane leases and parked-queue depth | `/pool peggy` |
+| `/pool [pool-agent-id]` | Show cc-pool pane leases and parked-queue depth; marks the pane serving this chat | `/pool peggy` |
+| `/pool kill` | Kill the pane window serving this chat (even mid-turn); the next message gets a fresh window | `/pool kill` |
 | `/pane [n\|all]` | Send a PNG snapshot of the cc-pool tmux pane(s) | `/pane 2` |
 | `/rc [n]` | Type `/remote-control` into a cc-pool Claude pane | `/rc` |
 | `/keys [@n] <key> [key...]` | Send keystrokes to a cc-pool Claude pane | `/keys Escape` |
@@ -194,7 +195,7 @@ Renders pane leases and parked-queue depth for each configured `cc-pool` instanc
 ```
 /pool
 -> Pool peggy (agent:peggy) — 2 panes
-     peggy-pool-1: leased  conv=a3f9c21e  model=claude-sonnet-5  idle=12s
+     peggy-pool-1: leased  conv=a3f9c21e  model=claude-sonnet-5  idle=12s  ◀ this chat
      peggy-pool-2: free
      parked: 1 (oldest 42s)
 ```
@@ -212,6 +213,12 @@ An optional first argument narrows the output to one pool, matched against eithe
      ...
 ```
 A name that matches no configured pool replies `No cc-pool instance for "<name>".` instead of silently showing nothing.
+
+The pane leased to the conversation you typed `/pool` in carries `◀ this chat` (E80). When no pane holds it, the output ends with `This chat: no pane is serving it (...)`.
+
+#### `/pool kill`
+
+Kills the pane window serving this conversation, even if a turn is in flight, and replies `Killed <pane>. Your next message starts on a fresh window.` (adding `(a turn was in flight and was cut off)` when one was). With no serving pane it replies `No pane is serving this chat; nothing to kill.` and does nothing. The pane is detached first, so the next message takes the normal acquire path (a free pane, or the same one once freed) and resumes the same Claude session with `--resume`; this is not `/clear`, the session stays open. The in-flight message is acked so it is not replayed into the new window, and messages still pending for the dead pane are moved to the parked queue and routed to a fresh pane by the next drain (within one sweep tick, 60s by default). Output the dead pane had not yet sent is lost. A late reply from the killed pane is refused by the reply-linked lease guard.
 
 Each pane line shows its state, then `conv=<first 8 hex chars of conversation_id>` when the pane is bound to a conversation, then `model=<name>` (E53) when the pane's current session was launched with a model, then `idle=<age>` when it has a recorded `last_activity_at` — all three are omitted for a `free` pane, which has none of them. See [CC_POOL_ADAPTER.md#model-selection](CC_POOL_ADAPTER.md#model-selection) for what `model=` means and when it changes. The trailing `parked: N` line adds `(oldest <age>)` only when `N > 0`.
 
