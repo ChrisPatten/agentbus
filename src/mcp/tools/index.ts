@@ -21,6 +21,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { MessageEnvelope } from '../../types/envelope.js';
 import { toolError, toolSuccess } from './helpers.js';
 import { applyChoices, choicesSchema, CHOICES_DESCRIPTION } from '../../choices/validate.js';
+import { applySendOptions, sendOptionFields } from '../../outbound/send-options.js';
 import type { AppConfig } from '../../config/schema.js';
 import { registerChannelTools } from './channels.js';
 import { registerMessagingTools, registerEmailTool, buildEmailToolConfig } from './messaging.js';
@@ -86,7 +87,7 @@ export function registerAllTools(
   registerProposalTools(server, busBaseUrl, agentId);
   registerStatusTool(server);
   maybeRegisterEmailTool(server, busBaseUrl, agentId, config);
-  maybeRegisterTelegramTools(server, busBaseUrl, config);
+  maybeRegisterTelegramTools(server, busBaseUrl, agentId, config);
 }
 
 /** Register the `send_email` tool when an email adapter + allowlist is configured. */
@@ -105,6 +106,7 @@ function maybeRegisterEmailTool(
 function maybeRegisterTelegramTools(
   server: McpServer,
   busBaseUrl: string,
+  agentId: string,
   config?: AppConfig,
 ): void {
   if (!config) return;
@@ -143,7 +145,7 @@ export function registerHeadlessTools(
   registerProposalTools(server, busBaseUrl, agentId);
   registerStatusTool(server);
   maybeRegisterEmailTool(server, busBaseUrl, agentId, config);
-  maybeRegisterTelegramTools(server, busBaseUrl, config);
+  maybeRegisterTelegramTools(server, busBaseUrl, agentId, config);
 }
 
 // ── Core tools (E2) ───────────────────────────────────────────────────────────
@@ -184,14 +186,16 @@ function registerReplyTool(server: McpServer, busBaseUrl: string, agentId: strin
     {
       description:
         'Send a reply to a message. Looks up the original by message_id, swaps sender/recipient, and posts the outbound message to AgentBus. ' +
-        'Pass `choices` to offer single-choice answers (tappable buttons on Telegram).',
+        'Pass `choices` to offer single-choice answers (tappable buttons on Telegram). ' +
+        '`silent`, `no_preview` and `pin` tune Telegram delivery (no notification sound, no link card, pin after sending).',
       inputSchema: {
         message_id: z.string().describe('ID of the message to reply to'),
         body: z.string().min(1).describe('Text body of the reply'),
         choices: choicesSchema.optional().describe(CHOICES_DESCRIPTION),
+        ...sendOptionFields,
       },
     },
-    async ({ message_id, body, choices }) => {
+    async ({ message_id, body, choices, silent, no_preview, pin }) => {
       let original: MessageEnvelope;
       try {
         const res = await fetch(`${busBaseUrl}/api/v1/messages/${message_id}`);
@@ -213,7 +217,12 @@ function registerReplyTool(server: McpServer, busBaseUrl: string, agentId: strin
       const originalConversationId = original.metadata?.['conversation_id'];
       const baseMetadata: Record<string, unknown> =
         typeof originalConversationId === 'string' ? { conversation_id: originalConversationId } : {};
-      const withChoices = applyChoices(original.channel, body, baseMetadata, choices);
+      const withChoices = applyChoices(
+        original.channel,
+        body,
+        applySendOptions(baseMetadata, { silent, no_preview, pin }),
+        choices,
+      );
       const replyBody = {
         channel: original.channel,
         topic: original.topic,

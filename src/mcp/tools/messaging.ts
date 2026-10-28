@@ -10,6 +10,7 @@ import { getEmailInstances, type AppConfig } from '../../config/schema.js';
 import { toPrefixedAgentId } from '../../pool/types.js';
 import { applyChoices, choicesSchema, CHOICES_DESCRIPTION } from '../../choices/validate.js';
 import { originFromEnv, withOrigin } from '../../core/origin.js';
+import { applySendOptions, sendOptionFields } from '../../outbound/send-options.js';
 
 /**
  * @param agentId - The BARE agent id of the pane/instance registering this
@@ -27,7 +28,8 @@ export function registerMessagingTools(server: McpServer, busBaseUrl: string, ag
         'For proactive sends (not replying to a message you just received), call get_session or ' +
         'list_sessions first to check the current topic for that conversation rather than guessing one. ' +
         'For channel app, omit topic to send to Main, or use an existing app session thread:<hash> topic. Unknown app topics are rejected. ' +
-        'Pass `choices` to offer single-choice answers (tappable buttons on Telegram).',
+        'Pass `choices` to offer single-choice answers (tappable buttons on Telegram). ' +
+        '`silent`, `no_preview` and `pin` tune Telegram delivery (no notification sound, no link card, pin after sending).',
       inputSchema: {
         to: z.string().min(1).describe('Recipient identifier (e.g. "contact:chris", "contact:alice")'),
         channel: z.string().min(1).describe('Target channel (e.g. "telegram", "bluebubbles", "app")'),
@@ -55,6 +57,7 @@ export function registerMessagingTools(server: McpServer, busBaseUrl: string, ag
           .optional()
           .describe('Optional key/value metadata attached to the message'),
         choices: choicesSchema.optional().describe(CHOICES_DESCRIPTION),
+        ...sendOptionFields,
         source: z
           .string()
           .optional()
@@ -65,7 +68,7 @@ export function registerMessagingTools(server: McpServer, busBaseUrl: string, ag
           ),
       },
     },
-    async ({ to, channel, body, topic, reply_to, priority, metadata, source, choices }) => {
+    async ({ to, channel, body, topic, reply_to, priority, metadata, source, choices, silent, no_preview, pin }) => {
       // Validate channel exists — resolved the same way real delivery is
       // (registry.lookupPrimaryByChannel), so a dynamically-derived channel
       // (e.g. a Telegram group, E28) validates correctly too.
@@ -87,7 +90,7 @@ export function registerMessagingTools(server: McpServer, busBaseUrl: string, ag
       // Construct and enqueue the envelope.
       // reply_to is passed through as-is; the bus stores it without validating
       // against transcripts (no /api/v1/transcripts/:id endpoint exists yet).
-      const withChoices = applyChoices(channel, body, metadata ?? {}, choices);
+      const withChoices = applyChoices(channel, body, applySendOptions(metadata ?? {}, { silent, no_preview, pin }), choices);
       const envelope = {
         channel,
         topic: topic ?? 'general',
