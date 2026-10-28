@@ -4,6 +4,9 @@ Feature ideas and future work that hasn't been scoped into an epic yet. Promote 
 
 ## Ideas
 
+### /pool shows the serving window, and /pool kill → promoted to E80 (backlog 2026-10-27)
+See `_bmad-output/epics/E80-pool-current-and-kill.md`. `/pool` marks the pane serving the current chat (`◀ this chat`); `/pool kill` kills that pane regardless of an in-flight turn so the conversation restarts on a fresh window.
+
 ### Telegram: multiple-choice buttons from the agent → promoted to E74 (backlog 2026-10-27)
 See `_bmad-output/epics/E74-telegram-choice-buttons.md`. Agents can only send plain text, so a multiple-choice question means the user types an answer. The Telegram adapter already renders inline keyboards and handles taps for E51 approvals, but `reply` / `send_message` cannot attach buttons. E74 adds an optional `choices` argument (1-8 labels) that renders as tappable buttons; a tap is injected back as an ordinary `[tapped] <label>` inbound message. Single choice only; multi-select is out of scope.
 

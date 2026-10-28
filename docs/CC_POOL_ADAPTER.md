@@ -248,7 +248,7 @@ On the adapter side (`TelegramAdapter.appendToolCallLine`, `src/adapters/telegra
      parked: 1 (oldest 42s)
 ```
 
-An optional argument narrows the output to one pool, matched against either the bare or `agent:`-prefixed form of its logical agent id. `/status` also gets a one-line summary per configured pool (`pool peggy: 3/4 leased, 1 parked`), omitted entirely on a deployment with no `cc-pool` instances configured.
+The pane serving the conversation you ran the command in is marked `◀ this chat`. `/pool kill` kills that pane's window (see [SLASH_COMMANDS.md](SLASH_COMMANDS.md#pool-pool-agent-id)). An optional argument narrows the output to one pool, matched against either the bare or `agent:`-prefixed form of its logical agent id. `/status` also gets a one-line summary per configured pool (`pool peggy: 3/4 leased, 1 parked`), omitted entirely on a deployment with no `cc-pool` instances configured.
 
 ### `/pane` command
 

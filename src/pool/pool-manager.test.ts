@@ -1041,6 +1041,74 @@ describe('PoolManager', () => {
     });
   });
 
+  describe('killConversation (E80, /pool kill)', () => {
+    it('detaches, kills (not clears) and frees the pane; the next message gets a fresh window and resumes the session', async () => {
+      const { manager, paneLauncher, db } = makeManager({ panes: 1, on_evict: 'clear' });
+      await manager.ensureStarted();
+      await manager.resolveRoute('conv-1', { contact_id: 'alice', channel: 'telegram' });
+      const pane = manager.leaseStore.findByConversation(manager.poolId, 'conv-1')!;
+      db.prepare(`INSERT INTO sessions (id, contact_id, channel, conversation_id, started_at, last_activity, claude_session_id)
+                  VALUES ('s1', 'alice', 'telegram', 'conv-1', ?, ?, ?)`)
+        .run(new Date().toISOString(), new Date().toISOString(), 'sess-uuid');
+
+      const killed = manager.killConversation('conv-1');
+      expect(killed?.paneId).toBe(pane.pane_id);
+      expect(manager.leaseStore.findByConversation(manager.poolId, 'conv-1')).toBeNull();
+      expect(manager.leaseStore.findByPane(manager.poolId, pane.pane_id)?.state).toBe('draining');
+      await killed!.done;
+      expect(paneLauncher.release).toHaveBeenCalledWith(pane.pane_id, 'kill');
+      expect(manager.leaseStore.findByPane(manager.poolId, pane.pane_id)?.state).toBe('free');
+
+      paneLauncher.launch.mockClear();
+      expect(await manager.resolveRoute('conv-1', { contact_id: 'alice', channel: 'telegram' })).toBe('agent:peggy-pool-1');
+      expect(paneLauncher.launch).toHaveBeenCalledTimes(1);
+      expect(paneLauncher.launch.mock.calls[0]![0].resume).toBe(true);
+      expect(manager.leaseStore.findByConversation(manager.poolId, 'conv-1')?.state).toBe('leased');
+    });
+
+    it('returns null when no pane serves the conversation and touches nothing', async () => {
+      const { manager, paneLauncher } = makeManager({ panes: 1 });
+      await manager.ensureStarted();
+      expect(manager.killConversation('nope')).toBeNull();
+      expect(paneLauncher.release).not.toHaveBeenCalled();
+    });
+
+    it('mid-turn: acks the in-flight message (no replay), re-parks pending ones, leaves other conversations alone', async () => {
+      const { manager, db } = makeManager({ panes: 2 });
+      await manager.ensureStarted();
+      await manager.resolveRoute('conv-1', { contact_id: 'alice', channel: 'telegram' });
+      await manager.resolveRoute('conv-2', { contact_id: 'bob', channel: 'telegram' });
+      const pane1 = manager.leaseStore.findByConversation(manager.poolId, 'conv-1')!;
+      const pane2 = manager.leaseStore.findByConversation(manager.poolId, 'conv-2')!;
+      const queue = new MessageQueue(db);
+      const inFlight = queue.enqueue({ ...parkEnvelope('conv-1'), recipient: pane1.agent_id });
+      queue.dequeue(pane1.agent_id); // now 'processing'
+      const pending = queue.enqueue({ ...parkEnvelope('conv-1'), recipient: pane1.agent_id });
+      const other = queue.enqueue({ ...parkEnvelope('conv-2'), recipient: pane2.agent_id });
+
+      const killed = manager.killConversation('conv-1');
+      expect(killed?.inFlight).toBe(true);
+      await killed!.done;
+
+      const status = (id: string) => (db.prepare(`SELECT status, recipient FROM message_queue WHERE id = ?`).get(id) as { status: string; recipient: string });
+      expect(status(inFlight).status).toBe('delivered');
+      expect(status(pending)).toEqual({ status: 'pending', recipient: manager.parkedRecipientId() });
+      expect(status(other)).toEqual({ status: 'pending', recipient: pane2.agent_id });
+      // recoverStuck must not resurrect the in-flight message.
+      expect(queue.recoverStuck(0)).toBe(0);
+      expect(manager.leaseStore.findByConversation(manager.poolId, 'conv-2')?.state).toBe('leased');
+    });
+
+    it('reports inFlight=false when no turn was running', async () => {
+      const { manager } = makeManager({ panes: 1 });
+      await manager.ensureStarted();
+      await manager.resolveRoute('conv-1', { contact_id: 'alice', channel: 'telegram' });
+      const killed = manager.killConversation('conv-1');
+      expect(killed?.inFlight).toBe(false);
+      await killed!.done;
+    });
+  });
+
   describe('createPoolManagers', () => {
     it('returns one PoolManager per configured cc-pool instance, keyed by prefixed agent id', () => {
       const db = makeDb();

@@ -1120,6 +1120,57 @@ export class PoolManager {
   }
 
   /**
+   * E80 — `/pool kill`: kill the window serving `conversationId` regardless of
+   * an in-flight turn. Same detach-first shape as `clearConversation()` (the
+   * conversation stops owning the pane at once, the row goes 'draining' so
+   * `acquire()` skips it, then the window is killed and the row freed in the
+   * background), but always with kill semantics and with the conversation's
+   * open `sessions` row left alone: the next message acquires a fresh window
+   * through the normal path and `--resume`s the same Claude session.
+   *
+   * Queue hygiene, so a mid-turn kill neither strands nor duplicates:
+   *  - 'pending' rows still addressed to the dying pane for this conversation
+   *    are re-addressed to the parked bucket; `drainParked()` routes them to
+   *    a fresh pane. Left in place they would be picked up by whichever
+   *    conversation next owns that pane id.
+   *  - 'processing' rows (the in-flight turn's input, already handed to the
+   *    killed session) are acked so `recoverStuck()` never replays them into
+   *    the replacement session.
+   * The killed pane's late outbound calls (if any) are rejected by the
+   * reply-linked lease guard, since it no longer holds this conversation.
+   * Returns null when no pane is leased to the conversation.
+   */
+  killConversation(
+    conversationId: string,
+  ): { paneId: string; inFlight: boolean; done: Promise<void> } | null {
+    const row = this.leaseStore.findByConversation(this.poolId, conversationId);
+    if (!row || row.state !== 'leased') return null;
+    if (!this.leaseStore.detach(this.poolId, row.pane_id, conversationId)) return null;
+
+    const now = new Date().toISOString();
+    const convMatch = `recipient = ? AND json_extract(metadata, '$.conversation_id') = ?`;
+    const inFlight = this.db
+      .prepare(`UPDATE message_queue SET status = 'delivered', acked_at = ?, updated_at = ?
+                WHERE ${convMatch} AND status = 'processing'`)
+      .run(now, now, row.agent_id, conversationId).changes > 0;
+    this.db
+      .prepare(`UPDATE message_queue SET recipient = ?, updated_at = ?
+                WHERE ${convMatch} AND status = 'pending'`)
+      .run(this.parkedRecipientId(), now, row.agent_id, conversationId);
+
+    const done = this.trackPaneOperation(row.pane_id, async () => {
+      try {
+        await this.paneLauncher.release(row.pane_id, 'kill');
+      } catch (err) {
+        console.error(`[pool:${this.poolId}] /pool kill: failed to kill ${row.pane_id} — freeing the lease anyway:`, err);
+      }
+      this.leaseStore.release(this.poolId, row.pane_id);
+      console.log(`[pool:${this.poolId}] /pool kill: killed ${row.pane_id} for ${conversationId.slice(0, 8)}`);
+    });
+    return { paneId: row.pane_id, inFlight, done };
+  }
+
+  /**
    * Park-queue draining. Dequeues a batch from `parkedRecipientId()` and
    * retries `resolveRoute()` for each. A message that now resolves to a
    * real pane is re-addressed and re-enqueued there. A message that's still

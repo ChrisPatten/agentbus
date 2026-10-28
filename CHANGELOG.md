@@ -10,6 +10,9 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+### Added
+- **`/pool` marks your window and `/pool kill` replaces it (E80).** `/pool` now flags the pane serving the chat you typed it in with `◀ this chat`, or says no pane is serving it. `/pool kill` kills that pane's window even mid-turn and replies with the pane name (and notes a cut-off turn); your next message acquires a fresh window and resumes the same Claude session. The in-flight message is marked delivered so it is not replayed, and messages still waiting for the dead pane are re-parked and routed to a fresh pane. With no serving pane it does nothing. See `docs/SLASH_COMMANDS.md`.
+
 ## [0.16.0] - 2026-10-27
 
 ### Added
