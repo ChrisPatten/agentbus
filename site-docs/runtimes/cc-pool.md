@@ -89,6 +89,7 @@ Panes read their other MCP servers from the working folder's `.mcp.json`, so you
 
 | Command | Shows |
 |---|---|
+| `/pool kill` | Kills the window serving this chat, even mid-turn. Your next message starts on a fresh window and resumes the same session |
 | `/pool` | Each pane, whether it's free or leased, the conversation it's leased to, its model and how long it's been idle, plus the number of parked messages |
 | `/pane` | A picture of your conversation's pane, as it looks right now |
 | `/pane 2` or `/pane all` | A picture of pane 2, or of every pane (up to 8) |
