@@ -15,6 +15,8 @@ struct DraftFile: Identifiable, Equatable {
 @MainActor @Observable final class ComposerModel {
     var files: [DraftFile] = []
     var error: String?
+    /// Bumped to move focus to the composer with the insertion point at the end of the draft.
+    var focusRequest = 0
 
     var uploading: Bool { files.contains { $0.state == .uploading } }
     var ready: [UploadedFile] {
@@ -46,9 +48,21 @@ struct DraftFile: Identifiable, Equatable {
     func startPasteMonitor(_ connection: BusConnection) {
         guard monitor == nil else { return }
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            // TEMP E75 DIAGNOSTIC (PgUp/PgDn focus): remove before commit.
+            if event.keyCode == 116 || event.keyCode == 121, let window = event.window {
+                Self.log("key \(event.keyCode) before: \(type(of: window.firstResponder as Any)) composerFocused=\(self?.focused ?? false)")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    Self.log("key \(event.keyCode) after: \(type(of: window.firstResponder as Any))")
+                }
+            }
             let handled = MainActor.assumeIsolated { self?.paste(event, connection: connection) ?? false }
             return handled ? nil : event
         }
+    }
+    nonisolated static func log(_ text: String) {
+        let line = "\(Date().timeIntervalSince1970) \(text)\n"
+        if let h = FileHandle(forWritingAtPath: "/tmp/agentbus-scroll.log") { h.seekToEndOfFile(); h.write(Data(line.utf8)); try? h.close() }
+        else { try? line.write(toFile: "/tmp/agentbus-scroll.log", atomically: false, encoding: .utf8) }
     }
     func stopPasteMonitor() {
         if let monitor { NSEvent.removeMonitor(monitor) }
@@ -73,48 +87,6 @@ struct DraftFile: Identifiable, Equatable {
     }
 }
 
-/// Converts pasted rich text (bold, italic, code, strikethrough, links, bullets) to the Markdown the bus sends.
-enum MarkdownWriter {
-    static func markdown(from text: NSAttributedString) -> String {
-        var output = ""
-        text.enumerateAttributes(in: NSRange(location: 0, length: text.length)) { attributes, range, _ in
-            let run = (text.string as NSString).substring(with: range)
-            output += styled(run, attributes)
-        }
-        // Rich-text lists arrive as "•\t" (or "◦\t") prefixes.
-        return output.split(separator: "\n", omittingEmptySubsequences: false).map { line -> String in
-            let trimmed = line.drop { $0 == " " || $0 == "\t" }
-            for bullet in ["•", "◦", "▪", "-"] where trimmed.hasPrefix(bullet + "\t") {
-                return "- " + trimmed.dropFirst(bullet.count + 1)
-            }
-            return String(line)
-        }.joined(separator: "\n")
-    }
-
-    private static func styled(_ run: String, _ attributes: [NSAttributedString.Key: Any]) -> String {
-        // Markers wrap each line's text, never its surrounding whitespace or line breaks.
-        run.split(separator: "\n", omittingEmptySubsequences: false).map { line in
-            let core = line.trimmingCharacters(in: .whitespaces)
-            guard !core.isEmpty else { return String(line) }
-            var value = core
-            let traits = (attributes[.font] as? NSFont)?.fontDescriptor.symbolicTraits ?? []
-            if traits.contains(.monoSpace) { value = "`" + value + "`" }
-            else {
-                if traits.contains(.bold) { value = "**" + value + "**" }
-                if traits.contains(.italic) { value = "*" + value + "*" }
-            }
-            if (attributes[.strikethroughStyle] as? Int ?? 0) != 0 { value = "~~" + value + "~~" }
-            if let link = attributes[.link] {
-                let url = (link as? URL)?.absoluteString ?? (link as? String) ?? ""
-                if !url.isEmpty { value = "[" + value + "](" + url + ")" }
-            }
-            let leading = line.prefix { $0 == " " || $0 == "\t" }
-            let trailing = String(line.reversed().prefix { $0 == " " || $0 == "\t" })
-            return leading + value + trailing
-        }.joined(separator: "\n")
-    }
-}
-
 struct ComposerView: View {
     let connection: BusConnection
     let session: CachedSession?
@@ -123,12 +95,15 @@ struct ComposerView: View {
     @Binding var importing: Bool
     @State private var selection = 0
     @State private var dismissedSlash = false
+    @State private var caret: TextSelection?
     @FocusState private var focused: Bool
+    @Environment(\.pageTranscript) private var pageTranscript
 
-    private var draftKey: String { session?.id ?? "main" }
+    private var draftKey: String { session?.draftKey ?? "main" }
     private var draft: Binding<String> {
         Binding(get: { connection.drafts[draftKey] ?? "" }, set: { connection.drafts[draftKey] = $0 })
     }
+    private var replyTarget: ReplyRef? { connection.replyTargets[draftKey] }
     private var placeholder: String {
         if session?.isEarlier == true { return "Continue in a new conversation" }
         return "Message \(session?.title ?? "Main")"
@@ -147,6 +122,10 @@ struct ComposerView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            if let replyTarget {
+                ReplyBar(reply: replyTarget) { connection.replyTargets[draftKey] = nil }
+                    .padding(.horizontal, 4).padding(.top, 2)
+            }
             if !model.files.isEmpty {
                 FlowLayout(spacing: 6) {
                     ForEach(model.files) { file in AttachmentToken(file: file, limit: connection.maxUploadBytes) { model.remove(file.id) } }
@@ -164,12 +143,12 @@ struct ComposerView: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Attach Files")
 
-                TextField(placeholder, text: draft, axis: .vertical)
+                TextField(placeholder, text: draft, selection: $caret, axis: .vertical)
                     .textFieldStyle(.plain)
                     .lineLimit(1...8)
                     .padding(.vertical, 7)
                     .focused($focused)
-                    .onKeyPress(keys: [.return, .upArrow, .downArrow, .tab, .escape], phases: .down, action: handleKey)
+                    .onKeyPress(keys: [.return, .upArrow, .downArrow, .tab, .escape, .pageUp, .pageDown], phases: .down, action: handleKey)
                     .onSubmit(send)
 
                 Button(action: send) {
@@ -204,6 +183,7 @@ struct ComposerView: View {
             selection = 0
         }
         .onAppear { focused = true }
+        .onChange(of: model.focusRequest) { focusAtEnd() }
         .task { await connection.loadCommands() }
     }
 
@@ -238,13 +218,49 @@ struct ComposerView: View {
         case .downArrow where slash: selection = (selection + 1) % options.count; return .handled
         case .tab where slash: complete(options[min(selection, options.count - 1)]); return .handled
         case .escape where slash: dismissedSlash = true; return .handled
+        // Clicking a message focuses its text view, and paging scrolls that row out of the lazy stack, which
+        // hands focus to the composer. The next PgUp/PgDn then lands here, so it pages the transcript.
+        case .pageUp: pageTranscript?(-1); return .handled
+        case .pageDown: pageTranscript?(1); return .handled
+        case .escape where replyTarget != nil: connection.replyTargets[draftKey] = nil; return .handled
         case .return:
             if slash { complete(options[min(selection, options.count - 1)]); return .handled }
             if press.modifiers.contains(.shift) || press.modifiers.contains(.option) {
-                draft.wrappedValue += "\n"; return .handled
+                insertNewline(); return .handled
             }
             send(); return .handled
         default: return .ignored
+        }
+    }
+
+    /// Shift/Option+Return: a line break at the insertion point, replacing any selection (E75). The
+    /// field editor does it when it's reachable, which keeps undo, IME and the caret native. Otherwise
+    /// the draft is edited through the `caret` selection binding.
+    private func insertNewline() {
+        if model.focused, let editor = model.window?.firstResponder as? NSTextView {
+            editor.insertText("\n", replacementRange: editor.selectedRange())
+            return
+        }
+        var ranges: [Range<String.Index>] = []
+        if let caret {
+            switch caret.indices {
+            case .selection(let range): ranges = [range]
+            case .multiSelection(let set): ranges = Array(set.ranges)
+            @unknown default: break
+            }
+        }
+        let edit = NewlineInsertion.insert(into: draft.wrappedValue, replacing: ranges)
+        draft.wrappedValue = edit.text
+        caret = TextSelection(insertionPoint: edit.caret)
+    }
+
+    /// Focus alone can select the whole draft, so the insertion point is set explicitly. Focus is dropped
+    /// first so a selected message view, or a stale focus flag, can't swallow the request.
+    private func focusAtEnd() {
+        focused = false
+        Task { @MainActor in
+            focused = true
+            caret = TextSelection(insertionPoint: draft.wrappedValue.endIndex)
         }
     }
 
@@ -257,13 +273,42 @@ struct ComposerView: View {
         guard canSend else { return }
         let body = draft.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let files = model.ready
+        // A slash command is for the bus, not a reply to a message.
+        let reply = body.hasPrefix("/") ? nil : replyTarget
         draft.wrappedValue = ""
+        connection.replyTargets[draftKey] = nil
         model.files.removeAll { if case .ready = $0.state { true } else { false } }
         model.error = nil
         Task {
-            do { try await connection.send(body, target: target, attachments: files.map(\.id), files: files) }
+            do { try await connection.send(body, target: target, attachments: files.map(\.id), files: files, replyTo: reply) }
             catch { model.error = error.localizedDescription }
         }
+    }
+}
+
+/// "Replying to you: first line ✕", above the field. Esc in the field or the ✕ cancels the reply.
+struct ReplyBar: View {
+    let reply: ReplyRef
+    let cancel: () -> Void
+
+    var body: some View {
+        let firstLine = reply.text.split(separator: "\n", omittingEmptySubsequences: true).first.map(String.init) ?? ""
+        HStack(spacing: 6) {
+            Image(systemName: "arrowshape.turn.up.left").foregroundStyle(.secondary)
+            (Text("Replying to \(reply.senderName): ").fontWeight(.medium) + Text(firstLine).foregroundStyle(.secondary))
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer(minLength: 8)
+            Button(action: cancel) { Image(systemName: "xmark").font(.system(size: 9, weight: .bold)) }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("Cancel Reply (Esc)")
+                .accessibilityLabel("Cancel Reply")
+        }
+        .font(.caption)
+        .padding(.horizontal, 8)
+        .frame(height: 26)
+        .background(.fill.tertiary, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }
 

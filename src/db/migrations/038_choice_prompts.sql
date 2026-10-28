@@ -1,4 +1,4 @@
--- Migration 035 — choice_prompts table (E74 / S74.2)
+-- Migration 038 — choice_prompts table (E74 / S74.2)
 --
 -- Single-choice button prompts an agent attaches to an outbound message via
 -- the `choices` argument of the `reply` / `send_message` MCP tools. The

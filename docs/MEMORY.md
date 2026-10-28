@@ -14,7 +14,8 @@ For a queryable, agent-managed store, use the `knowledge` table ([KNOWLEDGE_STOR
 
 ```
 SessionTracker (every memory.summarizer_interval_ms)
-  closes sessions idle past session_idle_threshold_ms (polling-adapter sessions only: claude_session_id IS NULL)
+  closes sessions idle past session_idle_threshold_ms (polling-adapter sessions only: claude_session_id IS NULL; never the Mac app's Main)
+  rotates Main rows idle past adapters.app.main_idle_rotation_ms (E69; rows with a claude_session_id only)
   marks sessions Stage 80 closed mid-conversation as closed
   reports every close to the journaling engine (the `close` trigger)
   runs the on_session_close hook for sessions meeting session_close_min_messages
@@ -46,4 +47,4 @@ A session must have at least this many messages before idle expiration fires the
 
 ## Troubleshooting
 
-- **A session never closes.** Only sessions with `claude_session_id IS NULL` close on idle. Confirm `[session-tracker]` lines appear every `summarizer_interval_ms`.
+- **A session never closes.** Only sessions with `claude_session_id IS NULL` close on idle, and never the Mac app's Main, which rotates on `adapters.app.main_idle_rotation_ms` instead ([APP_ADAPTER.md](APP_ADAPTER.md#main-one-continuous-conversation)). Confirm `[session-tracker]` lines appear every `summarizer_interval_ms`.

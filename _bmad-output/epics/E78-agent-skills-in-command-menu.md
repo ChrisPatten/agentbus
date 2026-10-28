@@ -1,8 +1,8 @@
-# E73 — Agent Skills in the Channel Command Menu
+# E78 — Agent Skills in the Channel Command Menu
 
 | Field | Value |
 |---|---|
-| Epic ID | E73 |
+| Epic ID | E78 |
 | Dependencies | E71 (provider slash-command forwarding), E3 (Telegram `setMyCommands`), E19/E23 (`cc-headless`, `init` event `slash_commands`), E48 (`cc-pool`) |
 | Story Count | 6 |
 | Estimated Complexity | M |
@@ -16,7 +16,7 @@ E71 lets a user run an agent's skill from chat by typing `/name`, but nothing
 tells the user which skills exist. Telegram's `/` autocomplete lists only bus
 commands, and there is no way to list skills from any channel.
 
-E73 exposes each agent's **project-level skills** (the ones defined in the
+E78 exposes each agent's **project-level skills** (the ones defined in the
 agent's own working directory) in two places:
 
 - Telegram's command menu, so `/` autocompletes them.
@@ -95,12 +95,12 @@ has no project-level skills it says so.
 
 | Story | Title | Notes |
 |---|---|---|
-| S73.1 | Skill catalog | Scanner, frontmatter parser, mtime cache, `cc-headless` `init` intersection. Unit tests with fixture directories. |
-| S73.2 | Name aliases | Alias and reverse map, collision and bus-name handling, tests for `-` and `:` names and 32-char truncation. |
-| S73.3 | Alias resolution in dispatch | `processInbound` maps alias -> real name before the E71 forwarder; tests for precedence over typos and bus commands. |
-| S73.4 | `/skills` command | Handler in `src/commands/handlers.ts`, `refresh` and filter arguments, `/help` entry. |
-| S73.5 | Telegram menu | `source` on manifests, skill entries in `registerCommands`, 100-command cap, debounced refresh, `expose_skills` in `src/config/schema.ts`. |
-| S73.6 | Docs and live check | `docs/SLASH_COMMANDS.md`, `docs/TELEGRAM_ADAPTER.md`, matching `site-docs/` pages (`npm run docs:build`), `CHANGELOG.md` Unreleased. Operator check on a real bot with a headless and a pool agent. |
+| S78.1 | Skill catalog | Scanner, frontmatter parser, mtime cache, `cc-headless` `init` intersection. Unit tests with fixture directories. |
+| S78.2 | Name aliases | Alias and reverse map, collision and bus-name handling, tests for `-` and `:` names and 32-char truncation. |
+| S78.3 | Alias resolution in dispatch | `processInbound` maps alias -> real name before the E71 forwarder; tests for precedence over typos and bus commands. |
+| S78.4 | `/skills` command | Handler in `src/commands/handlers.ts`, `refresh` and filter arguments, `/help` entry. |
+| S78.5 | Telegram menu | `source` on manifests, skill entries in `registerCommands`, 100-command cap, debounced refresh, `expose_skills` in `src/config/schema.ts`. |
+| S78.6 | Docs and live check | `docs/SLASH_COMMANDS.md`, `docs/TELEGRAM_ADAPTER.md`, matching `site-docs/` pages (`npm run docs:build`), `CHANGELOG.md` Unreleased. Operator check on a real bot with a headless and a pool agent. |
 
 ## Risks and notes
 
@@ -115,3 +115,7 @@ has no project-level skills it says so.
   menu; the registration log confirms what Telegram stored.
 - **Skills run with the agent's permissions**, as E71 forwarding already does.
   `deny` is the control for skills that shouldn't be triggerable from chat.
+
+## Numbering
+
+Planned as E72, renumbered E73 when origin/dev was merged (origin kept E72 for Mac text selection), then E78 on 2026-10-27 because local E73 (hook-delivered `recent.md`) and E74–E77 were already taken.

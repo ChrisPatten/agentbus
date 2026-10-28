@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import Database from 'better-sqlite3';
 import { runMigrations } from '../schema.js';
 
-describe('migration 035 — choice_prompts table', () => {
+describe('migration 038 — choice_prompts table', () => {
   it('creates the table with the expected columns and status index', () => {
     const db = new Database(':memory:');
     runMigrations(db);

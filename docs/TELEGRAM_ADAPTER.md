@@ -306,7 +306,7 @@ history for the new topic to inherit.
   `processUpdate` reads and clears it (a full metadata replace omitting
   `pendingContext` is what clears it — no separate delete needed), then
   attaches `metadata.injected_topic_context` to that one `InboundMessage`.
-  `formatMessagesForSampling` (`src/adapters/cc.ts`) renders it as
+  `formatMessagesForSampling` (`src/adapters/message-format.ts`) renders it as
   `[Context for this new topic, provided when it was created]\n<context>`
   before the first message body, for both the polling and headless
   adapters.
@@ -487,7 +487,7 @@ The adapter sends a permission request as a DM with **Approve** and **Deny** inl
 
 ## Choice buttons
 
-When an outbound envelope carries `metadata.choices` (set by the `choices` argument of the `reply` and `send_message` tools, see [MCP_TOOLS.md](MCP_TOOLS.md#choice-buttons)), the adapter adds an inline keyboard to the last part of the message and stores a `choice_prompts` row (migration 035). Invalid `metadata.choices` is logged and ignored; the message goes out without buttons.
+When an outbound envelope carries `metadata.choices` (set by the `choices` argument of the `reply` and `send_message` tools, see [MCP_TOOLS.md](MCP_TOOLS.md#choice-buttons)), the adapter adds an inline keyboard to the last part of the message and stores a `choice_prompts` row (migration 038). Invalid `metadata.choices` is logged and ignored; the message goes out without buttons.
 
 - **Layout.** One button per row; two per row when every label is 12 characters or fewer.
 - **Callback data.** `choice:<prompt uuid>:<index>`, 45 bytes at most. Telegram caps `callback_data` at 64 bytes, so labels are kept in the database and never in the button.

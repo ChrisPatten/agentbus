@@ -22,6 +22,29 @@ replacement session or silently route to Main.
 {"to":"contact:chris","channel":"app","topic":"thread:0123456789abcdef","body":"The travel plan is ready."}
 ```
 
+## Main stays one conversation (E69)
+
+Repeated proactive sends to Main land in the same Main conversation, in
+order, with no new Earlier entries. A Main row that has only received
+proactive sends is never closed by the 30-minute teardown; Main rotates its
+Claude session only after `adapters.app.main_idle_rotation_ms` (12 h by
+default) without operator messages or sends from a Main turn, or on `/clear`.
+See [APP_ADAPTER.md → Main](APP_ADAPTER.md#main-one-continuous-conversation).
+
+Every send is stamped with `metadata.origin`. A send from anywhere other than
+a turn running in Main (a scheduled routine, another agent session) is
+foreign to Main. On the next turn in Main, the agent gets every foreign
+message it hasn't seen as a dated context block ahead of the operator's
+message, so it can answer a reply to one of them. Pass `source` to label
+the sender:
+
+```json
+{"to":"contact:chris","channel":"app","body":"Two calendar items need you today.","source":"Ambient scan"}
+```
+
+See [MCP_TOOLS.md → Origin metadata](MCP_TOOLS.md#origin-metadata) and
+[CC_HEADLESS_ADAPTER.md → Pending context](CC_HEADLESS_ADAPTER.md#pending-context-main).
+
 ## Background work
 
 Run scheduled work in its own `sched:` topic. Its prompt and transcript stay in

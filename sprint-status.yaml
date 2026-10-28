@@ -5,7 +5,7 @@ bmad_status:
   planning: complete
   architecture: complete
   implementation: in-progress
-current_epic: E42
+current_epic: E62
 epics:
   E1:
     status: complete
@@ -396,6 +396,8 @@ epics:
       Shared sessions & conversation membership (multi-participant email).
       Not started — every session is still strictly 1:1
       (conversation_id = sha256(sorted([contact_id, channel, topic]))).
+      Note: inbound email attachments (bd4f119, merged 7e399e9) shipped under the
+      E22 label but are not one of S22.1-S22.4. S22.4 is deferred in its epic doc.
     stories:
       S22.1: pending  # Membership model + shared-session keying + admission rule
       S22.2: pending  # Inbound participant capture, resolution & surfacing
@@ -932,7 +934,8 @@ epics:
       S58.5: complete  # Activity and observability
       S58.6: complete  # Integration and docs
   E59:
-    status: in-progress
+    status: complete
+    completed: 2026-10-21
     notes: Generic app adapter, authenticated WebSocket and HTTP API, durable replay, sessions, mirror, uploads, and scripted client implemented. Live client walkthrough against a configured bus and contact token remains.
     stories:
       S59.1: complete  # Protocol and event-log architecture
@@ -942,7 +945,7 @@ epics:
       S59.5: complete  # Listing, history, read state
       S59.6: complete  # Uploads and attachment lifecycle
       S59.7: complete  # Health, commands, activity, script
-      S59.8: in-progress  # Tests and docs pass; live scripted walkthrough needs configured bus and token
+      S59.8: complete  # Tests and docs pass; live scripted walkthrough confirmed by the operator 2026-10-21
   E60:
     status: in-progress
     notes: Bound sessions, app-only replies, Earlier forks, scoped commands, and identity audit implemented and tested. Live Telegram-to-app walkthrough remains.
@@ -952,15 +955,16 @@ epics:
       S60.3: complete  # Transcript, prompt, and reply path
       S60.4: complete  # Earlier resume and read-only behavior
       S60.5: complete  # Bound commands and state propagation
-      S60.6: in-progress  # Automated tests and docs pass; live Telegram-to-app walkthrough remains
+      S60.6: in-progress  # Automated tests and docs pass; live Telegram-to-app walkthrough deferred until the personal agent (the work agent has no Telegram)
   E61:
-    status: in-progress
+    status: complete
+    completed: 2026-10-21
     notes: Main/topic validation, title discovery, offline scheduled delivery, and missed-fire wake behavior implemented and tested. Live cron-to-app check remains.
     stories:
       S61.1: complete  # Destination and title discovery
       S61.2: complete  # Scheduler isolation and offline replay
       S61.3: complete  # Missed-fire behavior
-      S61.4: in-progress  # Docs and tests pass; live offline cron-to-app check remains
+      S61.4: complete  # Docs and tests pass; live offline cron-to-app check confirmed by the operator 2026-10-21
   E62:
     status: in-progress
     notes: UI rebuilt to the approved design (planning-artifacts/mac-client/design/DESIGN.md) on 2026-10-01; Xcode 26.6 build and 14 XCTest cases pass. Activity tool_lines and slot counts are now decoded. Not yet viewed on screen or run against a live bus. Live F1-F6, 10k-message memory and week-long acceptance pending; E63 covers foreign activity plus /clear successor.
@@ -1058,7 +1062,8 @@ epics:
       S68.4: complete  # agents.<id>.protected_paths, cc-headless deny rules, before/after hashing + protected-paths:unapproved-change
       S68.5: complete  # docs/AGENT_LEARNING.md + doc updates, site-docs Consolidation / Teaching your agent, e2e test
   E69:
-    status: pending
+    status: complete
+    completed: 2026-10-27
     notes: >
       App Main continuity and cross-agent context. Main behaves like a
       Telegram DM (one continuous scrollback across Claude sessions, with a
@@ -1070,12 +1075,12 @@ epics:
       Adds reply-to-message in the app. Supersedes E63 S63.3 for Main.
       Depends on E58-E61; coordinates with E63 and E66.
     stories:
-      S69.1: pending  # Outbound origin stamping and source label
-      S69.2: pending  # Main as a continuous conversation (aggregated history, divider)
-      S69.3: pending  # Main lifecycle: sweep exemption, idle rotation, /clear
-      S69.4: pending  # Pending-context injection
-      S69.5: pending  # Reply to a specific message in the app
-      S69.6: pending  # Docs, PRD amendments, live verification
+      S69.1: complete  # Outbound origin stamping and source label
+      S69.2: complete  # Main as a continuous conversation (aggregated history, divider)
+      S69.3: complete  # Main lifecycle: sweep exemption, idle rotation, /clear
+      S69.4: complete  # Pending-context injection
+      S69.5: complete  # Reply to a specific message in the app
+      S69.6: complete  # docs done; live check on baxter-mac-test passed 2026-10-27
   E70:
     status: pending
     notes: >
@@ -1111,8 +1116,10 @@ epics:
       S71.5: complete  # Wiring and docs
       S71.6: complete  # /keys: send keystrokes to a pool pane
   E72:
-    status: pending
+    status: complete
     notes: >
+      Implemented on dev, uncommitted at time of writing; live acceptance by the operator is pending (hover and
+      selection layout, ⌘⇧R and caret placement, reply bar, scroll-to-original, end-to-end send).
       Mac text selection, copy, and reply. Copy button made reachable (can ship
       first as a patch); message bodies rebuilt on NSTextView so selection spans
       a whole message (one message per selection); Reply with a selection quotes
@@ -1120,12 +1127,103 @@ epics:
       selection sends reply_to and the bus builds Telegram-style quoted_message
       (200 chars, sender you/agent). Additive app protocol field (MINOR).
     stories:
-      S72.1: pending  # Reachable copy button and Copy Message menu
-      S72.2: pending  # Native message text view
-      S72.3: pending  # Reply with selection
-      S72.4: pending  # Bus: reply_to on app sends
-      S72.5: pending  # Mac: reply to whole message
+      S72.1: complete  # Reachable copy button and Copy Message menu (builds, 18 XCTests pass; live hover check still the operator's)
+      S72.2: complete  # Native message text view (builds, 31 XCTests pass; live selection/layout check still the operator's)
+      S72.3: complete  # Reply with selection (builds, 47 XCTests pass; live check of focus/caret and menu is still the operator's)
+      S72.4: complete  # Bus: reply_to on app sends (vitest and tsc pass)
+      S72.5: complete  # Mac: reply to whole message (builds, 54 XCTests pass; live check of reply bar, scroll-to-original, and end-to-end send is still the operator's)
   E73:
+    status: in-progress
+    notes: >
+      Hook-delivered recent.md. Baxter's transcripts show Claude Code
+      re-attaching the whole changed recent.md (up to 40 KB, 11 times in 33
+      turns) because it comes through a CLAUDE.md import. Remove the import
+      and deliver it through the freshness hook for every runtime: SessionStart
+      injects the full file when the session hasn't seen it (new, /clear,
+      compact), later SessionStart/UserPromptSubmit inject only appended lines.
+      One endpoint and script serve cc-headless, cc-pool and the desktop app;
+      disk fallback when the bus is down. Starts with a spike on hook behavior
+      (SessionStart on --resume, reasons, compaction). Reuses recentDelta.
+      Depends on E67, E66.
+    stories:
+      S73.1: complete  # Spike: hook behavior across headless, pool, desktop app
+      S73.2: complete  # Endpoint: full on first sight, delta after, start reason
+      S73.3: complete  # Hook script: reason, print on SessionStart, disk fallback
+      S73.4: complete  # Setup check and advisory (import vs hook delivery)
+      S73.5: in-progress  # docs done; Baxter migration awaits the operator
+  E74:
+    status: planned
+    notes: >
+      App channel approvals. cc-headless becomes an approval source through
+      --permission-prompt-tool (an MCP tool that raises the request and waits),
+      and the app channel becomes a notification and answer surface: a durable
+      approval event, an approval_decision WebSocket frame, and an Approve/Deny
+      card in the Mac transcript. Telegram sessions served by cc-headless get
+      the same prompts for free. Starts with a spike on permission-prompt-tool
+      behavior and MCP timeouts. Epic: _bmad-output/epics/E74-app-channel-approvals.md.
+      Depends on E51, E59, E62, E30.
+    stories:
+      S74.1: pending  # Spike: permission-prompt-tool payload, timeouts, resume
+      S74.2: pending  # cc-headless approval source (MCP tool, target, backend, cancel)
+      S74.3: pending  # Config and policy (enabled, timeout, auto allow/deny)
+      S74.4: pending  # App adapter seam, approval event, migration
+      S74.5: pending  # App protocol: approval_decision frame, list route, client script
+      S74.6: pending  # Mac client: card, badge, background notification
+      S74.7: pending  # Docs, tests, live check
+  E75:
+    status: in-progress
+    notes: >
+      Mac composer newline at the caret. Shift/Option+Return appends "\n" to the
+      end of the bound draft string (ComposerView.handleKey) instead of
+      inserting at the insertion point, so mid-draft newlines land at the end and
+      the caret doesn't follow. Fix by inserting through the field editor (or the
+      TextSelection binding). Epic: _bmad-output/epics/E75-mac-composer-newline-at-caret.md.
+      Depends on E62, E72.
+    stories:
+      S75.1: complete  # Insert newline at the caret (field editor first, TextSelection fallback; live check pending)
+      S75.3: complete  # Transcript keeps the newest message visible when the composer grows (live check pending)
+      S75.2: complete  # NewlineInsertion helper + 9 XCTests (63 pass), CHANGELOG, docs/MAC_CLIENT.md
+  E76:
+    status: in-progress
+    notes: >
+      Two-way Slack channel through a self-hosted n8n relay, with no hosted Slack
+      app. n8n receives Slack events, queues messages in a
+      Data Table, and posts replies. AgentBus polls GET /inbox, enqueues, acks,
+      and sends through POST /send, so messages queue up while the laptop is
+      offline. Exactly-once via a local seen table; Slack threads map to
+      sessions through the generic thread store. S76.0 (outbound DM POC)
+      shipped first. Epic:
+      _bmad-output/epics/E76-slack-n8n-relay.md. Depends on E5, E27.
+    stories:
+      S76.0: complete  # POC: outbound DM through a JWT-authenticated n8n webhook (live check passed 2026-10-21)
+      S76.0b: pending  # Rename transport to slack-n8n (channel, adapter id, config block, files, docs); keep platforms.slack identity
+      S76.1: pending  # n8n workflows and Slack app manifest
+      S76.2: pending  # Configuration
+      S76.3: pending  # Adapter: poll, enqueue, ack
+      S76.4: pending  # Threading and send()
+      S76.5: pending  # Formatting and receipts
+      S76.6: pending  # Docs, tests, live check
+  E77:
+    status: planned
+    notes: >
+      Mac app owns the bus process. Managed mode (default for new installs)
+      spawns bus-core from a checkout with tsx, sanitized login-shell env, and
+      pm2's log paths; the bus exits with the app (stdin-EOF parent watch,
+      AGENTBUS_EXIT_WITH_PARENT=1) and unrequested exits restart with backoff.
+      Menu-bar item keeps the app (and bus) alive with windows closed; Quit
+      stops it gracefully. ~/.agentbus/managed.json lets make restart and
+      safe_restart.sh restart through the app. External mode keeps pm2.
+      Supersedes the uncommitted Oct 5 E64 draft. Epic:
+      _bmad-output/epics/E77-mac-app-owned-bus.md. Depends on E62, E59, E40.
+    stories:
+      S77.1: pending  # Bus: exit with parent (AGENTBUS_EXIT_WITH_PARENT, stdin EOF -> shutdown)
+      S77.2: pending  # App: ServerLaunchSpec (checkout validation, login-shell env, sanitizing)
+      S77.3: pending  # App: ServerSupervisor (spawn, readiness, conflict probe, restart policy, managed.json)
+      S77.4: pending  # App: Quit handling and menu bar (terminateLater, MenuBarExtra, activation policy)
+      S77.5: pending  # App: Settings > Server tab and default-mode rule
+      S77.6: pending  # Scripts: managed-aware make restart/start/stop/status/logs and safe_restart.sh
+      S77.7: pending  # Docs, changelog, live verification
+  E78:
     status: pending
     notes: >
       Agent skills in the channel command menu. Project-level skills from each
@@ -1133,13 +1231,13 @@ epics:
       commands) appear in Telegram's per-bot "/" autocomplete and a new
       /skills command. Telegram name aliasing ([a-z0-9_]), headless init-list
       filter for interactive-only commands, expose_skills config (default
-      off). Builds on E71.
+      off). Builds on E71. Epic: _bmad-output/epics/E78-agent-skills-in-command-menu.md.
     stories:
-      S73.1: pending  # Skill catalog
-      S73.2: pending  # Name aliases
-      S73.3: pending  # Alias resolution in dispatch
-      S73.4: pending  # /skills command
-      S73.5: pending  # Telegram menu
-      S73.6: pending  # Docs and live check
+      S78.1: pending  # Skill catalog
+      S78.2: pending  # Name aliases
+      S78.3: pending  # Alias resolution in dispatch
+      S78.4: pending  # /skills command
+      S78.5: pending  # Telegram menu
+      S78.6: pending  # Docs and live check
 
-last_updated: 2026-10-27  # Merged origin/dev into dev: kept origin E72 (Mac text selection, copy, and reply); renumbered local E72 (agent skills in command menu) to E73. Prior note preserved (origin, 2026-10-14): Planned E72 (Mac text selection, copy, and reply). Prior note preserved (origin, 2026-10-08): Closed E12 (S12.3 dropped), E23, E51, E53, E67, E71 on operator say-so. Prior note preserved: Reconciled origin/dev (PR #8 provider slash commands + /keys, renumbered E58 -> E71; pool launch fix e7fd65e folded into the local fix) into dev via merge/reconcile-origin-dev. Prior note preserved (origin, 2026-10-03): E58 (provider slash commands, now E71) implemented on feat/e58-provider-slash-commands. Prior note preserved: Merged feat/e64-e68-journaling into dev (E64-E68 complete; E67 S67.5 awaits the operator-approved Baxter migration). Prior note preserved: E68 complete on feat/e64-e68-journaling (consolidation, feedback events, self-edit proposals, protected paths). Prior note preserved: E67 S67.1-S67.4 complete, S67.5 awaiting the operator-approved Baxter migration (feat/e64-e68-journaling). Prior note preserved: E66 complete on feat/e64-e68-journaling (S66.6-S66.11: journalers, cc-pool integration, /journal, summarizer retired). Prior note preserved (2026-10-05): Planned E69 (app Main continuity and cross-agent context) from the ambient-scan session discussion. Merged plan/e64-e68-pluggable-journaling and feat/e58-e59-mac-client-foundation into dev. Prior note preserved (2026-10-01): E62 Save/Open Chat and Quit fix builds with 5 XCTest cases; operator retest and other live acceptance pending. E63 bus integration remains planned. Prior note preserved (2026-10-02): Planned E64-E68 (runtime capability taxonomy, advisories, pluggable journaling, native memory layout, agent learning) from the journaling design discussion. Prior note preserved: E53 (pool model selection) implemented on feat/e53-pool-model-selection, not yet merged. Prior note preserved: E52 (pool pane watchdog): S52.1 and S52.2 implemented on feat/e52-pool-watchdog, not yet merged; S52.3 waits on real captured stalls. Prior note preserved: E51 (approval requests) merged to dev and live, awaiting a real end-to-end check. Prior note preserved: E49 (context-block ledger) + E50 (agent-managed knowledge store, Phase 1) implemented end-to-end on claude/agent-knowledge-database-xiqn29, not yet merged, not yet pushed. Both from a design spike (_bmad-output/planning-artifacts/design-spike-agent-knowledge-store.md) worked out conversationally with the operator. Prior note preserved: 2026-09-17  # E48 (interactive Claude Code session pool over tmux) implemented end-to-end and marked complete — all 10 stories, on feat/e48-cc-session-pool, not yet merged to dev/main. current_epic stays E42/E44 (Siri Bridge) since that's the operator's ongoing focus; E48 was a self-contained side branch, now finished. Prior note preserved: Backfilled E36, E38, E39, E40 (complete, merged to dev 2026-08-31/09-01) and E37, E41 (pending, epic files only). Added the Siri Bridge package E42–E47 (renumbered from E36–E41 on arrival to avoid the collision): E42 complete, E44 in-progress (S44.5 on-device is the operator's), E43/E45/E46/E47 pending. E23's S23.5 still pending operator sign-off. Prior note preserved: Planned E70 (provider hook installer). Prior note preserved: Planned E69 (app Main continuity and cross-agent context) from the ambient-scan session discussion. Merged plan/e64-e68-pluggable-journaling and feat/e58-e59-mac-client-foundation into dev. Prior note preserved (2026-10-01): E62 Save/Open Chat and Quit fix builds with 5 XCTest cases; operator retest and other live acceptance pending. E63 bus integration remains planned. Prior note preserved (2026-10-02): Planned E64-E68 (runtime capability taxonomy, advisories, pluggable journaling, native memory layout, agent learning) from the journaling design discussion. Prior note preserved: E53 (pool model selection) implemented on feat/e53-pool-model-selection, not yet merged. Prior note preserved: E52 (pool pane watchdog): S52.1 and S52.2 implemented on feat/e52-pool-watchdog, not yet merged; S52.3 waits on real captured stalls. Prior note preserved: E51 (approval requests) merged to dev and live, awaiting a real end-to-end check. Prior note preserved: E49 (context-block ledger) + E50 (agent-managed knowledge store, Phase 1) implemented end-to-end on claude/agent-knowledge-database-xiqn29, not yet merged, not yet pushed. Both from a design spike (_bmad-output/planning-artifacts/design-spike-agent-knowledge-store.md) worked out conversationally with the operator. Prior note preserved: 2026-09-17  # E48 (interactive Claude Code session pool over tmux) implemented end-to-end and marked complete — all 10 stories, on feat/e48-cc-session-pool, not yet merged to dev/main. current_epic stays E42/E44 (Siri Bridge) since that's the operator's ongoing focus; E48 was a self-contained side branch, now finished. Prior note preserved: Backfilled E36, E38, E39, E40 (complete, merged to dev 2026-08-31/09-01) and E37, E41 (pending, epic files only). Added the Siri Bridge package E42–E47 (renumbered from E36–E41 on arrival to avoid the collision): E42 complete, E44 in-progress (S44.5 on-device is the operator's), E43/E45/E46/E47 pending. E23's S23.5 still pending operator sign-off.
+last_updated: 2026-10-27  # Merged origin/dev into local dev (Telegram forum topic name + pinned message at session start); renumbered origin's agent-skills epic E73 -> E78 because local E73 is hook-delivered recent.md and E74-E77 were taken. Prior note preserved: Planned E77 (Mac app owns the bus process). Prior note preserved:E69 complete: live check on baxter-mac-test passed (client fold fix, schedule-name origin label, single /clear marker in Main); released as 0.16.0. Prior note preserved: E69 implemented on feat/e69-app-main-continuity (S69.1-S69.5 complete, S69.6 docs done; live check on baxter-mac-test pending). Prior note preserved: 2026-10-21  # E59 and E61 closed after the operator's live checks; E60 live walkthrough deferred to the personal agent. Prior note preserved: Status reconciliation of yaml, epic docs and git history (current_epic E42 -> E62; E75 and E76 added; E52 doc status; Status rows added to docs that lacked one; E22 note). Prior note preserved: E73 implemented (S73.1-S73.4 complete, S73.5 docs done; Baxter migration and live checks await the operator). Prior note preserved: Planned E73 (delta injection of recent.md for native cc-headless agents). Prior note preserved: Planned E72 (Mac text selection, copy, and reply). Prior note preserved (origin, 2026-10-08): Closed E12 (S12.3 dropped), E23, E51, E53, E67, E71 on operator say-so. Prior note preserved: Reconciled origin/dev (PR #8 provider slash commands + /keys, renumbered E58 -> E71; pool launch fix e7fd65e folded into the local fix) into dev via merge/reconcile-origin-dev. Prior note preserved (origin, 2026-10-03): E58 (provider slash commands, now E71) implemented on feat/e58-provider-slash-commands. Prior note preserved: Merged feat/e64-e68-journaling into dev (E64-E68 complete; E67 S67.5 awaits the operator-approved Baxter migration). Prior note preserved: E68 complete on feat/e64-e68-journaling (consolidation, feedback events, self-edit proposals, protected paths). Prior note preserved: E67 S67.1-S67.4 complete, S67.5 awaiting the operator-approved Baxter migration (feat/e64-e68-journaling). Prior note preserved: E66 complete on feat/e64-e68-journaling (S66.6-S66.11: journalers, cc-pool integration, /journal, summarizer retired). Prior note preserved (2026-10-05): Planned E69 (app Main continuity and cross-agent context) from the ambient-scan session discussion. Merged plan/e64-e68-pluggable-journaling and feat/e58-e59-mac-client-foundation into dev. Prior note preserved (2026-10-01): E62 Save/Open Chat and Quit fix builds with 5 XCTest cases; operator retest and other live acceptance pending. E63 bus integration remains planned. Prior note preserved (2026-10-02): Planned E64-E68 (runtime capability taxonomy, advisories, pluggable journaling, native memory layout, agent learning) from the journaling design discussion. Prior note preserved: E53 (pool model selection) implemented on feat/e53-pool-model-selection, not yet merged. Prior note preserved: E52 (pool pane watchdog): S52.1 and S52.2 implemented on feat/e52-pool-watchdog, not yet merged; S52.3 waits on real captured stalls. Prior note preserved: E51 (approval requests) merged to dev and live, awaiting a real end-to-end check. Prior note preserved: E49 (context-block ledger) + E50 (agent-managed knowledge store, Phase 1) implemented end-to-end on claude/agent-knowledge-database-xiqn29, not yet merged, not yet pushed. Both from a design spike (_bmad-output/planning-artifacts/design-spike-agent-knowledge-store.md) worked out conversationally with the operator. Prior note preserved: 2026-09-17  # E48 (interactive Claude Code session pool over tmux) implemented end-to-end and marked complete — all 10 stories, on feat/e48-cc-session-pool, not yet merged to dev/main. current_epic stays E42/E44 (Siri Bridge) since that's the operator's ongoing focus; E48 was a self-contained side branch, now finished. Prior note preserved: Backfilled E36, E38, E39, E40 (complete, merged to dev 2026-08-31/09-01) and E37, E41 (pending, epic files only). Added the Siri Bridge package E42–E47 (renumbered from E36–E41 on arrival to avoid the collision): E42 complete, E44 in-progress (S44.5 on-device is the operator's), E43/E45/E46/E47 pending. E23's S23.5 still pending operator sign-off. Prior note preserved: Planned E70 (provider hook installer). Prior note preserved: Planned E69 (app Main continuity and cross-agent context) from the ambient-scan session discussion. Merged plan/e64-e68-pluggable-journaling and feat/e58-e59-mac-client-foundation into dev. Prior note preserved (2026-10-01): E62 Save/Open Chat and Quit fix builds with 5 XCTest cases; operator retest and other live acceptance pending. E63 bus integration remains planned. Prior note preserved (2026-10-02): Planned E64-E68 (runtime capability taxonomy, advisories, pluggable journaling, native memory layout, agent learning) from the journaling design discussion. Prior note preserved: E53 (pool model selection) implemented on feat/e53-pool-model-selection, not yet merged. Prior note preserved: E52 (pool pane watchdog): S52.1 and S52.2 implemented on feat/e52-pool-watchdog, not yet merged; S52.3 waits on real captured stalls. Prior note preserved: E51 (approval requests) merged to dev and live, awaiting a real end-to-end check. Prior note preserved: E49 (context-block ledger) + E50 (agent-managed knowledge store, Phase 1) implemented end-to-end on claude/agent-knowledge-database-xiqn29, not yet merged, not yet pushed. Both from a design spike (_bmad-output/planning-artifacts/design-spike-agent-knowledge-store.md) worked out conversationally with the operator. Prior note preserved: 2026-09-17  # E48 (interactive Claude Code session pool over tmux) implemented end-to-end and marked complete — all 10 stories, on feat/e48-cc-session-pool, not yet merged to dev/main. current_epic stays E42/E44 (Siri Bridge) since that's the operator's ongoing focus; E48 was a self-contained side branch, now finished. Prior note preserved: Backfilled E36, E38, E39, E40 (complete, merged to dev 2026-08-31/09-01) and E37, E41 (pending, epic files only). Added the Siri Bridge package E42–E47 (renumbered from E36–E41 on arrival to avoid the collision): E42 complete, E44 in-progress (S44.5 on-device is the operator's), E43/E45/E46/E47 pending. E23's S23.5 still pending operator sign-off. Prior note preserved: Merged origin/dev into dev: kept origin E72 (Mac text selection, copy, and reply); renumbered local E72 (agent skills in command menu) to E73.

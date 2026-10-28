@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Epic ID | E72 |
-| Status | Planned |
+| Status | Implemented; live acceptance pending |
 | Dependencies | E62 (Mac client), E59 (app adapter protocol v1), E28 (Telegram quoted-reply context) |
 | Story Count | 5 |
 | Estimated Complexity | M–L |
@@ -84,7 +84,7 @@ Depends on S72.2. App only.
 ### S72.4 — Bus: `reply_to` on app sends
 
 - Add an optional `reply_to: <message_id>` (UUID) to the `send` frame schema in `src/http/app-routes.ts`, and carry it in `StoredIntent` so recovery and idempotent retries preserve it.
-- Resolve it on the server: the transcript must belong to this contact and to the target session (or to its resumed-from origin). An unknown or foreign ID returns `rejected` with reason `reply_target_not_found`; the client never supplies quote text.
+- Resolve it on the server: the transcript must be a visible message in a session of this contact and agent. (Decided during planning: the bus keeps no resumed-from link, so the check is not limited to the target session or its origin.) An unknown or foreign ID returns `rejected` with reason `reply_target_not_found`; the client never supplies quote text.
 - Build `metadata.quoted_message = { message_id, sender_name, text }` with `sender_name` `you` for inbound or `agent` for outbound, and `text` cut to 200 characters. The existing formatter in `src/adapters/cc.ts` renders the `[Replying to …]` line for both cc-pool and cc-headless.
 - Don't set the inbound envelope's `reply_to`: on the app channel that field drives outbound reply binding (`boundAppReply` in `src/app/binding.ts`).
 - Confirm that inbound transcript metadata keeps `quoted_message`, and expose it from `messageInfo` (`src/app/store.ts`) as an optional `reply_to: { message_id, sender_name, text }` on history and `message` events.

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import type { AppConfig } from '../../config/schema.js';
 import type { PipelineStage } from '../types.js';
+import { isMainConversation } from '../../app/main.js';
 
 /**
  * Stage 80 — Transcript Log (critical: false)
@@ -24,6 +25,8 @@ import type { PipelineStage } from '../types.js';
  *         E20 headless sessions are long-lived and never torn down on idle;
  *         the same claude_session_id resumes across pauses. Journaling (not
  *         teardown) captures durable knowledge while paused.
+ *       · app Main (E69) → extend. Main rotates on its own idle period
+ *         (SessionTracker), never on this gap.
  *       · otherwise (MCP cc.ts path) → end old (set ended_at), INSERT new.
  *
  * After session resolution:
@@ -104,7 +107,7 @@ export function createTranscriptLog(db: Database.Database, config: AppConfig): P
       // are long-lived: a gap never tears them down, it just extends them.
       const isHeadless = activeSession.claude_session_id !== null;
 
-      if (gapMs > idleThresholdMs && !isHeadless) {
+      if (gapMs > idleThresholdMs && !isHeadless && !isMainConversation(db, conversationId)) {
         // Gap exceeded threshold (legacy MCP path) — end old session, start new,
         // counting this first message.
         db.prepare(`UPDATE sessions SET ended_at = ? WHERE id = ?`).run(now, activeSession.id);

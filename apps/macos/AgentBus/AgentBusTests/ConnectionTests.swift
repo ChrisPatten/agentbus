@@ -176,6 +176,75 @@ import SwiftData
         connection.stop()
     }
 
+    private let target = ReplyRef(messageID: "8c1f0e5e-5a38-4a0f-b3b5-6d1f2a6d8b10", senderName: "agent", text: "Which one?")
+
+    func testReplySendCarriesTheReferenceAndPersistsOnThePendingRow() async throws {
+        let (store, socket, connection) = try await connected()
+        try await connection.send("The second", target: .session("s1"), replyTo: target)
+        try await waitFor { socket.sent.count >= 2 }
+        XCTAssertEqual(try socket.frame(1)["reply_to"] as? String, target.messageID)
+        XCTAssertEqual(store.pending.first?.replyTo, target)
+        try await connection.send("No reply", target: .session("s1"))
+        try await waitFor { socket.sent.count >= 3 }
+        XCTAssertNil(try socket.frame(2)["reply_to"])
+        connection.stop()
+    }
+
+    func testRejectedRetryKeepsTheReferenceExceptWhenTheTargetIsGone() async throws {
+        let (store, socket, connection) = try await connected()
+        try await connection.send("Same text", target: .session("s1"), replyTo: target)
+        try await waitFor { socket.sent.count >= 2 }
+        let first = try XCTUnwrap(socket.frame(1)["client_msg_id"] as? String)
+        socket.push(#"{"type":"ack","client_msg_id":"\#(first)","status":"rejected","reason":"Aborted at stage \"dedup\""}"#)
+        try await waitFor { store.pending.first?.failure != nil }
+        try await connection.retry(first)
+        try await waitFor { socket.sent.count >= 3 }
+        XCTAssertEqual(try socket.frame(2)["reply_to"] as? String, target.messageID)
+
+        let second = try XCTUnwrap(socket.frame(2)["client_msg_id"] as? String)
+        socket.push(#"{"type":"ack","client_msg_id":"\#(second)","status":"rejected","reason":"reply_target_not_found"}"#)
+        try await waitFor { store.pending.first?.failure == "reply_target_not_found" }
+        try await connection.retry(second)
+        try await waitFor { socket.sent.count >= 4 }
+        XCTAssertEqual(try socket.frame(3)["body"] as? String, "Same text")
+        XCTAssertNil(try socket.frame(3)["reply_to"])
+        XCTAssertNil(store.pending.first?.replyTo)
+        connection.stop()
+    }
+
+    func testIncomingMessageKeepsItsReplyReference() async throws {
+        let (store, socket, connection) = try await connected()
+        socket.push(#"{"type":"event","seq":1,"event":"message","data":{"message_id":"m1","session_id":"s1","seq":1,"cursor":"row-1","direction":"inbound","arrival_channel":"app","body":"The second","created_at":"2026-09-30T12:00:00Z","scheduled":false,"attachments":[],"reply_to":{"message_id":"m0","sender_name":"agent","text":"Which one?"}}}"#)
+        try await waitFor { store.messages("s1").first?.replyTo != nil }
+        XCTAssertEqual(store.messages("s1").first?.replyTo, ReplyRef(messageID: "m0", senderName: "agent", text: "Which one?"))
+        XCTAssertTrue(store.hasMessage("m1"))
+        XCTAssertFalse(store.hasMessage("m0"))
+        connection.stop()
+    }
+
+    func testReplyTargetsAreKeptPerDraftKey() async throws {
+        let (_, _, connection) = try await connected()
+        connection.replyTargets["s1"] = target
+        XCTAssertEqual(connection.replyTargets["s1"], target)
+        XCTAssertNil(connection.replyTargets["s2"])
+        connection.replyTargets["s1"] = nil
+        XCTAssertNil(connection.replyTargets["s1"])
+        connection.stop()
+    }
+
+    func testQuotesAppendToTheSessionsDraft() async throws {
+        let (_, _, connection) = try await connected()
+        XCTAssertTrue(connection.appendQuote("first line\nsecond", toDraft: "s1"))
+        XCTAssertEqual(connection.drafts["s1"], "> first line\n> second\n\n")
+        connection.drafts["s1"]? += "my reply"
+        XCTAssertTrue(connection.appendQuote("another", toDraft: "s1"))
+        XCTAssertEqual(connection.drafts["s1"], "> first line\n> second\n\nmy reply\n\n> another\n\n")
+        XCTAssertNil(connection.drafts["s2"])
+        XCTAssertFalse(connection.appendQuote("  \n", toDraft: "s2"))
+        XCTAssertNil(connection.drafts["s2"])
+        connection.stop()
+    }
+
     func testTurnStaysRunningAcrossMidTurnMessages() async throws {
         let (store, socket, connection) = try await connected()
         try store.upsert(JSONDecoder().decode(BusSession.self, from: Data(#"{"session_id":"s1","channel":"app","topic":"general","title":"Main","started_at":"2026-09-30","last_activity":"2026-09-30","ended_at":null,"unread_count":0,"resumable":true,"is_main":true,"activity":"running"}"#.utf8)))

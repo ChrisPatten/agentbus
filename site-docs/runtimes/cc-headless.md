@@ -105,7 +105,7 @@ Each agent has its own folder, settings, queue and concurrency limit. Names may 
 | Command | Effect |
 |---|---|
 | `/stop` | Stops the agent's current turn in this conversation immediately. Nothing more is sent for that turn. |
-| `/clear` | Ends this conversation's session. Your next message starts a fresh Claude session. |
+| `/clear` | Ends this conversation's session. Your next message starts a fresh Claude session. In the Mac app's Main, the scrollback stays. |
 | `/cost` | What the agent has cost today, over the last 7 days and this month. |
 
 Claude Code's own commands, such as `/compact` or `/context`, run as their own turn in your conversation's session, and you get their output back. See [Claude Code commands](/features/slash-commands#claude-code-commands) and [Slash commands](/features/slash-commands).
@@ -121,4 +121,4 @@ If `claude -p` crashes, exits with an error or produces nothing, and the agent h
 - **The first reply in a conversation is slower.** Claude Code needs a few seconds to start.
 - **Conversations are isolated.** The agent can't see what was said in another conversation, unless it looks it up with `search_transcripts` or keeps notes in its files.
 - **Don't turn off auto-compaction.** Long sessions rely on Claude Code's automatic context compaction. Leave `DISABLE_AUTO_COMPACT` unset.
-- **Claude Code's own auto memory is on and points at the agent's memory folder.** Each turn loads `CLAUDE.md` (with `recent.md`) and `MEMORY.md` fresh from disk, so changes the agent or a journal run made are seen on the next turn. See [How memory is organized](/features/agent-memory).
+- **Claude Code's own auto memory is on and points at the agent's memory folder.** Each turn loads `CLAUDE.md` and `MEMORY.md` fresh from disk, so changes the agent or a journal run made are seen on the next turn. `recent.md` reaches the agent through an import in `CLAUDE.md` or, better for long conversations, through the recent-memory hook, which sends it once and then only new entries. See [How memory is organized](/features/agent-memory).

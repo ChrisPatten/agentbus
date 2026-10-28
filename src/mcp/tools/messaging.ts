@@ -9,6 +9,7 @@ import { toolError, toolSuccess } from './helpers.js';
 import { getEmailInstances, type AppConfig } from '../../config/schema.js';
 import { toPrefixedAgentId } from '../../pool/types.js';
 import { applyChoices, choicesSchema, CHOICES_DESCRIPTION } from '../../choices/validate.js';
+import { originFromEnv, withOrigin } from '../../core/origin.js';
 
 /**
  * @param agentId - The BARE agent id of the pane/instance registering this
@@ -54,9 +55,17 @@ export function registerMessagingTools(server: McpServer, busBaseUrl: string, ag
           .optional()
           .describe('Optional key/value metadata attached to the message'),
         choices: choicesSchema.optional().describe(CHOICES_DESCRIPTION),
+        source: z
+          .string()
+          .optional()
+          .describe(
+            'Optional short label naming what is sending this (e.g. "Ambient scan"). When the message ' +
+              "lands in a conversation you are not running in, it is shown to that conversation's agent " +
+              'with this label as context.',
+          ),
       },
     },
-    async ({ to, channel, body, topic, reply_to, priority, metadata, choices }) => {
+    async ({ to, channel, body, topic, reply_to, priority, metadata, source, choices }) => {
       // Validate channel exists — resolved the same way real delivery is
       // (registry.lookupPrimaryByChannel), so a dynamically-derived channel
       // (e.g. a Telegram group, E28) validates correctly too.
@@ -87,7 +96,8 @@ export function registerMessagingTools(server: McpServer, busBaseUrl: string, ag
         reply_to: reply_to ?? null,
         priority: priority ?? 'normal',
         payload: { type: 'text' as const, body: withChoices.body },
-        metadata: withChoices.metadata,
+        // E69: the bus-side origin always replaces a caller-supplied one.
+        metadata: withOrigin(withChoices.metadata, originFromEnv(agentId, source)),
       };
 
       try {
@@ -219,6 +229,7 @@ export function registerEmailTool(
       const trimmedSubject = subject?.trim();
       const metadata: Record<string, unknown> = { email_to: address };
       if (trimmedSubject) metadata['email_subject'] = trimmedSubject;
+      metadata['origin'] = originFromEnv(agentId); // E69
       const envelope = {
         channel: emailCfg.channel,
         topic: 'general',

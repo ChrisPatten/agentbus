@@ -2,6 +2,11 @@
 
 **Version:** 0.1 · **Status:** Draft · **BMAD Phase:** 2 — Planning · **Parent:** `_bmad-output/planning-artifacts/PRD.md` (AgentBus PRD v1.2) · **Brief:** `product-brief.md` v0.4 · **Date:** 2026-09-29
 
+> **Amended 2026-10-27 by E69 (App Main Continuity).** F4, F6, FR-17, FR-18,
+> FR-21 and FR-34 now describe Main as one continuous conversation whose
+> session rows rotate underneath it. E63 S63.3 (`/clear` successor session) is
+> superseded for Main. See `_bmad-output/epics/E69-app-main-continuity.md`.
+
 This PRD adds a generic `app` channel to AgentBus and a native macOS client
 for it. Requirement IDs are stable and will be referenced from epics
 E58–E62.
@@ -27,7 +32,7 @@ operator in the app when it has something to say.
 | Term | Meaning |
 |---|---|
 | **Session** | A row in `sessions`: one context window with the agent, tied to one `conversation_id` and, for `cc-headless`, one `claude_session_id`. One sidebar item |
-| **Main** | The `app` channel's `general` topic. The default destination for proactive messages |
+| **Main** | The `app` channel's `general` topic. The default destination for proactive messages. One sidebar item over all of its session rows (E69) |
 | **Topic session** | An `app` session on a `thread:<hash>` topic, created with "New conversation" |
 | **Foreign session** | A session that started on another channel (Telegram, email, Siri) |
 | **Arrival channel** | The channel a specific message came in on. For a message sent from the app into a foreign session, this is `app`, while the session's channel stays the same |
@@ -70,6 +75,10 @@ operator in the app when it has something to say.
 3. The message lands in Main.
 4. If the app is closed, the message is stored. When the app next connects,
    the message is delivered and a notification appears.
+5. *(E69)* Repeated sends with no reply land in the same Main conversation,
+   in order, with no new Earlier entries. The sends are stamped with an
+   origin; when the operator replies, the Main turn first gets every foreign
+   message it hasn't seen as dated context, with its source label.
 
 ### F5 — Laptop sleeps and wakes
 1. The WebSocket drops when the laptop sleeps.
@@ -78,9 +87,14 @@ operator in the app when it has something to say.
 3. Overdue schedules fire once each.
 
 ### F6 — Clear and resume
-1. The operator runs `/clear` in Main. That session moves to **Earlier** and
-   a new Main session starts.
-2. Later, the operator opens the Earlier session and sends a message.
+1. *(Amended by E69)* The operator runs `/clear` in Main. Main's Claude
+   session is journaled and its row ends (`end_reason = 'clear'`), but Main
+   stays one item with all its scrollback and a "New context · /clear"
+   divider. Nothing moves to **Earlier**; the next turn starts a new row and
+   Claude session. The same happens after `adapters.app.main_idle_rotation_ms`
+   (12 h) of operator and agent inactivity.
+2. Later, the operator opens an Earlier session (an app topic or foreign
+   session, never Main) and sends a message.
    - If its `claude` session can still be resumed, the conversation
      continues.
    - If it can't, the composer is disabled and explains why.
@@ -250,6 +264,13 @@ the first follow-up).
   - `unread_count`, based on the contact's read marker (FR-21);
   - `resumable` (FR-34), `is_main`, and the current activity state.
 - Any change to a listed session also sends a `session` event.
+- *(E69)* Each item also has `conversation_id`. Main is listed once, under
+  `active` and `all` and never `earlier`, as an aggregate over all its rows:
+  `session_id` is the active row (else the newest), `ended_at` is null,
+  `resumable` is true, and counts span every row. When Main's active row
+  changes, a `session` event carries the aggregate; the one recorded when a
+  row ends through rotation adds `rotated { previous_session_id, ended_at,
+  reason }`.
 
 **FR-18 History (M).**
 - `GET /api/v1/app/sessions/:id/messages?before&limit` returns transcript
@@ -261,6 +282,13 @@ the first follow-up).
     `expired`);
   - `scheduled: true` for scheduled prompts.
 - Only listed sessions are readable. Any other `id` returns `404`.
+- *(E69)* Each message also has `conversation_id`, and `reply_to` when it
+  quotes another message (an operator `reply_to`, or an agent reply to an
+  earlier message rather than the operator's latest). History for any Main
+  row id pages across every Main row, oldest first, and the page carries
+  `boundaries [{ session_id, ended_at, reason: idle | clear | null }]` for the
+  rows that ended inside its range. The client draws a "New context" divider
+  at each.
 
 **FR-19 Superset mirror (M).**
 - Every transcript row written to a listed session becomes a `message`
@@ -285,6 +313,9 @@ the first follow-up).
 - Unread counts come from that marker.
 - Marking a session read on one connection updates the others through a
   `session` event.
+- *(E69)* Main's marker and unread count are per conversation: `mark_read`
+  accepts any Main row id, the effective marker is the highest across Main's
+  rows, and rotation never resets it.
 
 **FR-22 Attachments upload (M).**
 - `POST /api/v1/app/attachments` takes a multipart upload (the existing
@@ -368,6 +399,8 @@ the first follow-up).
 - The mechanics are decided in the architecture document. The requirement is
   that resuming an Earlier session never disturbs the current active session
   on the same conversation (see §9, Q1).
+- *(E69)* Does not apply to Main. Main's ended rows are never listed in
+  Earlier, and a send naming one goes to Main's current row.
 
 **FR-35 Commands act on the targeted session (M).**
 - `/clear` and `/stop` sent from the app act on the target session, whatever

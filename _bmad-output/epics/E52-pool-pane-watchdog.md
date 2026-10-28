@@ -6,7 +6,7 @@
 | Dependencies | E48 (cc-pool: leases, `TmuxController`, the 60s sweep, `reconcileLiveness`), E51 (approval requests — owns permission dialogs), E29/E48 hooks (`Stop` → `/turn-ended`) |
 | Story Count | 6 |
 | Estimated Complexity | M |
-| Status | Ready — decisions recorded, not started |
+| Status | In progress — S52.1 and S52.2 shipped (observe-only watchdog, turn-end signal); S52.3–S52.6 not started |
 
 ---
 

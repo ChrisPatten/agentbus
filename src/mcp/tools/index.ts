@@ -35,6 +35,7 @@ import { registerAdvisoryTools } from './advisories.js';
 import { registerJournalTools } from './journal.js';
 import { registerProposalTools } from './proposals.js';
 import { getTelegramInstances } from '../../config/schema.js';
+import { originFromEnv } from '../../core/origin.js';
 
 export { toolError, toolSuccess };
 
@@ -66,7 +67,7 @@ export function registerAllTools(
   config?: AppConfig,
 ): void {
   // E2 core tools
-  registerCoreTools(server, busBaseUrl, healthState);
+  registerCoreTools(server, busBaseUrl, healthState, agentId);
 
   // E7 tools
   registerChannelTools(server, busBaseUrl);
@@ -125,7 +126,7 @@ export function registerHeadlessTools(
   agentId: string,
   config?: AppConfig,
 ): void {
-  registerReplyTool(server, busBaseUrl);
+  registerReplyTool(server, busBaseUrl, agentId);
   registerChannelTools(server, busBaseUrl);
   registerMessagingTools(server, busBaseUrl, agentId);
   registerTranscriptTools(server, busBaseUrl);
@@ -147,8 +148,9 @@ function registerCoreTools(
   server: McpServer,
   busBaseUrl: string,
   healthState: HealthState,
+  agentId: string,
 ): void {
-  registerReplyTool(server, busBaseUrl);
+  registerReplyTool(server, busBaseUrl, agentId);
 
   // ── get_adapter_status ────────────────────────────────────────────────────
 
@@ -170,7 +172,7 @@ function registerCoreTools(
 
 // ── reply tool (shared by full + headless tool sets) ────────────────────────────
 
-function registerReplyTool(server: McpServer, busBaseUrl: string): void {
+function registerReplyTool(server: McpServer, busBaseUrl: string, agentId: string): void {
   // ── reply ────────────────────────────────────────────────────────────────
 
   server.registerTool(
@@ -216,7 +218,10 @@ function registerReplyTool(server: McpServer, busBaseUrl: string): void {
         reply_to: original.id,
         priority: 'normal' as const,
         payload: { type: 'text' as const, body: withChoices.body },
-        metadata: withChoices.metadata,
+        metadata: {
+          ...withChoices.metadata,
+          origin: originFromEnv(agentId), // E69
+        },
       };
 
       try {

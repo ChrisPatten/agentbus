@@ -176,8 +176,23 @@ function loadMigrations(): Migration[] {
     },
     {
       version: 35,
+      description: 'memory_recent_seen.content for recent.md delta injection',
+      sql: readFileSync(join(migrationsDir, '035_memory_recent_seen_content.sql'), 'utf-8'),
+    },
+    {
+      version: 36,
+      description: 'pending_context_watermarks for E69 pending-context injection',
+      sql: readFileSync(join(migrationsDir, '036_pending_context_watermarks.sql'), 'utf-8'),
+    },
+    {
+      version: 37,
+      description: 'sessions.end_reason and app_events.rotation for E69 Main rotation dividers',
+      sql: readFileSync(join(migrationsDir, '037_session_end_reason.sql'), 'utf-8'),
+    },
+    {
+      version: 38,
       description: 'Choice prompts (E74)',
-      sql: readFileSync(join(migrationsDir, '035_choice_prompts.sql'), 'utf-8'),
+      sql: readFileSync(join(migrationsDir, '038_choice_prompts.sql'), 'utf-8'),
     },
   ];
 }
