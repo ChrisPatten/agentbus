@@ -628,9 +628,10 @@ class HeadlessInstance {
       // explicitly allowed because this is a noninteractive Claude process.
       // E66: a journaling turn never delivers, so it gets the opposite.
       // E68: journal and consolidation turns also run without Bash.
+      // E79: `status` only validates, but a refused call returns an error to the agent.
       ...(journal
         ? ['--disallowedTools', [JOURNAL_DISALLOWED_TOOLS, ...JOURNAL_TURN_DISALLOWED_TOOLS, ...(journal.denyTools ?? [])].join(',')]
-        : ['--allowedTools', 'mcp__agentbus__reply,mcp__agentbus__send_message']),
+        : ['--allowedTools', 'mcp__agentbus__reply,mcp__agentbus__send_message,mcp__agentbus__status']),
       '--mcp-config', mcpConfigPath,
       '--system-prompt-file', systemPromptPath,
     ];

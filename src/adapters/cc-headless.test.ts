@@ -947,7 +947,7 @@ describe('turn cost persistence (E39)', () => {
     await new Promise((r) => setTimeout(r, 30));
 
     const args = spawnMock.mock.calls[0]![1] as string[];
-    expect(args[args.indexOf('--allowedTools') + 1]).toBe('mcp__agentbus__reply,mcp__agentbus__send_message');
+    expect(args[args.indexOf('--allowedTools') + 1]).toBe('mcp__agentbus__reply,mcp__agentbus__send_message,mcp__agentbus__status');
     // E68: normal conversation turns keep Bash; only journal turns deny it.
     expect(args).not.toContain('--disallowedTools');
 
