@@ -4,6 +4,12 @@ Feature ideas and future work that hasn't been scoped into an epic yet. Promote 
 
 ## Ideas
 
+### /stop does nothing on cc-pool → promoted to E85 (backlog 2026-10-29)
+See `_bmad-output/epics/E85-stop-command-for-cc-pool.md`. `/stop` only knows cc-headless runners; E85 sends Escape to the conversation's leased pool pane.
+
+### cc-headless: coalesce queued messages into one turn → promoted to E84 (backlog 2026-10-29)
+See `_bmad-output/epics/E84-headless-coalesce-queued-turns.md`. Messages sent while a headless turn runs become separate queued turns when they land in different polls; E84 merges them into one turn at turn start.
+
 ### Agent status lines → promoted to E79 (backlog 2026-10-27)
 See `_bmad-output/epics/E79-agent-status-lines.md`. While an agent works, Telegram showed a draft line of raw tool usage (tool name plus arguments). E79 replaces it with 2-5 word human phrases ("Checking the calendar") from one shared data file, adds a `status` MCP tool so the agent can write its own line, and keeps a `tool_status.mode: raw` switch. Possible follow-up: show the same line in the Mac app channel.
 ### /pool shows the serving window, and /pool kill → promoted to E80 (backlog 2026-10-27)
