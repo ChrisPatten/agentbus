@@ -63,7 +63,7 @@ import type { PipelineContext, RouteTarget } from '../pipeline/types.js';
 import { PENDING_CONTEXT_KEY, SYSTEM_BLOCKS_KEY, SYSTEM_ONLY_KEY, attachSystemBlock, pendingContextFor, readPendingContext, stripSystemMetadata, systemBlocksFor } from '../core/system-block.js';
 import type Database from 'better-sqlite3';
 import type { CommandChoice, CommandImage, CommandRegistry, CommandResponse, SlashCommandContext } from '../commands/registry.js';
-import { isTelegramChannel, choicesSchema } from '../choices/validate.js';
+import { supportsChoiceButtons, choicesSchema } from '../choices/validate.js';
 import { OutboundStore } from '../outbound/store.js';
 import { MAX_CHOICES, MAX_CHOICE_LABEL_LENGTH } from '../choices/types.js';
 import {
@@ -438,9 +438,9 @@ const CHOICE_FOLLOW_UP_TTL_MS = 10 * 60 * 1000;
 
 /**
  * Deliver a bus-command handler's response, including any interactive
- * `choices` (E54). On Telegram the choices ride the E74 button path
- * (`metadata.choices` labels plus `metadata.choice_commands`, the slash command
- * each tap runs); on every other channel they are appended to the body as a
+ * `choices` (E54). On Telegram and the Mac app (E86) the choices ride the E74
+ * button path (`metadata.choices` labels plus `metadata.choice_commands`, the
+ * slash command each tap runs); on every other channel they are appended to the body as a
  * numbered list and a choice follow-up capture is registered so a reply like
  * `2` picks one. Choices beyond E74's limit (8, labels of 64 characters) are
  * clipped here as a backstop; handlers should already respect them.
@@ -464,7 +464,7 @@ export async function deliverCommandResponse(
     return;
   }
 
-  if (isTelegramChannel(result.envelope.channel)) {
+  if (supportsChoiceButtons(result.envelope.channel)) {
     await sendCommandResponse(
       deps,
       result,

@@ -223,6 +223,8 @@ struct SelectionRequest: Equatable {
     @ObservationIgnored private var viewing: [UUID: String] = [:]
     @ObservationIgnored private var sessionByConversation: [String: String] = [:]
     @ObservationIgnored private var finishedTrails: [String: (lines: [String], seconds: Double)] = [:]
+    /// Button taps awaiting their ack: `client_msg_id` → (prompt message ID, item index). Never resent (E86).
+    @ObservationIgnored private var choiceTaps: [String: (messageID: String, index: Int)] = [:]
 
     let settings: ClientSettings
     let http: any BusAPI
@@ -242,6 +244,8 @@ struct SelectionRequest: Equatable {
         self.http = api ?? BusHTTP(settings: settings)
         // Before any window reads the cache, so a stored selection of an old Main row resolves to Main.
         store.foldMain()
+        // A tap from the last run will never be acked on this socket; its outcome arrives as a `choice` event.
+        try? store.clearChoicePending(errors: true)
         guard observeSystemEvents else { return }
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.reconnect() }
@@ -264,9 +268,13 @@ struct SelectionRequest: Equatable {
         guard settings.configured else { state = .offline; return }
         generation += 1; let current = generation
         runTask?.cancel(); socket.close()
+        dropChoiceTaps()
         runTask = Task { [weak self] in await self?.run(current) }
     }
-    func stop() { generation += 1; runTask?.cancel(); runTask = nil; socket.close(); pathMonitor?.cancel(); state = .offline; nextRetry = nil }
+    func stop() {
+        generation += 1; runTask?.cancel(); runTask = nil; socket.close(); pathMonitor?.cancel(); state = .offline; nextRetry = nil
+        dropChoiceTaps()
+    }
 
     private func run(_ current: Int) async {
         var delay: UInt64 = 1
@@ -289,6 +297,7 @@ struct SelectionRequest: Equatable {
             guard !Task.isCancelled && current == generation else { break }
             socket.close(); state = .offline
             live.removeAll()
+            dropChoiceTaps()
             nextRetry = Date().addingTimeInterval(TimeInterval(delay))
             try? await Task.sleep(for: .seconds(delay))
             delay = min(delay * 2, 30)
@@ -318,6 +327,29 @@ struct SelectionRequest: Equatable {
         let replyTo = row.failure == SendStatus.replyTargetNotFound ? nil : row.replyTo
         try store.discard(id)
         try await send(body, target: target, attachments: ids, files: files, replyTo: replyTo)
+    }
+    /// Taps a callback button (E86). Only while connected, on an open prompt with no tap in flight: taps are
+    /// not queued offline. Copy and link buttons never reach here; their `action` is handled in the view.
+    func choose(message id: String, index: Int) async throws {
+        guard state == .connected, let row = store.message(id), row.choicePendingIndex == nil,
+              let choices = row.choices, choices.isOpen, let promptID = choices.promptID,
+              choices.items.indices.contains(index), choices.items[index].isCallback else { return }
+        let clientID = UUID().uuidString
+        choiceTaps[clientID] = (id, index)
+        try store.setChoicePending(id, index: index)
+        do {
+            try await socket.send(ProtocolCodec.encode(.choice(clientID, promptID: promptID, index: index)))
+        } catch {
+            choiceTaps[clientID] = nil
+            try? store.setChoicePending(id, index: nil)
+            throw error
+        }
+    }
+    /// A disconnect loses the acks of taps in flight; the bus's `choice` event (replayed on reconnect) has the outcome.
+    private func dropChoiceTaps() {
+        guard !choiceTaps.isEmpty else { return }
+        choiceTaps.removeAll()
+        try? store.clearChoicePending()
     }
     func createSession(title: String) async throws {
         let frame = ClientFrame(type: "create_session", title: title, requestID: UUID().uuidString)
@@ -474,7 +506,9 @@ struct SelectionRequest: Equatable {
                 onAgentMessage?(message, (frame.seq ?? 0) <= replayThrough)
             }
         case "ack":
-            if let id = frame.clientMsgID {
+            if let id = frame.clientMsgID, let tap = choiceTaps.removeValue(forKey: id) {
+                try store.finishChoice(tap.messageID, index: tap.index, status: frame.status ?? "rejected", reason: frame.reason)
+            } else if let id = frame.clientMsgID {
                 let target = try store.acknowledge(id, status: frame.status ?? "rejected", reason: frame.reason)
                 // Follow a new topic, or the copy a resumed Earlier session forks into.
                 // A send to one of Main's rows is a send to Main, never a fork (E69).

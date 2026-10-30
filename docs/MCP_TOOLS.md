@@ -127,13 +127,14 @@ in Telegram and is not notified.
 `reply` and `send_message` both accept `choices` (E74) to offer single-choice answers:
 
 - On Telegram the labels render as inline buttons (one per row, or two per row when every label is 12 characters or fewer). The tap arrives back in the same conversation and topic as an ordinary inbound message `[tapped] <label>`, with `metadata.choice_prompt_id` and `reply_to` set to the prompt's bus message. Typed replies still work.
+- In the Mac app (`app` channel, E86) the labels render as buttons under the message, and the tap arrives the same way, as `[tapped] <label>` with `metadata.choice_prompt_id`, bound to the prompt's session. The body gets no numbered list. The prompt shows as answered or expired on every open app window and after a reload.
 - On every other channel the labels are appended to the body as a numbered list, and `metadata.choices` is not set.
 - More than 8 labels, an empty label or a label over 64 characters is rejected with an error and nothing is sent.
 - Use it for a real decision the user must make, not for routine messages. Single choice only; there is no multi-select.
 
-See [TELEGRAM_ADAPTER.md](TELEGRAM_ADAPTER.md#choice-buttons) for tap handling, expiry and limits.
+See [TELEGRAM_ADAPTER.md](TELEGRAM_ADAPTER.md#choice-buttons) for Telegram tap handling, expiry and limits, and [APP_ADAPTER.md](APP_ADAPTER.md#choice-buttons-e86) for the app's message fields, `choice` event and tap frame.
 
-**Button objects (E81).** An item may be an object instead of a string: `{ "label": "...", "style": "primary|success|danger", "copy_text": "...", "url": "..." }`. `style` colors a normal button; `copy_text` (1-256 characters) makes a button that copies the text when tapped and sends nothing back; `url` (`http(s)://` or `tg://`) opens a link; `copy_text` and `url` are mutually exclusive. Strings and objects can be mixed. After a tap on a prompt that uses objects, the chosen button stays visible and disabled and the others are removed; a prompt of plain strings behaves exactly as before. Off Telegram an object renders as `N. label (copy_text or url)`.
+**Button objects (E81).** An item may be an object instead of a string: `{ "label": "...", "style": "primary|success|danger", "copy_text": "...", "url": "..." }`. `style` colors a normal button; `copy_text` (1-256 characters) makes a button that copies the text when tapped and sends nothing back; `url` (`http(s)://` or `tg://`) opens a link; `copy_text` and `url` are mutually exclusive. Strings and objects can be mixed. After a tap on a prompt that uses objects, the chosen button stays visible and disabled and the others are removed; a prompt of plain strings behaves exactly as before. In the Mac app, copy and link buttons work on the client (pasteboard, browser) and send nothing to the bus. On other channels an object renders as `N. label (copy_text or url)`.
 
 ### Send options
 

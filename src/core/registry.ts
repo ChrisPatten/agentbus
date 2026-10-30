@@ -160,8 +160,9 @@ export interface AdapterInstance {
   finalizeApproval?(request: ApprovalRequest): Promise<void>;
   /**
    * Clear the tappable choice buttons from a prompt that has expired (E74) —
-   * called by the choice-prompt expiry sweep. Adapters that don't render
-   * choice buttons don't implement this.
+   * called by the choice-prompt expiry sweep. Telegram empties the keyboard;
+   * the Mac app (E86) records a `choice` event so clients grey the buttons.
+   * Adapters that don't render choice buttons don't implement this.
    */
   finalizeChoicePrompt?(prompt: ChoicePrompt): Promise<void>;
   /**

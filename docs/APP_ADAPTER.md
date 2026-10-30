@@ -16,6 +16,7 @@ adapters:
     event_retention_days: 30
     ping_interval_ms: 30000
     main_idle_rotation_ms: 43200000   # E69; 0 disables Main's idle rotation
+    choice_ttl_hours: 24              # E86; unanswered choice buttons expire after this long
     pending_context:                  # E69; foreign messages (and E82 shared notes) injected into the next Main turn
       max_items: 10
       max_chars: 4000
@@ -51,6 +52,7 @@ pipeline:
 | `max_upload_bytes` | `26214400` | Largest upload (`413` above it) |
 | `event_retention_days` | `30` | Replay window for durable events |
 | `ping_interval_ms` | `30000` | WebSocket ping interval (minimum 1000) |
+| `choice_ttl_hours` | `24` | E86: hours before an unanswered choice-button prompt expires. See [Choice buttons](#choice-buttons-e86) |
 | `main_idle_rotation_ms` | `43200000` (12 h) | Retire Main's Claude session after this long with no operator message and no send from a Main turn. `0` disables rotation. See [Main](#main-one-continuous-conversation) |
 | `pending_context.max_items` | `10` | Most foreign messages injected into one Main turn; older ones are counted as omitted |
 | `pending_context.max_chars` | `4000` | Character budget for the injected item lines (the intro line doesn't count). Also the longest note `share_context` accepts |
@@ -146,6 +148,62 @@ Other client frames:
 
 Only app topic sessions can be renamed; Main and foreign sessions cannot. `mark_read` updates the per-contact read marker and sends a `session` event so other open clients update their unread count. For Main, `mark_read` accepts any Main row id and a `seq` of an event on any Main row; the effective marker is the highest one across Main's rows, so rotation never resets it. `ping` is an optional application-level check in addition to WebSocket protocol pings.
 
+## Choice buttons (E86)
+
+An agent `reply` / `send_message` with `choices`, and a bus command that answers with choices (E54, for example `/model`), reach the app as buttons. The app channel gets no numbered list and no "reply with a number" follow-up: `supportsChoiceButtons` (`src/choices/validate.ts`) is true for Telegram channels and `app`, so `applyChoices` and `deliverCommandResponse` put `metadata.choices` (and, for commands, `metadata.choice_commands`) on the envelope as they do for Telegram. Every other channel keeps the numbered list. All additions below are optional; clients ignore fields, event kinds and ack reasons they don't know, and the protocol stays version **1**.
+
+**Prompt storage.** `AppAdapter.persist` writes a `choice_prompts` row (`channel = 'app'`) in the same transaction as the transcript row, when at least one item is a callback button (not `copy_text` or `url`). `platform_message_id` and `bus_message_id` are both the envelope id; `topic` is the prompt session's topic; `contact_id` is the recipient. A retried delivery finds the existing row and creates no second prompt. `adapters.app.choice_ttl_hours` (default 24) sets the expiry.
+
+**Message fields.** `messageInfo` (history items and `message` event `data`) adds, on an outbound `app` row whose metadata has valid `choices`:
+
+```json
+"choices": {
+  "prompt_id": "<uuid>" | null,
+  "items": [{ "label": "Approve", "style": "success", "copy_text": "...", "url": "https://..." }],
+  "status": "open" | "answered" | "expired",
+  "chosen_index": 1 | null
+}
+```
+
+The items come from the transcript metadata; the state is read from `choice_prompts` (joined on `bus_message_id`) each time, so history pages and a reset reload always show the current state. `prompt_id` is null when no item is a callback button (every item copies or links); `status` is then always `open`. An `open` prompt past its `expires_at` reads as `expired` before the sweep marks it. `style`, `copy_text` and `url` are each optional, and an item never has both `copy_text` and `url`. Rows from other channels (a Telegram prompt mirrored into the app) carry no `choices`.
+
+An inbound row that is a tap (any channel; its metadata has `choice_prompt_id` and `choice_index`) adds `"choice_answer": { "prompt_id": "<uuid>", "index": 1, "label": "Approve" }`. The label is `metadata.choice_label` (set by app taps), else the prompt's label at that index.
+
+**The `choice` event.** When a prompt is answered (after a tap) or expires (the expiry sweep calls `AppAdapter.finalizeChoicePrompt`; a tap that finds the prompt past its expiry records it at once), the bus records one durable `choice` event in the per-contact `seq` stream:
+
+```json
+{ "type": "event", "seq": 812, "event": "choice",
+  "data": { "message_id": "<prompt message id>", "session_id": "...", "conversation_id": "...",
+            "choices": { "prompt_id": "...", "items": [...], "status": "answered", "chosen_index": 1 } } }
+```
+
+`data.choices` is the full object above in its current state. The client replaces the cached message's `choices` with it, and ignores the event when the message isn't cached (history carries the state). A choice event whose message is hidden or whose session isn't visible is skipped, like a message event. Choice events never count toward `unread_count` and never add rows to history pages: both queries read `kind = 'message'` only.
+
+**The `choice` frame.** A tap sends:
+
+```json
+{"type":"choice","client_msg_id":"<uuid>","prompt_id":"<uuid>","index":1}
+{"type":"ack","client_msg_id":"<uuid>","message_id":"…","session_id":"…","status":"queued"}
+{"type":"ack","client_msg_id":"<uuid>","status":"rejected","reason":"already_answered"}
+```
+
+`index` is the item's position in `items`; only items without `copy_text` and `url` may be sent (copy and link buttons are handled on the client and send nothing). The handler (`src/http/app-routes.ts`) checks that the prompt is an `app` prompt addressed to this contact, on a message in a session the contact can see, then calls `resolveChoiceTap` (`src/choices/tap.ts`), which makes the atomic `open -> answered` flip, so a double tap injects once. On `answered` it injects the pick through `submitInbound` with `channel: app`, `reply_to` = the prompt message, the body `[tapped] <label>` (or the choice's slash command, E54), metadata `choice_prompt_id`, `choice_index`, `choice_label`, and `bound_session_id` = the prompt message's session. If that session has ended, `bound_session_id` is dropped and normal routing picks the session (the prompt session's topic for an app session, `general` for a foreign one), so the answer may land in a new session. It then records the `choice` event and acks.
+
+| Ack | Meaning |
+|---|---|
+| `queued` | The tap was injected as `[tapped] <label>` |
+| `command` | The choice's slash command ran |
+| `rejected`, `already_answered` | Final. The state arrives in a `choice` event. A retry after a lost ack gets this too |
+| `rejected`, `expired` | The prompt has expired |
+| `rejected`, `forbidden` | The prompt is addressed to another contact |
+| `rejected`, `not_found` | Unknown prompt, a prompt from another channel, or a message this contact can't see |
+| `rejected`, `invalid_choice` | Index out of range, a copy or link button, or a malformed frame with a valid `client_msg_id` |
+| `rejected`, other text | Injection failed (`delivery_failed`) or nothing accepted the message; the prompt is reopened so the human can tap again |
+
+A frame without a valid `client_msg_id` gets `{"type":"error","code":"invalid_choice"}`. Taps are not stored in `app_sends`: a retry is answered from the prompt's state. A rejected tap writes no inbound row, except a tap that the pipeline accepted but nothing enqueued (for example a paused adapter); that row stays and the prompt is reopened.
+
+**Migration 043.** `app_events` is rebuilt to allow `kind = 'choice'` and add a nullable `choice_prompt_id`. A choice event points at the prompt message's transcript row through the existing `transcript_id`. The migration drops the three `app_*` triggers from 024 (they reference `app_events`), copies every row with its `seq` and `rotation` into the new table, drops the old one, renames the new one, and recreates both indexes and the three triggers unchanged. `app_event_counters` is untouched, so `seq` continues where it was. Choice events take their `seq` the way `recordSessionEvent` does (bump `app_event_counters`, insert at the new value) in `recordChoiceEvent` (`src/app/store.ts`).
+
 ## Main: one continuous conversation
 
 Main (E69) behaves like a Telegram DM. The operator sees one conversation with all its scrollback, while the bus manages Claude sessions underneath it. Each Claude session is still its own `sessions` row ("one row = one context window = one `claude_session_id`"); all of Main's rows share the conversation `appConversationId(contact, 'general')` (`mainConversationId` in `src/app/main.ts`). Helpers there: `isMainConversation`, `isMainSession`, `rotateMainSession`, `mainActivityClock`, `rotateIdleMainSessions`.
@@ -220,7 +278,7 @@ npx tsx scripts/app-client.ts send new "Plan a trip" "Travel"
 npx tsx scripts/app-client.ts sessions
 ```
 
-Use a returned `session_id` with `history` or `send session:<uuid>`. To test an attachment, upload a small PDF and copy its returned `id` into `send-file`:
+Use a returned `session_id` with `history` or `send session:<uuid>`. A history entry with `choices` has a `prompt_id`; tap a button with `choose <prompt-id> <index>` (index from 0) and watch for the `choice` event. To test an attachment, upload a small PDF and copy its returned `id` into `send-file`:
 
 ```bash
 npx tsx scripts/app-client.ts upload ./sample.pdf

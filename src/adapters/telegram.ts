@@ -38,7 +38,8 @@ import type { ApprovalDecision, ApprovalRequest } from '../approvals/types.js';
 import type { ResolveApprovalOutcome } from '../approvals/resolve.js';
 import { ChoiceStore } from '../choices/store.js';
 import { DEFAULT_CHOICE_TTL_MS, MAX_CHOICES, type ChoiceButtonAttrs, type ChoicePrompt } from '../choices/types.js';
-import { choicesSchema, choiceCommandsSchema, choiceAttrs, choiceLabel } from '../choices/validate.js';
+import { hasCallbackButton, parseChoiceCommands, parseChoices, type ParsedChoices } from '../choices/parse.js';
+import { resolveChoiceTap } from '../choices/tap.js';
 import { InputPromptStore, type InputKind, type InputPrompt } from '../choices/input-store.js';
 import { OutboundStore, type OutboundKind } from '../outbound/store.js';
 import { readSendOptions, type SendOptions } from '../outbound/send-options.js';
@@ -333,12 +334,6 @@ export function buildChoiceKeyboard(
   const rows: InlineButton[][] = [];
   for (let i = 0; i < built.length; i += perRow) rows.push(built.slice(i, i + perRow));
   return { inline_keyboard: rows };
-}
-
-/** True if at least one of `count` buttons is a callback button (not copy_text/url) — only then is there anything to answer. */
-function hasCallbackButton(buttons: Array<ChoiceButtonAttrs | null> | undefined, count: number): boolean {
-  if (!buttons) return count > 0;
-  return buttons.some((b) => !b || (b.copy_text === undefined && b.url === undefined));
 }
 
 /** Telegram's description from a failed call, without the "Telegram API error:" boilerplate or any token. */
@@ -1759,36 +1754,14 @@ export class TelegramAdapter implements AdapterInstance {
     return this.choiceStoreInstance;
   }
 
-  /**
-   * `metadata.choices` if valid (see choicesSchema), else undefined (message sent without buttons).
-   * `buttons` is parallel to `labels` and present only when some item is an E81 button object.
-   */
-  private parseChoices(raw: unknown): { labels: string[]; buttons?: Array<ChoiceButtonAttrs | null> } | undefined {
-    if (raw === undefined) return undefined;
-    const parsed = choicesSchema.safeParse(raw);
-    if (!parsed.success) {
-      console.warn(`${this.tag} Ignoring invalid metadata.choices: ${parsed.error.issues[0]?.message ?? 'invalid'}`);
-      return undefined;
-    }
-    const labels = parsed.data.map(choiceLabel);
-    const attrs = parsed.data.map(choiceAttrs);
-    return attrs.some((a) => a) ? { labels, buttons: attrs } : { labels };
+  /** `metadata.choices` if valid, else undefined (message sent without buttons). See src/choices/parse.ts. */
+  private parseChoices(raw: unknown): ParsedChoices | undefined {
+    return parseChoices(raw, this.tag);
   }
 
-  /**
-   * `metadata.choice_commands` (E54): per-choice slash-command payloads, parallel
-   * to the labels. Invalid or wrong-length input is dropped (plain E74 buttons).
-   */
+  /** `metadata.choice_commands` (E54), parallel to the labels; invalid input is dropped. See src/choices/parse.ts. */
   private parseChoiceCommands(raw: unknown, labelCount: number): Array<string | null> | undefined {
-    if (raw === undefined) return undefined;
-    const parsed = choiceCommandsSchema.safeParse(raw);
-    if (!parsed.success || parsed.data.length !== labelCount) {
-      console.warn(
-        `${this.tag} Ignoring invalid metadata.choice_commands: ${parsed.success ? 'length does not match choices' : (parsed.error.issues[0]?.message ?? 'invalid')}`,
-      );
-      return undefined;
-    }
-    return parsed.data;
+    return parseChoiceCommands(raw, labelCount, this.tag);
   }
 
   private persistChoicePrompt(
@@ -1861,23 +1834,16 @@ export class TelegramAdapter implements AdapterInstance {
     contactId: string,
     answer: (text: string) => Promise<unknown>,
   ): Promise<void> {
-    const prompt = this.choiceStore.getById(promptId);
-    if (!prompt) {
-      await answer('Prompt not found');
-      return;
-    }
-    if (prompt.contact_id && prompt.contact_id !== contactId) {
-      console.error(`${this.tag} Choice ${promptId} tapped by ${contactId} but addressed to ${prompt.contact_id}`);
-      await answer('Not authorized');
-      return;
-    }
-
     const chat = query.message?.chat.id;
     const messageId = query.message?.message_id;
-    const result = this.choiceStore.answer(promptId, index, `contact:${contactId}`);
+    const result = resolveChoiceTap(this.choiceStore, promptId, index, contactId);
     switch (result.outcome) {
       case 'not_found':
         await answer('Prompt not found');
+        return;
+      case 'forbidden':
+        console.error(`${this.tag} Choice ${promptId} tapped by ${contactId} but addressed to ${result.prompt?.contact_id}`);
+        await answer('Not authorized');
         return;
       case 'already_answered':
         await answer('Already answered');
@@ -1895,21 +1861,20 @@ export class TelegramAdapter implements AdapterInstance {
       case 'answered':
         break;
     }
+    const { prompt } = result;
 
     // E54: a choice that carries a command payload runs that slash command as
     // the user's own message (through the normal inbound/command path, after
     // all of the checks above); every other choice stays "[tapped] <label>".
-    const command = prompt.commands?.[index] ?? null;
     try {
       const message: InboundMessage = {
         channel: prompt.channel,
         ...(prompt.topic && prompt.topic !== 'general' ? { topic: prompt.topic } : {}),
         sender: String(query.from.id),
         reply_to: prompt.bus_message_id,
-        payload: { type: 'text', body: command ?? `[tapped] ${result.label}` },
+        payload: { type: 'text', body: result.body },
         metadata: {
-          choice_prompt_id: promptId,
-          choice_index: index,
+          ...result.metadata,
           ...(chat !== undefined && messageId !== undefined
             ? {
                 telegram_chat_id: chat,

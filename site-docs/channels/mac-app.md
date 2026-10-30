@@ -18,6 +18,7 @@ The Mac app and its bus channel are built and tested, but haven't yet been throu
 - **Reply to part of a message.** Select the text you want to answer, then right-click and choose **Reply**, or press ⇧⌘R. The selection is added to your draft as a quote, with its bold, links, headings and lists intact, and the cursor is placed after it for your answer. Reply again to quote more, from the same message or others in the conversation. The agent receives the quote as part of your message.
 - **Reply to a message.** Right-click a message, with nothing selected, and choose **Reply**. A bar above the message box shows what you're replying to; press Esc or click ✕ to cancel. The agent sees what you replied to above your message. Your sent message shows a "Replying to…" note, and clicking it jumps to the original, loading older history if needed. When the agent replies to an earlier message rather than your latest one, the app shows the quote on the agent's message too. Replying needs a bus that supports it; update the bus along with the app.
 - **Run commands.** Type `/` to pick from the bus's [slash commands](/features/slash-commands). The **Session** menu has Stop (⌘.) and Clear Session (⇧⌘K), and **More** has Cost.
+- **Answer with a click.** When the agent offers choices, they appear as buttons under its message. See [Buttons](#buttons) below.
 - **See what the agent is doing.** While a turn runs, the conversation shows "Working" with a timer and a short line saying what the agent is doing, such as "Reading a file" (see [`tool_status`](/reference/configuration#tool-status)). If all the agent's slots are busy, it shows "Waiting for a free slot". The sidebar marks conversations that are running, queued or unread.
 - **Get notified.** The app notifies you of agent messages in conversations you aren't looking at, and shows unread counts on its Dock icon. Message previews can be hidden in Settings.
 
@@ -34,6 +35,18 @@ Main keeps everything in one place. Your messages, the agent's replies, and the 
 **`/clear` works the same way.** Clearing Main starts a fresh Claude session right away and shows "New context · /clear". Main keeps its scrollback, your unread count and your draft.
 
 **Nothing is lost while the app is closed.** The bus records every message and session change. When the app reconnects, after sleep, a network change or days away, it catches up on everything that happened.
+
+## Buttons
+
+When your agent needs a decision from you, it can put up to 8 buttons under its message. Click one and the agent receives `[tapped] <label>` as your answer, in the same conversation. Typing an answer still works too.
+
+- **After you click**, the button you chose shows a checkmark and the others are disabled. The conversation shows a short "You chose *label*" line instead of a message from you. Every Mac showing the conversation updates, and so does the history after a reload.
+- **Only you can answer, and only once.** A second click is refused. Buttons stop working after 24 hours (`choice_ttl_hours`) and show "Expired".
+- **Buttons need a connection.** While the app is offline, buttons are disabled rather than queued.
+- **Styled, copy and link buttons.** A button can be colored as a primary, success or danger action, copy a piece of text to your clipboard, or open a link. Copy and link buttons don't send anything back to the agent.
+- **Commands use buttons too.** `/model` shows a picker of models, and clicking one runs the command for you.
+
+Buttons need a bus and an app that both support them, so update the two together. An older app shows these messages without any choices.
 
 ## Set up the bus
 
@@ -83,6 +96,7 @@ Restart the bus.
 | `event_retention_days` | `30` | How long the bus keeps the history the app uses to catch up. An app that's been away longer reloads from scratch. |
 | `max_upload_bytes` | `26214400` (25 MB) | Largest file the app can upload |
 | `ping_interval_ms` | `30000` | How often the bus checks the connection is alive |
+| `choice_ttl_hours` | `24` | How long [buttons](#buttons) stay clickable |
 | `main_idle_rotation_ms` | `43200000` (12 hours) | How long Main can go without a message from you or a reply from the agent before its Claude session is journaled and the next message starts a fresh one. `0` turns this off. |
 | `pending_context.max_items` | `10` | The most updates the agent catches up on in one go when you reply in Main. Older ones are summarized as "N older messages omitted". |
 | `pending_context.max_chars` | `4000` | How much text those updates can take up in total. It's also the longest note `share_context` accepts. |

@@ -81,8 +81,8 @@ export const choiceCommandsSchema = z
 
 export const CHOICES_DESCRIPTION =
   `Optional single-choice answers (1-${MAX_CHOICES} labels, each at most ${MAX_CHOICE_LABEL_LENGTH} characters). ` +
-  'On Telegram they render as tappable buttons and the tap arrives back as a normal inbound message ' +
-  '"[tapped] <label>"; typed replies still work. On other channels they are appended to the body as a ' +
+  'On Telegram and in the Mac app they render as tappable buttons and the tap arrives back as a normal inbound ' +
+  'message "[tapped] <label>"; typed replies still work. On other channels they are appended to the body as a ' +
   'numbered list. Use only for a real decision the user must make, not for routine messages. ' +
   'An item may instead be an object {label, style?: "primary"|"success"|"danger", copy_text?, url?}: ' +
   'copy_text makes a button that copies that text when tapped (nothing is sent back), url makes a link button; ' +
@@ -93,9 +93,17 @@ export function isTelegramChannel(channel: string): boolean {
 }
 
 /**
- * Applies `choices` to an outbound message for `channel`: Telegram gets
- * `metadata.choices` (the adapter renders the keyboard); every other channel
- * gets a numbered list appended to the body.
+ * E86 — channels whose adapter draws `metadata.choices` as buttons: Telegram
+ * (inline keyboard, E74) and the Mac app (`app`, buttons in the transcript).
+ */
+export function supportsChoiceButtons(channel: string): boolean {
+  return isTelegramChannel(channel) || channel === 'app';
+}
+
+/**
+ * Applies `choices` to an outbound message for `channel`: Telegram and the Mac
+ * app get `metadata.choices` (the adapter renders the buttons); every other
+ * channel gets a numbered list appended to the body.
  */
 export function applyChoices(
   channel: string,
@@ -104,7 +112,7 @@ export function applyChoices(
   choices: ChoiceItem[] | undefined,
 ): { body: string; metadata: Record<string, unknown> } {
   if (!choices || choices.length === 0) return { body, metadata };
-  if (isTelegramChannel(channel)) {
+  if (supportsChoiceButtons(channel)) {
     return { body, metadata: { ...metadata, choices } };
   }
   const list = choices

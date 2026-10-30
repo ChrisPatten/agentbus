@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { applyChoices, choiceCommandsSchema, choicesSchema, isTelegramChannel } from './validate.js';
+import { applyChoices, choiceCommandsSchema, choicesSchema, isTelegramChannel, supportsChoiceButtons } from './validate.js';
 
 describe('choicesSchema', () => {
   it('accepts 1 to 8 labels of up to 64 characters', () => {
@@ -23,6 +23,15 @@ describe('applyChoices', () => {
       expect(isTelegramChannel(ch)).toBe(true);
       expect(applyChoices(ch, 'Pick', { a: 1 }, ['A', 'B'])).toEqual({ body: 'Pick', metadata: { a: 1, choices: ['A', 'B'] } });
     }
+  });
+
+  it('puts choices in metadata for the Mac app (E86), with no numbered list', () => {
+    expect(supportsChoiceButtons('app')).toBe(true);
+    expect(supportsChoiceButtons('telegram:peggy')).toBe(true);
+    expect(supportsChoiceButtons('email')).toBe(false);
+    expect(supportsChoiceButtons('application')).toBe(false);
+    expect(applyChoices('app', 'Pick', {}, ['A', { label: 'B', url: 'https://example.com' }]))
+      .toEqual({ body: 'Pick', metadata: { choices: ['A', { label: 'B', url: 'https://example.com' }] } });
   });
 
   it('appends a numbered list for other channels and adds no metadata', () => {

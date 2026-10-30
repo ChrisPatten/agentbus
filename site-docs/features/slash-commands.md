@@ -9,7 +9,7 @@ Slash commands let you control the bus from any chat. Type a message starting wi
 - **Commands are recorded** in the conversation's transcript like any other message.
 - **Other commands go to your agent's Claude Code.** On `cc-pool` and `cc-headless`, a command the bus doesn't have, such as `/compact` or `/context`, is passed on to Claude Code. See [Claude Code commands](#claude-code-commands). On other runtimes you get `Unknown command: /foo`, with a pointer to `/help`.
 - **Telegram and the Mac app list the commands** as you type `/`. In Telegram groups, `/status@YourBot` works as well as `/status`.
-- **Some commands offer choices.** On Telegram they're buttons you tap. On other channels they're a numbered list: reply with the number within 10 minutes.
+- **Some commands offer choices.** On Telegram and in the Mac app they're buttons you tap or click. On other channels they're a numbered list: reply with the number within 10 minutes.
 
 **Every contact can use every command.** There are no per-person permissions yet, so anyone listed under `contacts` can, for example, pause a channel.
 

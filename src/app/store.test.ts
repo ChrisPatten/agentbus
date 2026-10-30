@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { runMigrations } from '../db/schema.js';
 import { ensureOutboundAppSession } from './outbound.js';
-import { createAppSession, eventBounds, history, listSessions, quotableMessage, readEvents, recordSessionEvent, sessionInfo, visibleSession } from './store.js';
+import { createAppSession, eventBounds, history, listSessions, quotableMessage, readEvents, recordChoiceEvent, recordSessionEvent, sessionInfo, visibleSession } from './store.js';
+import { ChoiceStore } from '../choices/store.js';
 import { upsertThread } from '../pipeline/thread-store.js';
 import { rotateMainSession } from './main.js';
 
@@ -431,6 +432,93 @@ describe('Main as one conversation (E69)', () => {
         text: 'Two calendar items', created_at: created, source: 'Ambient scan' });
       expect(quotableMessage(f.db, 'alice', 'agent:work', 'scan', main.conversationId)).not.toBeNull();
       expect(quotableMessage(f.db, 'alice', 'agent:work', 'scan', 'some-other-conversation')).toBeNull();
+    } finally { f.db.close(); }
+  });
+});
+
+describe('choice buttons on app messages (E86 S86.3)', () => {
+  function seeded() {
+    const f = fixture();
+    const conv = f.addSession('alice', 'agent:work', 'app', 'general', 'main');
+    f.addMessage('alice', 'main', conv, 'ask', 'outbound', 'Which one?',
+      { choices: ['A', { label: 'B', style: 'success' }, { label: 'Copy', copy_text: 'xyz' }, { label: 'Docs', url: 'https://example.com' }] });
+    new ChoiceStore(f.db).create({ id: 'p1', channel: 'app', topic: 'general', contactId: 'alice', labels: ['A', 'B', 'Copy', 'Docs'],
+      buttons: [null, { style: 'success' }, { copy_text: 'xyz' }, { url: 'https://example.com' }],
+      platformMessageId: 'ask', busMessageId: 'ask' }, 24 * 60 * 60 * 1000);
+    return { ...f, conv, store: new ChoiceStore(f.db) };
+  }
+  const items = [{ label: 'A' }, { label: 'B', style: 'success' }, { label: 'Copy', copy_text: 'xyz' }, { label: 'Docs', url: 'https://example.com' }];
+
+  it('history carries the items with the prompt state from the join', () => {
+    const f = seeded();
+    try {
+      const page = () => history(f.db, 'alice', 'agent:work', 'main', 50)!.messages;
+      expect(page()[0]!['choices']).toEqual({ prompt_id: 'p1', items, status: 'open', chosen_index: null });
+      f.store.answer('p1', 1, 'contact:alice');
+      expect(page()[0]!['choices']).toEqual({ prompt_id: 'p1', items, status: 'answered', chosen_index: 1 });
+    } finally { f.db.close(); }
+  });
+
+  it('a message with choices but no prompt row is open with a null prompt_id; others carry no choices', () => {
+    const f = fixture();
+    try {
+      const conv = f.addSession('alice', 'agent:work', 'app', 'general', 'main');
+      f.addMessage('alice', 'main', conv, 'links', 'outbound', 'See', { choices: [{ label: 'Docs', url: 'https://example.com' }] });
+      f.addMessage('alice', 'main', conv, 'plain', 'outbound', 'Hi');
+      const [links, plain] = history(f.db, 'alice', 'agent:work', 'main', 50)!.messages;
+      expect(links!['choices']).toEqual({ prompt_id: null, items: [{ label: 'Docs', url: 'https://example.com' }], status: 'open', chosen_index: null });
+      expect(plain).not.toHaveProperty('choices');
+      expect(plain).not.toHaveProperty('choice_answer');
+    } finally { f.db.close(); }
+  });
+
+  it('an open prompt past its expiry reads as expired', () => {
+    const f = seeded();
+    try {
+      f.db.prepare(`UPDATE choice_prompts SET expires_at = '2000-01-01T00:00:00.000Z'`).run();
+      expect(history(f.db, 'alice', 'agent:work', 'main', 50)!.messages[0]!['choices']).toMatchObject({ status: 'expired', chosen_index: null });
+    } finally { f.db.close(); }
+  });
+
+  it('an inbound tap row carries choice_answer, with the label from metadata or the prompt', () => {
+    const f = seeded();
+    try {
+      f.addMessage('alice', 'main', f.conv, 'tap1', 'inbound', '[tapped] B', { choice_prompt_id: 'p1', choice_index: 1, choice_label: 'B' });
+      f.addMessage('alice', 'main', f.conv, 'tap2', 'inbound', '/model a', { choice_prompt_id: 'p1', choice_index: 0 });
+      const messages = history(f.db, 'alice', 'agent:work', 'main', 50)!.messages;
+      expect(messages[1]!['choice_answer']).toEqual({ prompt_id: 'p1', index: 1, label: 'B' });
+      expect(messages[2]!['choice_answer']).toEqual({ prompt_id: 'p1', index: 0, label: 'A' });
+      expect(messages[1]).not.toHaveProperty('choices');
+    } finally { f.db.close(); }
+  });
+
+  it('replays a choice event with the current state, never as unread or a duplicate history row', () => {
+    const f = seeded();
+    try {
+      const before = sessionInfo(f.db, visibleSession(f.db, 'alice', 'agent:work', 'main')!, 'alice')['unread_count'];
+      f.store.answer('p1', 0, 'contact:alice');
+      expect(recordChoiceEvent(f.db, f.store.getById('p1')!)).toBe(true);
+      const latest = eventBounds(f.db, 'alice').latest;
+      const events = readEvents(f.db, 'alice', 'agent:work', 0, latest);
+      const choice = events.filter((e) => e.event === 'choice');
+      expect(choice).toEqual([{ seq: latest, event: 'choice', data: { message_id: 'ask', session_id: 'main', conversation_id: f.conv,
+        choices: { prompt_id: 'p1', items, status: 'answered', chosen_index: 0 } } }]);
+      expect(events.filter((e) => e.event === 'message')).toHaveLength(1);
+      expect(history(f.db, 'alice', 'agent:work', 'main', 50)!.messages.map((m) => m['message_id'])).toEqual(['ask']);
+      expect(history(f.db, 'alice', 'agent:work', 'main', 50)!.messages[0]!['seq']).toBeLessThan(latest);
+      expect(sessionInfo(f.db, visibleSession(f.db, 'alice', 'agent:work', 'main')!, 'alice')['unread_count']).toBe(before);
+    } finally { f.db.close(); }
+  });
+
+  it('skips a choice event whose message is hidden or whose session is not visible', () => {
+    const f = seeded();
+    try {
+      recordChoiceEvent(f.db, f.store.getById('p1')!);
+      expect(readEvents(f.db, 'bob', 'agent:work', 0, 100).some((e) => e.event === 'choice')).toBe(false);
+      expect(readEvents(f.db, 'alice', 'agent:other', 0, 100).some((e) => e.event === 'choice')).toBe(false);
+      f.db.prepare(`UPDATE transcripts SET metadata = json_set(metadata, '$.context_only', 1) WHERE message_id = 'ask'`).run();
+      expect(readEvents(f.db, 'alice', 'agent:work', 0, 100).some((e) => e.event === 'choice')).toBe(false);
+      expect(recordChoiceEvent(f.db, { id: 'p2', bus_message_id: 'missing' })).toBe(false);
     } finally { f.db.close(); }
   });
 });

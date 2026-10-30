@@ -3,6 +3,7 @@
  *
  * APP_TOKEN=... npx tsx scripts/app-client.ts send main "Hello"
  * APP_TOKEN=... npx tsx scripts/app-client.ts watch
+ * APP_TOKEN=... npx tsx scripts/app-client.ts choose <prompt-id> 1
  * See docs/APP_ADAPTER.md for the full walkthrough.
  */
 import { readFile, writeFile } from 'node:fs/promises';
@@ -33,6 +34,7 @@ Commands:
   create [title]                  Create an empty app topic
   rename <session-id> <title>     Rename an app topic
   read <session-id> <seq>         Mark a session read
+  choose <prompt-id> <index>      Tap a choice button (index is 0-based; see a message's choices.prompt_id)
   bad-token                       Check that an invalid token gets HTTP 401
 
 Environment: APP_CURSOR_FILE defaults to .app-client-cursor.json. watch and send
@@ -198,6 +200,11 @@ async function main(): Promise<void> {
   if (command === 'rename') {
     if (!args[1] || !args[2]) usage();
     await socketCommand({ type: 'rename_session', session_id: args[1], title: args[2] }); return;
+  }
+  if (command === 'choose') {
+    const index = Number(args[2]);
+    if (!args[1] || !Number.isSafeInteger(index) || index < 0) usage();
+    await socketCommand({ type: 'choice', client_msg_id: randomUUID(), prompt_id: args[1], index }); return;
   }
   if (command === 'read') {
     if (!args[1] || !args[2]) usage();

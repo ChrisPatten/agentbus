@@ -110,6 +110,52 @@ struct ReplyRef: Codable, Equatable {
     enum CodingKeys: String, CodingKey { case messageID = "message_id", senderName = "sender_name", text }
 }
 
+/// One button of an agent message's choice prompt (E86). A button with `copy_text` or `url` is handled on
+/// this Mac; any other is a callback that is sent to the bus as a `choice` frame.
+struct ChoiceItem: Codable, Equatable {
+    let label: String
+    /// "primary", "success" or "danger"; anything else draws the default button.
+    var style: String? = nil
+    var copyText: String? = nil
+    var url: String? = nil
+    var isCallback: Bool { copyText == nil && url == nil }
+    enum CodingKeys: String, CodingKey { case label, style, copyText = "copy_text", url }
+
+    enum Action: Equatable { case send, copy(String), open(URL), unavailable }
+    /// What a click does. A link opens only for http or https.
+    var action: Action {
+        if let copyText { return .copy(copyText) }
+        guard let url else { return .send }
+        guard let value = URL(string: url), ["http", "https"].contains(value.scheme?.lowercased() ?? "") else { return .unavailable }
+        return .open(value)
+    }
+}
+
+/// An agent message's buttons and their current state, from history pages, `message` events and `choice` events.
+struct ChoiceSet: Codable, Equatable {
+    /// Nil when no item is a callback: nothing goes back to the bus and `status` stays "open".
+    let promptID: String?
+    let items: [ChoiceItem]
+    /// "open", "answered" or "expired".
+    let status: String
+    let chosenIndex: Int?
+    enum CodingKeys: String, CodingKey { case promptID = "prompt_id", items, status, chosenIndex = "chosen_index" }
+
+    var isOpen: Bool { status == "open" }
+    var isExpired: Bool { status == "expired" }
+    /// Two buttons to a row when every label is 12 characters or fewer, otherwise one.
+    var columns: Int { items.count > 1 && items.allSatisfy { $0.label.count <= 12 } ? 2 : 1 }
+    func answered(_ index: Int) -> ChoiceSet { ChoiceSet(promptID: promptID, items: items, status: "answered", chosenIndex: index) }
+}
+
+/// On an inbound tap row: the prompt and button it answered.
+struct ChoiceAnswer: Codable, Equatable {
+    let promptID: String
+    let index: Int
+    let label: String
+    enum CodingKeys: String, CodingKey { case promptID = "prompt_id", index, label }
+}
+
 struct BusMessage: Codable, Identifiable {
     let messageID: String
     let sessionID: String
@@ -125,17 +171,21 @@ struct BusMessage: Codable, Identifiable {
     var replyTo: ReplyRef? = nil
     /// The row's conversation, so any of Main's rows maps to the one Main item (E69). Absent from older buses.
     var conversationID: String? = nil
+    /// An agent message's buttons (E86).
+    var choices: ChoiceSet? = nil
+    /// An operator row that is a button tap rather than typed text (E86).
+    var choiceAnswer: ChoiceAnswer? = nil
     var id: String { messageID }
     enum CodingKeys: String, CodingKey {
         case messageID = "message_id", sessionID = "session_id", seq, cursor
         case direction, arrivalChannel = "arrival_channel", body
         case createdAt = "created_at", scheduled, attachments, replyTo = "reply_to"
-        case conversationID = "conversation_id"
+        case conversationID = "conversation_id", choices, choiceAnswer = "choice_answer"
     }
 }
 
 extension BusMessage {
-    /// A malformed `reply_to` must not cost the whole message, so it decodes to nil instead of throwing.
+    /// A malformed `reply_to`, `choices` or `choice_answer` must not cost the whole message, so it decodes to nil instead of throwing.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         messageID = try c.decode(String.self, forKey: .messageID)
@@ -150,6 +200,8 @@ extension BusMessage {
         attachments = try c.decode([BusAttachment].self, forKey: .attachments)
         replyTo = try? c.decodeIfPresent(ReplyRef.self, forKey: .replyTo)
         conversationID = try? c.decodeIfPresent(String.self, forKey: .conversationID)
+        choices = try? c.decodeIfPresent(ChoiceSet.self, forKey: .choices)
+        choiceAnswer = try? c.decodeIfPresent(ChoiceAnswer.self, forKey: .choiceAnswer)
     }
 }
 
@@ -194,14 +246,21 @@ struct ClientFrame: Encodable {
     var seq: Int? = nil
     var requestID: String? = nil
     var replyTo: String? = nil
+    var promptID: String? = nil
+    var index: Int? = nil
     enum CodingKeys: String, CodingKey {
         case type, cursor, clientMsgID = "client_msg_id", target, body
         case attachmentIDs = "attachment_ids", sessionID = "session_id"
         case title, seq, requestID = "request_id", replyTo = "reply_to"
+        case promptID = "prompt_id", index
     }
     static func hello(_ cursor: Int) -> Self { Self(type: "hello", cursor: cursor) }
     static func send(_ id: String, target: BusTarget, body: String, attachments: [String], replyTo: String? = nil) -> Self {
         Self(type: "send", clientMsgID: id, target: target, body: body, attachmentIDs: attachments, replyTo: replyTo)
+    }
+    /// A button tap (E86). `index` is the item's position in the prompt's `items`.
+    static func choice(_ id: String, promptID: String, index: Int) -> Self {
+        Self(type: "choice", clientMsgID: id, promptID: promptID, index: index)
     }
 }
 
@@ -239,9 +298,13 @@ struct ServerFrame: Decodable {
         let session: BusSession?
         /// On a Main session event that follows a rotation: the row that ended.
         let rotated: SessionRotation?
+        /// On a `choice` event: the prompt's message and its current state (E86).
+        let messageID: String?
+        let choices: ChoiceSet?
         enum CodingKeys: String, CodingKey {
             case sessionID = "session_id", conversationID = "conversation_id", state
             case turnClass = "turn_class", typing, toolLines = "tool_lines", rotated
+            case messageID = "message_id", choices
         }
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -255,6 +318,8 @@ struct ServerFrame: Decodable {
             message = try? BusMessage(from: decoder)
             session = try? BusSession(from: decoder)
             rotated = try? c.decodeIfPresent(SessionRotation.self, forKey: .rotated)
+            messageID = try? c.decodeIfPresent(String.self, forKey: .messageID)
+            choices = try? c.decodeIfPresent(ChoiceSet.self, forKey: .choices)
         }
     }
 }

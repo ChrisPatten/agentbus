@@ -100,7 +100,7 @@ When your agent needs a decision from you, it can attach up to 8 buttons to a me
 
 Some [slash commands](/features/slash-commands) use buttons too: `/model` offers a picker of models, and tapping one runs the command for you.
 
-On other channels, the same choices arrive as a numbered list at the end of the message.
+The [Mac app](/channels/mac-app#buttons) shows the same choices as buttons. On other channels, they arrive as a numbered list at the end of the message.
 
 ## Cards, files and rich messages
 

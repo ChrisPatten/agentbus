@@ -53,7 +53,7 @@ Each item in `choices` is a label of up to 64 characters, or an object for a spe
 | `copy_text` | Text the button copies to your clipboard, up to 256 characters. Sends nothing back. |
 | `url` | A link the button opens (`https://`, `http://` or `tg://`). Sends nothing back. |
 
-A button can't have both `copy_text` and `url`. Plain labels and objects can be mixed. On Telegram, a tap on an ordinary button reaches the agent as `[tapped] <label>`. On other channels the choices are added to the message as a numbered list. See [Telegram buttons](/channels/telegram#buttons).
+A button can't have both `copy_text` and `url`. Plain labels and objects can be mixed. On Telegram and in the Mac app, a tap on an ordinary button reaches the agent as `[tapped] <label>`. On other channels the choices are added to the message as a numbered list. See [Telegram buttons](/channels/telegram#buttons) and [Mac app buttons](/channels/mac-app#buttons).
 
 ```json
 { "choices": ["Book it", { "label": "Cancel", "style": "danger" }, { "label": "Open the booking", "url": "https://example.com/b/123" }] }
