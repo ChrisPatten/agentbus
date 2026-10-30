@@ -10,6 +10,9 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+### Fixed
+- **`status` works in cc-headless conversation turns.** `mcp__agentbus__status` is now in the turn's `--allowedTools`, next to `reply` and `send_message`. Before, a `claude -p` turn refused the call unless the agent's own project settings allowed it: the status line still showed, but the agent got a permission error back.
+
 ## [0.17.0] - 2026-10-28
 
 ### Added

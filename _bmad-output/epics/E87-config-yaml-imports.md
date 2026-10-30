@@ -1,8 +1,8 @@
-# E86 — Config Imports: Layered YAML With Precedence
+# E87 — Config Imports: Layered YAML With Precedence
 
 | Field | Value |
 |---|---|
-| Epic ID | E86 |
+| Epic ID | E87 |
 | Dependencies | `src/config/loader.ts`, E66/E67 `agents.<id>` blocks, E48 cc-pool |
 | Story Count | 5 |
 | Estimated Complexity | M |
@@ -72,30 +72,30 @@ Diagnostics: a per-leaf source map feeds validation errors ("agents.peggy.memory
 
 ## Stories
 
-### S86.1 — Merge engine and loader wiring
+### S87.1 — Merge engine and loader wiring
 
 - New `src/config/imports.ts`: `loadYamlWithImports`, custom js-yaml schema for the tags, `deepMerge`.
 - `loader.ts` uses it and strips `imports` before Zod.
 
 **Acceptance:** `src/config/imports.test.ts` covers precedence, merge rules, resolution and cycle/depth; existing loader tests pass.
 
-### S86.2 — `allow` scoping
+### S87.2 — `allow` scoping
 
 - Per-import key-prefix allow list, enforced before the merge.
 
 **Acceptance:** a violation fails startup with file and key in the message.
 
-### S86.3 — Provenance and diagnostics
+### S87.3 — Provenance and diagnostics
 
 - Source map built during the merge; errors carry the file; `config --print/--explain`; startup log line.
 
 **Acceptance:** a bad value in an imported file is reported with that file's path.
 
-### S86.4 — Docs
+### S87.4 — Docs
 
 - "Splitting the file" section in the configuration reference, example in `config.yaml.example`, CHANGELOG.
 
-### S86.5 — Peggy migration
+### S87.5 — Peggy migration
 
 - Split `agentbus-config.yaml` into a bus file and `peggy-claude-code/agentbus.agent.yaml` (`agents.peggy`, `peggy-pool`, and routes/topics if decided); update the runbook in the same turn.
 - Verify with `config --print` against the pre-split parse, then a safe restart per the `agentbus-dev-workflow` skill.
