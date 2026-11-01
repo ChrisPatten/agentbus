@@ -24,12 +24,12 @@ import { registerAllTools, registerHeadlessTools, type HealthState } from '../mc
 import { installBusTokenFetch, resolveBusToken, resolveRemoteBusToken } from '../core/bus-auth.js';
 import type { MessageEnvelope } from '../types/envelope.js';
 import { formatMessagesForSampling } from './message-format.js';
+import { startPollLoop, type PollLoop } from './cc-poller.js';
 
 const AGENT_ID = process.env['AGENTBUS_AGENT_ID'] ?? 'claude';
 const TOOLS_ONLY = process.env['AGENTBUS_TOOLS_ONLY'] === 'true';
-const DEGRADED_THRESHOLD = 3;
-const DISCONNECTED_THRESHOLD = 10;
-const BACKOFF_INTERVAL_MS = 5000;
+/** E88 — set by cc-pool per pane launch; sent on every poll so the bus can fence stale launches. */
+const LAUNCH_ID = process.env['AGENTBUS_LAUNCH_ID']?.trim() || undefined;
 
 /**
  * Poll interval for this process: `AGENTBUS_POLL_INTERVAL_MS` (set by cc-pool
@@ -152,106 +152,15 @@ async function main(): Promise<void> {
 
   // ── Polling loop ────────────────────────────────────────────────────────────
 
-  let pollTimer: ReturnType<typeof setTimeout> | null = null;
+  let pollLoop: PollLoop | null = null;
   let shuttingDown = false;
-
-  async function poll(): Promise<void> {
-    if (shuttingDown) return;
-
-    try {
-      const res = await fetch(
-        `${busBaseUrl}/api/v1/messages/pending?agent=${AGENT_ID}&limit=10`
-      );
-
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}`);
-      }
-
-      const data = (await res.json()) as {
-        ok: boolean;
-        messages: MessageEnvelope[];
-        count: number;
-      };
-
-      // Ack each message and only buffer those that acked successfully
-      const acked: MessageEnvelope[] = [];
-      await Promise.all(
-        data.messages.map(async (envelope) => {
-          try {
-            const ackRes = await fetch(`${busBaseUrl}/api/v1/messages/${envelope.id}/ack`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ status: 'delivered' }),
-            });
-            if (ackRes.ok) {
-              acked.push(envelope);
-            } else {
-              console.error(`[agentbus] ack rejected for ${envelope.id}: HTTP ${ackRes.status}`);
-            }
-          } catch (err: unknown) {
-            console.error(`[agentbus] ack failed for ${envelope.id}: ${String(err)}`);
-          }
-        })
-      );
-
-      // Buffer messages and wake Claude Code via channel notification
-      if (acked.length > 0) {
-        processAckedMessages(acked, messageBuffer, (text) => {
-          sendChannelNotification(mcpServer.server, text);
-        });
-
-        // Now that Claude Code has the messages, signal each source adapter to
-        // start its typing indicator. Fire-and-forget — never blocks the poll loop.
-        // Email channels have no typing indicator, so skip them.
-        for (const envelope of acked) {
-          if (envelope.channel === 'email' || envelope.channel.startsWith('email:')) continue;
-          fetch(`${busBaseUrl}/api/v1/adapters/${envelope.channel}/typing`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ contact_id: envelope.sender }),
-          }).catch(() => {});
-        }
-      }
-
-      // Reset health on success
-      if (!healthState.busReachable) {
-        console.error('[agentbus] Bus reconnected');
-      }
-      healthState.busReachable = true;
-      healthState.consecutiveFailures = 0;
-      healthState.lastPollAt = new Date().toISOString();
-      healthState.status = 'healthy';
-    } catch (err) {
-      healthState.consecutiveFailures++;
-      healthState.busReachable = false;
-
-      if (healthState.consecutiveFailures === DEGRADED_THRESHOLD) {
-        healthState.status = 'degraded';
-        console.error(
-          `[agentbus] Bus unreachable after ${DEGRADED_THRESHOLD} failures — ` +
-            `backing off to ${BACKOFF_INTERVAL_MS}ms intervals`
-        );
-      } else if (healthState.consecutiveFailures === DISCONNECTED_THRESHOLD) {
-        healthState.status = 'disconnected';
-        console.error(`[agentbus] Disconnected (${DISCONNECTED_THRESHOLD}+ consecutive failures)`);
-      }
-    }
-
-    if (!shuttingDown) {
-      const nextInterval =
-        healthState.consecutiveFailures >= DEGRADED_THRESHOLD ? BACKOFF_INTERVAL_MS : pollIntervalMs;
-      pollTimer = setTimeout(() => {
-        void poll();
-      }, nextInterval);
-    }
-  }
 
   // ── Shutdown ────────────────────────────────────────────────────────────────
 
   async function shutdown(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
-    if (pollTimer !== null) clearTimeout(pollTimer);
+    pollLoop?.stop();
     await mcpServer.close();
     process.exit(0);
   }
@@ -272,9 +181,26 @@ async function main(): Promise<void> {
     console.error(`[agentbus] cc adapter ready (tools-only mode) — serving headless tool subset`);
   } else {
     console.error(
-      `[agentbus] claude-code adapter ready — polling ${busBaseUrl} for agent:${AGENT_ID} every ${pollIntervalMs}ms`
+      `[agentbus] claude-code adapter ready — polling ${busBaseUrl} for agent:${AGENT_ID} every ${pollIntervalMs}ms` +
+        (LAUNCH_ID ? ` (launch ${LAUNCH_ID})` : '')
     );
-    void poll();
+    pollLoop = startPollLoop({
+      busBaseUrl,
+      agentId: AGENT_ID,
+      ...(LAUNCH_ID ? { launchId: LAUNCH_ID } : {}),
+      pollIntervalMs,
+      healthState,
+      onMessages: (acked) => {
+        processAckedMessages(acked, messageBuffer, (text) => {
+          sendChannelNotification(mcpServer.server, text);
+        });
+      },
+    });
+    // E88: a stale launch only stops polling. The MCP server stays up so the
+    // Claude session it belongs to doesn't see its tools vanish mid-turn.
+    void pollLoop.stopped.then((reason) => {
+      if (reason === 'stale_launch') healthState.status = 'disconnected';
+    });
   }
 }
 

@@ -65,6 +65,16 @@ describe('writePaneMcpConfig', () => {
     expect(written.mcpServers.agentbus.env.AGENTBUS_POLL_INTERVAL_MS).toBe('250');
   });
 
+  it('E88: passes the launch id to cc.ts as AGENTBUS_LAUNCH_ID next to AGENTBUS_AGENT_ID', () => {
+    const { workingDir, outDir } = setupFixture();
+
+    const outPath = writePaneMcpConfig(baseOpts({ workingDir, outDir, launchId: 'launch-abc' }));
+    const env = JSON.parse(readFileSync(outPath, 'utf-8')).mcpServers.agentbus.env;
+
+    expect(env.AGENTBUS_AGENT_ID).toBe('peggy-pool-2');
+    expect(env.AGENTBUS_LAUNCH_ID).toBe('launch-abc');
+  });
+
   it('preserves an unrelated "bmp" server from the project .mcp.json and still sets agentbus correctly', () => {
     const { workingDir, outDir } = setupFixture();
     const projectConfig = {

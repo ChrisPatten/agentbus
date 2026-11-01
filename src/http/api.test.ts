@@ -296,6 +296,8 @@ describe('HTTP API', () => {
         ok: true,
         agentId: 's48-4-never-polled',
         lastPollAt: null,
+        lastLaunchId: null,
+        registeredLaunchId: null,
       });
     });
 
