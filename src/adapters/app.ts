@@ -5,7 +5,11 @@ import type Database from 'better-sqlite3';
 import type { HeadlessActivityEvent, HeadlessCapacitySnapshot } from './cc-headless.js';
 import { ensureOutboundAppSession, validateAppDestination } from '../app/outbound.js';
 import { boundAppReply } from '../app/binding.js';
-import { quotableMessage, VISIBLE_TRANSCRIPT } from '../app/store.js';
+import { quotableMessage, recordChoiceEvent, VISIBLE_TRANSCRIPT } from '../app/store.js';
+import { randomUUID } from 'node:crypto';
+import { ChoiceStore } from '../choices/store.js';
+import { hasCallbackButton, parseChoiceCommands, parseChoices } from '../choices/parse.js';
+import { DEFAULT_CHOICE_TTL_MS, type ChoicePrompt } from '../choices/types.js';
 import { logOutboundTranscript, renderOutboundBody } from '../pipeline/outbound-transcript.js';
 import { computeConversationId } from '../pipeline/conversation-id.js';
 
@@ -25,11 +29,17 @@ export class AppAdapter implements AdapterInstance {
   /** Turns the headless agent reports as running, by `${agent}:${conversation}`. */
   private readonly runningTurns = new Map<string, HeadlessActivityEvent>();
 
+  /** E86: choice-button prompts for app messages (channel 'app'). */
+  readonly choices: ChoiceStore;
+
   constructor(
     private readonly db: Database.Database,
     private readonly agentFor: (contactId: string) => string | null,
     private readonly capacitySnapshots: () => HeadlessCapacitySnapshot[] = () => [],
-  ) {}
+    private readonly options: { choiceTtlHours?: number } = {},
+  ) {
+    this.choices = new ChoiceStore(db);
+  }
 
   async start(): Promise<void> {}
   async stop(): Promise<void> {}
@@ -70,6 +80,7 @@ export class AppAdapter implements AdapterInstance {
           // E69: the envelope's reply_to is kept on the row; the quote rule reads it.
           metadata: { ...this.withQuote(envelope, contactId, agentId, conversationId), reply_to: envelope.reply_to ?? null },
         });
+        this.persistChoicePrompt(envelope, contactId, sessionId);
       })();
       this.lastActivity = new Date().toISOString();
       this.finishActivity(contactId, agentId, envelope.topic || 'general', bound?.conversationId);
@@ -77,6 +88,34 @@ export class AppAdapter implements AdapterInstance {
     } catch (error) {
       return { success: false, error: `Could not persist app message: ${String(error)}`, retryable: true };
     }
+  }
+  /**
+   * E86: a message with at least one callback button gets a `choice_prompts`
+   * row, in the same transaction as its transcript row. The message id is
+   * both the platform and the bus message id. A retried delivery finds the
+   * existing prompt and creates no second one. A copy/link-only message
+   * gets none: nothing in it answers back to the bus.
+   */
+  private persistChoicePrompt(envelope: MessageEnvelope, contactId: string, sessionId: string): void {
+    const parsed = parseChoices(envelope.metadata['choices'], '[app]');
+    if (!parsed || !hasCallbackButton(parsed.buttons, parsed.labels.length)) return;
+    if (this.db.prepare(`SELECT 1 FROM choice_prompts WHERE channel = 'app' AND bus_message_id = ?`).get(envelope.id)) return;
+    const topic = (this.db.prepare(`SELECT cr.topic FROM sessions s JOIN conversation_registry cr ON cr.id = s.conversation_id
+      WHERE s.id = ?`).get(sessionId) as {topic:string}|undefined)?.topic ?? (envelope.topic || 'general');
+    const hours = this.options.choiceTtlHours;
+    this.choices.create({
+      id: randomUUID(), channel: 'app', topic, contactId, labels: parsed.labels,
+      commands: parseChoiceCommands(envelope.metadata['choice_commands'], parsed.labels.length, '[app]') ?? null,
+      buttons: parsed.buttons ?? null, platformMessageId: envelope.id, busMessageId: envelope.id,
+    }, hours ? hours * 60 * 60 * 1000 : DEFAULT_CHOICE_TTL_MS);
+  }
+  /** E86: the expiry sweep's hook. The app has no keyboard to clear; it records a `choice` event instead. */
+  async finalizeChoicePrompt(prompt: ChoicePrompt): Promise<void> {
+    this.recordChoiceEvent(prompt);
+  }
+  /** E86: a durable `choice` event with the prompt's current state, after a tap or expiry. */
+  recordChoiceEvent(prompt: Pick<ChoicePrompt, 'id' | 'bus_message_id'>): boolean {
+    return recordChoiceEvent(this.db, prompt);
   }
   /**
    * E69: an agent reply to a specific earlier message renders as a quote.

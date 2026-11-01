@@ -17,6 +17,7 @@ import type { QuotedMessage } from '../app/store.js';
 import { createAppSession, eventBounds, history, isMainRow, listSessions, readEvents, quotableMessage, recordSessionEvent, routedAgent, sessionInfo, sessionScope, visibleSession } from '../app/store.js';
 import { MAIN_TOPIC } from '../app/main.js';
 import { sessionCanResume } from '../app/resume.js';
+import { resolveChoiceTap } from '../choices/tap.js';
 import { VERSION } from '../version.js';
 import type { InboundAbort, InboundMessage, InboundResult } from './api.js';
 
@@ -39,6 +40,10 @@ const Send = z.object({ type: z.literal('send'), client_msg_id: z.string().uuid(
   body: z.string().default(''), attachment_ids: z.array(z.string().uuid()).default([]),
   reply_to: z.string().uuid().optional() })
   .refine(v => v.body.trim().length > 0 || v.attachment_ids.length > 0);
+
+/** E86: a tap on a choice button. `index` is the item's position in `choices.items`. */
+const Choice = z.object({ type: z.literal('choice'), client_msg_id: z.string().uuid(), prompt_id: z.string().uuid(),
+  index: z.number().int().min(0) });
 
 interface StoredIntent {
   message_id: string; topic: string; session_id: string | null; body: string;
@@ -138,6 +143,63 @@ export async function registerAppRoutes(server: FastifyInstance, deps: AppRouteD
     deps.db.prepare('UPDATE app_sends SET ack_json = ? WHERE contact_id = ? AND client_msg_id = ?')
       .run(JSON.stringify(ack), contactId, clientMsgId);
     return ack;
+  };
+  /**
+   * E86: a choice tap. Only an app prompt on a message this contact can see
+   * may be answered, and only by its addressee. The atomic answer flip means
+   * a double tap injects once. The pick is injected like a send, bound to the
+   * prompt message's session (unless that session has ended, when routing
+   * chooses), with `[tapped] <label>` or the choice's slash command as the
+   * body. A failed injection reopens the prompt so the human can tap again.
+   */
+  const handleChoice = async (contactId: string, agentId: string, f: z.infer<typeof Choice>): Promise<Record<string, unknown>> => {
+    const reject = (reason: string) => ({ type: 'ack', client_msg_id: f.client_msg_id, status: 'rejected', reason });
+    const store = deps.app.choices;
+    const prompt = store.getById(f.prompt_id);
+    if (!prompt || prompt.channel !== 'app' || !prompt.bus_message_id) return reject('not_found');
+    if (prompt.contact_id && prompt.contact_id !== contactId) return reject('forbidden');
+    const target = deps.db.prepare(`SELECT t.session_id, s.ended_at, s.channel, cr.topic FROM transcripts t
+      JOIN sessions s ON s.id = t.session_id JOIN conversation_registry cr ON cr.id = s.conversation_id
+      WHERE t.message_id = ? AND t.direction = 'outbound' AND t.channel = 'app' AND t.contact_id = ?
+      ORDER BY t.rowid DESC LIMIT 1`).get(prompt.bus_message_id, contactId) as
+      {session_id:string;ended_at:string|null;channel:string;topic:string}|undefined;
+    if (!target || !visibleSession(deps.db, contactId, agentId, target.session_id)) return reject('not_found');
+
+    const result = resolveChoiceTap(store, f.prompt_id, f.index, contactId);
+    if (result.outcome !== 'answered') {
+      // A tap that found the prompt past its expiry flipped it to expired:
+      // tell every client now rather than at the next sweep.
+      if (result.outcome === 'expired' && result.prompt?.platform_message_id) {
+        deps.app.recordChoiceEvent(result.prompt);
+        store.clearMessageRef(result.prompt.id);
+      }
+      return reject(result.outcome);
+    }
+
+    const bound = target.ended_at === null;
+    const topic = bound ? target.topic : target.channel === 'app' ? target.topic : 'general';
+    const messageId = randomUUID();
+    let inbound: InboundResult | InboundAbort;
+    try {
+      inbound = await deps.submitInbound({ id: messageId, channel: 'app', topic, sender: `contact:${contactId}`,
+        reply_to: prompt.bus_message_id, payload: { type: 'text', body: result.body },
+        metadata: { source: 'app', client_msg_id: f.client_msg_id, ...result.metadata, choice_label: result.label,
+          ...(bound ? { bound_session_id: target.session_id } : {}) } });
+    } catch (error) {
+      console.error(`[app] choice ${f.prompt_id.slice(0, 8)} could not be delivered: ${String(error)}`);
+      store.reopen(f.prompt_id);
+      return reject('delivery_failed');
+    }
+    const status = inbound.queued && inbound.enqueued_count > 0 ? 'queued'
+      : !inbound.queued && inbound.reason === 'command_handled' ? 'command' : 'rejected';
+    if (status === 'rejected') {
+      store.reopen(f.prompt_id);
+      return reject(inbound.queued ? 'No route accepted the message' : inbound.reason);
+    }
+    deps.app.recordChoiceEvent(prompt);
+    const sessionId = bound ? target.session_id : (deps.db.prepare(`SELECT session_id FROM transcripts
+      WHERE message_id = ? AND direction = 'inbound' ORDER BY rowid DESC LIMIT 1`).get(messageId) as {session_id:string}|undefined)?.session_id ?? null;
+    return { type: 'ack', client_msg_id: f.client_msg_id, message_id: messageId, session_id: sessionId, status };
   };
   // Finish sends interrupted between durable claim, transcript, queue and ack.
   // This runs before the listener accepts requests; client retry uses the same
@@ -350,6 +412,17 @@ export async function registerAppRoutes(server: FastifyInstance, deps: AppRouteD
             .run(JSON.stringify(ack), contactId, f.client_msg_id);
           send(socket, ack); drain(client); return;
           } finally { sendLocks.delete(lockKey); release(); }
+        }
+        if (frame['type'] === 'choice') {
+          const parsed = Choice.safeParse(frame);
+          if (!parsed.success) {
+            const id = frame['client_msg_id'];
+            if (typeof id === 'string' && z.string().uuid().safeParse(id).success)
+              send(socket, { type: 'ack', client_msg_id: id, status: 'rejected', reason: 'invalid_choice' });
+            else send(socket, { type: 'error', code: 'invalid_choice' });
+            return;
+          }
+          send(socket, await handleChoice(contactId, agentId, parsed.data)); drain(client); return;
         }
         if (frame['type'] === 'create_session') {
           const created = createAppSession(deps.db, contactId, agentId, typeof frame['title'] === 'string' ? frame['title'] : undefined);

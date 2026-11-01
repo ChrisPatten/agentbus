@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../adapters/cc-headless.js', () => ({ getHeadlessSnapshots: () => [] }));
 vi.mock('../adapters/claude-transcript.js', () => ({ claudeTranscriptExists: () => true }));
+import { randomUUID } from 'node:crypto';
 import Database from 'better-sqlite3';
 import { runMigrations } from '../db/schema.js';
 import { MessageQueue } from '../core/queue.js';
@@ -653,4 +654,168 @@ async function until(check: () => boolean): Promise<void> {
     if (Date.now() - start > 3000) throw new Error('Timed out waiting for app frame');
     await new Promise(resolve => setTimeout(resolve, 10));
   }
+}
+
+describe('choice taps over the socket (E86 S86.4)', () => {
+  const BOB = 'bob-contact-token-0123456789';
+  const twoContacts = { ...config, contacts: { ...config.contacts,
+    bob: { id: 'bob', displayName: 'Bob', platforms: { app: { token: BOB } } } } } as unknown as AppConfig;
+  const picked: string[][] = [];
+
+  async function choiceFixture() {
+    picked.length = 0;
+    const db = new Database(':memory:'); db.pragma('foreign_keys = ON'); runMigrations(db);
+    const registry = new AdapterRegistry(); const app = new AppAdapter(db, () => 'agent:work'); registry.register(app);
+    const queue = new MessageQueue(db);
+    const commandRegistry = new CommandRegistry();
+    commandRegistry.register({ name: 'pickme', description: 'test picker', usage: '/pickme [x]', scope: 'bus',
+      handler: async (args) => {
+        if (args.length === 0) return { body: 'Pick one', choices: [{ label: 'Alpha', args: 'a' }, { label: 'Beta', args: 'b' }] };
+        picked.push(args); return { body: `picked ${args.join(' ')}` };
+      } });
+    const pipeline = new PipelineEngine();
+    pipeline.use({ slot: 10, name: 'normalize', stage: normalize });
+    pipeline.use({ slot: 40, name: 'slash', stage: slashCommandDetect });
+    pipeline.use({ slot: 70, name: 'route', stage: createRouteResolve(twoContacts, db) });
+    pipeline.use({ slot: 80, name: 'transcript', stage: createTranscriptLog(db, twoContacts) });
+    const server = await createHttpServer({ config: twoContacts, db, registry, app, queue, pipeline, commandRegistry });
+    live.push({ server, db });
+    await server.listen({ host: '127.0.0.1', port: 0 });
+    const address = server.server.address(); if (!address || typeof address === 'string') throw new Error('No address');
+    const url = `ws://127.0.0.1:${address.port}/api/v1/app/ws`;
+    const open = async (token = TOKEN) => {
+      const client = await connectWith(url, token);
+      client.socket.send(JSON.stringify({ type: 'hello', cursor: 0 }));
+      await until(() => client.frames.some(f => f['type'] === 'welcome'));
+      return client;
+    };
+    /** An agent message with choices, persisted by the app adapter as DeliveryWorker would. */
+    const prompt = async (id: string, topic = 'general') => {
+      const result = await app.send({ id, timestamp: new Date().toISOString(), channel: 'app', topic, sender: 'agent:work',
+        recipient: 'contact:alice', reply_to: null, priority: 'normal', payload: { type: 'text', body: 'Which one?' },
+        metadata: { choices: ['A', 'B', { label: 'Copy', copy_text: 'xyz' }] } });
+      expect(result.success).toBe(true);
+      return app.choices.list().find(p => p.bus_message_id === id)!;
+    };
+    const tap = async (client: Awaited<ReturnType<typeof open>>, promptId: string, index: number) => {
+      const clientMsgId = randomUUID();
+      client.socket.send(JSON.stringify({ type: 'choice', client_msg_id: clientMsgId, prompt_id: promptId, index }));
+      await until(() => client.frames.some(f => f['type'] === 'ack' && f['client_msg_id'] === clientMsgId));
+      return client.frames.find(f => f['type'] === 'ack' && f['client_msg_id'] === clientMsgId)!;
+    };
+    const taps = (promptId: string) => db.prepare(`SELECT * FROM transcripts WHERE direction = 'inbound'
+      AND json_extract(metadata,'$.choice_prompt_id') = ?`).all(promptId) as Record<string, unknown>[];
+    return { db, app, queue, open, prompt, tap, taps };
+  }
+
+  it('injects one "[tapped] <label>" row bound to the prompt session, then rejects a second tap', async () => {
+    const f = await choiceFixture();
+    const p = await f.prompt('11111111-1111-4111-8111-111111111111');
+    const sessionId = (f.db.prepare(`SELECT session_id FROM transcripts WHERE message_id = ?`).get(p.bus_message_id) as {session_id:string}).session_id;
+    const client = await f.open();
+    const ack = await f.tap(client, p.id, 1);
+    expect(ack).toMatchObject({ status: 'queued', session_id: sessionId, message_id: expect.any(String) });
+    expect(ack).not.toHaveProperty('reason');
+    const rows = f.taps(p.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ body: '[tapped] B', session_id: sessionId, channel: 'app', message_id: ack['message_id'] });
+    const queued = new MessageQueue(f.db).getById(String(ack['message_id']))!;
+    expect(queued.envelope).toMatchObject({ reply_to: p.bus_message_id, payload: { body: '[tapped] B' },
+      metadata: { bound_session_id: sessionId, choice_prompt_id: p.id, choice_index: 1, choice_label: 'B' } });
+    await until(() => client.frames.some(fr => fr['event'] === 'choice'));
+    expect(client.frames.find(fr => fr['event'] === 'choice')!['data']).toMatchObject({ message_id: p.bus_message_id, session_id: sessionId,
+      choices: { prompt_id: p.id, status: 'answered', chosen_index: 1 } });
+    // The tap's own message event carries choice_answer.
+    await until(() => client.frames.some(fr => fr['event'] === 'message' && (fr['data'] as Record<string, unknown>)['message_id'] === ack['message_id']));
+    expect((client.frames.find(fr => fr['event'] === 'message' && (fr['data'] as Record<string, unknown>)['message_id'] === ack['message_id'])!['data'] as Record<string, unknown>)['choice_answer'])
+      .toEqual({ prompt_id: p.id, index: 1, label: 'B' });
+
+    expect(await f.tap(client, p.id, 0)).toMatchObject({ status: 'rejected', reason: 'already_answered' });
+    expect(f.taps(p.id)).toHaveLength(1);
+    client.socket.close();
+  });
+
+  it('rejects an expired prompt with a live choice event, and another contact\'s token, injecting nothing', async () => {
+    const f = await choiceFixture();
+    const expired = await f.prompt('22222222-2222-4222-8222-222222222222');
+    const other = await f.prompt('33333333-3333-4333-8333-333333333333');
+    f.db.prepare(`UPDATE choice_prompts SET expires_at = '2000-01-01T00:00:00.000Z' WHERE id = ?`).run(expired.id);
+    const alice = await f.open();
+    expect(await f.tap(alice, expired.id, 0)).toMatchObject({ status: 'rejected', reason: 'expired' });
+    await until(() => alice.frames.some(fr => fr['event'] === 'choice'));
+    expect((alice.frames.find(fr => fr['event'] === 'choice')!['data'] as Record<string, any>)['choices']).toMatchObject({ prompt_id: expired.id, status: 'expired' });
+    expect(f.app.choices.getById(expired.id)).toMatchObject({ status: 'expired', platform_message_id: null });
+
+    const bob = await f.open(BOB);
+    expect(await f.tap(bob, other.id, 0)).toMatchObject({ status: 'rejected', reason: 'forbidden' });
+    expect(await f.tap(bob, randomUUID(), 0)).toMatchObject({ status: 'rejected', reason: 'not_found' });
+    expect(f.app.choices.getById(other.id)!.status).toBe('open');
+    expect(await f.tap(alice, other.id, 2)).toMatchObject({ status: 'rejected', reason: 'invalid_choice' });
+    expect(await f.tap(alice, other.id, 9)).toMatchObject({ status: 'rejected', reason: 'invalid_choice' });
+    expect(f.taps(expired.id)).toHaveLength(0);
+    expect(f.taps(other.id)).toHaveLength(0);
+    alice.socket.send(JSON.stringify({ type: 'choice', client_msg_id: 'not-a-uuid', prompt_id: other.id, index: 0 }));
+    await until(() => alice.frames.some(fr => fr['type'] === 'error' && fr['code'] === 'invalid_choice'));
+    alice.socket.close(); bob.socket.close();
+  });
+
+  it('runs a command picker from the app: /pickme shows buttons, a tap runs the command', async () => {
+    const f = await choiceFixture();
+    const client = await f.open();
+    client.socket.send(JSON.stringify({ type: 'send', client_msg_id: randomUUID(), target: { kind: 'main' }, body: '/pickme' }));
+    await until(() => client.frames.some(fr => fr['type'] === 'ack'));
+    expect(client.frames.find(fr => fr['type'] === 'ack')).toMatchObject({ status: 'command' });
+    const response = f.db.prepare(`SELECT body, metadata FROM transcripts WHERE direction = 'outbound'
+      AND json_extract(metadata,'$.command') = 'pickme'`).all() as {body:string;metadata:string}[];
+    expect(response).toHaveLength(1);
+    expect(response[0]!.body).toBe('Pick one');
+    expect(JSON.parse(response[0]!.metadata)).toMatchObject({ choices: ['Alpha', 'Beta'], choice_commands: ['/pickme a', '/pickme b'] });
+    const p = f.app.choices.list()[0]!;
+    expect(p).toMatchObject({ channel: 'app', labels: ['Alpha', 'Beta'], commands: ['/pickme a', '/pickme b'] });
+
+    const ack = await f.tap(client, p.id, 1);
+    expect(ack).toMatchObject({ status: 'command' });
+    expect(picked).toEqual([['b']]);
+    expect(f.taps(p.id)).toHaveLength(1);
+    expect(f.taps(p.id)[0]).toMatchObject({ body: '/pickme b' });
+    expect(f.app.choices.getById(p.id)).toMatchObject({ status: 'answered', chosen_index: 1 });
+    client.socket.close();
+  });
+
+  it('drops the session binding when the prompt session has ended, and lets routing choose', async () => {
+    const f = await choiceFixture();
+    const { sessionId, topic } = createAppSession(f.db, 'alice', 'agent:work', 'Trip');
+    const p = await f.prompt('44444444-4444-4444-8444-444444444444', topic);
+    expect(f.db.prepare(`SELECT session_id FROM transcripts WHERE message_id = ?`).get(p.bus_message_id)).toEqual({ session_id: sessionId });
+    f.db.prepare(`UPDATE sessions SET ended_at = ? WHERE id = ?`).run(new Date().toISOString(), sessionId);
+    const client = await f.open();
+    const ack = await f.tap(client, p.id, 0);
+    expect(ack['status']).toBe('queued');
+    expect(ack['session_id']).not.toBe(sessionId);
+    const queued = new MessageQueue(f.db).getById(String(ack['message_id']))!;
+    expect(queued.envelope.metadata).not.toHaveProperty('bound_session_id');
+    expect(queued.envelope.topic).toBe(topic);
+    expect(f.taps(p.id)).toHaveLength(1);
+    client.socket.close();
+  });
+
+  it('reopens the prompt when the tap is not delivered, so the human can tap again', async () => {
+    const f = await choiceFixture();
+    const p = await f.prompt('55555555-5555-4555-8555-555555555555');
+    const client = await f.open();
+    f.db.exec(`CREATE TRIGGER fail_tap BEFORE INSERT ON message_queue BEGIN SELECT RAISE(ABORT, 'boom'); END;`);
+    expect(await f.tap(client, p.id, 0)).toMatchObject({ status: 'rejected', reason: 'No route accepted the message' });
+    expect(f.app.choices.getById(p.id)!.status).toBe('open');
+    f.db.exec(`DROP TRIGGER fail_tap`);
+    expect(await f.tap(client, p.id, 0)).toMatchObject({ status: 'queued' });
+    client.socket.close();
+  });
+});
+
+async function connectWith(url: string, token: string): Promise<{ socket: WebSocket; frames: Record<string, unknown>[] }> {
+  const socket = new WebSocket(url, { headers: { authorization: `Bearer ${token}` } });
+  const frames: Record<string, unknown>[] = [];
+  socket.on('message', raw => frames.push(JSON.parse(raw.toString()) as Record<string, unknown>));
+  await new Promise<void>((resolve, reject) => { socket.once('open', resolve); socket.once('error', reject); });
+  return { socket, frames };
 }

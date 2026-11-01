@@ -208,3 +208,74 @@ describe('AppAdapter quote rule: the conversation moved on (E69)', () => {
     } finally { f.db.close(); }
   });
 });
+
+describe('AppAdapter choice prompts (E86 S86.2)', () => {
+  const withChoices = (id: string, metadata: Record<string, unknown>): MessageEnvelope => ({ ...message(id), metadata });
+
+  it('creates one open prompt for a message with choices, keyed by the message id', async () => {
+    const db = makeDb();
+    try {
+      const app = new AppAdapter(db, () => 'agent:work');
+      const envelope = withChoices('out-c1', { choices: ['A', { label: 'B', style: 'success' }] });
+      expect((await app.send(envelope)).success).toBe(true);
+      expect((await app.send(envelope)).success).toBe(true);
+      const prompts = db.prepare(`SELECT * FROM choice_prompts`).all() as Record<string, unknown>[];
+      expect(prompts).toHaveLength(1);
+      expect(prompts[0]).toMatchObject({ channel: 'app', topic: 'general', contact_id: 'me', labels: '["A","B"]',
+        buttons: '[null,{"style":"success"}]', commands: null, platform_message_id: 'out-c1', bus_message_id: 'out-c1', status: 'open' });
+      const ttl = Date.parse(String(prompts[0]!['expires_at'])) - Date.parse(String(prompts[0]!['created_at']));
+      expect(ttl).toBe(24 * 60 * 60 * 1000);
+    } finally { db.close(); }
+  });
+
+  it('keeps choice_commands on the prompt and honours choice_ttl_hours', async () => {
+    const db = makeDb();
+    try {
+      const app = new AppAdapter(db, () => 'agent:work', () => [], { choiceTtlHours: 2 });
+      await app.sendCommandResponse(withChoices('out-c2', { choices: ['Opus', 'Haiku'], choice_commands: ['/model opus', '/model haiku'] }));
+      const prompt = app.choices.list()[0]!;
+      expect(prompt.commands).toEqual(['/model opus', '/model haiku']);
+      expect(Date.parse(prompt.expires_at) - Date.parse(prompt.created_at)).toBe(2 * 60 * 60 * 1000);
+    } finally { db.close(); }
+  });
+
+  it('creates no prompt for a copy- or link-only message, or a message without choices', async () => {
+    const db = makeDb();
+    try {
+      const app = new AppAdapter(db, () => 'agent:work');
+      await app.send(withChoices('out-c3', { choices: [{ label: 'Copy', copy_text: 'abc' }, { label: 'Docs', url: 'https://example.com' }] }));
+      await app.send(message('out-c4'));
+      expect(db.prepare(`SELECT COUNT(*) AS n FROM choice_prompts`).get()).toEqual({ n: 0 });
+    } finally { db.close(); }
+  });
+
+  it('rolls the prompt back with the transcript when the insert fails', async () => {
+    const db = makeDb();
+    try {
+      const app = new AppAdapter(db, () => 'agent:work');
+      db.exec(`CREATE TRIGGER fail_prompt BEFORE INSERT ON choice_prompts BEGIN SELECT RAISE(ABORT, 'boom'); END;`);
+      const result = await app.send(withChoices('out-c5', { choices: ['A'] }));
+      expect(result).toMatchObject({ success: false, retryable: true });
+      expect(db.prepare(`SELECT COUNT(*) AS n FROM transcripts WHERE message_id = 'out-c5'`).get()).toEqual({ n: 0 });
+    } finally { db.close(); }
+  });
+
+  it('the expiry sweep writes one choice event for an expired app prompt', async () => {
+    const { AdapterRegistry } = await import('../core/registry.js');
+    const { sweepChoices } = await import('../choices/sweep.js');
+    const db = makeDb();
+    try {
+      const app = new AppAdapter(db, () => 'agent:work');
+      const registry = new AdapterRegistry(); registry.register(app);
+      await app.send(withChoices('out-c6', { choices: ['A', 'B'] }));
+      const before = (db.prepare(`SELECT seq FROM app_event_counters WHERE contact_id = 'me'`).get() as { seq: number }).seq;
+      const future = new Date(Date.now() + 25 * 60 * 60 * 1000).toISOString();
+      expect(await sweepChoices({ registry, store: app.choices }, future)).toEqual({ expired: 1, keyboardsCleared: 1 });
+      expect(await sweepChoices({ registry, store: app.choices }, future)).toEqual({ expired: 0, keyboardsCleared: 0 });
+      const events = db.prepare(`SELECT e.seq, e.kind, e.choice_prompt_id, t.message_id FROM app_events e
+        JOIN transcripts t ON t.id = e.transcript_id WHERE e.kind = 'choice'`).all();
+      expect(events).toEqual([{ seq: before + 1, kind: 'choice', choice_prompt_id: app.choices.list()[0]!.id, message_id: 'out-c6' }]);
+      expect(app.choices.list()[0]).toMatchObject({ status: 'expired', platform_message_id: null });
+    } finally { db.close(); }
+  });
+});
