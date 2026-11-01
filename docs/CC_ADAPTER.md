@@ -34,6 +34,7 @@ and stderr captured separately: stdout must contain only MCP JSON frames.
 | `AGENTBUS_CONFIG` | `./config.yaml` | Config file. The `.env` next to it is loaded too |
 | `AGENTBUS_AGENT_ID` | `claude` | Recipient to poll for (`agent:<id>`). Polling mode only |
 | `AGENTBUS_TOOLS_ONLY` | unset | `true` selects tools-only mode |
+| `AGENTBUS_LAUNCH_ID` | unset | E88. Set by cc-pool per pane launch. Sent on every poll as `?launch_id=`; when the bus answers `409 stale_launch` (a newer launch owns this agent id) the poll loop stops for good. See [CC_POOL_ADAPTER.md](CC_POOL_ADAPTER.md#launch-fencing) |
 
 The only config field this process reads is `adapters.claude-code.poll_interval_ms` (default `1000`). An `AGENTBUS_POLL_INTERVAL_MS` environment variable overrides it; cc-pool sets that from the pool's own `poll_interval_ms`. The schema also accepts `sampling_max_tokens` and `plugin`, but nothing reads them.
 

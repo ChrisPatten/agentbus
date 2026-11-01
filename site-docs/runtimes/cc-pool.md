@@ -78,6 +78,7 @@ Routes reach the pool with `adapterId: cc-pool` and `recipientId: agent:<agent_i
 | `launch_ack_max_attempts` | `3` | How many times to try confirming Claude Code's "Loading development channels" warning at start-up, which the bus confirms for you. |
 | `launch_ack_pattern` | `loading development channels` | The text that identifies the warning, in case Claude Code rewords it. |
 | `model_confirm_pattern` | `switch model\?` | A pattern (regular expression, ignoring case) that identifies Claude Code's "Switch model?" question when [`/model`](/features/models#with-cc-pool) switches a pane in place. Change it only if Claude Code rewords the question. |
+| `kill_orphan_servers` | `false` | Stop leftover tmux servers for this pool automatically. See [Leftover tmux servers](#leftover-tmux-servers). |
 | `launch_ack_delay_ms` | | No longer used. The bus now watches for the warning until the pane is ready. Older configs that set it still load. |
 
 You don't need `--dangerously-load-development-channels` in `launch_args`: the bus already starts every pane with the options it needs to connect. If your `launch_args` has it anyway (older example configs added it), the bus leaves out the copy, so it's only passed once.
@@ -164,7 +165,22 @@ To send notes from a Claude Code session on another machine, point its AgentBus 
 
 ## What survives a restart
 
-Restarting the bus doesn't interrupt your conversations. tmux keeps the panes running, and when the bus starts again it picks up every pane that's still alive, with its lease. If a pane's window has disappeared, its lease is released and a notice with the pane's last screen is posted on the `system` channel; the conversation resumes its Claude session in a new pane with the next message.
+Restarting the bus doesn't interrupt your conversations. tmux keeps the panes running, and when the bus starts again it picks up every pane where Claude Code is still running, with its lease. If a pane's window has disappeared, or the window is back at a plain shell prompt, or Claude Code is stuck on its start-up warning without checking for messages, its lease is released and a notice with the pane's last screen is posted on the `system` channel; the conversation resumes its Claude session in a new pane with the next message.
+
+## Leftover tmux servers
+
+If tmux loses its socket file, `tmux` starts a fresh server for the pool, but the old server keeps running in the background with its Claude sessions. The bus makes sure only the session it started most recently for a pane receives that pane's messages, so leftovers can't take your messages. It also checks for them when it starts and every minute after, logs `orphan tmux server pid=<n>`, and posts one notice per leftover process on the `system` channel.
+
+To stop a leftover server yourself, run `kill <pid>` with the pid from the notice. To have the bus stop them for you:
+
+```yaml
+adapters:
+  cc-pool:
+    agent_id: peggy
+    tmux_session: peggy-pool
+    claude_bin: /Users/you/.local/bin/claude
+    kill_orphan_servers: true
+```
 
 Parked messages and leases are stored in the bus database and survive a restart.
 

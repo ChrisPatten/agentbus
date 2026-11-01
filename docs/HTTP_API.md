@@ -50,6 +50,7 @@ Set `bus.host: 0.0.0.0` to accept connections from other hosts, for example a re
 | GET | `/api/v1/siri/health` | Siri channel reachability and routing check (when configured) |
 | GET | `/api/v1/messages/pending` | Dequeue messages for a recipient |
 | POST | `/api/v1/messages/:id/ack` | Acknowledge or dead-letter a dequeued message |
+| GET | `/api/v1/agents/:agentId/last-poll` | Last time a bare agent id polled, with the launch id that poll carried and the one registered (cc-pool readiness, E48/E88) |
 | POST | `/api/v1/messages` | Enqueue an outbound message |
 | GET | `/api/v1/messages/:id` | Fetch a message by ID |
 | POST | `/api/v1/messages/:id/react` | React to a message on its platform |
@@ -312,10 +313,17 @@ Dequeues up to `limit` pending messages for one recipient and marks them `proces
 | `agent` or `recipient` | One is required. `agent=peggy` is shorthand for `recipient=agent:peggy` |
 | `limit` | 1 to 100, default 10 |
 | `topic` | Optional topic filter |
+| `launch_id` | E88. The poller's launch id (also accepted as an `X-Agentbus-Launch-Id` header). See below |
 
-Returns `{ "ok": true, "messages": [<MessageEnvelope>], "count": n }`, ordered urgent, high, normal, then oldest first.
+Returns `{ "ok": true, "messages": [<MessageEnvelope>], "count": n }`, ordered urgent, high, normal, then oldest first. Each poll is recorded for `GET /api/v1/agents/:agentId/last-poll`.
+
+E88 launch fencing: once cc-pool has registered a launch id for the agent id, a poll carrying any other `launch_id`, or none, returns `409 { "ok": false, "error": "stale_launch", "stale_launch": true, "messages": [], "count": 0 }`, dequeues nothing, and is not recorded. Agent ids with no registered launch id are unaffected. See [CC_POOL_ADAPTER.md](CC_POOL_ADAPTER.md#launch-fencing).
 
 While a System Message journal run is open for a conversation (E66), messages for it addressed to the journaled agent stay `pending` and are skipped, except the run's own instruction. They are returned once the run ends.
+
+### `GET /api/v1/agents/:agentId/last-poll`
+
+Returns `{ "ok": true, "agentId", "lastPollAt", "lastLaunchId", "registeredLaunchId" }`: when the bare agent id last polled `GET /api/v1/messages/pending` (null if never since bus-core started), the `launch_id` that poll carried, and the launch id cc-pool registered for the agent id (null when none is, i.e. no fence). cc-pool's launch readiness check requires `lastLaunchId` to equal its own launch id (E88). In memory; resets on restart.
 
 ### `POST /api/v1/messages/:id/ack`
 

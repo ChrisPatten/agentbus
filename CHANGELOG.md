@@ -10,7 +10,16 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+### Added
+- **Orphaned pool tmux server detection (E88).** Each cc-pool checks at startup and on every sweep tick (60 s) for a second `tmux new-session -d -s <tmux_session>` server its own `tmux` can't reach (a server that lost its socket keeps its `claude` sessions running), and for processes with one of the pool's `AGENTBUS_AGENT_ID`s outside the live server (read from `ps -axEww`). Each orphan pid is logged as `orphan tmux server pid=<n>` (or `orphan pool agent pid=<n>`) and reported once in a `system` notice. New optional cc-pool setting `kill_orphan_servers` (default `false`) also sends them `SIGTERM`. Troubleshooting steps are in `docs/CC_POOL_ADAPTER.md` ("Orphaned tmux servers").
+
+### Changed
+- **cc-pool launches are fenced with a per-launch id (E88).** Each pane launch gets a fresh `AGENTBUS_LAUNCH_ID` in its MCP config; `cc.ts` sends it on every poll (`?launch_id=`), and `GET /api/v1/agents/:id/last-poll` now also returns `lastLaunchId` and `registeredLaunchId`. The pool registers the id just before typing the launch line; from then on `GET /api/v1/messages/pending` answers polls with any other launch id (or none) with `409 stale_launch` and no messages, does not record them, and logs a warning at most once a minute. `cc.ts` stops polling on `stale_launch`. Readiness passes only on a poll carrying the launch's own id. Agent ids with no registered launch id (every non-pool adapter) behave exactly as before. The registry is in memory, so a pane running across a bus-core restart is unfenced until its next launch.
+- **The pool types a launch line only into a shell that is ready (E88).** Before every launch line, on new and reused windows alike, the shell must echo a nonce probe (` printf … __AGENTBUS_READY <nonce>`); a mangled probe is retried after `C-u`, and the launch fails after 20 s instead of typing into a shell that isn't reading.
+
 ### Fixed
+- **A cc-pool relaunch no longer "succeeds" on another process's polls (E88).** On Oct 31, 2026 an orphaned tmux server's hidden sessions polled as `peggy-pool-1..4`, so relaunches passed readiness at once, deleted their MCP config before their own `claude` read it (`MCP config file not found`), and left panes at a bare shell prompt while the orphans took their messages. MCP config and prompt files are now deleted only after a launch-id-matched readiness pass.
+- **Bus restart no longer adopts panes where `claude` isn't running (E88).** `reconcileLiveness()` releases (with the usual notice) a leased pane whose window is at a shell prompt, or that hasn't polled from its current launch for 2x the watchdog interval while showing the dev-channels, launch-ack or model-confirm prompt (its window is killed). The reuse path in `resolveRoute()` releases a pane found at a shell prompt and routes the message again, which relaunches the conversation.
 - **`status` works in cc-headless conversation turns.** `mcp__agentbus__status` is now in the turn's `--allowedTools`, next to `reply` and `send_message`. Before, a `claude -p` turn refused the call unless the agent's own project settings allowed it: the status line still showed, but the agent got a permission error back.
 
 ## [0.17.0] - 2026-10-28

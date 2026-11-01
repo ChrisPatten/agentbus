@@ -4,9 +4,9 @@
 |---|---|
 | Epic ID | E88 |
 | Dependencies | E48 (cc-pool adapter), E54 (model-confirmation prompt), pool readiness check in `src/pool/pane.ts` |
-| Story Count | 4 |
+| Story Count | 5 |
 | Estimated Complexity | M |
-| Status | Scoped — not started |
+| Status | Implemented on `feat/e88-pool-launch-fencing` — awaiting review, merge and live check |
 
 ---
 
@@ -27,6 +27,8 @@ Checked 2026-10-31 on bobafett (bus-core v0.17.0, `dev@38337e7`) via `ps`, `tmux
 - Pane 2, Oct 31 21:53: the log shows `launching peggy-pool:2 model=claude-sonnet-5-5` at :28, then `model=claude-opus-5-5 (source=agent-override)` at :32. The pane shows the Opus launch line typed before oh-my-zsh and direnv had finished. zsh then dropped its first character (`zsh: command not found: nset`), and the retyped line hit the missing config.
 - Grow-1 (`peggy-pool-4`) was stuck at Claude Code's "Loading development channels" confirmation screen, because readiness had passed on the orphan's polls.
 - Watchdog lines (`stalled … 5m unhandled, screen static 5m`) for peggy-pool:2 and :3 recurred from Oct 30 to Oct 31. That fits messages going to the orphans.
+- bus-core's log shows, on 2026-10-29 at 20:23:32, `error connecting to /private/tmp/tmux-501/default (No such file or directory)` during `reconcileLiveness`. The tmux socket was already missing then, before the new server was created at 21:30.
+- After the Oct 31 bus-core restart (22:10), `PoolManager.reconcileLiveness()` adopted leased rows whose tmux window existed but held only a bare zsh prompt (claude had exited with "MCP config file not found"), and one stuck on the "Loading development channels" screen. `tmux.paneAlive()` only checks that the window exists, so these were "adopted as-is" and their conversations' messages went to agent ids nobody polled. Recovery needed the windows killed by hand and another restart.
 - Killing pid 2088 ended all five orphans. Polls for those ids stopped at the moment of the kill. `scripts/safe_restart.sh` then brought bus-core back healthy at 21:59:51.
 
 ## Design
@@ -97,6 +99,14 @@ Either way the check also runs on the reuse path, not only after `createWindow`.
 
 **Acceptance:** with a second detached `tmux -L test new-session -d -s peggy-pool` running, the pool logs `orphan tmux server pid=<n>` and sends one notice. With `kill_orphan_servers: true` the process is gone after the tick.
 
+### S88.5 — A leased pane counts as dead unless claude is really running and polling
+
+Added 2026-10-31 after the 22:10 restart (see Verified Behavior).
+
+- In `reconcileLiveness` (and the reuse path in `resolveRoute`), treat a leased/draining pane as dead if its foreground command is a shell (`isShellCommand`), or if its `/last-poll` (with the S88.1 launch token, when present) is older than a threshold (2× the watchdog interval) while the screen shows a known blocking prompt: the dev-channels warning or the launch-ack pattern. Release it with the existing notice path so it relaunches on the next message.
+
+**Acceptance:** unit tests where paneAlive=true but the foreground is "zsh" → row released + notice; foreground is claude and it polls fresh → adopted; foreground claude stuck on the dev-channels screen with a stale poll → released.
+
 ## Risks
 
 - The bus API changes for `cc.ts` polling. A pane started before the upgrade (no launch id) must keep working until its next relaunch. Mitigation: no-token polls fall back to the old behavior, unless a launch id is registered for that agent id.
@@ -107,3 +117,20 @@ Either way the check also runs on the reuse path, not only after `createWindow`.
 
 - Raised by Mr. Patten 2026-10-31 after "Peggy:2 isn't working". The live incident was cleared by killing the orphan server (pid 2088) and running `safe_restart.sh`. Runbook troubleshooting entry: `peggy-claude-code/memory/reference_peggy_runbook.md`.
 - Root cause of the Oct 29 socket loss is not known. A manual `tmux kill-server` on a different socket, or deletion of `/private/tmp/tmux-501`, would both produce it. Worth noting if it recurs.
+
+## Implementation notes (2026-10-31)
+
+Entry criteria confirmed: `cc.ts` built its poll in `main()` (now `src/adapters/cc-poller.ts`); the bus records polls in `GET /api/v1/messages/pending` (`src/http/api.ts`) into `src/http/agent-liveness.ts`, which serves `/api/v1/agents/:id/last-poll` and `runtime-resolver`'s `getLastPollAt`. Every pool launch goes through `PoolManager.runTrackedLaunch()` → `PaneLifecycle.launch()`: the bound/grow/evict path and the model-override relaunch (`relaunchClaimed`). The pokeclaude pool is another cc-pool instance with its own `PoolManager`.
+
+Deviations from the design above:
+
+- **Registration time.** The pool registers the launch id right before it types the launch line, not "when the launch succeeds". Registering on success would fence the new claude's own first polls as stale against the previous launch id, so no relaunch could ever pass readiness. Registering early also fences an older process at once. A failed launch leaves its id registered until the next launch replaces it.
+- **In-process registration.** `PaneLifecycle` calls `registerAgentLaunch()` directly (the pool always runs inside bus-core) rather than over HTTP; the readiness check still uses `/last-poll`.
+- **In-memory fence.** Like `lastPollAt`, registrations reset on a bus-core restart; a pane running across a restart is unfenced until its next launch. Orphan detection still reports strays. Persisting launch ids (a `pool_leases` column) is a possible follow-up.
+- **Stale polls are not recorded**, so an orphan can't move `lastPollAt`/`lastLaunchId` and flap readiness or liveness.
+- **Orphan check cadence.** It runs on the pool's sweep tick (60 s), which runs whether or not the stall watchdog is enabled, rather than inside the watchdog's sample loop.
+- **Process listing** uses `ps -axEww` (macOS shows the environment with `-E`; `-axeww` showed it for only some processes on bobafett). The topmost process of each `AGENTBUS_AGENT_ID` chain is reported; `npm exec` rewrites its own title and shows no environment, so it is usually the `node … tsx` child.
+- **Live server pid** comes from `tmux list-sessions -F '#{pid}'` (the server the pool's `tmux` reaches, whichever session; grown panes live in a second session on the same server), not `display -p '#{pid}'`, which needs a client or target and silently answers for another session when the target is missing.
+- **S88.5 reuse path** checks only the foreground command, and only when no model switch is due (a model switch relaunches anyway, and its DB claim must stay synchronous for the E53 concurrency guard). The stale-poll rule also matches `model_confirm_pattern`, never a permission dialog, and treats "no poll since bus start" as unknown until the threshold has passed.
+- **Real-tmux acceptance test** for S88.4 (`src/pool/orphan-detector.test.ts`) is opt-in (`AGENTBUS_TMUX_IT=1`): it starts two private-socket servers with a unique session name and signals only the one it started.
+

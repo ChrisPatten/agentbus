@@ -163,6 +163,7 @@ adapters:
   #   model_confirm_pattern: "..."    # regex for Claude Code's "Switch model?" prompt (answered with key 1 only); default: switch model\\?
   #   pane_env:                      # set via `tmux new-window -e` (TERM/COLORTERM always added)
   #     CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: "50"
+  #   kill_orphan_servers: false     # E88: SIGTERM leftover pool tmux servers the pool can't reach (default: log + notify once)
   #   lease:
   #     idle_evict_ms: 1800000       # 30m without activity → evictable
   #     hard_idle_ms: 21600000       # 6h → proactively released even if pool is busy
