@@ -601,7 +601,7 @@ export class IntercomService {
       if (seen.has(s.conversationId)) continue;
       seen.add(s.conversationId);
       const actions = n.actions.length > 0 ? ` Actions: ${n.actions.map((a) => a.label).join(' / ')}.` : '';
-      const text = `[Shown on Intercom at ${this.clock(n.updated_at)}] (${n.level}) ${n.title}${n.body ? `: ${n.body}` : '.'}${actions}`;
+      const text = `[Shown on Intercom at ${this.clock(n.updated_at)}] (${n.level}) ${n.title}${n.body ? `: ${/[.!?]$/.test(n.body) ? n.body : `${n.body}.`}` : '.'}${actions}`;
       const res = shareContextToConversation(this.deps.db, cfg, {
         contactId: s.follow.contact, channel: s.follow.channel, topic: normalizeTopic(s.follow.topic), body: text, source: `Intercom: ${n.source}`,
       });
