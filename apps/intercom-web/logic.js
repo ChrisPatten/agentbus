@@ -3,7 +3,7 @@
 
 export const C = 233; // centre of the 466 design square
 export const RING_R = 208; // radius of the outer lane
-export const LANE_GAP = 24;
+export const LANE_GAP = 17; // second lane sits just inside the first; never more than two lanes
 
 /** Hours (0..24) to an angle in radians; midnight at the top, clockwise. */
 export function hourToAngle(h) {
@@ -75,7 +75,7 @@ export function assignLanes(spans) {
   const laneEnds = [];
   return spans.map((sp) => {
     let lane = laneEnds.findIndex((end) => sp.startH >= end - 0.001);
-    if (lane === -1) lane = laneEnds.length < 3 ? laneEnds.length : 2;
+    if (lane === -1) lane = laneEnds.length < 2 ? laneEnds.length : 1; // at most 2 lanes, so arcs stay clear of the text
     laneEnds[lane] = Math.max(laneEnds[lane] ?? 0, sp.endH);
     return { ...sp, lane };
   });

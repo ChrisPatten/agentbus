@@ -26,7 +26,7 @@ export function dayRingSvg(events, now, tz) {
     const a = ev.startH + 0.03;
     const b = Math.max(a + 0.25, ev.endH - 0.03);
     const past = ev.endH <= nowH;
-    s += `<path d="${arcPath(a, Math.min(24, b), r)}" stroke="${colorFor(ev)}" stroke-width="20" fill="none"${past ? ' opacity=".4"' : ''}/>`;
+    s += `<path d="${arcPath(a, Math.min(24, b), r)}" stroke="${colorFor(ev)}" stroke-width="${ev.lane ? 10 : 20}" fill="none"${past ? ' opacity=".4"' : ''}/>`;
   }
   const [nx, ny] = polar(nowH, RING_R);
   s += `<circle cx="${nx.toFixed(1)}" cy="${ny.toFixed(1)}" r="15" fill="#d9b23a" stroke="#000" stroke-width="4"/>`;
