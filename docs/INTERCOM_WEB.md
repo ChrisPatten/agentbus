@@ -9,10 +9,10 @@
 | `index.html`, `styles.css`, `manifest.webmanifest`, `icons/` | Page shell, look, Home Screen manifest and icons (180, 192, 512 px) |
 | `app.js` | State, view selection, pairing, send form, wake lock |
 | `socket.js` | WebSocket client: hello and cursor, backoff, outbox, ping, 4401 |
-| `logic.js` | Pure helpers: 24 h geometry, calendar selection, backoff, glance, outbox (unit-tested) |
+| `logic.js` | Pure helpers: 24 h geometry, calendar selection, backoff, glance, outbox, notification map, screen priority, quiet hours (unit-tested) |
 | `dial.js`, `screens.js` | SVG rims and the HTML of each dial screen |
-| `demo.js` | Scripted `?demo` walkthrough of the nine mockup screens |
-| `dev/` | `mock-server.mjs`, `cdp-flow.mjs` (screenshot driver), `frame.html`, `logic.test.js`, `screenshots/` |
+| `demo.js` | Scripted `?demo` walkthrough: the nine mockup screens plus three notification steps |
+| `dev/` | `mock-server.mjs`, `cdp-flow.mjs` and `cdp-notify.mjs` (screenshot drivers), `frame.html`, `logic.test.js`, `notifications.test.js`, `screenshots/` |
 
 ## The dial
 
@@ -20,16 +20,27 @@ The dial is a 466 x 466 design square scaled with CSS. Default size is **true si
 
 Readability rules, in design units: text at least 26 px, primary text 34 px or more, clock 110 px or more (130 in the idle view), nothing important within 30 px of the rim, buttons at least 72 px tall and at most 4, secondary grey no darker than `#b3aa9a`.
 
-Views, in priority order:
+Views, in priority order (`pickScreen` in `logic.js`):
 
 1. **Not paired**: explains briefly; the text field accepts a pasted code or link.
 2. **Connecting / Offline**: shown once the socket has been down for about 1.5 s.
-3. **Reply**: the glance in serif; tap to expand and scroll the full plain-text body; double-tap or 60 s of no touch returns to the dial. "More on Telegram" when the reply is flagged.
-4. **Working**: the `status_text` (or "Working") with a turning gold arc, while `activity` is `running` or `queued`; also for a few seconds after you send.
-5. **Done**: a check mark and a few words for about 2 s after an `interaction` closes.
-6. **Idle day-dial**: 24 h ring with midnight at the top, one arc per timed event (overlaps move to inner lanes, past events dim), gold now-dot, 12-hour clock without seconds, date, the next event in amber (`4:10 · ENT`), and all-day items as a small line under the date. Redrawn every 30 s.
+3. **Listening**: not wired yet (E92).
+4. **Reply**: the glance in serif; tap to expand and scroll the full plain-text body; double-tap or 60 s of no touch returns to the dial. "More on Telegram" when the reply is flagged.
+5. **Working, your own turn**: the `status_text` (or "Working") with a turning gold arc, while `activity` is `running` or `queued` for an interaction this surface opened (a typed send or a notification action); also for a few seconds after you send.
+6. **Done**: a check mark and a few words for about 2 s after an `interaction` closes. (Not in the contract's list; it is a two-second flourish and sits here.)
+7. **Needs you**: while there are active `attention` or `urgent` notifications, and not during quiet hours.
+8. **Working, another turn**: a running turn that did not come from this surface.
+9. **Quiet** (22:00 to 06:30 on the phone's clock) or **Idle day-dial**: 24 h ring with midnight at the top, one arc per timed event (overlaps move to inner lanes, past events dim), gold now-dot, 12-hour clock without seconds, date, the next event in amber (`4:10 · ENT`), and all-day items as a small line under the date. Redrawn every 30 s.
 
-Listening, Choice, Needs you, Draft and Quiet exist as screens and appear in `?demo` only (M0).
+## Notifications (E89)
+
+The client follows `m1-notifications-contract.md`. It keeps a map of `notification` events by id (durable, replayed by cursor, plus the post-welcome snapshot of every active or acknowledged item). `resolved` and `expired` drop an item; an update older than the held `updated_at` is ignored; items past `expires_at` are hidden locally. Only `active` items count; `acknowledged` ones do not. The `attention` event (`{level, count}`) is kept and drives "n waiting" on Quiet.
+
+- **Needs-you screen.** An amber inset glow (an `urgent` item pulses slowly), the title (34 px or more, at most two lines), one clamped line of body in amber, up to three action buttons from `actions` (styled from `style`: `success` green, `danger` red, otherwise plain) and **Got it**, so four buttons at most, each 72 px tall. With one or two buttons and a short title the buttons stack and a small "NEEDS YOU" label shows; otherwise the buttons sit in a compact two-column grid and the label is dropped to keep everything clear of the rim. With more than one item a "1 of N" counter shows; tap it or swipe left or right to move through them. Order: urgent before attention, newest first.
+- **Taps.** An action sends `notification_action` `{client_msg_id, id, index}` through the same outbox as typed sends (stable id, resent after reconnect, dropped after 10 minutes or on `notification_not_found`). Its `ack` carries an `interaction_id`; the app records it as its own, so Working and Reply show as for a typed message. **Got it** sends `notification_ack` and the item disappears at once (the app re-sends pending acks after every `welcome` until the server reports the item is no longer active).
+- **Info items** never glow. Idle shows a brass dot and "1 note" under the date; tap it to open the item on the Needs-you screen (calm, no glow, "Got it" only unless it has actions).
+- **Rim halo.** A thin amber halo on the day-dial's rim while an `attention` or `urgent` item is active. The needs screen normally takes over, so the halo shows on Idle only when something with higher priority is not on screen.
+- **Quiet.** 22:00 to 06:30 on the device clock (`isQuietHours`, to be made configurable later). Needs-you never shows, nothing glows, and the Quiet screen shows "n waiting" (`attention.count`, less items you just acknowledged). A reply or your own Working screen still shows. Dev override: `?quiet` forces quiet, `?quiet=0` forces the day screens.
 
 ## Pairing
 
@@ -50,7 +61,7 @@ iOS gives a Home Screen app its own storage, separate from Safari, and the launc
 
 ## Demo and mock server
 
-- `/intercom/?demo` plays all nine screens (tap the dial to advance, otherwise automatic). `?demo=5` starts at screen 5; add `&hold` to stop auto-advance.
-- `node apps/intercom-web/dev/mock-server.mjs` serves the app and speaks the contract (needs the repo's `node_modules` for `ws`). `PORT` defaults to 3098. Open `http://localhost:3098/intercom/#pair=demo-code`. Typing a message plays activity (running, status lines), a reply, and a closed interaction; `long: ...` returns a long flagged reply; `/revoke` closes the socket with 4401.
-- `node apps/intercom-web/dev/cdp-flow.mjs` drives headless Chrome through the live flow and writes screenshots to `dev/screenshots/`.
+- `/intercom/?demo` plays twelve steps: the nine mockup screens, then a day-dial with a note dot and rim halo, an urgent three-action item with "1 of 3", and a calm note (tap the dial to advance, otherwise automatic). `?demo=5` starts at step 5; add `&hold` to stop auto-advance.
+- `node apps/intercom-web/dev/mock-server.mjs` serves the app and speaks the contract (needs the repo's `node_modules` for `ws`). `PORT` defaults to 3098. Open `http://localhost:3098/intercom/#pair=demo-code`. Typing a message plays activity (running, status lines), a reply, and a closed interaction; `long: ...` returns a long flagged reply; `/revoke` closes the socket with 4401. Notifications: a sample item appears about 2.5 s after connect; type `notify: Title` (attention, two actions), `notify!: Title` (urgent, three actions), `note: Title` (info) or `clear:` (resolve all). It accepts `notification_ack` and `notification_action` (the latter starts an interaction with `[tapped] <label>`) and emits `notification` and `attention` events.
+- `node apps/intercom-web/dev/cdp-flow.mjs` drives headless Chrome through the live flow and writes screenshots to `dev/screenshots/`; `PORT=3097 node apps/intercom-web/dev/cdp-notify.mjs` does the same for the notification flow (use `?quiet=0` when running at night).
 - Tests: `npx vitest run apps/intercom-web`.

@@ -165,11 +165,108 @@ export class Outbox {
     this.items.push(item);
     return item;
   }
+  /** A notification action tap (E89); resent as a `notification_action` frame. */
+  addAction(id, index, at = Date.now()) {
+    const item = { client_msg_id: this.makeId(), kind: 'action', id, index, at };
+    this.items.push(item);
+    return item;
+  }
   ack(id) {
     const n = this.items.length;
     this.items = this.items.filter((i) => i.client_msg_id !== id);
     return this.items.length !== n;
   }
+  /** Drop queued notification actions (the server said the item is gone, or they went stale). */
+  dropActions(olderThanMs = 0, now = Date.now()) {
+    const n = this.items.length;
+    this.items = this.items.filter((i) => i.kind !== 'action' || (olderThanMs > 0 && now - (i.at || 0) <= olderThanMs));
+    return n - this.items.length;
+  }
   pending() { return this.items.slice(); }
   get size() { return this.items.length; }
+}
+
+/** The wire frame for an outbox item. */
+export function frameOf(item) {
+  if (item.kind === 'action') return { type: 'notification_action', client_msg_id: item.client_msg_id, id: item.id, index: item.index };
+  return { type: 'send', client_msg_id: item.client_msg_id, body: item.body };
+}
+
+/* ---------- notifications (E89) ---------- */
+
+export const LEVEL_RANK = { info: 1, attention: 2, urgent: 3 };
+
+/** Merge a `notification` event into the client map (mutates). Terminal states drop the item; stale updates are ignored. */
+export function applyNotification(map, n) {
+  if (!n || !n.id) return false;
+  if (n.state === 'resolved' || n.state === 'expired') return map.delete(n.id);
+  const old = map.get(n.id);
+  if (old && old.updated_at && n.updated_at && old.updated_at > n.updated_at) return false;
+  map.set(n.id, n);
+  return true;
+}
+
+/** Active (not acknowledged, not expired, not locally acked) items: urgent first, then attention, info; newest first. */
+export function activeItems(map, nowMs = Date.now(), hidden = new Map()) {
+  const out = [];
+  for (const n of map.values()) {
+    if (n.state !== 'active' || hidden.has(n.id)) continue;
+    const exp = Date.parse(n.expires_at || '');
+    if (!isNaN(exp) && exp <= nowMs) continue;
+    out.push(n);
+  }
+  const t = (n) => Date.parse(n.updated_at || n.created_at || '') || 0;
+  return out.sort((a, b) => (LEVEL_RANK[b.level] || 2) - (LEVEL_RANK[a.level] || 2) || t(b) - t(a));
+}
+export const needsList = (items) => items.filter((n) => n.level !== 'info');
+export const infoList = (items) => items.filter((n) => n.level === 'info');
+export function attentionLevel(items) {
+  let best = 'none';
+  for (const n of items) if ((LEVEL_RANK[n.level] || 2) > (LEVEL_RANK[best] || 0)) best = n.level || 'attention';
+  return best;
+}
+
+/** The id to show after moving `delta` steps through the list, wrapping; falls back to the first. */
+export function cycleId(list, currentId, delta = 1) {
+  if (!list.length) return null;
+  const i = list.findIndex((n) => n.id === currentId);
+  if (i < 0) return list[0].id;
+  return list[(i + delta + list.length) % list.length].id;
+}
+
+/** Client-side quiet hours, 22:00 to 06:30 by default, on the clock of the given IANA zone (device zone when omitted). */
+export function isQuietHours(now, tz, startMin = 22 * 60, endMin = 6 * 60 + 30) {
+  const p = tzParts(now, tz);
+  const m = p.hour * 60 + p.minute;
+  return startMin <= endMin ? m >= startMin && m < endMin : m >= startMin || m < endMin;
+}
+
+/** "n waiting": the server's active count, less items the user has just acknowledged locally. */
+export function waitingCount(attention, items, hidden = new Map()) {
+  if (!attention || typeof attention.count !== 'number') return items.length;
+  let h = 0;
+  for (const n of items) if (hidden.has(n.id)) h++;
+  return Math.max(0, attention.count - h);
+}
+
+/**
+ * Which dial screen wins. Highest first: pairing, offline, listening, reply, working on this surface's own
+ * interaction, done (a two-second flourish), needs-you (never while quiet), working on another turn, quiet/idle.
+ */
+export function pickScreen(c) {
+  if (!c.paired) return 'pairing';
+  if (c.offline) return 'offline';
+  if (c.listening) return 'listening';
+  if (c.reply) return 'reply';
+  if (c.ownWorking) return 'working';
+  if (c.done) return 'done';
+  if (c.needs && !c.quiet) return 'needs';
+  if (c.otherWorking) return 'working';
+  return c.quiet ? 'quiet' : 'idle';
+}
+
+/** Needs-you layout: roomy stack for short titles with at most two buttons, otherwise a compact two-column grid. */
+export function needsLayout(item, total = 1) {
+  const buttons = Math.min(3, (item.actions || []).length) + 1;
+  return buttons <= 2 && String(item.title || '').length <= 16 && total <= 9 ? 'stack' : 'grid';
 }

@@ -1,6 +1,8 @@
 // Dev-only mock of the Intercom backend contract (docs/INTERCOM_WEB.md).
 // Run: node apps/intercom-web/dev/mock-server.mjs   (PORT=3098, needs `ws` from the repo's node_modules)
 // Pair with code "demo-code". Typing "long: ..." returns a long reply; "/revoke" closes with 4401.
+// Notifications (E89): a sample one appears ~2.5 s after connect. Type `notify: Title` (attention, 2 actions),
+// `notify!: Title` (urgent, 3 actions), `note: Title` (info) to raise more; `clear:` resolves them all.
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -68,8 +70,31 @@ const bcast = (event, data, isDurable = false) => {
 };
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function handleSend(body) {
-  const iid = `int-${Date.now()}`;
+const notes = new Map(); let nseq = 0;
+const nowIso = () => new Date().toISOString();
+function attention() {
+  const act = [...notes.values()].filter((n) => n.state === 'active');
+  const rank = { info: 1, attention: 2, urgent: 3 };
+  const level = act.reduce((m, n) => (rank[n.level] > (rank[m] || 0) ? n.level : m), 'none');
+  return { level, count: act.length };
+}
+const sendAttention = (ws) => (ws ? out(ws, { type: 'event', event: 'attention', data: attention() }) : bcast('attention', attention()));
+function raise(title, { body = '', level = 'attention', actions = [{ label: 'Leaving now', style: 'success' }, { label: 'Snooze 10' }], source = 'Mock' } = {}) {
+  const id = `n-${++nseq}`; const t = nowIso();
+  const n = { id, key: null, title: title.slice(0, 60), body, level, state: 'active', actions, source, created_at: t, updated_at: t, expires_at: null };
+  notes.set(id, n); bcast('notification', n, true); sendAttention(); return n;
+}
+function setState(n, state) { n.state = state; n.updated_at = nowIso(); bcast('notification', n, true); if (state === 'resolved') notes.delete(n.id); sendAttention(); }
+function typedNotify(body) {
+  const m = body.match(/^(notify!|notify|note):\s*(.*)$/i); if (!m) return false;
+  const kind = m[1].toLowerCase(); const title = m[2] || 'Something needs you';
+  if (kind === 'notify!') raise(title, { level: 'urgent', body: 'Please look at this now', actions: [{ label: 'On it', style: 'success' }, { label: 'Snooze 10' }, { label: 'Not today', style: 'danger' }] });
+  else if (kind === 'note') raise(title, { level: 'info', body: 'For your information', actions: [] });
+  else raise(title, { body: 'Leave by 3:45', actions: [{ label: 'Thanks', style: 'success' }, { label: 'Snooze 10' }] });
+  return true;
+}
+
+async function handleSend(body, iid = `int-${Date.now()}`) {
   bcast('interaction', { interaction_id: iid, state: 'open' });
   bcast('activity', { state: 'running', status_text: null, interaction_id: iid });
   await wait(1200); bcast('activity', { state: 'running', status_text: 'Checking the calendar', interaction_id: iid });
@@ -98,13 +123,32 @@ wss.on('connection', (ws) => {
       if (!reset) durable.filter((e) => e.seq > f.cursor).forEach((e) => out(ws, e));
       out(ws, { type: 'event', event: 'activity', data: { state: 'idle', status_text: null, interaction_id: null } });
       out(ws, { type: 'event', event: 'calendar', data: calendar() });
+      for (const n of notes.values()) if (n.state !== 'resolved' && n.state !== 'expired') out(ws, { type: 'event', event: 'notification', data: n });
+      sendAttention(ws);
+      setTimeout(() => { if (![...notes.values()].length) raise('Leave for the dentist', { body: 'Dr. Alvarez at 9:00, 18 min drive', actions: [{ label: 'Leaving now', style: 'success' }, { label: 'Snooze 10' }] }); }, 2500);
     } else if (!ws.authed) { out(ws, { type: 'error', code: 'unauthorized' }); }
-    else if (f.type === 'send') {
-      if (f.body === '/revoke') return ws.close(4401);
+    else if (f.type === 'notification_ack') {
+      const n = notes.get(f.id);
+      if (!n || n.state === 'resolved') return out(ws, { type: 'error', code: 'notification_not_found' });
+      if (n.state === 'active') setState(n, 'acknowledged');
+    } else if (f.type === 'notification_action') {
       if (seen.has(f.client_msg_id)) return out(ws, seen.get(f.client_msg_id));
-      const ack = !f.body || f.body.length > 4000 ? { type: 'ack', client_msg_id: f.client_msg_id, status: 'rejected', reason: 'invalid_body' } : { type: 'ack', client_msg_id: f.client_msg_id, status: 'queued', message_id: `in-${Date.now()}`, interaction_id: 'x' };
+      const n = notes.get(f.id); const a = n && n.actions[f.index];
+      if (!n || !a) return out(ws, { type: 'error', code: 'notification_not_found' });
+      const iid = `int-${Date.now()}`;
+      const ack = { type: 'ack', client_msg_id: f.client_msg_id, status: 'queued', message_id: `in-${Date.now()}`, interaction_id: iid };
       seen.set(f.client_msg_id, ack); out(ws, ack);
-      if (ack.status === 'queued') handleSend(f.body);
+      if (n.state === 'active') setState(n, 'acknowledged');
+      handleSend(`[tapped] ${a.label}`, iid);
+    } else if (f.type === 'send') {
+      if (f.body === '/revoke') return ws.close(4401);
+      if (/^clear:/i.test(f.body || '')) { out(ws, { type: 'ack', client_msg_id: f.client_msg_id, status: 'queued', message_id: `in-${Date.now()}`, interaction_id: 'x' }); for (const n of [...notes.values()]) setState(n, 'resolved'); return; }
+      if (typedNotify(f.body || '')) return out(ws, { type: 'ack', client_msg_id: f.client_msg_id, status: 'queued', message_id: `in-${Date.now()}`, interaction_id: 'x' });
+      if (seen.has(f.client_msg_id)) return out(ws, seen.get(f.client_msg_id));
+      const iid = `int-${Date.now()}`;
+      const ack = !f.body || f.body.length > 4000 ? { type: 'ack', client_msg_id: f.client_msg_id, status: 'rejected', reason: 'invalid_body' } : { type: 'ack', client_msg_id: f.client_msg_id, status: 'queued', message_id: `in-${Date.now()}`, interaction_id: iid };
+      seen.set(f.client_msg_id, ack); out(ws, ack);
+      if (ack.status === 'queued') handleSend(f.body, iid);
     } else if (f.type === 'ping') out(ws, { type: 'pong' });
   });
 });

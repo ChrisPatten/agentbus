@@ -1,22 +1,23 @@
 // HTML for each dial screen. All inner content is laid out in the 466 design square.
 // Readability: text >= 26px, primary >= 34px, clock >= 110px, buttons >= 72px, <= 4 buttons,
 // nothing inside the outer 30px.
-import { escapeHtml as e, daySpans, nextEvent, clockText, dateText, shortTime, allDayLine, glanceOf } from './logic.js';
+import { escapeHtml as e, daySpans, nextEvent, clockText, dateText, shortTime, allDayLine, glanceOf, needsLayout } from './logic.js';
 import { dayRingSvg, workingRingSvg, waveRingSvg } from './dial.js';
 
 export const SCREENS = ['idle', 'listening', 'working', 'reply', 'choice', 'needs', 'draft', 'done', 'quiet'];
 
 const btn = (label, cls = '') => `<div class="btn ${cls}">${e(label)}</div>`;
 
-export function idle({ events, now, tz, calendarKnown = true }) {
+export function idle({ events, now, tz, calendarKnown = true, notes = 0, halo = false }) {
   const { timed, allDay } = daySpans(events, now, tz);
   const next = nextEvent(timed, now, tz);
   const ad = allDayLine(allDay);
   let nextHtml;
   if (next) nextHtml = `<div class="next">${e(shortTime(next.startH))} · ${e(next.title)}</div>`;
   else nextHtml = `<div class="sec dim-line">${calendarKnown ? 'Clear for today' : 'Diary unavailable'}</div>`;
-  return `${dayRingSvg(events, now, tz)}
-    <div class="sec datey">${e(dateText(now, tz))}</div>
+  const noteHtml = notes ? `<div class="sec notey" data-act="note"><span class="ndot"></span>${notes} ${notes === 1 ? 'note' : 'notes'}</div>` : '';
+  return `${dayRingSvg(events, now, tz, halo)}
+    <div class="sec datey">${e(dateText(now, tz))}</div>${noteHtml}
     ${ad ? `<div class="sec allday">${e(ad)}</div>` : ''}
     <div class="clock">${e(clockText(now, tz))}</div>${nextHtml}`;
 }
@@ -51,10 +52,20 @@ export function choice({ question, choices }) {
     choices.slice(0, 3).map((c) => btn(c.label, styles[c.style] ?? '')).join('');
 }
 
-export function needs({ title, line, actions }) {
-  return `<div class="glow"></div><div class="big" style="font-size:50px">${e(title)}</div>
-    <div class="sec" style="color:var(--amber);font-weight:600;margin:8px 0 22px">${e(line)}</div>` +
-    actions.slice(0, 2).map((a, i) => `<div class="btn ${i === 0 ? 'ok' : ''}" style="width:260px">${e(a)}</div>`).join('');
+export function needs({ item, index = 0, total = 1 }) {
+  const level = item.level || 'attention';
+  const acts = (item.actions || []).slice(0, 3);
+  const layout = needsLayout(item, total);
+  const styles = { success: 'ok', primary: '', danger: 'danger' };
+  const buttons = [...acts.map((a, i) => ({ label: a.label, cls: styles[a.style] ?? '', act: 'action', i })), { label: 'Got it', cls: '', act: 'ack' }];
+  const glow = level === 'info' ? '' : `<div class="glow${level === 'urgent' ? ' urgent' : ''}"></div>`;
+  const label = layout === 'stack' ? `<div class="label nlabel">${level === 'info' ? 'Note' : 'Needs you'}</div>` : '';
+  const body = item.body ? `<div class="nbody${level === 'info' ? ' calm' : ''}">${e(item.body)}</div>` : '';
+  const btns = layout === 'stack'
+    ? buttons.map((b) => `<div class="btn ${b.cls}" data-act="${b.act}" data-i="${b.i ?? ''}" style="width:260px">${e(b.label)}</div>`).join('')
+    : `<div class="ngrid">${buttons.map((b, k) => `<div class="btn ${b.cls}${buttons.length % 2 && k === buttons.length - 1 ? ' span' : ''}" data-act="${b.act}" data-i="${b.i ?? ''}">${e(b.label)}</div>`).join('')}</div>`;
+  const count = total > 1 ? `<div class="ncount" data-act="cycle">${index + 1} of ${total}</div>` : '';
+  return `${glow}${label}<div class="ntitle ${layout === 'stack' ? 'l' : 'g'}">${e(item.title)}</div>${body}${btns}${count}`;
 }
 
 export function draft({ to, text, send = 'Send it', hold = 'Hold' }) {
