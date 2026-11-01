@@ -6,6 +6,7 @@
  * optional and combinable with `choices`.
  */
 import { z } from 'zod';
+import { clampGlance, GLANCE_MAX } from '../intercom/glance.js';
 
 export const SILENT_DESCRIPTION =
   'Telegram only: deliver without a notification sound (disable_notification). Use for routine or low-urgency messages. Ignored on other channels.';
@@ -14,17 +15,24 @@ export const NO_PREVIEW_DESCRIPTION =
 export const PIN_DESCRIPTION =
   'Telegram only: pin this message in its chat or forum topic after sending (silently). Needs the bot to have the "Pin Messages" admin right; a failure is logged, not returned. Ignored on other channels.';
 
+export const GLANCE_DESCRIPTION =
+  `Optional one-line summary of this message for small glance displays (Intercom), a plain line of at most ${GLANCE_MAX} characters, no markdown. ` +
+  'Longer text is truncated. When omitted the bus derives one from the first sentence. Other channels ignore it.';
+
 /** Zod fields to spread into a tool's inputSchema. */
 export const sendOptionFields = {
   silent: z.boolean().optional().describe(SILENT_DESCRIPTION),
   no_preview: z.boolean().optional().describe(NO_PREVIEW_DESCRIPTION),
   pin: z.boolean().optional().describe(PIN_DESCRIPTION),
+  glance: z.string().max(2000).optional().describe(GLANCE_DESCRIPTION),
 };
 
 export interface SendOptions {
   silent?: boolean;
   no_preview?: boolean;
   pin?: boolean;
+  /** E90 (I3): glance line for Intercom surfaces; truncated to 100 characters. */
+  glance?: string | undefined;
 }
 
 /** Copies the options the caller set (true only) into `metadata`; unset or false options add nothing. */
@@ -33,6 +41,8 @@ export function applySendOptions(metadata: Record<string, unknown>, opts: SendOp
   if (opts.silent) out['silent'] = true;
   if (opts.no_preview) out['no_preview'] = true;
   if (opts.pin) out['pin'] = true;
+  const glance = clampGlance(opts.glance);
+  if (glance) out['glance'] = glance;
   return out;
 }
 

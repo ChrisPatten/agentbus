@@ -193,7 +193,9 @@ function registerReplyTool(server: McpServer, busBaseUrl: string, agentId: strin
       description:
         'Send a reply to a message. Looks up the original by message_id, swaps sender/recipient, and posts the outbound message to AgentBus. ' +
         'Pass `choices` to offer single-choice answers (tappable buttons on Telegram). ' +
-        '`silent`, `no_preview` and `pin` tune Telegram delivery (no notification sound, no link card, pin after sending).',
+        '`silent`, `no_preview` and `pin` tune Telegram delivery (no notification sound, no link card, pin after sending). ' +
+        '`glance` is an optional one-line summary (at most 100 characters) for small glance displays such as Intercom. ' +
+        'When a message came from Intercom (the message says so), keep the reply to 1-3 sentences and pass `glance`.',
       inputSchema: {
         message_id: z.string().describe('ID of the message to reply to'),
         body: z.string().min(1).describe('Text body of the reply'),
@@ -201,7 +203,7 @@ function registerReplyTool(server: McpServer, busBaseUrl: string, agentId: strin
         ...sendOptionFields,
       },
     },
-    async ({ message_id, body, choices, silent, no_preview, pin }) => {
+    async ({ message_id, body, choices, silent, no_preview, pin, glance }) => {
       let original: MessageEnvelope;
       try {
         const res = await fetch(`${busBaseUrl}/api/v1/messages/${message_id}`);
@@ -226,7 +228,7 @@ function registerReplyTool(server: McpServer, busBaseUrl: string, agentId: strin
       const withChoices = applyChoices(
         original.channel,
         body,
-        applySendOptions(baseMetadata, { silent, no_preview, pin }),
+        applySendOptions(baseMetadata, { silent, no_preview, pin, glance }),
         choices,
       );
       const replyBody = {

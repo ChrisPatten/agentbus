@@ -78,6 +78,25 @@ describe('reply tool — conversation_id forwarding (E48 S48.6)', () => {
     await client.close();
   });
 
+  it('passes a glance through (E90 I3), truncated to 100 characters', async () => {
+    fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ ok: true, message: makeOriginalEnvelope() }) });
+    fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ ok: true, id: 'reply-msg-g' }) });
+
+    const client = await makeClient();
+    const result = await client.callTool({
+      name: 'reply',
+      arguments: { message_id: 'orig-msg-1', body: 'here is my reply', glance: 'word '.repeat(50) },
+    });
+
+    expect(result.isError).toBeFalsy();
+    const postCall = fetchMock.mock.calls[1]! as [string, { body: string }];
+    const sentBody = JSON.parse(postCall[1].body) as { metadata: { glance: string } };
+    expect(Array.from(sentBody.metadata.glance).length).toBeLessThanOrEqual(100);
+    expect(sentBody.metadata.glance.endsWith('…')).toBe(true);
+
+    await client.close();
+  });
+
   it('sends metadata: {} when the original has no conversation_id (unchanged fallback behavior)', async () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,
