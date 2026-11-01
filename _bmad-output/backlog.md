@@ -4,7 +4,7 @@ Feature ideas and future work that hasn't been scoped into an epic yet. Promote 
 
 ## Ideas
 
-### Intercom: pushes from other sessions carry into the next Intercom turn (backlog 2026-11-01, Chris)
+### Intercom: pushes from other sessions carry into the next Intercom turn (backlog 2026-11-01, Chris) — promoted into E89 (S89.6, built 2026-11-01)
 Other sessions and automations push items to the device (extends E89 notifications). Every pushed item is also queued as pending context for the Intercom conversation, the way Main's pending context and `share_context` (E69/E82) work, so when Chris next talks back on the dial the Intercom session already knows what was shown ("what was that about?" just works). Needs: push API/tool that targets a surface, the item rendered on the dial, and injection into the followed conversation's next turn with a "shown on the device at HH:MM" label. Likely folds into E89 as a story or becomes its own epic.
 
 ### Intercom session delegates heavy work (backlog 2026-11-01, Chris)

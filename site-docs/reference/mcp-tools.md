@@ -73,6 +73,18 @@ Gives the agent in the Mac app's Main a note about work you finished in another 
 
 Notes older than 24 hours are skipped, a note too long for the context budget is refused (shorten it and try again), and it can't be called from Main itself. To tell you something or ask a question, use `send_message`. See [Proactive messages](/features/proactive-messages#letting-main-know-without-a-message).
 
+### Notifications
+
+Put a short "needs you soon" item on your Intercom screen and clear it later. See [Intercom notifications](/channels/intercom#notifications).
+
+| Tool | What it does |
+|---|---|
+| `notify` | Raises an item. `title` (60 characters), optional `body` (280), `level` (`info`, `attention`, `urgent`), `key`, `targets`, `expires_in_s`, up to three `actions` (`label`, optional `style`) and `source`. The same `key` while the item is open updates it. Returns `id`, `key`, `state`. |
+| `update_notification` | Changes or clears an item by `id` or `key`: new `title`, `body`, `level`, or `state` of `resolved` (removes it), `acknowledged` or `active`. |
+| `list_notifications` | Lists items: `state` of `active`, `open` (default; active plus dismissed) or `all`, and `limit`. |
+
+Use `notify` for short-lived items and ordinary messages for content. Notifications must be turned on with the `notifications` block in `config.yaml`.
+
 ### `send_email`
 
 | Parameter | Required | Meaning |

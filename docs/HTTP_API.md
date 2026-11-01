@@ -2,7 +2,7 @@
 
 ## Mac app API
 
-When `adapters.intercom.enabled` is true, the bus also serves the Intercom web app at `/intercom/` (static, no auth) and `POST /api/v1/intercom/pair` (one-time pairing code), `GET /api/v1/intercom/health`, `GET /api/v1/intercom/today` (Bearer surface token) and `GET /api/v1/intercom/ws` (hello-token WebSocket). See [INTERCOM.md](INTERCOM.md).
+When `adapters.intercom.enabled` is true, the bus also serves the Intercom web app at `/intercom/` (static, no auth) and `POST /api/v1/intercom/pair` (one-time pairing code), `GET /api/v1/intercom/health`, `GET /api/v1/intercom/today` (Bearer surface token) and `GET /api/v1/intercom/ws` (hello-token WebSocket). See [INTERCOM.md](INTERCOM.md). With `notifications.enabled` it also serves `/api/v1/notifications` (below).
 
 When `adapters.app.enabled` is true, `/api/v1/app/*` uses `Authorization: Bearer <contacts.*.platforms.app.token>` and also `X-Bus-Token` when `bus.auth_token` is set. `GET /api/v1/app/ws` upgrades to the durable JSON WebSocket protocol. `GET /api/v1/app/sessions` lists the routed agent's visible sessions; `GET /api/v1/app/sessions/:id/messages` pages transcript history; `POST /api/v1/app/attachments` uploads one multipart file; `GET /api/v1/app/commands` returns the command manifest; `GET /api/v1/app/health` reports routing and capacity. Main is listed once, aggregated over its rotating session rows, and its history pages across them with `boundaries` (E69). See [APP_ADAPTER.md](APP_ADAPTER.md) for frame shapes and cursor semantics.
 
@@ -16,7 +16,7 @@ bus-core serves a JSON API on `bus.host:bus.http_port` (default `127.0.0.1:3000`
 
 ### Authentication
 
-If `bus.auth_token` is set, every request except `GET /api/v1/health` and the Intercom routes (`/intercom`, `/api/v1/intercom/*`, which carry their own surface-token auth; E90) must send a matching `X-Bus-Token` header or it receives `401`. The Pebble webhook additionally requires its own per-contact bearer token; the two checks are layered. The comparison is not constant time; the token is a shared secret between local processes, not a user password.
+If `bus.auth_token` is set, every request except `GET /api/v1/health` and the Intercom routes (`/intercom`, `/api/v1/intercom/*`, which carry their own surface-token auth; E90) and, when `notifications.enabled`, `/api/v1/notifications*` (own Bearer tokens; E89) must send a matching `X-Bus-Token` header or it receives `401`. The Pebble webhook additionally requires its own per-contact bearer token; the two checks are layered. The comparison is not constant time; the token is a shared secret between local processes, not a user password.
 
 AgentBus's own clients send the header automatically when a token is configured: the `claude-code` MCP server (`src/adapters/cc.ts`: polling loop and every MCP tool), `cc-headless`, the `cc-pool` manager and pane readiness poll, and the pool hook scripts in `scripts/hooks/`. They share `src/core/bus-auth.ts`, which only attaches the header to requests for the bus's own base URL. The token comes from the loaded config's `bus.auth_token`, falling back to the `AGENTBUS_BUS_TOKEN` environment variable. `cc-headless` passes `AGENTBUS_BUS_TOKEN` to its `claude -p` children, and `cc-pool` sets it in every pane window it creates, so the pane's MCP server and hook scripts inherit it. The hooks read `AGENTBUS_BUS_TOKEN` (else the older `AGENTBUS_TOKEN` or `AGENTBUS_TOKEN_FILE`; the bus address from `AGENTBUS_URL`) and hand the header to `curl` on stdin (`-K -`), keeping it out of the process list. With no token configured, none of these requests change.
 
@@ -29,6 +29,7 @@ Set `bus.host: 0.0.0.0` to accept connections from other hosts, for example a re
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/api/v1/health` | Liveness, adapter health, agent runtimes, queue counts |
+| POST, PATCH, GET | `/api/v1/notifications` | Raise, update and list Intercom notifications (E89; Bearer token from `notifications.api_tokens_env`) |
 | GET | `/api/v1/pool` | cc-pool pane leases and parked-queue depth (when configured) |
 | POST | `/api/v1/pool/:agentId/turn-ended` | Real-time pane activity signal, fed by a `Stop` hook (superseded by `/api/v1/journal/events`) |
 | POST | `/api/v1/journal/events` | Harness hook events for journaling (`turn-ended`, `pre-compact`, `session-end`, `clear`) |
@@ -397,6 +398,18 @@ E81, used by the `edit_message`, `pin_message` and `unpin_message` tools. `:id` 
 | 400 | `{ "ok": false, "error" }`: missing `body`, invalid `choices`, a channel without the action, or the adapter refused (multi-part message, wrong kind, too long, missing Pin Messages right) |
 | 404 | No registry row for the id |
 | 502 | The adapter threw |
+
+## Notifications (E89)
+
+Registered when `notifications.enabled` and `adapters.intercom.enabled`. Semantics, limits and the surface protocol: [NOTIFICATIONS.md](NOTIFICATIONS.md). Keep these off `tailscale serve`.
+
+| Method | Path | Body or query | Answer |
+|---|---|---|---|
+| POST | `/api/v1/notifications` | `{title, source, body?, level?, key?, targets?, expires_in_s?, actions?, contact_id?, conversation_ref?}` | `201 {ok, id, key, state, created: true}`; `200 ... created: false` when `key` matched an open item |
+| PATCH | `/api/v1/notifications/:id` or `/api/v1/notifications?key=…` | `{title?, body?, level?, state?: resolved\|acknowledged\|active, expires_in_s?}` | `200 {ok, id, key, state}`; `404` unknown; `409` already resolved or expired |
+| GET | `/api/v1/notifications?state=active\|open\|all&limit=N` | default `open` (active plus acknowledged), limit 50 (max 200) | `{ok, notifications: [...]}` |
+
+`Authorization: Bearer <token>` where the token equals the value of an env var named in `notifications.api_tokens_env` (else 401). `source` is required (a free label; the rate limit is per source). Errors: 400 `{ok:false, error:"invalid_body", detail}`, 413 over 8 KB, 429 over 30 writes per minute per source with `Retry-After: 60`. The MCP tools use the identical handlers at `/api/v1/internal/notifications*` under the shared `X-Bus-Token` auth instead of Bearer tokens.
 
 ## Adapters
 

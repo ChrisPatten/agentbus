@@ -11,6 +11,7 @@ Errors come back as `{ "content": [{ "type": "text", "text": "Error: ..." }], "i
 | `reply` | Reply to a message by its bus ID | Always |
 | `send_message` | Send to any contact on any channel | Always |
 | `share_context` | Hand a Claude Code session's outcome to Main as hidden context (no message) | Always |
+| `notify`, `update_notification`, `list_notifications` | Raise, change or clear a short-lived "needs you" item on the Intercom dial (E89) | Always (answers "not enabled" unless `notifications.enabled`) |
 | `send_email` | Start a new email thread to an allowlisted address | An email adapter is configured |
 | `react_to_message` | Emoji reaction on a message | Always |
 | `create_telegram_topic` | Create a forum topic in a Telegram group | A Telegram adapter is configured |
@@ -152,6 +153,18 @@ There is deliberately no `effect` option: Telegram rejects message effects in gr
 ### Glance
 
 `reply` and `send_message` (E90) take an optional `glance`: a plain line of at most 100 characters for small round displays such as Intercom (`docs/INTERCOM.md`). A longer value is truncated at a word boundary with `…`; it is never rejected. It is stored in `metadata.glance` of the outbound message and ignored by Telegram, email, the app and Siri. When the agent passes none, the bus derives one from the first sentence of the body (markdown stripped, skipping abbreviations such as `Mr.`), cut to 100 characters on a word boundary. When a message arrives from Intercom, a system line in the prompt says so and asks for 1-3 sentences plus a `glance`.
+
+### Notifications
+
+`notify`, `update_notification` and `list_notifications` (E89) manage Intercom attention items; full semantics in [NOTIFICATIONS.md](NOTIFICATIONS.md). They call `/api/v1/internal/notifications*` with the shared bus auth.
+
+| Tool | Input | Output |
+|---|---|---|
+| `notify` | `title` (cut at 60 characters), `body?` (280), `level?` (`info` \| `attention` default \| `urgent`), `key?`, `targets?` (surface ids, default all), `expires_in_s?`, `actions?` (up to 3 of `{label (24), style?}`), `source?` (default: `AGENTBUS_SOURCE_LABEL`, else `Agent: <id>`) | `{ "id", "key", "state" }` |
+| `update_notification` | `id` or `key`, plus any of `title`, `body`, `level`, `state` (`resolved` \| `acknowledged` \| `active`), `expires_in_s` | `{ "id", "key", "state" }` |
+| `list_notifications` | `state?` (`active` \| `open` default \| `all`), `limit?` | `{ "notifications": [...] }` |
+
+The same `key` while the item is open updates it in place and puts it back to `active`. Use `notify` for short-lived "needs you soon" states (leaving time, a bill due today, a draft awaiting approval, a job finished), with a `key` you can resolve later; use `reply` / `send_message` for content. When background work started from an Intercom turn finishes, `notify` with `level: "info"` (or `"attention"` if a decision is needed) and a key, and `reply` the result.
 
 ### `send_email`
 

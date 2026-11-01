@@ -109,7 +109,9 @@ After `welcome` the server replays durable events with `seq > cursor` (oldest fi
 | `{"type":"state","quiet":false,"battery":null}` | none; stored in memory and logged only |
 | `{"type":"ping"}` | `{"type":"pong"}` |
 
-Errors: `{"type":"error","code":"invalid_frame"\|"unauthorized"\|"internal_error"}`.
+Errors: `{"type":"error","code":"invalid_frame"\|"unauthorized"\|"internal_error"\|"notification_not_found"}`.
+
+**Notifications (E89).** When `notifications.enabled`, the server also sends `notification` (durable) and `attention` (ephemeral) events, plus a snapshot of open items after `welcome`, and accepts `notification_ack` and `notification_action` frames. The agent note on each surface message then also carries the notify-versus-message guidance. See [NOTIFICATIONS.md](NOTIFICATIONS.md).
 
 ## Follow engine
 
@@ -160,4 +162,4 @@ Each interaction logs structured lines, `[intercom] {"evt":"latency","mark":"inb
 - Cold panes are not warmed (Q4); only measured.
 - A turn that started on another channel for a different conversation does not affect the surface (by design).
 - `state` frames (quiet, battery) are logged only.
-- Choice taps, notifications (E89) and voice (E92) are not built.
+- Choice taps and voice (E92) are not built. Notifications (E89) are built: see [NOTIFICATIONS.md](NOTIFICATIONS.md).

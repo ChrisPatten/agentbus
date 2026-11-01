@@ -62,6 +62,10 @@ It prints a one-time link ending in `/intercom/#pair=CODE`. Open it on the phone
 
 Nothing to do: each Intercom message carries a short note asking the agent for a sentence or two and a one-line `glance`. See the [glance option](/reference/mcp-tools#messaging) on `reply` and `send_message`.
 
+### 4. Turn on notifications (optional)
+
+Notifications put a short "needs you soon" item on the screen: a leaving time, a bill due today, a draft waiting for your OK. See [Notifications](#notifications) below.
+
 ## Troubleshooting
 
 | Problem | What to try |
@@ -101,3 +105,55 @@ Pairing codes work once and expire after 12 hours. To unpair a phone, press and 
 - Type under the dial and tap **Send**. The message goes into the followed conversation as if you had typed it there.
 - Tap **Large** to fill the width of the phone; **True size** returns to the 1.75-inch dial. The choice is remembered.
 - Add `?demo` to the address to see all nine screens with sample data, without a connection.
+
+## Notifications
+
+A notification is a short item your agent, a schedule or one of your own scripts puts on the screen, such as "Leave for the dentist in 20 min" or "Draft to Kate awaiting your OK". Important ones make the screen glow amber (urgent ones pulse), and an item can carry up to three buttons. Tapping "Got it" dismisses the item; tapping a button dismisses it and sends your choice to the agent, as if you had typed it in the conversation. The reply shows on the screen as usual.
+
+Whatever the screen shows is also handed to the agent, quietly, for its next turn in that conversation. So when you say "what was that about?", the agent already knows what you were looking at and when.
+
+### Turn it on
+
+Add a `notifications` block next to `adapters` in `config.yaml` and restart the bus:
+
+```yaml
+notifications:
+  enabled: true
+  retention_days: 14
+  api_tokens_env: [NOTIFY_TOKEN_AUTOMATIONS]
+  context_to_followed: true
+```
+
+| Option | Default | What it does |
+|---|---|---|
+| `enabled` | `false` | Turns notifications on. Intercom must be on too. |
+| `retention_days` | `14` | How long finished items are kept |
+| `api_tokens_env` | none | Names of environment variables holding passwords (16 characters or more) that scripts use to post notifications. Leave empty to allow only your agents. |
+| `context_to_followed` | `true` | Hand what the screen shows to the agent for its next turn in the followed conversation |
+| `rate_limit_per_min` | `30` | How many notifications one source can post per minute |
+
+### Raise one from a script
+
+```bash
+curl -X POST http://127.0.0.1:3000/api/v1/notifications \
+  -H "Authorization: Bearer $NOTIFY_TOKEN_AUTOMATIONS" \
+  -H "Content-Type: application/json" \
+  -d '{"title": "Bill due today", "body": "Citi $2,410", "key": "bill-citi", "level": "attention", "source": "Bills", "expires_in_s": 86400}'
+```
+
+The same `key` while the item is still open updates it instead of adding a second one. To clear it, send `PATCH /api/v1/notifications?key=bill-citi` with `{"state": "resolved"}`. Keep these addresses on your own network; do not publish them to the internet.
+
+### Let your agent raise them
+
+Agents have three tools, `notify`, `update_notification` and `list_notifications` (see [MCP tools](/reference/mcp-tools#notifications)). The Intercom note each message carries tells the agent when to use them: `notify` for short-lived "needs you soon" items, a normal message for content, and a `notify` when background work started from the screen finishes.
+
+### What the screen does
+
+| Level | On the screen |
+|---|---|
+| `info` | No glow. A small note under the date |
+| `attention` | Amber glow, the title, one line of detail and the buttons |
+| `urgent` | The same, pulsing |
+
+Items you've dismissed don't count toward the glow. An item with an `expires_in_s` goes away by itself. Quiet hours are handled by the screen. Escalating an urgent item to Telegram is not available yet.
+

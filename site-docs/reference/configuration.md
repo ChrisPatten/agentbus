@@ -280,6 +280,18 @@ A topic rule:
   pattern: "\\bitinerar(y|ies)\\b"
 ```
 
+## notifications
+
+Short "needs you soon" items on Intercom screens. Off unless `enabled: true`; needs the `intercom` block. See [Intercom notifications](/channels/intercom#notifications).
+
+| Option | Default | What it does |
+|---|---|---|
+| `enabled` | `false` | Turns notifications on |
+| `retention_days` | `14` | How long finished items are kept |
+| `api_tokens_env` | none | Names of environment variables holding the passwords scripts send as `Authorization: Bearer` |
+| `context_to_followed` | `true` | Tell the agent, for its next turn in the followed conversation, what the screen showed |
+| `rate_limit_per_min` | `30` | Posts per source per minute |
+
 ## topics
 
 ```yaml

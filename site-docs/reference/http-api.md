@@ -128,6 +128,18 @@ There's no route to raise an advisory; only the bus raises them. See [Owners and
 
 See [Knowledge store](/features/knowledge-store).
 
+## Notifications
+
+`/api/v1/notifications` raises and clears items on your Intercom screen from scripts. It needs a `Bearer` password listed under `notifications.api_tokens_env` rather than `X-Bus-Token`. See [Intercom notifications](/channels/intercom#notifications).
+
+| Request | What it does |
+|---|---|
+| `POST /api/v1/notifications` | Raises an item. Body: `title` and `source` (required), `body`, `level`, `key`, `targets`, `expires_in_s`, `actions`. Answers `201` with `id`, `key` and `state` (`200` when the `key` updated an open item). |
+| `PATCH /api/v1/notifications/<id>` or `PATCH /api/v1/notifications?key=<key>` | Changes an item or sets its `state` to `resolved`. |
+| `GET /api/v1/notifications?state=open` | Lists items. `state` is `active`, `open` (default) or `all`. |
+
+Bodies over 8 KB are refused, and more than 30 posts a minute from one `source` get a `429`. Don't expose this route to the internet.
+
 ## Sending a message in
 
 `POST /api/v1/inbound` puts a message into the bus as if it had arrived on a channel. It's how you'd connect a channel of your own:

@@ -198,6 +198,17 @@ adapters:
   # claude-code:
   #   poll_interval_ms: 1000
 
+# ── Notifications (E89) — docs/NOTIFICATIONS.md ──────────────────────────────────
+# "Needs you soon" items on Intercom surfaces, raised with the notify MCP tools or
+# POST /api/v1/notifications (Bearer token = the value of an env var listed here).
+# Needs adapters.intercom. Keep /api/v1/notifications off tailscale serve.
+# notifications:
+#   enabled: true
+#   retention_days: 14
+#   api_tokens_env: [NOTIFY_TOKEN_AUTOMATIONS]   # >= 16 chars each; `openssl rand -hex 24`
+#   context_to_followed: true     # shown items reach the followed conversation's next turn
+#   rate_limit_per_min: 30        # per source
+
 contacts:
   alice:
     id: alice                        # must equal the map key
