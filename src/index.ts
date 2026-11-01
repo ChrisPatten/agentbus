@@ -25,7 +25,7 @@ import { getDb, closeDb } from './db/client.js';
 import { runMigrations, rebuildFts } from './db/schema.js';
 import { MessageQueue } from './core/queue.js';
 import { AdapterRegistry } from './core/registry.js';
-import { createHttpServer } from './http/api.js';
+import { createHttpServer, processInbound } from './http/api.js';
 import { PipelineEngine } from './pipeline/engine.js';
 import { normalize } from './pipeline/stages/normalize.js';
 import { createContactResolve } from './pipeline/stages/contact-resolve.js';
@@ -48,6 +48,7 @@ import { createPoolManagers } from './pool/pool-manager.js';
 import { RuntimeResolver } from './core/runtime-resolver.js';
 import { createPoolRouteResolve } from './pipeline/stages/pool-route-resolve.js';
 import { DeliveryWorker } from './core/delivery.js';
+import { IntercomService } from './intercom/service.js';
 import { createCommandSystem } from './commands/index.js';
 import { createTorrentCommand } from './commands/torrent.js';
 import { createCostCommand } from './commands/cost.js';
@@ -360,7 +361,16 @@ const memoryRecent = new RecentFreshness({
   },
   knownAgent: (agentId) => runtimeResolver.resolve(agentId.startsWith('agent:') ? agentId : `agent:${agentId}`) !== undefined,
 });
-const httpServer = await createHttpServer({ queue, registry, config, pipeline, db, commandRegistry, pauseSet, siri, app, poolManagers, getHeadlessSnapshots, runtimeResolver, advisories, journalEvents, journalGate, journalStatus, memoryRecent, approvalHooks, proposals: proposalService });
+// E90/E91 — Intercom: surfaces follow one existing conversation. Built here (not in the HTTP layer) so
+// the delivery worker below can hand it agent replies. Tokens come from the env vars the config names.
+const intercom = config.adapters.intercom?.enabled
+  ? new IntercomService({
+    config: config.adapters.intercom, db, registry,
+    submitInbound: (message, system) => processInbound(message, {
+      queue, pipeline, config, db, registry, commandRegistry, pauseSet,
+    }, system),
+  }) : undefined;
+const httpServer = await createHttpServer({ queue, registry, config, pipeline, db, commandRegistry, pauseSet, siri, app, intercom, poolManagers, getHeadlessSnapshots, runtimeResolver, advisories, journalEvents, journalGate, journalStatus, memoryRecent, approvalHooks, proposals: proposalService });
 
 // E66 — busy notice for a held message: the channel's native queued/status
 // signal where it has one, a short text elsewhere, nothing on email.
@@ -455,6 +465,7 @@ for (const inst of getEmailInstances(config)) {
 
 const deliveryWorker = new DeliveryWorker({
   queue, registry, db, primaryChannels: primaryChannels(config),
+  onDelivered: (envelope) => intercom?.onDelivered(envelope),
   onFailed: (envelope, reason) => safeFeedback(() => recordDeliveryFailure(feedbackProducers, envelope, reason)),
 });
 
