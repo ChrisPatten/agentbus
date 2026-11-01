@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<title>Intercom</title>
+<meta name="theme-color" content="#0b0a08">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-title" content="Intercom">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" href="icons/icon-192.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="page">
+  <div class="top">
+    <button class="dotbtn" id="dotbtn" type="button" aria-label="Connection status. Long-press to unpair."><span class="dot" id="dot"></span><span id="dotlabel">Offline</span></button>
+    <button class="size" id="size" type="button">Large</button>
+  </div>
+  <div class="stagewrap"><div class="bezel"><div class="dial" id="dial"><div class="face" id="face"></div></div></div></div>
+  <div class="under">
+    <div class="caption" id="caption" hidden></div>
+    <div class="note" id="note"></div>
+    <form class="send" id="form" autocomplete="off">
+      <input id="input" type="text" enterkeyhint="send" autocapitalize="sentences" autocomplete="off" aria-label="Message to Peggy">
+      <button id="go" type="submit">Send</button>
+    </form>
+  </div>
+</div>
+<div class="confirm" id="confirm"><div>Unpair this device? You will need a new pairing link.</div><div class="row"><button type="button" id="cancel">Cancel</button><button type="button" class="danger" id="unpair">Unpair</button></div></div>
+<script type="module" src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,33 @@
+// Dev helper: drive the live flow against the mock server with headless Chrome over CDP and save screenshots.
+// usage: node cdp-flow.mjs   (mock server on :3098; Chrome path below)
+import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+const OUT = path.join(path.dirname(fileURLToPath(import.meta.url)), 'screenshots');
+const chrome = spawn('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', ['--headless=new', '--remote-debugging-port=9333', '--user-data-dir=/tmp/intercom-cdp', 'about:blank'], { stdio: 'ignore' });
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+await sleep(2000);
+const targets = await (await fetch('http://localhost:9333/json')).json();
+const ws = new WebSocket(targets.find((t) => t.type === 'page').webSocketDebuggerUrl);
+await new Promise((r) => (ws.onopen = r));
+let id = 0; const pend = new Map();
+ws.onmessage = (m) => { const f = JSON.parse(m.data); if (f.id && pend.has(f.id)) { pend.get(f.id)(f.result); pend.delete(f.id); } };
+const call = (method, params = {}) => new Promise((r) => { pend.set(++id, r); ws.send(JSON.stringify({ id, method, params })); });
+const ev = (expression) => call('Runtime.evaluate', { expression, awaitPromise: true });
+const shot = async (name) => { const r = await call('Page.captureScreenshot', { format: 'png' }); fs.writeFileSync(path.join(OUT, name), Buffer.from(r.data, 'base64')); };
+await call('Page.enable');
+await call('Emulation.setDeviceMetricsOverride', { width: 430, height: 932, deviceScaleFactor: 2, mobile: true });
+const BASE = 'http://localhost:3098/intercom/';
+await call('Page.navigate', { url: BASE }); await sleep(1200); await shot('live-0-unpaired.png');
+await call('Page.navigate', { url: BASE + '#pair=demo-code' }); await sleep(2500); await shot('live-1-idle.png');
+const send = (t) => ev(`(()=>{const i=document.getElementById('input');i.value=${JSON.stringify(t)};document.getElementById('form').requestSubmit();})()`);
+await send('What is on today?'); await sleep(700); await shot('live-2-working.png');
+await sleep(2600); await shot('live-3-working-status.png');
+await sleep(2200); await shot('live-4-reply.png');
+await send('long: brief me'); await sleep(6200);
+await ev(`document.getElementById('dial').click()`); await sleep(500); await shot('live-5-reply-expanded.png');
+await ev(`document.querySelector('[data-scroller]').scrollTop=200`); await sleep(300); await shot('live-6-scrolled.png');
+await ev(`localStorage.setItem('intercom.large','1');location.reload()`); await sleep(2500); await shot('live-7-large.png');
+console.log(JSON.stringify((await ev(`JSON.stringify({pair:localStorage.getItem('intercom.pair'),cursor:localStorage.getItem('intercom.cursor'),hash:location.hash})`)).result.value));
+ws.close(); chrome.kill();
