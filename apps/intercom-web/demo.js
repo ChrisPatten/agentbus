@@ -29,14 +29,20 @@ export const STEPS = [
     props: () => ({ reply: { glance: 'Two routes. I’d use a service account on a Peggy vault.', body: 'Two routes. A service account on a dedicated Peggy vault keeps the blast radius small, and it works headless. The alternative is the agent SDK with a connect server, which needs a host we do not run.', more_on_telegram: true } }) },
   { name: 'choice', title: 'Choice buttons', desc: 'The same buttons Telegram gets. Green is my recommendation, red the careful option. (Later phase.)',
     props: () => ({ question: 'Merge PR #12?', choices: [{ label: 'Merge only', style: 'success' }, { label: 'Merge + restart', style: 'primary' }, { label: 'Hold', style: 'danger' }] }) },
-  { name: 'needs', title: 'Needs you', desc: 'The rim glows amber, a light on the desk rather than a buzz in the pocket. (Later phase.)',
-    props: () => ({ title: 'ENT at 4:10', line: 'Leave by 3:45', actions: ['Thanks', 'Snooze 10'] }) },
+  { name: 'needs', title: 'Needs you', desc: 'The rim glows amber, a light on the desk rather than a buzz in the pocket. Tap an action and it goes to me as if you had typed it.',
+    props: () => ({ item: { title: 'ENT at 4:10', body: 'Leave by 3:45', level: 'attention', actions: [{ label: 'Thanks', style: 'success' }, { label: 'Snooze 10' }] }, index: 0, total: 1 }) },
   { name: 'draft', title: 'Draft, then send', desc: 'Anything that leaves the house shows in full before Send appears. Example text only. (Later phase.)',
     props: () => ({ to: 'Text to Kate', text: 'Heading to ENT. Back by 5:30.' }) },
   { name: 'done', title: 'Done', desc: 'Two seconds of the check mark and a word from me, then back to the day-dial.',
     props: () => ({ word: 'Noted, and filed.', detail: 'Water bill · $166' }) },
   { name: 'quiet', title: 'Face-down / night', desc: 'Turned over, or after 10 PM: no glow, dim display, messages wait. (Later phase.)',
     props: () => ({ now: new Date('2026-11-02T22:41:00-05:00'), tz: TZ, waiting: 2 }) },
+  { name: 'idle', title: 'A quiet note', desc: 'A low-key item adds a brass dot and “1 note” under the date, with no glow. Tap it to read. The amber line on the rim means something else needs you.',
+    props: () => ({ events: DEMO_EVENTS, now: DEMO_NOW, tz: TZ, notes: 1, halo: true }) },
+  { name: 'needs', title: 'Urgent, several items', desc: 'Urgent items pulse slowly. With more than one, “1 of 3” shows; swipe or tap it to move through them. Up to three actions, plus Got it.',
+    props: () => ({ item: { title: 'Leave for the dentist', body: 'Dr. Alvarez at 9:00, 18 min drive', level: 'urgent', actions: [{ label: 'Leaving now', style: 'success' }, { label: 'Snooze 10' }, { label: 'Call office' }] }, index: 0, total: 3 }) },
+  { name: 'needs', title: 'A note, no glow', desc: 'Opened from the dot on the day-dial: the same screen, calm, with only Got it.',
+    props: () => ({ item: { title: 'Mail Watcher finished', body: '3 bills filed, none due this week', level: 'info', actions: [] }, index: 0, total: 1 }) },
 ];
 
 export function runDemo({ show, setCaption, dialEl, start = 0, hold = false, stepMs = 4200 }) {

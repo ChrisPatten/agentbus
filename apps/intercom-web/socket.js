@@ -1,5 +1,5 @@
 // WebSocket client for /api/v1/intercom/ws (protocol v1).
-import { backoffDelay, Outbox } from './logic.js';
+import { backoffDelay, Outbox, frameOf } from './logic.js';
 
 export const CLIENT = 'intercom-web/0.1';
 export const WS_PATH = 'api/v1/intercom/ws';
@@ -121,7 +121,9 @@ export class IntercomSocket {
         }
         this.setState('online');
         this.h.onWelcome?.(f);
-        for (const item of this.outbox.pending()) this.sendRaw({ type: 'send', client_msg_id: item.client_msg_id, body: item.body });
+        this.outbox.dropActions(600000); // a tap from long ago should not fire on a fresh connection
+        this.saveOutbox();
+        for (const item of this.outbox.pending()) this.sendRaw(frameOf(item));
         break;
       case 'event':
         if (typeof f.seq === 'number' && f.seq > this.cursor) {
@@ -135,7 +137,10 @@ export class IntercomSocket {
         this.h.onAck?.(f);
         break;
       case 'ping': this.sendRaw({ type: 'pong' }); break;
-      case 'error': this.h.onError?.(f); break;
+      case 'error':
+        if (f.code === 'notification_not_found') { this.outbox.dropActions(); this.saveOutbox(); }
+        this.h.onError?.(f);
+        break;
       default: break;
     }
   }
@@ -149,7 +154,18 @@ export class IntercomSocket {
   send(body) {
     const item = this.outbox.add(body);
     this.saveOutbox();
-    if (this.state === 'online') this.sendRaw({ type: 'send', client_msg_id: item.client_msg_id, body });
+    if (this.state === 'online') this.sendRaw(frameOf(item));
     return item;
   }
+
+  /** Tap on a notification action: queued like a send (same retry and ack), answered by an `ack` with an interaction. */
+  sendAction(id, index) {
+    const item = this.outbox.addAction(id, index);
+    this.saveOutbox();
+    if (this.state === 'online') this.sendRaw(frameOf(item));
+    return item;
+  }
+
+  /** "Got it". Idempotent on the server, so fire and forget; the app re-sends pending ones after each welcome. */
+  ackNotification(id) { return this.sendRaw({ type: 'notification_ack', id }); }
 }

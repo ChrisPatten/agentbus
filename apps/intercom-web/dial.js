@@ -11,11 +11,16 @@ function colorFor(ev) {
 }
 
 /** Day-dial rim: 24 h ring, midnight at top, one arc per event, gold now-dot. */
-export function dayRingSvg(events, now, tz) {
+export function dayRingSvg(events, now, tz, halo = false) {
   const { timed } = daySpans(events, now, tz);
   const lanes = assignLanes(timed);
   const nowH = tzParts(now, tz).hours;
   let s = `<svg viewBox="0 0 466 466" aria-hidden="true">`;
+  if (halo) {
+    s += `<defs><filter id="hb" x="-10%" y="-10%" width="120%" height="120%"><feGaussianBlur stdDeviation="5"/></filter></defs>` +
+      `<circle cx="${C}" cy="${C}" r="224" fill="none" stroke="#ffb347" stroke-width="14" opacity=".7" filter="url(#hb)"/>` +
+      `<circle cx="${C}" cy="${C}" r="225" fill="none" stroke="#ffb347" stroke-width="5"/>`;
+  }
   s += `<circle cx="${C}" cy="${C}" r="${RING_R}" fill="none" stroke="#1f1d1a" stroke-width="20"/>`;
   for (const h of [0, 6, 12, 18]) {
     const [x, y] = polar(h, RING_R - 24);

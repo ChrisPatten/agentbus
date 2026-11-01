@@ -83,6 +83,16 @@ Intercom is a small round display for your agent: your day around the rim, what 
 | Working | The agent has a turn running in the conversation Intercom follows. It shows the agent's status line with a turning gold arc. |
 | Reply | The agent answered something you sent from Intercom. A short line first; tap to read all of it and scroll; double-tap to dismiss. |
 | Done | A check mark and a few words for about two seconds after the exchange ends. |
+| Needs you | Something is waiting for you. The dial glows amber (an urgent item pulses), with a title, one line of detail and up to three buttons plus **Got it**. |
+| Quiet | Between 10 PM and 6:30 AM. A dim clock; nothing glows, and a line shows how many items are waiting. |
+
+#### Notifications
+
+When something needs you, the dial glows amber and shows what it is. Tap a button to answer: the choice goes to your agent as if you had typed it, and its reply shows on the dial. **Got it** just acknowledges the item and it goes away. If several items are waiting, "1 of 3" appears below the buttons; swipe left or right, or tap it, to move between them.
+
+A low-priority item does not glow. Instead a small brass dot and "1 note" appear under the date on the day-dial; tap it to read the item. A thin amber line around the day-dial's rim shows that something that needs you is waiting.
+
+From 10 PM to 6:30 AM the dial stays dark: no glow, and the Quiet screen says how many items are waiting. The hours are fixed for now and follow the phone's clock.
 
 Only replies to messages you sent from Intercom appear as replies. Everything still arrives in Telegram as usual, and "More on Telegram" tells you when the full answer lives there.
 
@@ -100,4 +110,4 @@ Pairing codes work once and expire after 12 hours. To unpair a phone, press and 
 
 - Type under the dial and tap **Send**. The message goes into the followed conversation as if you had typed it there.
 - Tap **Large** to fill the width of the phone; **True size** returns to the 1.75-inch dial. The choice is remembered.
-- Add `?demo` to the address to see all nine screens with sample data, without a connection.
+- Add `?demo` to the address to see all the screens, including a notification sequence, with sample data and without a connection.

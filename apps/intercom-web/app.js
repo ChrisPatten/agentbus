@@ -1,7 +1,7 @@
 // Intercom web app: wires the socket, state and dial screens together.
 import { render } from './screens.js';
 import { IntercomSocket, store, apiUrl } from './socket.js';
-import { parsePairInput, replyIsFresh, glanceOf } from './logic.js';
+import { parsePairInput, replyIsFresh, applyNotification, activeItems, needsList, infoList, attentionLevel, cycleId, isQuietHours, waitingCount, pickScreen } from './logic.js';
 import { runDemo, STEPS } from './demo.js';
 
 const $ = (id) => document.getElementById(id);
@@ -15,9 +15,12 @@ const DONE_WORDS = ['Noted, and filed.', 'Very good.', 'Consider it handled.', '
 const S = {
   pair: loadPair(), conn: 'offline', offlineSince: Date.now(), activity: { state: 'idle', status_text: null },
   reply: null, expanded: false, doneUntil: 0, doneWord: DONE_WORDS[0], calendar: null, sentAt: 0, pairError: '', lastReplyId: null,
+  notes: new Map(), hidden: new Map(), attention: null, nSel: null, noteOpen: false, ownIids: new Set(), swipedAt: 0,
 };
+const forceQuiet = params.has('quiet') ? params.get('quiet') !== '0' : null; // dev: ?quiet previews the Quiet screen, ?quiet=0 shows the day screens at any hour
 let sock = null;
 let lastHtml = '';
+let lastName = '';
 let replyTimer = null;
 let wakeLock = null;
 
@@ -42,6 +45,7 @@ function applySize() {
 
 /* ---------- rendering ---------- */
 function show(name, props) {
+  lastName = name;
   const html = render(name, props);
   if (html === lastHtml) return;
   lastHtml = html;
@@ -53,15 +57,34 @@ function show(name, props) {
 }
 
 function computeView(now = new Date()) {
-  if (!S.pair) return ['pairing', { error: S.pairError }];
-  if (S.conn !== 'online' && !S.reply && Date.now() - S.offlineSince > 1500) return ['offline', { connecting: S.conn === 'connecting' }];
-  if (S.reply) return ['reply', { reply: S.reply, expanded: S.expanded }];
-  const a = S.activity;
-  if (a.state === 'running' || a.state === 'queued') return ['working', { status: a.status_text }];
-  if (S.sentAt && Date.now() - S.sentAt < 6000) return ['working', { status: 'Sent' }];
-  if (Date.now() < S.doneUntil) return ['done', { word: S.doneWord }];
   const cal = S.calendar;
-  return ['idle', { events: cal ? cal.events : [], now, tz: (cal && cal.tz) || TZ_FALLBACK, calendarKnown: !!cal }];
+  const tz = (cal && cal.tz) || TZ_FALLBACK;
+  const quiet = forceQuiet === null ? isQuietHours(now) : forceQuiet;
+  const items = activeItems(S.notes, now.getTime(), S.hidden);
+  const attn = needsList(items);
+  const list = attn.length ? attn : S.noteOpen ? infoList(items) : [];
+  if (!attn.length && !list.length) S.noteOpen = false;
+  if (list.length && !list.some((n) => n.id === S.nSel)) S.nSel = list[0].id;
+  const a = S.activity;
+  const running = a.state === 'running' || a.state === 'queued';
+  const own = running && !!a.interaction_id && S.ownIids.has(a.interaction_id);
+  const sent = !!S.sentAt && Date.now() - S.sentAt < 6000;
+  const name = pickScreen({
+    paired: !!S.pair,
+    offline: S.conn !== 'online' && !S.reply && Date.now() - S.offlineSince > 1500,
+    reply: !!S.reply, ownWorking: own || (sent && !running), done: Date.now() < S.doneUntil,
+    needs: list.length > 0, quiet, otherWorking: running,
+  });
+  switch (name) {
+    case 'pairing': return [name, { error: S.pairError }];
+    case 'offline': return [name, { connecting: S.conn === 'connecting' }];
+    case 'reply': return [name, { reply: S.reply, expanded: S.expanded }];
+    case 'working': return [name, { status: running ? a.status_text : 'Sent' }];
+    case 'done': return [name, { word: S.doneWord }];
+    case 'needs': return [name, { item: list.find((n) => n.id === S.nSel), index: list.findIndex((n) => n.id === S.nSel), total: list.length }];
+    case 'quiet': return [name, { now, tz, waiting: !S.attention ? items.length : waitingCount(S.attention, items, S.hidden) }];
+    default: return [name, { events: cal ? cal.events : [], now, tz, calendarKnown: !!cal, notes: infoList(items).length, halo: attentionLevel(attn) !== 'none' }];
+  }
 }
 
 function update() {
@@ -104,7 +127,16 @@ function onEvent(name, d) {
       S.activity = { state: d.state, status_text: d.status_text || null };
       if (d.state === 'running' || d.state === 'queued') S.sentAt = 0;
       break;
+    case 'notification':
+      if (applyNotification(S.notes, d)) {
+        const h = S.hidden.get(d.id);
+        if (h !== undefined && (d.state !== 'active' || (d.updated_at || '') > h)) S.hidden.delete(d.id);
+        if (!S.notes.has(d.id)) S.hidden.delete(d.id);
+      }
+      break;
+    case 'attention': S.attention = { level: d.level, count: d.count }; break;
     case 'interaction':
+      if (d.interaction_id && d.state !== 'closed') S.ownIids.add(d.interaction_id);
       if (d.state === 'closed') {
         S.doneWord = DONE_WORDS[Math.floor(Math.random() * DONE_WORDS.length)];
         if (!S.reply) { S.doneUntil = Date.now() + DONE_MS; later(DONE_MS + 50); }
@@ -129,10 +161,11 @@ function startSocket() {
     handlers: {
       onState(st) { if (S.conn === 'online' && st !== 'online') S.offlineSince = Date.now(); S.conn = st; update(); if (st !== 'online') later(1600); },
       onEvent,
-      onReset() { S.reply = null; S.calendar = null; S.activity = { state: 'idle', status_text: null }; },
-      onAck(f) { if (f.status === 'rejected') { S.sentAt = 0; note(`Not sent: ${f.reason || 'rejected'}`); } },
+      onWelcome() { for (const id of S.hidden.keys()) sock.ackNotification(id); },
+      onReset() { S.notes.clear(); S.hidden.clear(); S.attention = null; S.reply = null; S.calendar = null; S.activity = { state: 'idle', status_text: null }; },
+      onAck(f) { if (f.interaction_id && f.status === 'queued') S.ownIids.add(f.interaction_id); if (f.status === 'rejected') { S.sentAt = 0; note(`Not sent: ${f.reason || 'rejected'}`); } },
       onUnauthorized() { unpair('Pairing was rejected. Open a new pairing link.'); },
-      onError(f) { if (f.code === 'unauthorized') unpair('Pairing was rejected. Open a new pairing link.'); },
+      onError(f) { if (f.code === 'notification_not_found') update(); if (f.code === 'unauthorized') unpair('Pairing was rejected. Open a new pairing link.'); },
     },
   });
   sock.start();
@@ -170,7 +203,31 @@ async function pair(code) {
 function unpair(msg = '') {
   sock?.stop(); sock = null;
   ['intercom.pair', 'intercom.cursor', 'intercom.outbox'].forEach(store.del);
-  Object.assign(S, { pair: null, conn: 'offline', reply: null, calendar: null, activity: { state: 'idle', status_text: null }, pairError: msg, sentAt: 0, doneUntil: 0 });
+  Object.assign(S, { pair: null, conn: 'offline', reply: null, calendar: null, activity: { state: 'idle', status_text: null }, pairError: msg, sentAt: 0, doneUntil: 0, notes: new Map(), hidden: new Map(), attention: null, noteOpen: false });
+  update();
+}
+
+/* ---------- notification taps ---------- */
+function currentList() {
+  const items = activeItems(S.notes, Date.now(), S.hidden);
+  const attn = needsList(items);
+  return attn.length ? attn : infoList(items);
+}
+function cycle(delta) {
+  S.nSel = cycleId(currentList(), S.nSel, delta);
+  update();
+}
+function hide(item) { S.hidden.set(item.id, item.updated_at || ''); }
+function onAct({ act, i }) {
+  if (act === 'note') { const info = infoList(activeItems(S.notes, Date.now(), S.hidden)); if (info.length) { S.noteOpen = true; S.nSel = info[0].id; update(); } return; }
+  if (act === 'cycle') { cycle(1); return; }
+  const item = S.notes.get(S.nSel);
+  if (!item || !sock) return;
+  if (act === 'ack') { hide(item); sock.ackNotification(item.id); }
+  else if (act === 'action') {
+    hide(item); sock.sendAction(item.id, Number(i));
+    S.sentAt = Date.now(); S.doneUntil = 0; later(6100);
+  }
   update();
 }
 
@@ -205,16 +262,27 @@ function wireUi() {
   $('cancel').addEventListener('click', () => $('confirm').classList.remove('show'));
   $('unpair').addEventListener('click', () => { $('confirm').classList.remove('show'); unpair(); });
 
-  // Dial taps: reply expands on tap, double-tap dismisses.
+  // Dial taps: reply expands on tap, double-tap dismisses; notification buttons, note dot and counter use data-act.
   let lastTap = 0;
-  $('dial').addEventListener('click', () => {
+  $('dial').addEventListener('click', (ev) => {
     if (demoMode) return;
+    if (Date.now() - S.swipedAt < 400) return;
+    const act = ev.target.closest && ev.target.closest('[data-act]');
+    if (act && !S.reply) { onAct(act.dataset); return; }
     const t = Date.now();
     const dbl = t - lastTap < 350; lastTap = t;
     if (S.reply) {
       if (dbl) { dismissReply(); return; }
       if (!S.expanded) { S.expanded = true; armReplyTimer(); update(); }
     } else if (Date.now() < S.doneUntil) { S.doneUntil = 0; update(); }
+  });
+  // Swipe left or right through several notifications.
+  let sx = null;
+  $('dial').addEventListener('pointerdown', (ev) => { sx = ev.clientX; });
+  $('dial').addEventListener('pointerup', (ev) => {
+    if (sx === null) return;
+    const dx = ev.clientX - sx; sx = null;
+    if (Math.abs(dx) > 40 && lastName === 'needs') { S.swipedAt = Date.now(); cycle(dx < 0 ? 1 : -1); }
   });
   $('dial').addEventListener('scroll', () => { if (S.reply) armReplyTimer(); }, true);
 }
