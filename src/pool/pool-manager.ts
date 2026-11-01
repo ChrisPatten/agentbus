@@ -391,7 +391,7 @@ export class PoolManager {
       this.orphanDetector = new OrphanDetector({
         poolId: this.poolId,
         session,
-        liveServerPid: () => tmux.serverPid!(session),
+        liveServerPid: () => tmux.serverPid!(),
         isPoolAgentId: (id) => paneIdRe.test(id),
         notify: (body) => this.notifySystem(body),
         killOrphans: deps.cfg.kill_orphan_servers === true,

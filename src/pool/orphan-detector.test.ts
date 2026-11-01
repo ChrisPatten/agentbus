@@ -67,24 +67,22 @@ describe('findOrphans', () => {
 });
 
 describe('TmuxController.serverPid', () => {
-  it('returns the pid of the server holding the session', async () => {
-    const exec = vi.fn(async () => 'other\t111\npeggy-pool\t92327');
-    await expect(createTmuxController(exec as unknown as TmuxExec).serverPid!('peggy-pool')).resolves.toBe(92327);
-    expect(exec).toHaveBeenCalledWith(['list-sessions', '-F', '#{session_name}\t#{pid}']);
+  it('returns the pid of the server the controller reaches', async () => {
+    const exec = vi.fn(async () => '92327\n92327');
+    await expect(createTmuxController(exec as unknown as TmuxExec).serverPid!()).resolves.toBe(92327);
+    expect(exec).toHaveBeenCalledWith(['list-sessions', '-F', '#{pid}']);
   });
 
-  it('null when the session is absent, no server runs, or the socket is gone', async () => {
-    const absent = createTmuxController((async () => 'other\t111') as TmuxExec);
-    await expect(absent.serverPid!('peggy-pool')).resolves.toBeNull();
+  it('null when no server runs or the socket is gone', async () => {
     for (const msg of ['no server running on /private/tmp/tmux-501/default', 'error connecting to /private/tmp/tmux-501/default (No such file or directory)']) {
       const t = createTmuxController((async () => { throw new Error(msg); }) as TmuxExec);
-      await expect(t.serverPid!('peggy-pool')).resolves.toBeNull();
+      await expect(t.serverPid!()).resolves.toBeNull();
     }
   });
 
   it('rethrows other errors', async () => {
     const t = createTmuxController((async () => { throw new Error('tmux: command not found'); }) as TmuxExec);
-    await expect(t.serverPid!('peggy-pool')).rejects.toThrow(/not found/);
+    await expect(t.serverPid!()).rejects.toThrow(/not found/);
   });
 });
 
@@ -116,12 +114,12 @@ describe.skipIf(!runIt)('S88.4 acceptance with real tmux servers', () => {
     const livePid = Number(tmuxOn(liveSock, ['display-message', '-p', '-t', session, '#{pid}']));
     const orphanPid = Number(tmuxOn(orphanSock, ['display-message', '-p', '-t', session, '#{pid}']));
     const live = createTmuxController((args) => Promise.resolve(tmuxOn(liveSock, args)));
-    expect(await live.serverPid!(session)).toBe(livePid);
+    expect(await live.serverPid!()).toBe(livePid);
 
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const notify = vi.fn(async (_b: string) => {});
     const detector = new OrphanDetector({
-      poolId: 'it', session, liveServerPid: () => live.serverPid!(session), isPoolAgentId: () => false, notify,
+      poolId: 'it', session, liveServerPid: () => live.serverPid!(), isPoolAgentId: () => false, notify,
       listProcesses: realListProcesses,
     });
     const scan = await detector.check();
@@ -130,7 +128,7 @@ describe.skipIf(!runIt)('S88.4 acceptance with real tmux servers', () => {
     expect(notify).toHaveBeenCalledTimes(1);
 
     const killer = new OrphanDetector({
-      poolId: 'it', session, liveServerPid: () => live.serverPid!(session), isPoolAgentId: () => false, notify,
+      poolId: 'it', session, liveServerPid: () => live.serverPid!(), isPoolAgentId: () => false, notify,
       listProcesses: realListProcesses, killOrphans: true,
       // Belt and braces: only ever signal the server this test started.
       killFn: (pid, sig) => {

@@ -139,7 +139,7 @@ export function realListProcesses(): Promise<ProcessInfo[]> {
 export interface OrphanDetectorDeps {
   poolId: string;
   session: string;
-  /** Pid of the tmux server the pool's own `tmux` reaches for `session`, or null when none does. */
+  /** Pid of the tmux server the pool's own `tmux` reaches, or null when none is running. */
   liveServerPid: () => Promise<number | null>;
   isPoolAgentId: (agentId: string) => boolean;
   listProcesses?: () => Promise<ProcessInfo[]>;
