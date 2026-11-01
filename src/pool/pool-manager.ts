@@ -31,7 +31,9 @@ import { join } from 'node:path';
 import type Database from 'better-sqlite3';
 import { getCcPoolInstances, type AppConfig, type CcPoolInstanceConfig } from '../config/schema.js';
 import { LeaseStore } from './lease-store.js';
-import { PaneLifecycle, type LaunchParams } from './pane.js';
+import { PaneLifecycle, DEFAULT_MODEL_CONFIRM_PATTERN, isShellCommand, type LaunchParams } from './pane.js';
+import { OrphanDetector, type ProcessInfo } from './orphan-detector.js';
+import { getLastPoll, getRegisteredLaunch } from '../http/agent-liveness.js';
 import { createTmuxController, realTmuxExec, type TmuxController } from './tmux.js';
 import { PaneWatchdog } from './watchdog.js';
 import { resolveWatchdogConfig } from './watchdog-config.js';
@@ -92,6 +94,12 @@ const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
 const PARK_DRAIN_BATCH_SIZE = 20;
 /** Tail length (lines) captured from a dead pane for reconcileLiveness()'s restart notice. */
 const RECONCILE_CAPTURE_LINES = 50;
+
+/**
+ * E88 (S88.5) — Claude Code's dev-channels confirmation screen. A pane that
+ * shows it and hasn't polled for a while is stuck there, not working.
+ */
+const DEV_CHANNELS_PROMPT = 'loading development channels';
 
 /**
  * The minimal surface `PoolManager` needs from something that can launch and
@@ -181,6 +189,26 @@ export interface PoolManagerDeps {
    * file — gets the narrower default above instead.
    */
   resolveModel?: (scheduleModel: string | null) => PoolResolvedModel;
+  /**
+   * E88 — orphaned pool tmux server detection, run at `start()` and on every
+   * sweep tick. Defaults to an `OrphanDetector` when the `tmux` controller
+   * can report its server pid (the real one can; test fakes usually can't,
+   * which turns detection off). Pass `null` to turn it off.
+   */
+  orphanDetector?: OrphanDetector | null;
+  /** Injectable process lister for the default `OrphanDetector` (tests). */
+  listProcesses?: () => Promise<ProcessInfo[]>;
+  /** Injectable kill for the default `OrphanDetector` (tests). */
+  killProcess?: (pid: number, signal: NodeJS.Signals) => void;
+  /**
+   * E88 (S88.5) — the bus's last recorded poll for a bare agent id, and the
+   * launch id registered for it. Default to the in-process registry in
+   * src/http/agent-liveness.ts.
+   */
+  lastPoll?: (bareAgentId: string) => { lastPollAt: string; lastLaunchId: string | null } | null;
+  registeredLaunch?: (bareAgentId: string) => string | null;
+  /** Injectable clock (ms) for S88.5's poll-age check. */
+  nowMs?: () => number;
   /**
    * Whether Claude has a resumable transcript for `sessionId` under `cwd`.
    * Defaults to checking `~/.claude/projects/<cwd-slug>/<id>.jsonl`; tests
@@ -279,6 +307,15 @@ export class PoolManager {
   private readonly notifiedParkTimeout = new Set<string>();
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
   private running = false;
+  /** E88 — null when orphan detection is off. */
+  readonly orphanDetector: OrphanDetector | null;
+  private readonly lastPollFn: (bareAgentId: string) => { lastPollAt: string; lastLaunchId: string | null } | null;
+  private readonly registeredLaunchFn: (bareAgentId: string) => string | null;
+  private readonly nowMs: () => number;
+  /** When this manager was built — a poll map that is empty since then means "unknown", not "stale". */
+  private readonly constructedAtMs: number;
+  /** S88.5 — a leased pane that hasn't polled for this long and shows a blocking prompt is dead. 2x the watchdog interval. */
+  private readonly stalePollMs: number;
 
   constructor(deps: PoolManagerDeps) {
     this.cfg = deps.cfg;
@@ -327,6 +364,7 @@ export class PoolManager {
       });
     }
 
+    const watchdogCfg = resolveWatchdogConfig(deps.cfg.watchdog);
     this.watchdog =
       deps.watchdog ??
       new PaneWatchdog({
@@ -335,8 +373,34 @@ export class PoolManager {
         tmux: this.tmux,
         db: deps.db,
         incidentStore: new IncidentStore(deps.db),
-        cfg: resolveWatchdogConfig(deps.cfg.watchdog),
+        cfg: watchdogCfg,
       });
+
+    this.lastPollFn = deps.lastPoll ?? getLastPoll;
+    this.registeredLaunchFn = deps.registeredLaunch ?? getRegisteredLaunch;
+    this.nowMs = deps.nowMs ?? Date.now;
+    this.constructedAtMs = this.nowMs();
+    this.stalePollMs = 2 * watchdogCfg.sample_interval_ms;
+
+    if (deps.orphanDetector !== undefined) {
+      this.orphanDetector = deps.orphanDetector;
+    } else if (this.tmux.serverPid) {
+      const tmux = this.tmux;
+      const session = deps.cfg.tmux_session;
+      const paneIdRe = new RegExp(`^${escapeRegExp(toBareAgentId(deps.cfg.agent_id))}-pool-\\d+$`);
+      this.orphanDetector = new OrphanDetector({
+        poolId: this.poolId,
+        session,
+        liveServerPid: () => tmux.serverPid!(),
+        isPoolAgentId: (id) => paneIdRe.test(id),
+        notify: (body) => this.notifySystem(body),
+        killOrphans: deps.cfg.kill_orphan_servers === true,
+        ...(deps.listProcesses ? { listProcesses: deps.listProcesses } : {}),
+        ...(deps.killProcess ? { killFn: deps.killProcess } : {}),
+      });
+    } else {
+      this.orphanDetector = null;
+    }
   }
 
   /** E66 — install the journaling release hook (see `PoolReleaseHook`). */
@@ -403,6 +467,8 @@ export class PoolManager {
   async resolveRoute(
     conversationId: string,
     promptContext: PoolPromptContext,
+    /** Internal: set on the one retry after the reuse path released a dead pane (E88 S88.5). */
+    retriedAfterDeadPane = false,
   ): Promise<string> {
     try {
       const result = this.leaseStore.acquire(this.poolId, conversationId, {
@@ -433,7 +499,7 @@ export class PoolManager {
         if (result.lease.state === 'launching') {
           return this.awaitInFlightThenResolve(result.lease.pane_id, conversationId);
         }
-        return this.handleReuse(conversationId, result.lease, promptContext);
+        return this.handleReuse(conversationId, result.lease, promptContext, retriedAfterDeadPane);
       }
 
       if (result.kind === 'exhausted') {
@@ -698,14 +764,56 @@ export class PoolManager {
     }
   }
 
+  /**
+   * E88 (S88.5) — 'released' (after releasing the row and posting a notice)
+   * when a reused pane's foreground command is a shell, i.e. claude is not
+   * running; 'changed' when the row was re-claimed by a concurrent call
+   * meanwhile; else 'ok'. Any tmux error is "not known to be dead".
+   */
+  private async checkReusedPane(lease: PoolLeaseRow, conversationId: string): Promise<'ok' | 'released' | 'changed'> {
+    if (lease.state !== 'leased') return 'ok';
+    let command: string | null = null;
+    try {
+      command = await this.tmux.paneCommand(lease.pane_id);
+    } catch {
+      return 'ok';
+    }
+    if (!isShellCommand(command)) return 'ok';
+    // Re-read after the await: a concurrent call for this conversation may
+    // already have released and re-claimed the pane.
+    const now = this.leaseStore.findByPane(this.poolId, lease.pane_id);
+    if (!now || now.state !== 'leased' || now.conversation_id !== conversationId) return 'changed';
+    this.leaseStore.release(this.poolId, lease.pane_id);
+    const reason = `its window is at a bare "${command}" prompt — claude is not running`;
+    console.warn(`[pool:${this.poolId}] Released ${lease.pane_id} (conversation ${conversationId}) on reuse: ${reason}`);
+    void this.notifySystem(
+      `[pool:${this.poolId}] Pane ${lease.pane_id} was found dead when a new message arrived (${reason}; ` +
+        `was serving conversation ${conversationId}). It has been released and the conversation is relaunching.`,
+    );
+    return 'released';
+  }
+
   private async handleReuse(
     conversationId: string,
     lease: PoolLeaseRow,
     promptContext: PoolPromptContext,
+    retriedAfterDeadPane = false,
   ): Promise<string> {
     const resolved = this.resolveModelFn(promptContext.scheduleModel ?? null);
     const mismatch = resolved.model !== undefined && resolved.model !== lease.model;
-    if (!mismatch) return lease.agent_id;
+    if (!mismatch) {
+      // E88 (S88.5) — a pane whose claude has exited sits at a shell prompt;
+      // addressing the message to it would strand it. Release the pane and
+      // route again (once), which relaunches the conversation. Checked only
+      // here: the mismatch path below relaunches anyway, and its DB claim
+      // must stay synchronous (see the concurrency guard).
+      if (!retriedAfterDeadPane) {
+        const check = await this.checkReusedPane(lease, conversationId);
+        if (check === 'released') return this.resolveRoute(conversationId, promptContext, true);
+        if (check === 'changed') return this.awaitInFlightThenResolve(lease.pane_id, conversationId);
+      }
+      return lease.agent_id;
+    }
 
     const unhandledSince = getUnhandledSince(this.db, lease);
     if (unhandledSince !== null) {
@@ -1035,7 +1143,10 @@ export class PoolManager {
    * For every row with state 'leased' or 'draining', checks whether its
    * tmux window is still alive. A live pane is adopted as-is — left
    * completely untouched — so a bus-core restart doesn't interrupt a
-   * conversation already flowing to it. A pane whose window has vanished is
+   * conversation already flowing to it — unless (E88 S88.5) `liveButDead()`
+   * finds claude isn't really running in it (a bare shell prompt, or stuck at
+   * a launch-time prompt without polling); that pane is released with the
+   * same notice as a vanished one. A pane whose window has vanished is
    * the crash-recovery case: capture whatever pane output remains
    * (best-effort), free the row (the conversation's `claude_session_id` is
    * preserved in `sessions`, so it resumes correctly wherever it's next
@@ -1061,6 +1172,91 @@ export class PoolManager {
    * mid-claim, handled by whichever `resolveRoute()` call owns it. One with
    * no in-flight operation is orphaned (restart mid-launch) and is released.
    */
+  /**
+   * Release a leased/draining row found dead and send the restart notice.
+   * `reason` is null for the original "window vanished" case.
+   */
+  private async releaseDeadLeased(row: PoolLeaseRow, reason: string | null, tail: string): Promise<void> {
+    const conversationId = row.conversation_id ?? 'unknown';
+    this.leaseStore.release(this.poolId, row.pane_id);
+    if (reason) console.warn(`[pool:${this.poolId}] Released ${row.pane_id} (conversation ${conversationId}): ${reason}`);
+
+    const snippet = tail.trim();
+    const body =
+      `[pool:${this.poolId}] Pane ${row.pane_id} was found dead on reconciliation ` +
+      (reason ? `(${reason}; ` : '(') +
+      `was serving conversation ${conversationId}) and has been released — its session will ` +
+      `resume correctly wherever it is next claimed.` +
+      (snippet ? `\n\nLast pane output:\n${snippet}` : '');
+    await this.notifySystem(body);
+  }
+
+  /**
+   * E88 (S88.5) — whether a leased pane whose window exists is nevertheless
+   * dead. Observed Oct 31, 2026 after a bus-core restart: windows holding a
+   * bare zsh prompt (claude had exited with "MCP config file not found") and
+   * one stuck on the dev-channels confirmation screen were "adopted as-is",
+   * and their conversations' messages went to agent ids nobody polled.
+   *
+   * Dead when the foreground command is a shell (claude isn't running), or
+   * when the pane hasn't polled for `stalePollMs` (2x the watchdog interval;
+   * a poll from a launch other than the registered one doesn't count) AND
+   * its screen shows a prompt that blocks claude from starting: the
+   * dev-channels warning, `launch_ack_pattern`, or the model-confirm prompt.
+   * An empty poll record within `stalePollMs` of this manager's start is
+   * "unknown" (bus-core just restarted), not stale. A permission dialog
+   * (`PERMISSION_DIALOG_PATTERN`) is a turn waiting on a human, never dead.
+   */
+  private async liveButDead(row: PoolLeaseRow): Promise<{ reason: string; killWindow: boolean; tail: string } | null> {
+    const command = await this.tmux.paneCommand(row.pane_id);
+    if (isShellCommand(command)) {
+      let tail = '';
+      try {
+        tail = await this.tmux.capturePane(row.pane_id, RECONCILE_CAPTURE_LINES);
+      } catch {
+        /* best-effort */
+      }
+      return { reason: `its window is at a bare "${command}" prompt — claude is not running`, killWindow: false, tail };
+    }
+
+    const bare = toBareAgentId(row.agent_id);
+    const last = this.lastPollFn(bare);
+    const registered = this.registeredLaunchFn(bare);
+    const now = this.nowMs();
+    const ownPoll = last && (registered === null || last.lastLaunchId === registered) ? last : null;
+    const pollAt = ownPoll ? new Date(ownPoll.lastPollAt).getTime() : NaN;
+    if (!Number.isNaN(pollAt) && now - pollAt < this.stalePollMs) return null; // polling fresh
+    if (last === null && now - this.constructedAtMs < this.stalePollMs) return null; // unknown since restart
+
+    let screen = '';
+    try {
+      screen = await this.tmux.capturePane(row.pane_id, RECONCILE_CAPTURE_LINES);
+    } catch {
+      return null;
+    }
+    if (PERMISSION_DIALOG_PATTERN.test(screen)) return null;
+    const prompt = this.blockingPromptOn(screen);
+    if (!prompt) return null;
+    const age = Number.isNaN(pollAt) ? 'no poll from its current launch' : `last poll ${Math.round((now - pollAt) / 1000)}s ago`;
+    return { reason: `stuck at the "${prompt}" prompt (${age})`, killWindow: true, tail: screen };
+  }
+
+  /** The blocking launch-time prompt shown in `screen`, or null. */
+  private blockingPromptOn(screen: string): string | null {
+    const lower = screen.toLowerCase();
+    if (lower.includes(DEV_CHANNELS_PROMPT)) return DEV_CHANNELS_PROMPT;
+    const ack = this.cfg.launch_ack_pattern.toLowerCase();
+    if (ack && lower.includes(ack)) return this.cfg.launch_ack_pattern;
+    try {
+      const re = new RegExp(this.cfg.model_confirm_pattern ?? DEFAULT_MODEL_CONFIRM_PATTERN, 'i');
+      const m = re.exec(screen);
+      if (m) return m[0];
+    } catch {
+      /* invalid operator pattern — ignore */
+    }
+    return null;
+  }
+
   async reconcileLiveness(): Promise<void> {
     const allRows = this.leaseStore.list(this.poolId);
 
@@ -1068,7 +1264,21 @@ export class PoolManager {
     for (const row of liveCheckRows) {
       try {
         const alive = await this.tmux.paneAlive(row.pane_id);
-        if (alive) continue; // adopted as-is — completely untouched
+        if (alive) {
+          // E88 (S88.5) — a live window is not a live session. Adopted as-is
+          // only when claude is really there; see liveButDead().
+          const dead = await this.liveButDead(row);
+          if (!dead) continue; // adopted as-is — completely untouched
+          if (dead.killWindow) {
+            try {
+              await this.tmux.killWindow(row.pane_id);
+            } catch (err) {
+              console.error(`[pool:${this.poolId}] reconcileLiveness: killWindow failed for ${row.pane_id}:`, err);
+            }
+          }
+          await this.releaseDeadLeased(row, dead.reason, dead.tail);
+          continue;
+        }
 
         // Crash-recovery case: the tmux window backing a leased/draining
         // row has vanished. Capture whatever pane output remains,
@@ -1080,17 +1290,7 @@ export class PoolManager {
         } catch (err) {
           console.error(`[pool:${this.poolId}] reconcileLiveness: capturePane failed for ${row.pane_id}:`, err);
         }
-
-        const conversationId = row.conversation_id ?? 'unknown';
-        this.leaseStore.release(this.poolId, row.pane_id);
-
-        const snippet = tail.trim();
-        const body =
-          `[pool:${this.poolId}] Pane ${row.pane_id} was found dead on reconciliation ` +
-          `(was serving conversation ${conversationId}) and has been released — its session will ` +
-          `resume correctly wherever it is next claimed.` +
-          (snippet ? `\n\nLast pane output:\n${snippet}` : '');
-        await this.notifySystem(body);
+        await this.releaseDeadLeased(row, null, tail);
       } catch (err) {
         console.error(`[pool:${this.poolId}] reconcileLiveness: failed to reconcile pane ${row.pane_id}:`, err);
       }
@@ -1400,6 +1600,8 @@ export class PoolManager {
     this.reconcileLiveness().catch((err) => {
       console.error(`[pool:${this.poolId}] Startup reconcileLiveness() failed:`, err);
     });
+    // E88 — never throws.
+    void this.orphanDetector?.check();
 
     this.sweepTimer = setInterval(() => {
       void this.sweepTick();
@@ -1437,6 +1639,8 @@ export class PoolManager {
     } catch (err) {
       console.error(`[pool:${this.poolId}] drainParked() tick failed:`, err);
     }
+    // E88 — orphaned pool tmux servers; never throws.
+    await this.orphanDetector?.check();
   }
 
   /**
@@ -1544,4 +1748,8 @@ export function findPoolManagerForAgent(
     }
   }
   return undefined;
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

@@ -44,7 +44,18 @@ export interface TmuxController {
   paneCommand(target: string): Promise<string | null>;
   /** tmux capture-pane -p, optionally tailed to the last N lines. */
   capturePane(target: string, lines?: number): Promise<string>;
+  /**
+   * E88 — pid of the tmux server this controller reaches, or null when none
+   * is running (no server, or its socket is gone). Every session on that
+   * server — the pool's own and its grown-pane session — shares it.
+   * Optional so test fakes needn't implement it; orphan detection is skipped
+   * without it.
+   */
+  serverPid?(): Promise<number | null>;
 }
+
+/** tmux's errors for "nothing to reach": no server on the socket, or the socket file is gone. */
+const NO_SERVER_RE = /no server running|error connecting to|no such file or directory/i;
 
 // ── Error matching ────────────────────────────────────────────────────────────
 
@@ -188,8 +199,24 @@ export function createTmuxController(exec: TmuxExec): TmuxController {
     return rows.slice(Math.max(0, rows.length - lines)).join('\n');
   }
 
+  async function serverPid(): Promise<number | null> {
+    // list-sessions rather than display-message, which needs a client or a
+    // target and silently answers for some other session when the target is
+    // missing (see paneCommand above). #{pid} is the server's pid.
+    let out: string;
+    try {
+      out = await exec(['list-sessions', '-F', '#{pid}']);
+    } catch (err) {
+      if (NO_SERVER_RE.test(err instanceof Error ? err.message : String(err))) return null;
+      throw err;
+    }
+    const first = (out.split('\n')[0] ?? '').trim();
+    return /^\d+$/.test(first) ? Number(first) : null;
+  }
+
   return {
     ensureSession,
+    serverPid,
     listWindows,
     createWindow,
     killWindow,

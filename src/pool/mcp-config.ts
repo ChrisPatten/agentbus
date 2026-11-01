@@ -63,6 +63,12 @@ export interface PaneMcpConfigOptions {
    * adapter's own setting.
    */
   pollIntervalMs?: number;
+  /**
+   * E88 — this launch's id. Passed to the pane's cc.ts as
+   * `AGENTBUS_LAUNCH_ID`, which it sends on every poll so the bus can tell
+   * this launch's polls from any other process holding the same agent id.
+   */
+  launchId?: string;
 }
 
 /**
@@ -82,6 +88,7 @@ export function writePaneMcpConfig(opts: PaneMcpConfigOptions): string {
     env: {
       AGENTBUS_CONFIG: opts.agentbusConfigPath,
       AGENTBUS_AGENT_ID: opts.paneAgentId,
+      ...(opts.launchId !== undefined ? { AGENTBUS_LAUNCH_ID: opts.launchId } : {}),
       ...(opts.pollIntervalMs !== undefined ? { AGENTBUS_POLL_INTERVAL_MS: String(opts.pollIntervalMs) } : {}),
     },
   };

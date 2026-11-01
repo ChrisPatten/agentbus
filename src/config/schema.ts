@@ -423,6 +423,15 @@ const CcPoolAdapterSchema = z.object({
    */
   pane_env: z.record(z.string(), z.string()).default({}),
   /**
+   * E88 — when true, the pool sends SIGTERM to processes from an orphaned
+   * pool tmux server (a second `tmux new-session -d -s <tmux_session>`
+   * server the pool's own `tmux` can no longer reach, and pool-agent
+   * processes outside the live server). Default false: orphans are only
+   * logged and reported once each. No `.default()` so the key stays optional
+   * on `CcPoolInstanceConfig`; unset means false.
+   */
+  kill_orphan_servers: z.boolean().optional(),
+  /**
    * Stall watchdog (E52). Deliberately no `.default()`: a zod default would
    * make this a required key on `CcPoolInstanceConfig`. Defaults are applied
    * by `resolveWatchdogConfig()` in src/pool/watchdog-config.ts.

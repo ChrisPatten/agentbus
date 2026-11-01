@@ -87,7 +87,7 @@ import type { AppAdapter } from '../adapters/app.js';
 import type { HeadlessCapacitySnapshot } from '../adapters/cc-headless.js';
 import { registerAppRoutes } from './app-routes.js';
 import { VERSION } from '../version.js';
-import { recordAgentPoll, getLastPollAt } from './agent-liveness.js';
+import { recordAgentPoll, getLastPoll, getRegisteredLaunch, isStaleLaunch, warnStalePoll } from './agent-liveness.js';
 import type { RuntimeResolver } from '../core/runtime-resolver.js';
 import { toBareAgentId, toPrefixedAgentId } from '../pool/types.js';
 import { LeaseStore } from '../pool/lease-store.js';
@@ -1262,7 +1262,7 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
 
   // GET /api/v1/messages/pending
   server.get<{
-    Querystring: { agent?: string; recipient?: string; limit?: string; topic?: string };
+    Querystring: { agent?: string; recipient?: string; limit?: string; topic?: string; launch_id?: string };
   }>('/api/v1/messages/pending', (req, reply) => {
     const { agent, recipient, limit, topic } = req.query;
     if (!agent && !recipient) {
@@ -1272,9 +1272,27 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     // ?agent= is a shorthand that prepends the "agent:" prefix (legacy CC adapter usage).
     const recipientId = recipient ?? `agent:${agent}`;
     const parsedLimit = limit ? Math.max(1, Math.min(parseInt(limit, 10) || 10, 100)) : 10;
+    const bareAgentId = agent ?? toBareAgentId(recipient!);
+    // E88 — launch fencing. The launch id comes from `?launch_id=` or the
+    // `X-Agentbus-Launch-Id` header. Once cc-pool has registered a launch id
+    // for this agent id, a poll carrying any other one (or none) gets no
+    // messages and is not recorded as a poll: it is a process left over from
+    // an earlier launch (e.g. an orphaned tmux server's session).
+    const headerLaunch = req.headers['x-agentbus-launch-id'];
+    const launchId = req.query.launch_id || (typeof headerLaunch === 'string' ? headerLaunch : undefined) || null;
+    if (isStaleLaunch(bareAgentId, launchId)) {
+      warnStalePoll(bareAgentId, launchId);
+      return reply.status(409).send({
+        ok: false,
+        error: 'stale_launch',
+        stale_launch: true,
+        messages: [],
+        count: 0,
+      });
+    }
     // E48 (S48.4) — record this poll so cc-pool's pane-launch readiness gate
     // can tell a pane's cc.ts has come up (see src/http/agent-liveness.ts).
-    recordAgentPoll(agent ?? toBareAgentId(recipient!));
+    recordAgentPoll(bareAgentId, undefined, launchId);
     // E66 — messages for a conversation with an open System Message journal
     // run wait in the queue until the run ends.
     const gate = deps.journalGate;
@@ -1288,8 +1306,17 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
 
   // GET /api/v1/agents/:agentId/last-poll — E48 (S48.4): last time this bare
   // agent id was seen polling /api/v1/messages/pending, or null if never seen.
+  // E88: also the launch id that poll carried and the launch id currently
+  // registered for the agent id (null when none is — no fence).
   server.get<{ Params: { agentId: string } }>('/api/v1/agents/:agentId/last-poll', async (req, _reply) => {
-    return { ok: true, agentId: req.params.agentId, lastPollAt: getLastPollAt(req.params.agentId) };
+    const last = getLastPoll(req.params.agentId);
+    return {
+      ok: true,
+      agentId: req.params.agentId,
+      lastPollAt: last?.lastPollAt ?? null,
+      lastLaunchId: last?.lastLaunchId ?? null,
+      registeredLaunchId: getRegisteredLaunch(req.params.agentId),
+    };
   });
 
   // POST /api/v1/messages/:id/ack

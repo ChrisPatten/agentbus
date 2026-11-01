@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { recordAgentPoll, getLastPollAt } from './agent-liveness.js';
+import { recordAgentPoll, getLastPollAt, getLastPoll, registerAgentLaunch, getRegisteredLaunch, isStaleLaunch } from './agent-liveness.js';
 
 // Each test uses its own agent id to stay independent despite this module's
 // shared, unresettable module-level Map state (by design — see agent-liveness.ts).
@@ -38,5 +38,28 @@ describe('agent-liveness', () => {
     const recorded = getLastPollAt(agentId);
     expect(recorded).not.toBeNull();
     expect(new Date(recorded!).getTime()).toBeGreaterThanOrEqual(before);
+  });
+
+  it('E88: records the launch id a poll carried', () => {
+    recordAgentPoll('e88-launch-agent', new Date('2026-10-31T00:00:00.000Z'), 'L1');
+    expect(getLastPoll('e88-launch-agent')).toEqual({ lastPollAt: '2026-10-31T00:00:00.000Z', lastLaunchId: 'L1' });
+    recordAgentPoll('e88-launch-agent');
+    expect(getLastPoll('e88-launch-agent')!.lastLaunchId).toBeNull();
+  });
+
+  it('E88: an agent id with no registered launch is never stale', () => {
+    expect(getRegisteredLaunch('e88-unregistered')).toBeNull();
+    expect(isStaleLaunch('e88-unregistered', undefined)).toBe(false);
+    expect(isStaleLaunch('e88-unregistered', 'anything')).toBe(false);
+  });
+
+  it('E88: once registered, only the registered launch id is current', () => {
+    registerAgentLaunch('e88-registered', 'L-current');
+    expect(isStaleLaunch('e88-registered', 'L-current')).toBe(false);
+    expect(isStaleLaunch('e88-registered', 'L-old')).toBe(true);
+    expect(isStaleLaunch('e88-registered', undefined)).toBe(true);
+    expect(isStaleLaunch('e88-registered', '')).toBe(true);
+    registerAgentLaunch('e88-registered', 'L-next');
+    expect(isStaleLaunch('e88-registered', 'L-current')).toBe(true);
   });
 });
