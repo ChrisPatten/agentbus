@@ -16,6 +16,7 @@
  *   - journal_complete (E66; live agents only — not registered for cc-headless)
  *   - propose_change (E68)
  *   - status (E79)
+ *   - notify, update_notification, list_notifications (E89; Intercom attention items)
  *   - send_location, send_venue, send_contact, send_document, ask_input, send_rich, edit_message,
  *     pin_message, unpin_message (E81; only when a Telegram adapter is configured)
  */
@@ -41,6 +42,7 @@ import { registerAdvisoryTools } from './advisories.js';
 import { registerJournalTools } from './journal.js';
 import { registerProposalTools } from './proposals.js';
 import { registerStatusTool } from './status.js';
+import { registerNotificationTools } from './notifications.js';
 import { getTelegramInstances } from '../../config/schema.js';
 import { originFromEnv } from '../../core/origin.js';
 
@@ -89,6 +91,7 @@ export function registerAllTools(
   registerAdvisoryTools(server, busBaseUrl, agentId);
   registerJournalTools(server, busBaseUrl, agentId);
   registerProposalTools(server, busBaseUrl, agentId);
+  registerNotificationTools(server, busBaseUrl, agentId);
   registerStatusTool(server);
   maybeRegisterEmailTool(server, busBaseUrl, agentId, config);
   maybeRegisterTelegramTools(server, busBaseUrl, agentId, config);
@@ -149,6 +152,7 @@ export function registerHeadlessTools(
   registerModelOverrideTools(server, busBaseUrl);
   registerAdvisoryTools(server, busBaseUrl, agentId);
   registerProposalTools(server, busBaseUrl, agentId);
+  registerNotificationTools(server, busBaseUrl, agentId);
   registerStatusTool(server);
   maybeRegisterEmailTool(server, busBaseUrl, agentId, config);
   maybeRegisterTelegramTools(server, busBaseUrl, agentId, config);

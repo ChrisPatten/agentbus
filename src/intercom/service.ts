@@ -21,7 +21,8 @@
  */
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import type Database from 'better-sqlite3';
-import type { IntercomAdapterConfig, IntercomFollowConfig } from '../config/schema.js';
+import type { AppConfig, IntercomAdapterConfig, IntercomFollowConfig, NotificationsConfig } from '../config/schema.js';
+import { shareContextToConversation } from '../app/context-share.js';
 import type { MessageEnvelope } from '../types/envelope.js';
 import type { AdapterRegistry } from '../core/registry.js';
 import type { InboundAbort, InboundMessage, InboundResult, InboundSystemOptions } from '../http/api.js';
@@ -30,6 +31,11 @@ import { renderSystemBlock } from '../core/system-block.js';
 import { VERSION } from '../version.js';
 import { CalendarFeed, type CalendarPayload } from './calendar.js';
 import { resolveGlance, surfaceBody } from './glance.js';
+import {
+  acknowledgeNotification, attentionFor, expireDue, getNotification, isTerminal, openForSurface, publicNotification,
+  sweepNotifications, targetsSurface, updateNotification, upsertNotification, listNotifications,
+  type Notification, type NotifyInputT, type StateFilter, type UpdateInputT, type UpdateResult, type WriteResult,
+} from './notifications-store.js';
 import { appendEvent, cursorNeedsReset, eventBounds, getSend, putSend, readEvents, sweepEvents, sweepPairCodes, type StoredEvent } from './store.js';
 
 export const PROTOCOL_VERSION = 1;
@@ -76,6 +82,10 @@ export interface IntercomDeps {
   env?: NodeJS.ProcessEnv;
   now?: () => number;
   log?: (line: string) => void;
+  /** E89 — the `notifications` config block (absent or disabled: no notification features). */
+  notifications?: NotificationsConfig;
+  /** E89 — the full config, for routing the context carry-over into the followed conversation. */
+  appConfig?: AppConfig;
 }
 
 export const normalizeTopic = (topic: string | undefined | null): string => (!topic || topic === 'general' ? 'general' : topic);
@@ -83,9 +93,17 @@ const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
 const bareContact = (id: string) => id.replace(/^contact:/, '');
 
 /** The one-line note the agent sees with every surface message. */
-export function agentNote(surfaceId: string): string {
-  return `Sent from Intercom (${surfaceId}), a small round glance display. Reply as usual with reply(); keep it to 1-3 sentences, lead with the answer, and pass glance: a plain line of at most 100 characters.`;
+export function agentNote(surfaceId: string, withNotify = false): string {
+  const base = `Sent from Intercom (${surfaceId}), a small round glance display. Reply as usual with reply(); keep it to 1-3 sentences, lead with the answer, and pass glance: a plain line of at most 100 characters.`;
+  return withNotify ? `${base} ${NOTIFY_GUIDANCE}` : base;
 }
+
+/** N9 — when to raise a dial notification instead of sending a message. */
+export const NOTIFY_GUIDANCE =
+  'notify() puts a short-lived "needs you soon" item on the dial (leaving time, a bill due today, a draft awaiting approval, a job finished): give it a key so you can resolve it later. ' +
+  'Use reply()/send_message for content. When background work started from an Intercom turn finishes, notify with level "info" (or "attention" if a decision is needed) and a key, and reply the result.';
+
+const WRITE_WINDOW_MS = 60_000;
 
 export class IntercomService {
   readonly surfaces = new Map<string, Surface>();
@@ -98,6 +116,7 @@ export class IntercomService {
   private sweepTimer: NodeJS.Timeout | null = null;
   private calendarTimer: NodeJS.Timeout | null = null;
   private lastCalendarDate = '';
+  private readonly writeHits = new Map<string, number[]>();
 
   constructor(private readonly deps: IntercomDeps) {
     const env = deps.env ?? process.env;
@@ -134,10 +153,11 @@ export class IntercomService {
       } catch (err) { this.log(`warn: sweep failed: ${String(err)}`); }
     };
     sweep();
+    this.notificationTick();
     this.sweepTimer = setInterval(sweep, 60 * 60 * 1000);
     this.sweepTimer.unref();
     // Push the calendar every 5 minutes and at a date change.
-    this.calendarTimer = setInterval(() => { void this.pushCalendar(); }, 60_000);
+    this.calendarTimer = setInterval(() => { void this.pushCalendar(); this.notificationTick(); }, 60_000);
     this.calendarTimer.unref();
   }
 
@@ -219,6 +239,13 @@ export class IntercomService {
     const st = this.state.get(surface.id)!;
     this.raw(client.socket, { type: 'event', event: 'activity', data: st.activity });
     if (st.interaction) this.raw(client.socket, { type: 'event', event: 'interaction', data: { interaction_id: st.interaction.id, state: 'open' } });
+    if (this.notificationsOn) {
+      // A fresh client gets the full open set without replaying days of history, then the attention summary.
+      try {
+        for (const n of openForSurface(this.deps.db, surface.id)) this.raw(client.socket, { type: 'event', event: 'notification', data: publicNotification(n) });
+        this.raw(client.socket, { type: 'event', event: 'attention', data: attentionFor(this.deps.db, surface.id) });
+      } catch (err) { this.log(`warn: notification snapshot failed: ${String(err)}`); }
+    }
     try {
       const cal = await this.calendar.today();
       this.lastCalendarDate = cal.date;
@@ -421,7 +448,7 @@ export class IntercomService {
 
   // ── Surface send ─────────────────────────────────────────────────────────
 
-  async handleSend(surface: Surface, frame: { client_msg_id?: unknown; body?: unknown }): Promise<Record<string, unknown>> {
+  async handleSend(surface: Surface, frame: { client_msg_id?: unknown; body?: unknown }, extra: { noteLine?: string; metadata?: Record<string, unknown> } = {}): Promise<Record<string, unknown>> {
     const clientMsgId = typeof frame.client_msg_id === 'string' ? frame.client_msg_id : '';
     if (!clientMsgId || clientMsgId.length > 100) return { type: 'error', code: 'invalid_frame' };
     const reject = (reason: string, messageId = ''): Record<string, unknown> => ({ type: 'ack', client_msg_id: clientMsgId, status: 'rejected', reason, ...(messageId ? { message_id: messageId } : {}) });
@@ -448,11 +475,11 @@ export class IntercomService {
         ...(surface.follow.topic ? { topic: surface.follow.topic } : {}),
         sender: `contact:${surface.follow.contact}`,
         payload: { type: 'text', body },
-        metadata: { origin: 'intercom', surface_id: surface.id, interaction_id: interaction.id, client_msg_id: clientMsgId },
+        metadata: { origin: 'intercom', surface_id: surface.id, interaction_id: interaction.id, client_msg_id: clientMsgId, ...extra.metadata },
       };
       let result: InboundResult | InboundAbort;
       try {
-        result = await this.deps.submitInbound(inbound, { blocks: [renderSystemBlock('intercom', agentNote(surface.id), { surface: surface.id })] });
+        result = await this.deps.submitInbound(inbound, { blocks: [renderSystemBlock('intercom', extra.noteLine ? `${agentNote(surface.id, this.notificationsOn)}\n${extra.noteLine}` : agentNote(surface.id, this.notificationsOn), { surface: surface.id })] });
       } catch (err) {
         this.log(`warn: submitInbound failed: ${String(err)}`);
         this.abortIfUnused(surface, interaction.id);
@@ -509,6 +536,114 @@ export class IntercomService {
     } catch (err) {
       this.log(`warn: echo failed: ${String(err)}`);
     }
+  }
+
+  // ── Notifications (E89) ──────────────────────────────────────────────────
+
+  get notificationsOn(): boolean { return this.deps.notifications?.enabled === true; }
+
+  /** Sliding-window write limit per source label. */
+  writeAllowed(source: string): boolean {
+    const now = this.now();
+    const hits = (this.writeHits.get(source) ?? []).filter((t) => now - t < WRITE_WINDOW_MS);
+    if (hits.length >= (this.deps.notifications?.rate_limit_per_min ?? 30)) { this.writeHits.set(source, hits); return false; }
+    hits.push(now);
+    this.writeHits.set(source, hits);
+    if (this.writeHits.size > 1000) for (const [k, v] of this.writeHits) if (v.every((t) => now - t >= WRITE_WINDOW_MS)) this.writeHits.delete(k);
+    return true;
+  }
+
+  raise(input: NotifyInputT): WriteResult {
+    const res = upsertNotification(this.deps.db, input, this.now());
+    this.publish(res.notification, res.contentChanged);
+    return res;
+  }
+
+  patch(patch: UpdateInputT): UpdateResult {
+    const res = updateNotification(this.deps.db, patch, this.now());
+    if (!('error' in res)) this.publish(res.notification, res.contentChanged && res.notification.state === 'active');
+    return res;
+  }
+
+  list(state: StateFilter, limit: number): Notification[] { return listNotifications(this.deps.db, state, limit); }
+
+  private targetedSurfaces(n: Notification): Surface[] {
+    return [...this.surfaces.values()].filter((s) => targetsSurface(n, s.id));
+  }
+
+  /** Durable `notification` event plus a fresh `attention` to every targeted surface; optionally the context carry-over. */
+  private publish(n: Notification, carryContext: boolean): void {
+    try {
+      for (const s of this.targetedSurfaces(n)) {
+        this.emitDurable(s, 'notification', publicNotification(n));
+        this.emitAttention(s);
+      }
+      if (carryContext && n.state === 'active') this.carryContext(n);
+    } catch (err) { this.log(`warn: notification publish failed: ${String(err)}`); }
+  }
+
+  private emitAttention(surface: Surface): void {
+    this.emitEphemeral(surface, 'attention', attentionFor(this.deps.db, surface.id));
+  }
+
+  private clock(iso: string): string {
+    const tz = this.deps.config.calendar.timezone;
+    try { return new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: tz }).format(new Date(iso)); }
+    catch { return iso.slice(11, 16); }
+  }
+
+  /** Hand what the dial shows to each targeted surface's followed conversation as hidden pending context. */
+  private carryContext(n: Notification): void {
+    const cfg = this.deps.appConfig;
+    if (!cfg || this.deps.notifications?.context_to_followed === false) return;
+    const seen = new Set<string>();
+    for (const s of this.targetedSurfaces(n)) {
+      if (seen.has(s.conversationId)) continue;
+      seen.add(s.conversationId);
+      const actions = n.actions.length > 0 ? ` Actions: ${n.actions.map((a) => a.label).join(' / ')}.` : '';
+      const text = `[Shown on Intercom at ${this.clock(n.updated_at)}] (${n.level}) ${n.title}${n.body ? `: ${n.body}` : '.'}${actions}`;
+      const res = shareContextToConversation(this.deps.db, cfg, {
+        contactId: s.follow.contact, channel: s.follow.channel, topic: normalizeTopic(s.follow.topic), body: text, source: `Intercom: ${n.source}`,
+      });
+      if (!res.ok) this.log(`warn: notification context not written for ${s.id}: ${res.error}`);
+    }
+  }
+
+  /** 60 s tick: expire items past `expires_at` (telling the surfaces) and delete old terminal rows. */
+  notificationTick(): void {
+    if (!this.notificationsOn) return;
+    try {
+      for (const n of expireDue(this.deps.db, this.now())) this.publish(n, false);
+      sweepNotifications(this.deps.db, this.deps.notifications?.retention_days ?? 14, this.now());
+    } catch (err) { this.log(`warn: notification tick failed: ${String(err)}`); }
+  }
+
+  /** `{"type":"notification_ack"}` from a surface. Returns an error frame, or null on success. */
+  handleNotificationAck(surface: Surface, frame: { id?: unknown }): Record<string, unknown> | null {
+    const id = typeof frame.id === 'string' ? frame.id : '';
+    const n = id ? getNotification(this.deps.db, id) : null;
+    if (!this.notificationsOn || !n || isTerminal(n) || !targetsSurface(n, surface.id)) return { type: 'error', code: 'notification_not_found' };
+    const res = acknowledgeNotification(this.deps.db, id, surface.id, this.now());
+    if (res?.changed) this.publish(res.notification, false);
+    return null;
+  }
+
+  /** `{"type":"notification_action"}`: acknowledge, then send `[tapped] <label>` into the followed conversation like a surface `send`. */
+  async handleNotificationAction(surface: Surface, frame: { client_msg_id?: unknown; id?: unknown; index?: unknown }): Promise<Record<string, unknown>> {
+    const clientMsgId = typeof frame.client_msg_id === 'string' ? frame.client_msg_id : '';
+    if (!clientMsgId || clientMsgId.length > 100 || typeof frame.id !== 'string' || !Number.isInteger(frame.index)) return { type: 'error', code: 'invalid_frame' };
+    const existing = getSend(this.deps.db, surface.id, clientMsgId);
+    if (existing) return existing;                                             // idempotent on client_msg_id, even if the item has since been resolved
+    const n = getNotification(this.deps.db, frame.id);
+    if (!this.notificationsOn || !n || isTerminal(n) || !targetsSurface(n, surface.id)) return { type: 'error', code: 'notification_not_found' };
+    const action = n.actions[frame.index as number];
+    if (!action) return { type: 'error', code: 'invalid_frame' };
+    const acked = acknowledgeNotification(this.deps.db, n.id, surface.id, this.now());
+    if (acked?.changed) this.publish(acked.notification, false);
+    return this.handleSend(surface, { client_msg_id: clientMsgId, body: `[tapped] ${action.label}` }, {
+      noteLine: `On the Intercom notification "${n.title}" (${n.source}, raised ${this.clock(n.created_at)})`.replace(/\s+/g, ' '),
+      metadata: { notification_id: n.id },
+    });
   }
 
   // ── Test/inspection helpers ──────────────────────────────────────────────

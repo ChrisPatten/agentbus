@@ -3,6 +3,7 @@ import { AppAdapterSchema, type AppConfig } from '../config/schema.js';
 import { toPrefixedAgentId } from '../pool/types.js';
 import type { JournalEngine, TriggerHandle } from '../journaling/engine.js';
 import { appConversationId } from './outbound.js';
+import { computeConversationId } from '../pipeline/conversation-id.js';
 import { VISIBLE_TRANSCRIPT } from './store.js';
 
 /**
@@ -56,8 +57,25 @@ export function isPrimaryConversation(db: Database.Database, conversationId: str
 export function primaryConversationChannel(db: Database.Database, conversationId: string, config: AppConfig): string | null {
   const row = db.prepare(`SELECT channel, topic FROM conversation_registry WHERE id = ?`)
     .get(conversationId) as { channel: string; topic: string } | undefined;
-  if (!row || row.topic !== MAIN_TOPIC) return null;
+  if (!row) return null;
+  // E89 — a conversation an enabled Intercom surface follows (for example a forum topic) also reads pending context.
+  if (followedConversationIds(config).has(conversationId)) return row.channel;
+  if (row.topic !== MAIN_TOPIC) return null;
   return row.channel === 'app' || primaryChannels(config).includes(row.channel) ? row.channel : null;
+}
+
+/**
+ * E89 — ids of the conversations that enabled Intercom surfaces follow, when
+ * `notifications.enabled` and `notifications.context_to_followed` are on.
+ * Empty otherwise, so nothing changes for a bus without notifications.
+ */
+export function followedConversationIds(config: AppConfig): Set<string> {
+  const out = new Set<string>();
+  const n = config.notifications;
+  const ic = config.adapters?.intercom;
+  if (!n?.enabled || !n.context_to_followed || !ic?.enabled) return out;
+  for (const s of ic.surfaces) out.add(computeConversationId(s.follow.contact.replace(/^contact:/, ''), s.follow.channel, s.follow.topic || MAIN_TOPIC));
+  return out;
 }
 
 /**
@@ -66,7 +84,9 @@ export function primaryConversationChannel(db: Database.Database, conversationId
  * keeps `adapters.app.pending_context` (undefined: no agent override).
  */
 export function pendingContextAgent(config: AppConfig, channel: string): string | undefined {
-  return channel === 'app' ? undefined : primaryAgentForChannel(config, channel) ?? undefined;
+  // E89: a followed forum-topic channel (`telegram:peggy:group:<id>`) uses the limits of the bot's DM agent.
+  return channel === 'app' ? undefined
+    : primaryAgentForChannel(config, channel) ?? primaryAgentForChannel(config, channel.replace(/:group:.*$/, '')) ?? undefined;
 }
 
 /** Whether a session row belongs to some contact's Main. */

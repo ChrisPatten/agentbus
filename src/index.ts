@@ -365,7 +365,7 @@ const memoryRecent = new RecentFreshness({
 // the delivery worker below can hand it agent replies. Tokens come from the env vars the config names.
 const intercom = config.adapters.intercom?.enabled
   ? new IntercomService({
-    config: config.adapters.intercom, db, registry,
+    config: config.adapters.intercom, db, registry, notifications: config.notifications, appConfig: config,
     submitInbound: (message, system) => processInbound(message, {
       queue, pipeline, config, db, registry, commandRegistry, pauseSet,
     }, system),

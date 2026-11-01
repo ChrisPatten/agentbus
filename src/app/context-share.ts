@@ -127,3 +127,34 @@ export function shareContext(db: Database.Database, config: AppConfig, req: Shar
     return { ok: true, messageId, conversationId, sessionId };
   })();
 }
+
+export type FollowedContextResult = { ok: true; messageId: string; conversationId: string } | { ok: false; error: string };
+
+/**
+ * E89 — a hidden context-only note in a conversation an Intercom surface
+ * follows (a Telegram DM or a forum topic), so the agent's next turn there
+ * reads it as pending context. Same row as `shareContext` writes, but the
+ * target is the followed (channel, topic) rather than a primary channel, and
+ * the topic is not `general`. Never creates an app item and wakes no one.
+ */
+export function shareContextToConversation(
+  db: Database.Database, config: AppConfig,
+  req: { contactId: string; channel: string; topic: string; body: string; source: string },
+): FollowedContextResult {
+  const route = routedTarget(config, req.contactId, req.channel);
+  if (!route) return { ok: false, error: `Channel "${req.channel}" is not routed for ${req.contactId}` };
+  if (!READS_PENDING_CONTEXT.has(route.adapterId)) return { ok: false, error: `${req.channel} is served by ${route.adapterId}, which does not read pending context` };
+  const conversationId = computeConversationId(req.contactId, req.channel, req.topic);
+  const source = normalizeSource(req.source);
+  const messageId = randomUUID();
+  db.transaction(() => {
+    const existing = db.prepare(`SELECT id FROM sessions WHERE conversation_id = ?
+      ORDER BY (ended_at IS NULL) DESC, started_at DESC, rowid DESC LIMIT 1`).get(conversationId) as { id: string } | undefined;
+    const sessionId = existing?.id ?? ensurePrimarySession(db, req.contactId, req.channel, req.topic, route.recipientId).sessionId;
+    logOutboundTranscript(db, {
+      messageId, conversationId, sessionId, channel: req.channel, contactId: req.contactId, body: req.body,
+      metadata: { origin: { kind: 'external', label: source } satisfies Origin, [CONTEXT_ONLY_KEY]: true }, silent: true,
+    });
+  })();
+  return { ok: true, messageId, conversationId };
+}

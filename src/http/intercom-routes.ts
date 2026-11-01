@@ -165,6 +165,15 @@ export async function registerIntercomRoutes(server: FastifyInstance, deps: Inte
         send(await service.handleSend(client.surface, parsed.data));
         return;
       }
+      if (frame['type'] === 'notification_ack') {
+        const err = service.handleNotificationAck(client.surface, frame);
+        if (err) send(err);
+        return;
+      }
+      if (frame['type'] === 'notification_action') {
+        send(await service.handleNotificationAction(client.surface, frame));
+        return;
+      }
       if (frame['type'] === 'state') { service.setSurfaceState(client.surface, frame); return; }
       send({ type: 'error', code: 'invalid_frame' });
     })().catch(() => send({ type: 'error', code: 'internal_error' })); });

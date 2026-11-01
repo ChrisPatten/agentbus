@@ -224,6 +224,11 @@ function loadMigrations(): Migration[] {
       description: 'Intercom pairing codes, durable per-surface events and send idempotency (E90/E91)',
       sql: readFileSync(join(migrationsDir, '044_intercom.sql'), 'utf-8'),
     },
+    {
+      version: 45,
+      description: 'notifications table for Intercom attention items (E89)',
+      sql: readFileSync(join(migrationsDir, '045_notifications.sql'), 'utf-8'),
+    },
   ];
 }
 

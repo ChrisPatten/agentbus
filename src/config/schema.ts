@@ -631,6 +631,23 @@ export const IntercomAdapterSchema = z.object({
 });
 export type IntercomAdapterConfig = z.infer<typeof IntercomAdapterSchema>;
 
+/**
+ * E89 — user notifications: durable "needs you soon" items raised by agents,
+ * schedules and scripts and shown on Intercom surfaces. Opt-in. See docs/NOTIFICATIONS.md.
+ */
+export const NotificationsConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  /** Resolved and expired rows are deleted after this many days. */
+  retention_days: z.number().int().positive().default(14),
+  /** Names of env vars whose values are accepted as `Authorization: Bearer` tokens on /api/v1/notifications (each at least 16 characters). */
+  api_tokens_env: z.array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/)).default([]),
+  /** Hand every new or changed notification to the followed conversation as hidden pending context. */
+  context_to_followed: z.boolean().default(true),
+  /** Writes per source per minute before the API answers 429. */
+  rate_limit_per_min: z.number().int().positive().default(30),
+});
+export type NotificationsConfig = z.infer<typeof NotificationsConfigSchema>;
+
 const AdaptersConfigSchema = z.object({
   telegram: z.union([TelegramAdapterSchema, z.record(z.string(), TelegramAdapterSchema)]).optional(),
   email: z.union([EmailAdapterSchema, z.record(z.string(), EmailAdapterSchema)]).optional(),
@@ -1079,6 +1096,7 @@ export const AppConfigSchema = z.object({
   bus: BusConfigSchema,
   tool_status: ToolStatusConfigSchema.default({ mode: 'phrases' }),
   adapters: AdaptersConfigSchema,
+  notifications: NotificationsConfigSchema.optional(),
   contacts: z.record(z.string(), ContactSchema).default({}).superRefine((contacts, ctx) => {
     for (const [key, contact] of Object.entries(contacts)) {
       if (contact.id !== key) {
