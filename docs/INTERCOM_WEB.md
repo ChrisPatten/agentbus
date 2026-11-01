@@ -9,6 +9,7 @@
 | `index.html`, `styles.css`, `manifest.webmanifest`, `icons/` | Page shell, look, Home Screen manifest and icons (180, 192, 512 px) |
 | `app.js` | State, view selection, pairing, send form, wake lock |
 | `socket.js` | WebSocket client: hello and cursor, backoff, outbox, ping, 4401 |
+| `wake.js` | Keeps the screen on: Screen Wake Lock with a hidden-video fallback (see Home Screen install) |
 | `logic.js` | Pure helpers: 24 h geometry, calendar selection, backoff, glance, outbox, notification map, screen priority, quiet hours (unit-tested) |
 | `dial.js`, `screens.js` | SVG rims and the HTML of each dial screen |
 | `demo.js` | Scripted `?demo` walkthrough: the nine mockup screens plus three notification steps |
@@ -58,7 +59,13 @@ Run `npx tsx scripts/intercom-pair.ts <surface_id>` on the bus host; it prints a
 
 ## Home Screen install
 
-iOS gives a Home Screen app its own storage, separate from Safari, and the launch URL drops the `#pair=` fragment. So install first, then pair inside the installed app: in Safari open `/intercom/` (no code), Share, **Add to Home Screen**; launch it from the icon; paste the pairing link (or just the code) into the text field and tap **Pair**. Codes are single use, so generate a fresh one for this. It opens full screen (no browser chrome, black status bar, safe-area aware). The Screen Wake Lock API keeps the display on while the page is visible where iOS supports it; elsewhere nothing happens.
+iOS gives a Home Screen app its own storage, separate from Safari, and the launch URL drops the `#pair=` fragment. So install first, then pair inside the installed app: in Safari open `/intercom/` (no code), Share, **Add to Home Screen**; launch it from the icon; paste the pairing link (or just the code) into the text field and tap **Pair**. Codes are single use, so generate a fresh one for this. It opens full screen (no browser chrome, black status bar, safe-area aware). 
+
+### Keeping the screen on
+
+While the app is open the display is kept awake (`wake.js`). It requests `navigator.wakeLock.request('screen')` on load and again on the first touch, key or pointer (some browsers insist on a gesture), whenever the page becomes visible again, and whenever a held lock is released while the page is visible. During quiet hours (22:00 to 06:30 on the phone's clock, same rule as the Quiet screen; `?quiet` and `?quiet=0` apply here too) it holds no lock and releases any it has; a 60 s timer re-checks, so it takes the lock at 06:30 and drops it at 22:00. The decision is the pure `shouldHoldWakeLock` in `logic.js`. Where `navigator.wakeLock` is missing it falls back to a 1 px, muted, looping inline video (about 1.6 KB, NoSleep style) started on the first touch and paused in quiet hours. Every step is wrapped so a failure never affects the UI.
+
+Limits: iOS only supports the Wake Lock API in Home Screen web apps from iOS 18.4; before that the video fallback is best effort and may not work. Low Power Mode, or the phone being locked manually, still turns the screen off. At night the phone then sleeps normally.
 
 ## Demo and mock server
 

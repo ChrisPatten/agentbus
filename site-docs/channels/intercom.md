@@ -100,6 +100,8 @@ A low-priority item does not glow. Instead a small brass dot and "1 note" appear
 
 From 10 PM to 6:30 AM the dial stays dark: no glow, and the Quiet screen says how many items are waiting. The hours are fixed for now and follow the phone's clock.
 
+The app keeps your phone's screen on while it is open, except during those quiet hours, when the phone is allowed to sleep. On iPhone this needs iOS 18.4 or later for an app on the Home Screen, and Low Power Mode may still dim and lock the screen.
+
 Only replies to messages you sent from Intercom appear as replies. Everything still arrives in Telegram as usual, and "More on Telegram" tells you when the full answer lives there.
 
 ### Pair your phone

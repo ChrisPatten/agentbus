@@ -3,6 +3,7 @@ import { render } from './screens.js';
 import { IntercomSocket, store, apiUrl } from './socket.js';
 import { parsePairInput, replyIsFresh, applyNotification, activeItems, needsList, infoList, attentionLevel, cycleId, isQuietHours, waitingCount, pickScreen } from './logic.js';
 import { runDemo, STEPS } from './demo.js';
+import { createWakeKeeper } from './wake.js';
 
 const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
@@ -22,7 +23,7 @@ let sock = null;
 let lastHtml = '';
 let lastName = '';
 let replyTimer = null;
-let wakeLock = null;
+const wake = createWakeKeeper({ tz: TZ_FALLBACK, forceQuiet });
 
 function loadPair() {
   try { const p = JSON.parse(store.get('intercom.pair') || 'null'); return p && p.token ? p : null; } catch { return null; }
@@ -291,15 +292,6 @@ function wireUi() {
   $('dial').addEventListener('scroll', () => { if (S.reply) armReplyTimer(); }, true);
 }
 
-/* ---------- wake lock ---------- */
-async function acquireWake() {
-  try {
-    if (!('wakeLock' in navigator) || document.visibilityState !== 'visible' || wakeLock) return;
-    wakeLock = await navigator.wakeLock.request('screen');
-    wakeLock.addEventListener('release', () => { wakeLock = null; });
-  } catch { wakeLock = null; }
-}
-
 /* ---------- boot ---------- */
 /** Read #pair=CODE and remove the fragment so the code never lingers in the URL/history. */
 function takePairCode() {
@@ -313,10 +305,12 @@ function boot() {
   applySize();
   wireUi();
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') { acquireWake(); sock?.nudge(); fetchToday(); update(); }
+    if (document.visibilityState === 'visible') { wake.evaluate(); sock?.nudge(); fetchToday(); update(); }
   });
   window.addEventListener('online', () => sock?.nudge());
-  acquireWake();
+  wake.evaluate();
+  for (const ev of ['pointerdown', 'touchend', 'keydown']) document.addEventListener(ev, () => wake.gesture(), { once: true, passive: true });
+  setInterval(() => wake.evaluate(), 60000);
 
   if (demoMode) {
     $('form').hidden = true;
