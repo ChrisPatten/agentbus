@@ -11,6 +11,7 @@ Each time the bus starts a turn (`cc-headless`) or a session (`cc-pool`), it pic
 | Order | Source | Set with |
 |---|---|---|
 | 1 | The scheduled job that triggered this turn | `model` on the [schedule](/features/scheduling) |
+| 1b | A model rule for this conversation (`cc-pool` only) | [`conversation_models`](#one-conversation-one-model) in the pool config |
 | 2 | An override for this agent | [`/model`](#switching-from-chat) in chat, `set_model_override` with an `agent_id`, or the HTTP API |
 | 3 | An override for all agents | `set_model_override` without an `agent_id`, or the HTTP API |
 | 4 | The runtime's configuration | `model` under `adapters.cc-headless` or `adapters.cc-pool` |
@@ -67,6 +68,22 @@ When you change the model with `/model` and your chat holds a pane that's betwee
 An override set any other way, such as with `set_model_override`, reaches a pane at the conversation's next message: the bus restarts the pane's session with the new model, and the conversation carries on where it was.
 
 Don't switch a pane by typing `/model` into it yourself, or by sending `//model`. The bus doesn't know about that change and may switch the pane back. Use `/model` in chat.
+
+## One conversation, one model
+
+With `cc-pool` you can pin a single conversation, such as one Telegram forum topic, to its own model while everything else keeps its usual one. Add a rule under the pool in `config.yaml`:
+
+```yaml
+adapters:
+  cc-pool:
+    peggy:
+      conversation_models:
+        - match: { channel: "telegram:peggy:group:-1003977797157", topic: "thread:0a024ae00cb857bb" }
+          model: haiku
+          keep_warm: true
+```
+
+`channel` and `topic` must match exactly (`contact` is optional). The rule beats `/model` and the other overrides; only a schedule's own model beats it. `keep_warm: true` also keeps that conversation's pane running between turns instead of being reclaimed when idle. A warm pane takes one slot for good, so at least one pane in the pool is always left for other conversations. After a bus restart the conversation counts as warm again from its next message.
 
 ## Checking which model ran
 

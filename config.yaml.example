@@ -189,6 +189,10 @@ adapters:
   #     hard_idle_ms: 21600000       # 6h → proactively released even if pool is busy
   #     park_timeout_ms: 300000      # a parked message waits this long before erroring back
   #   on_evict: clear                # clear | kill (what happens to the pane on release)
+  #   conversation_models:           # E95: pin one conversation to a model; outranks overrides and `model`, not a schedule's model
+  #     - match: { channel: "telegram:peggy:group:-1003977797157", topic: "thread:0a024ae00cb857bb" }  # contact optional
+  #       model: haiku               # resolved through the /model catalog
+  #       keep_warm: true            # exempt its pane from idle eviction/hard-idle release (capped at capacity - 1)
 
   # ── Claude Code MCP adapter, polling mode (persistent session) — docs/CC_ADAPTER.md
   # claude-code:

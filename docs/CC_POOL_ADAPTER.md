@@ -52,6 +52,7 @@ Every field of `adapters.cc-pool`:
 | `launch_args` | list of strings | `[]` | Extra CLI args appended to every launch/resume invocation. `--dangerously-load-development-channels` (bare, followed by `server:agentbus`, or as `=server:agentbus`) is dropped, since the launcher always adds `--dangerously-load-development-channels server:agentbus` itself (`dedupeDevChannelsArgs` in `src/pool/pane.ts`). The flag with any other channel value is passed through. |
 | `poll_interval_ms` | number | `1000` | Poll interval for each pane's `cc.ts` process, passed in the per-pane MCP config as `AGENTBUS_POLL_INTERVAL_MS` (which `cc.ts` prefers over `adapters.claude-code.poll_interval_ms`). Takes effect when a pane's `claude` next starts. |
 | `system_prompt` | string | unset | Appended via `--append-system-prompt-file` — it adds to the CLI's default prompt rather than replacing it, unlike `cc-headless`'s required `system_prompt`. Supports the same `{{var}}` templates and `@path` expansion as `cc-headless`. |
+| `conversation_models` | list | unset | Per-conversation model rules and `keep_warm` (E95); see [Per-conversation models](#per-conversation-models-and-keep_warm). Each entry: `match` (`channel`, optional `topic`, optional `contact`), `model`, `keep_warm` (default `false`). |
 | `lease.idle_evict_ms` | number (ms) | `1800000` (30 min) | Idle time after which a leased pane becomes evictable by a new conversation. |
 | `lease.hard_idle_ms` | number (ms) | `21600000` (6 h) | Time since a lease started after which it's proactively released, regardless of activity. |
 | `lease.park_timeout_ms` | number (ms) | `300000` (5 min) | How long a parked message waits for a free pane before it's dead-lettered. |
@@ -161,12 +162,33 @@ Two records track a Claude session id, at different lifetimes:
 Every pane launch — a fresh `bound`/`grow`/`evict` claim, and every `reuse` of an already-leased pane, to detect a change — resolves the model to pass as `--model` from, in order:
 
 1. **The scheduled job's own `model`.** A schedule fired with a `model` set stamps it onto the envelope as `metadata.schedule_model`; `pool-route-resolve` (Stage 72) carries it into `PoolManager.resolveRoute()`. See `docs/SCHEDULING.md`.
+1a. **A matching `conversation_models` rule** (E95, logged `source=conversation-rule`). See [below](#per-conversation-models-and-keep_warm).
 2. **An agent-scoped override** — `agent:<pool agent_id>` (the pool's logical id, e.g. `agent:peggy`, not a specific pane) in the override store.
 3. **A global override.**
 4. **The pool's own `model`** (`adapters.cc-pool.<name>.model`).
 5. **Nothing** — no `--model` flag at all. The CLI falls back to whatever `model` is set in `~/.claude/settings.json`, and any interactive `/model` typed into ANY Claude session (this pool's or an entirely unrelated one) rewrites that file — so which model a pane actually runs can change for reasons that have nothing to do with this pool's own configuration. bus-core logs a startup warning (`[pool:<id>] No 'model' configured for this pool — ...`) for every configured pool whose `model` is unset, precisely because this fallback is a leak, not a feature.
 
-To set the agent override (step 2) from chat, send `/model` in a chat routed to the pool — for example `/model opus` or `/model haiku 4.5` (see [SLASH_COMMANDS.md](SLASH_COMMANDS.md#model-query--reset--list)). It stores a concrete model ID and, if the chat holds a live pane between turns, switches that pane immediately (typing `/model` into it and answering the prompt, falling back to a relaunch); otherwise the change applies at the next message. New model IDs can be added to `/model`'s catalog under `models.catalog` in `config.yaml`. Overrides (steps 2–3) live in the same store `cc-headless` uses (`src/adapters/model-override-loader.ts`) — see `docs/MCP_TOOLS.md` and [HTTP_API.md](HTTP_API.md#model-overrides) for managing them. The resolved model, and which of the five steps produced it, is logged on every launch: `[pool:<id>] launching <pane> model=<m> (source=<s>)`.
+To set the agent override (step 2) from chat, send `/model` in a chat routed to the pool — for example `/model opus` or `/model haiku 4.5` (see [SLASH_COMMANDS.md](SLASH_COMMANDS.md#model-query--reset--list)). It stores a concrete model ID and, if the chat holds a live pane between turns, switches that pane immediately (typing `/model` into it and answering the prompt, falling back to a relaunch); otherwise the change applies at the next message. New model IDs can be added to `/model`'s catalog under `models.catalog` in `config.yaml`. Overrides (steps 2–3) live in the same store `cc-headless` uses (`src/adapters/model-override-loader.ts`) — see `docs/MCP_TOOLS.md` and [HTTP_API.md](HTTP_API.md#model-overrides) for managing them. The resolved model, and which step produced it, is logged on every launch: `[pool:<id>] launching <pane> model=<m> (source=<s>)`.
+
+### Per-conversation models and keep_warm
+
+`conversation_models` pins one conversation (for example one Telegram forum topic) to its own model without touching anyone else:
+
+```yaml
+adapters:
+  cc-pool:
+    peggy:
+      conversation_models:
+        - match: { channel: "telegram:peggy:group:-1003977797157", topic: "thread:0a024ae00cb857bb" }  # contact optional
+          model: haiku
+          keep_warm: true
+```
+
+- **Matching.** `channel` is exact; `topic` is exact, and an absent topic equals `general`; `contact` (optional, with or without the `contact:` prefix) is exact. The first matching rule wins.
+- **Model.** The string goes through the `/model` catalog (`haiku` becomes the newest non-deprecated Haiku id; a `claude-...` id is used as written). A string that doesn't resolve is logged and the rule is ignored.
+- **Order.** The rule outranks agent and global overrides, `/model`, and the pool's `model`; only a schedule's own model beats it. A `/model` typed in a ruled conversation therefore has no lasting effect there. The rule depends only on the message's channel, topic and contact, so the conversation resolves to the same model on every message and a reuse never relaunches it back and forth.
+- **keep_warm.** A conversation seated by a `keep_warm: true` rule is skipped when `acquire()` picks an idle pane to evict and when `sweepHardIdle()` releases idle panes, so its pane stays leased between turns. A dead pane is still released by `reconcileLiveness()` and relaunched with `--resume` on the next message; `/clear` and `/pool kill` work as usual.
+- **Limits.** A warm pane permanently uses one slot. Warm conversations are capped at `capacity - 1` (`panes`, or `max_panes` for `growth: dynamic`), so at least one pane stays available to everyone else; a rule beyond the cap logs a warning and behaves as `keep_warm: false`. The warm set is held in memory: after a bus restart the conversation is warm again from its next message, and until then its pane is subject to the normal idle sweep. `keep_warm` keeps the lease, not a running turn, so the 30-minute `idle_evict_ms` and 6-hour `hard_idle_ms` timers simply don't apply to it.
 
 **The model is fixed per Claude session, not per message.** `--model` only takes effect at process start (fresh `--session-id`) or resume (`--resume`) — there is no way to change a running session's model mid-turn. `pool_leases.model` (migration 023) records what the pane's *current* session was actually launched with, so a `reuse` can compare against it without re-deriving anything.
 
