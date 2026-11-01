@@ -266,6 +266,18 @@ export function pickScreen(c) {
 }
 
 /** Needs-you layout: roomy stack for short titles with at most two buttons, otherwise a compact two-column grid. */
+/** True when an action label is itself a "Got it" (the client then skips its automatic Got it button). */
+export function isAckLabel(label) {
+  return String(label ?? '').trim().toLowerCase() === 'got it';
+}
+
+/** The compact Needs-you card clamps the title to two lines and the body to one; true when text is likely cut off. */
+export function needsMore(item, total = 1) {
+  const body = String(item.body || '').replace(/\s+/g, ' ').trim();
+  const title = String(item.title || '').trim();
+  return body.length > 24 || title.length > (needsLayout(item, total) === 'stack' ? 28 : 30);
+}
+
 export function needsLayout(item, total = 1) {
   const buttons = Math.min(3, (item.actions || []).length) + 1;
   return buttons <= 2 && String(item.title || '').length <= 16 && total <= 9 ? 'stack' : 'grid';

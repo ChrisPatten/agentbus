@@ -15,7 +15,7 @@ const DONE_WORDS = ['Noted, and filed.', 'Very good.', 'Consider it handled.', '
 const S = {
   pair: loadPair(), conn: 'offline', offlineSince: Date.now(), activity: { state: 'idle', status_text: null },
   reply: null, expanded: false, doneUntil: 0, doneWord: DONE_WORDS[0], calendar: null, sentAt: 0, pairError: '', lastReplyId: null,
-  notes: new Map(), hidden: new Map(), attention: null, nSel: null, noteOpen: false, ownIids: new Set(), swipedAt: 0,
+  notes: new Map(), hidden: new Map(), attention: null, nSel: null, nOpen: null, noteOpen: false, ownIids: new Set(), swipedAt: 0,
 };
 const forceQuiet = params.has('quiet') ? params.get('quiet') !== '0' : null; // dev: ?quiet previews the Quiet screen, ?quiet=0 shows the day screens at any hour
 let sock = null;
@@ -81,7 +81,7 @@ function computeView(now = new Date()) {
     case 'reply': return [name, { reply: S.reply, expanded: S.expanded }];
     case 'working': return [name, { status: running ? a.status_text : 'Sent' }];
     case 'done': return [name, { word: S.doneWord }];
-    case 'needs': return [name, { item: list.find((n) => n.id === S.nSel), index: list.findIndex((n) => n.id === S.nSel), total: list.length }];
+    case 'needs': return [name, { item: list.find((n) => n.id === S.nSel), index: list.findIndex((n) => n.id === S.nSel), total: list.length, expanded: S.nOpen === S.nSel }];
     case 'quiet': return [name, { now, tz, waiting: !S.attention ? items.length : waitingCount(S.attention, items, S.hidden) }];
     default: return [name, { events: cal ? cal.events : [], now, tz, calendarKnown: !!cal, notes: infoList(items).length, halo: attentionLevel(attn) !== 'none' }];
   }
@@ -214,6 +214,7 @@ function currentList() {
   return attn.length ? attn : infoList(items);
 }
 function cycle(delta) {
+  S.nOpen = null;
   S.nSel = cycleId(currentList(), S.nSel, delta);
   update();
 }
@@ -221,8 +222,11 @@ function hide(item) { S.hidden.set(item.id, item.updated_at || ''); }
 function onAct({ act, i }) {
   if (act === 'note') { const info = infoList(activeItems(S.notes, Date.now(), S.hidden)); if (info.length) { S.noteOpen = true; S.nSel = info[0].id; update(); } return; }
   if (act === 'cycle') { cycle(1); return; }
+  if (act === 'expand') { S.nOpen = S.nSel; update(); return; }
+  if (act === 'collapse') { S.nOpen = null; update(); return; }
   const item = S.notes.get(S.nSel);
   if (!item || !sock) return;
+  S.nOpen = null;
   if (act === 'ack') { hide(item); sock.ackNotification(item.id); }
   else if (act === 'action') {
     hide(item); sock.sendAction(item.id, Number(i));

@@ -1,7 +1,7 @@
 // HTML for each dial screen. All inner content is laid out in the 466 design square.
 // Readability: text >= 26px, primary >= 34px, clock >= 110px, buttons >= 72px, <= 4 buttons,
 // nothing inside the outer 30px.
-import { escapeHtml as e, daySpans, nextEvent, clockText, dateText, shortTime, allDayLine, glanceOf, needsLayout } from './logic.js';
+import { escapeHtml as e, daySpans, nextEvent, clockText, dateText, shortTime, allDayLine, glanceOf, needsLayout, isAckLabel, needsMore } from './logic.js';
 import { dayRingSvg, workingRingSvg, waveRingSvg } from './dial.js';
 
 export const SCREENS = ['idle', 'listening', 'working', 'reply', 'choice', 'needs', 'draft', 'done', 'quiet'];
@@ -52,20 +52,34 @@ export function choice({ question, choices }) {
     choices.slice(0, 3).map((c) => btn(c.label, styles[c.style] ?? '')).join('');
 }
 
-export function needs({ item, index = 0, total = 1 }) {
+export function needs({ item, index = 0, total = 1, expanded = false }) {
   const level = item.level || 'attention';
   const acts = (item.actions || []).slice(0, 3);
   const layout = needsLayout(item, total);
   const styles = { success: 'ok', primary: '', danger: 'danger' };
-  const buttons = [...acts.map((a, i) => ({ label: a.label, cls: styles[a.style] ?? '', act: 'action', i })), { label: 'Got it', cls: '', act: 'ack' }];
+  // The client adds its own Got it unless the agent already supplied one (that action dismisses the item too).
+  const buttons = acts.map((a, i) => ({ label: a.label, cls: styles[a.style] ?? '', act: 'action', i }));
+  if (!acts.some((a) => isAckLabel(a.label))) buttons.push({ label: 'Got it', cls: '', act: 'ack' });
   const glow = level === 'info' ? '' : `<div class="glow${level === 'urgent' ? ' urgent' : ''}"></div>`;
+  const calm = level === 'info' ? ' calm' : '';
+  if (expanded) {
+    const full = (t) => e(t).replace(/\n/g, '<br>');
+    return `${glow}<div class="scroller" data-scroller><div data-act="collapse">` +
+      `<div class="ntitle long">${full(item.title)}</div>` +
+      `${item.body ? `<div class="nbody long${calm}">${full(item.body)}</div>` : ''}</div>` +
+      buttons.map((b) => `<div class="btn ${b.cls}" data-act="${b.act}" data-i="${b.i ?? ''}">${e(b.label)}</div>`).join('') +
+      `<div class="btn back" data-act="collapse">Back</div></div>`;
+  }
   const label = layout === 'stack' ? `<div class="label nlabel">${level === 'info' ? 'Note' : 'Needs you'}</div>` : '';
-  const body = item.body ? `<div class="nbody${level === 'info' ? ' calm' : ''}">${e(item.body)}</div>` : '';
+  const more = needsMore(item, total);
+  const body = item.body ? `<div class="nbody${calm}">${e(item.body)}</div>` : '';
+  const hint = more ? '<div class="nhint">Tap to read</div>' : '';
   const btns = layout === 'stack'
     ? buttons.map((b) => `<div class="btn ${b.cls}" data-act="${b.act}" data-i="${b.i ?? ''}" style="width:260px">${e(b.label)}</div>`).join('')
     : `<div class="ngrid">${buttons.map((b, k) => `<div class="btn ${b.cls}${buttons.length % 2 && k === buttons.length - 1 ? ' span' : ''}" data-act="${b.act}" data-i="${b.i ?? ''}">${e(b.label)}</div>`).join('')}</div>`;
   const count = total > 1 ? `<div class="ncount" data-act="cycle">${index + 1} of ${total}</div>` : '';
-  return `${glow}${label}<div class="ntitle ${layout === 'stack' ? 'l' : 'g'}">${e(item.title)}</div>${body}${btns}${count}`;
+  const text = `<div${more ? ' class="ntext" data-act="expand"' : ' class="ntext"'}><div class="ntitle ${layout === 'stack' ? 'l' : 'g'}">${e(item.title)}</div>${body}${hint}</div>`;
+  return `${glow}${label}${text}${btns}${count}`;
 }
 
 export function draft({ to, text, send = 'Send it', hold = 'Hold' }) {

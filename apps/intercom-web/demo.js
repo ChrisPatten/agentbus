@@ -41,6 +41,8 @@ export const STEPS = [
     props: () => ({ events: DEMO_EVENTS, now: DEMO_NOW, tz: TZ, notes: 1, halo: true }) },
   { name: 'needs', title: 'Urgent, several items', desc: 'Urgent items pulse slowly. With more than one, “1 of 3” shows; swipe or tap it to move through them. Up to three actions, plus Got it.',
     props: () => ({ item: { title: 'Leave for the dentist', body: 'Dr. Alvarez at 9:00, 18 min drive', level: 'urgent', actions: [{ label: 'Leaving now', style: 'success' }, { label: 'Snooze 10' }, { label: 'Call office' }] }, index: 0, total: 3 }) },
+  { name: 'needs', title: 'Long text', desc: 'When the detail is cut short, “Tap to read” shows; tapping the text opens the whole message with the buttons below. Got it is never doubled.',
+    props: () => ({ item: { title: 'Morning test of the dial', body: 'Morning test of the dial to check that long messages can be read in full on the round screen without losing the buttons.', level: 'attention', actions: [{ label: 'Got it', style: 'success' }, { label: 'Dismiss' }] }, index: 0, total: 1 }) },
   { name: 'needs', title: 'A note, no glow', desc: 'Opened from the dot on the day-dial: the same screen, calm, with only Got it.',
     props: () => ({ item: { title: 'Mail Watcher finished', body: '3 bills filed, none due this week', level: 'info', actions: [] }, index: 0, total: 1 }) },
 ];

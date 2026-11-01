@@ -94,6 +94,8 @@ Intercom is a small round display for your agent: your day around the rim, what 
 
 When something needs you, the dial glows amber and shows what it is. Tap a button to answer: the choice goes to your agent as if you had typed it, and its reply shows on the dial. **Got it** just acknowledges the item and it goes away. If several items are waiting, "1 of 3" appears below the buttons; swipe left or right, or tap it, to move between them.
 
+If the one-line detail is cut short, "Tap to read" appears under it; tap the text to see the whole message, scroll if it is long, and tap **Back** (or the text) to return to the buttons. **Got it** is always added for you, so an agent should not list its own.
+
 A low-priority item does not glow. Instead a small brass dot and "1 note" appear under the date on the day-dial; tap it to read the item. A thin amber line around the day-dial's rim shows that something that needs you is waiting.
 
 From 10 PM to 6:30 AM the dial stays dark: no glow, and the Quiet screen says how many items are waiting. The hours are fixed for now and follow the phone's clock.

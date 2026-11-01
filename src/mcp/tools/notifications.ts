@@ -30,6 +30,7 @@ export function registerNotificationTools(server: McpServer, busBaseUrl: string,
       description:
         'Raise a short-lived "needs you soon" item on the operator\'s Intercom dial (leaving time, a bill due today, a draft awaiting approval, a background job finished). ' +
         'It makes the dial glow for attention/urgent and can offer up to 3 action buttons; a tap on one reaches the Intercom conversation as "[tapped] <label>". ' +
+        'A "Got it" dismiss button is always added automatically, so do not include one in `actions`; actions should be real choices. ' +
         'Pass a `key` for anything you may resolve or refresh later: the same key while the item is open updates it in place. ' +
         'Use send_message/reply for content, not notify. Title is cut at 60 characters, body at 280.',
       inputSchema: {
@@ -42,7 +43,7 @@ export function registerNotificationTools(server: McpServer, busBaseUrl: string,
         actions: z.array(z.object({
           label: z.string().min(1).describe('Button label, 24 characters at most'),
           style: z.enum(['primary', 'success', 'danger']).optional(),
-        })).max(3).optional().describe('Up to 3 action buttons'),
+        })).max(3).optional().describe('Up to 3 action buttons for real choices; a "Got it" dismiss button is added automatically, so do not include one'),
         source: z.string().min(1).optional().describe('Where this comes from; defaults to this agent'),
       },
     },

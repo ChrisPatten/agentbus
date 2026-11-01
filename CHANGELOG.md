@@ -10,6 +10,9 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+### Fixed
+- **Intercom Needs-you screen: duplicate Got it and unreadable long text.** The web app no longer adds its automatic Got it when an action is already labelled "Got it" (case-insensitive), and the `notify` tool description now says a Got it button is always added so agents should not include one. Tapping the title or body of a Needs-you item opens a scrollable view of the full text with the buttons below and a Back button; a "Tap to read" hint shows only when the text is probably truncated.
+
 ### Added
 - **Intercom web app: notifications (E89, client side).** `apps/intercom-web/` handles the `notification` and `attention` events and the post-welcome snapshot, and sends `notification_ack` and `notification_action` (the latter through the retrying outbox). The Needs-you screen glows amber (urgent pulses), shows the title, a line of body and up to three actions plus Got it, with "1 of N" and swipe or tap to cycle. Info items show a brass dot and "1 note" on the day-dial; the rim gets an amber halo while something needs you; the Quiet screen (22:00 to 06:30 on the device clock) shows "n waiting" and never glows. Screen priority follows the contract; `?demo` gained a notification sequence and the mock server emits notifications. See `docs/INTERCOM_WEB.md`.
 - **Per-conversation models and `keep_warm` for cc-pool (E95).** `adapters.cc-pool.<name>.conversation_models` pins a conversation, matched by channel, topic and optional contact, to its own `--model` (resolved through the `/model` catalog, logged as `source=conversation-rule`). It ranks just below a schedule's own model and above agent and global overrides and the pool `model`. A rule with `keep_warm: true` exempts that conversation's pane from idle eviction and the hard-idle sweep, capped at one slot less than the pool's capacity. See `docs/CC_POOL_ADAPTER.md`.

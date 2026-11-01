@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { applyNotification, activeItems, needsList, infoList, attentionLevel, cycleId, isQuietHours, waitingCount, pickScreen, needsLayout, Outbox, frameOf } from '../logic.js';
+import { applyNotification, activeItems, needsList, infoList, attentionLevel, cycleId, isQuietHours, waitingCount, pickScreen, needsLayout, isAckLabel, needsMore, Outbox, frameOf } from '../logic.js';
 import { IntercomSocket } from '../socket.js';
+import { needs } from '../screens.js';
 
 const n = (id, level = 'attention', extra = {}) => ({ id, title: id, level, state: 'active', actions: [], updated_at: '2026-11-02T10:00:00Z', ...extra });
 
@@ -86,6 +87,39 @@ describe('screen priority', () => {
     expect(pickScreen({ ...base, needs: true, quiet: true })).toBe('quiet');
     expect(pickScreen({ ...base, quiet: true })).toBe('quiet');
     expect(pickScreen({ ...base, reply: true, quiet: true })).toBe('reply');
+  });
+});
+
+describe('needs screen buttons and expansion', () => {
+  const html = (item, extra = {}) => needs({ item: { level: 'attention', ...item }, ...extra });
+  const count = (h, act) => (h.match(new RegExp(`data-act="${act}"`, 'g')) || []).length;
+  it('matches Got it labels loosely', () => {
+    expect(isAckLabel(' got IT ')).toBe(true);
+    expect(isAckLabel('Got it!')).toBe(false);
+  });
+  it('adds one automatic Got it unless an action already is one', () => {
+    const dup = html({ title: 'T', actions: [{ label: 'Got it', style: 'success' }, { label: 'Dismiss' }] });
+    expect(count(dup, 'ack')).toBe(0);
+    expect(count(dup, 'action')).toBe(2);
+    const plain = html({ title: 'T', actions: [{ label: 'Snooze' }] });
+    expect(count(plain, 'ack')).toBe(1);
+  });
+  it('shows Tap to read only when text is probably cut off', () => {
+    expect(html({ title: 'ENT', body: 'Leave by 3:45' })).not.toContain('Tap to read');
+    const long = html({ title: 'ENT', body: 'Morning test of the dial with a long message' });
+    expect(long).toContain('Tap to read');
+    expect(long).toContain('data-act="expand"');
+    expect(needsMore({ title: 'x'.repeat(40) })).toBe(true);
+  });
+  it('expanded view carries full text, buttons and a way back', () => {
+    const body = 'Morning test of the dial with a long message\nsecond line';
+    const h = html({ title: 'ENT', body, actions: [{ label: 'Snooze' }] }, { expanded: true });
+    expect(h).toContain('data-scroller');
+    expect(h).toContain('second line');
+    expect(h).not.toContain('Tap to read');
+    expect(count(h, 'action')).toBe(1);
+    expect(count(h, 'ack')).toBe(1);
+    expect(count(h, 'collapse')).toBe(2);
   });
 });
 

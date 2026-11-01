@@ -160,7 +160,7 @@ There is deliberately no `effect` option: Telegram rejects message effects in gr
 
 | Tool | Input | Output |
 |---|---|---|
-| `notify` | `title` (cut at 60 characters), `body?` (280), `level?` (`info` \| `attention` default \| `urgent`), `key?`, `targets?` (surface ids, default all), `expires_in_s?`, `actions?` (up to 3 of `{label (24), style?}`), `source?` (default: `AGENTBUS_SOURCE_LABEL`, else `Agent: <id>`) | `{ "id", "key", "state" }` |
+| `notify` | `title` (cut at 60 characters), `body?` (280), `level?` (`info` \| `attention` default \| `urgent`), `key?`, `targets?` (surface ids, default all), `expires_in_s?`, `actions?` (up to 3 of `{label (24), style?}`; real choices only, since a "Got it" dismiss button is always added automatically), `source?` (default: `AGENTBUS_SOURCE_LABEL`, else `Agent: <id>`) | `{ "id", "key", "state" }` |
 | `update_notification` | `id` or `key`, plus any of `title`, `body`, `level`, `state` (`resolved` \| `acknowledged` \| `active`), `expires_in_s` | `{ "id", "key", "state" }` |
 | `list_notifications` | `state?` (`active` \| `open` default \| `all`), `limit?` | `{ "notifications": [...] }` |
 
