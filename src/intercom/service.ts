@@ -363,18 +363,18 @@ export class IntercomService {
 
   /** `/api/v1/adapters/:id/typing` */
   onTyping(input: { channel: string; contactId?: string | null; topic?: string | null; conversationId?: string | null }): void {
-    for (const s of this.followersOf(input)) this.noteRunning(s, null);
+    try { for (const s of this.followersOf(input)) this.noteRunning(s, null); } catch (err) { console.error(`[intercom] onTyping failed: ${String(err)}`); }
   }
 
   /** `/api/v1/adapters/:id/tool-status` */
   onToolStatus(input: { channel: string; contactId?: string | null; topic?: string | null; conversationId?: string | null; text: string }): void {
-    for (const s of this.followersOf(input)) this.noteRunning(s, input.text.trim().slice(0, 80) || null);
+    try { for (const s of this.followersOf(input)) this.noteRunning(s, input.text.trim().slice(0, 80) || null); } catch (err) { console.error(`[intercom] onToolStatus failed: ${String(err)}`); }
   }
 
   /** A turn ended in this conversation (Stop hook). */
   onTurnEnded(conversationId: string | null | undefined): void {
     if (!conversationId) return;
-    for (const s of this.surfaces.values()) if (s.conversationId === conversationId) this.noteTurnEnded(s);
+    try { for (const s of this.surfaces.values()) if (s.conversationId === conversationId) this.noteTurnEnded(s); } catch (err) { console.error(`[intercom] onTurnEnded failed: ${String(err)}`); }
   }
 
   private followersOf(input: { channel: string; contactId?: string | null; topic?: string | null; conversationId?: string | null }): Surface[] {

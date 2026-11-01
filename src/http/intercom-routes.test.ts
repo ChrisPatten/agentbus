@@ -256,7 +256,7 @@ describe('Intercom and the shared bus token', () => {
     const server = await createHttpServer({ config, db, registry: new AdapterRegistry(), queue: new MessageQueue(db), pipeline: new PipelineEngine(), intercom: service });
     expect((await server.inject({ url: '/api/v1/intercom/health' })).statusCode).toBe(401);                 // surface auth, not bus auth
     expect((await server.inject({ url: '/api/v1/intercom/health', headers: { authorization: `Bearer ${TOKEN}` } })).statusCode).toBe(200);
-    expect((await server.inject({ url: '/intercom/' })).statusCode).toBe(404);                              // no web root checked in here
+    expect((await server.inject({ url: '/intercom/no-such-file.txt' })).statusCode).toBe(404);              // not blocked by bus auth; missing file is 404
     expect((await server.inject({ url: '/api/v1/adapters' })).statusCode).toBe(401);
     await server.close(); db.close();
   });
