@@ -373,6 +373,30 @@ const CcPoolAdapterSchema = z.object({
    * replacing the default.
    */
   system_prompt: z.string().optional(),
+  /**
+   * E95 — per-conversation model rules. The first rule whose `match` fits an
+   * inbound message (channel exact; topic exact with absent === "general";
+   * contact optional) pins that conversation's pane model, ranking just below
+   * a schedule's own model and above agent/global overrides and `model`.
+   * `keep_warm` additionally exempts the conversation's pane from idle
+   * eviction and the hard-idle sweep (capped at one slot less than the pool's
+   * capacity).
+   */
+  conversation_models: z
+    .array(
+      z.object({
+        match: z
+          .object({
+            channel: z.string().min(1),
+            topic: z.string().min(1).optional(),
+            contact: z.string().min(1).optional(),
+          })
+          .strict(),
+        model: z.string().trim().min(1),
+        keep_warm: z.boolean().default(false),
+      }).strict(),
+    )
+    .optional(),
   /** Pane lease lifecycle timing. */
   lease: z
     .object({

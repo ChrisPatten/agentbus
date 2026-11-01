@@ -138,6 +138,8 @@ export interface AcquireOptions {
   idleEvictMs: number;
   /** Wall-clock now, injectable for tests. */
   now?: () => Date;
+  /** E95 keep_warm — conversations whose panes must never be chosen for eviction. */
+  protectedConversationIds?: ReadonlySet<string>;
 }
 
 const AGENT_PREFIX = 'agent:';

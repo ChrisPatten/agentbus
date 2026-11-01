@@ -161,15 +161,16 @@ export class LeaseStore {
       // past `idleEvictMs`, if any. Capture what it held BEFORE the claim
       // overwrites it.
       const cutoffIso = new Date(now.getTime() - opts.idleEvictMs).toISOString();
+      const protectedIds = opts.protectedConversationIds;
       const evictRow = this.db
         .prepare(
           `SELECT * FROM pool_leases
            WHERE pool_id = ? AND state = 'leased'
              AND last_activity_at IS NOT NULL AND last_activity_at < ?
-           ORDER BY last_activity_at ASC, pane_id ASC
-           LIMIT 1`,
+           ORDER BY last_activity_at ASC, pane_id ASC`,
         )
-        .get(poolId, cutoffIso) as PoolLeaseRow | undefined;
+        .all(poolId, cutoffIso)
+        .find((r) => !protectedIds?.has((r as PoolLeaseRow).conversation_id ?? '')) as PoolLeaseRow | undefined;
       if (evictRow) {
         // Invariant: a 'leased' row always has a non-null conversation_id
         // (acquire() never sets state='leased'/'launching' without one).

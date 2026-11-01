@@ -531,4 +531,36 @@ describe('LeaseStore', () => {
       expect(store.list('p')[0].last_turn_ended_at).toBeNull();
     });
   });
+
+  describe('protectedConversationIds (E95 keep_warm)', () => {
+    it('evict skips a protected idle pane and takes the next-oldest; exhausted if all protected', () => {
+      const db = makeDb();
+      const store = new LeaseStore(db);
+      store.seedPanes('peggy-pool', [
+        { paneId: 'peggy-pool:1', agentId: 'agent:peggy-pool-1' },
+        { paneId: 'peggy-pool:2', agentId: 'agent:peggy-pool-2' },
+      ]);
+      const t0 = new Date('2026-01-01T00:00:00.000Z');
+      const b1 = assertKind(store.acquire('peggy-pool', 'conv-1', baseOpts({ maxPanes: 2, now: () => t0 })), 'bound');
+      store.confirmReady('peggy-pool', b1.lease.pane_id);
+      const t1 = new Date('2026-01-01T00:01:00.000Z');
+      const b2 = assertKind(store.acquire('peggy-pool', 'conv-2', baseOpts({ maxPanes: 2, now: () => t1 })), 'bound');
+      store.confirmReady('peggy-pool', b2.lease.pane_id);
+
+      const tNow = new Date('2026-01-01T01:00:00.000Z');
+      const idleEvictMs = 30 * 60 * 1000;
+      const ev = assertKind(
+        store.acquire('peggy-pool', 'conv-3', baseOpts({
+          maxPanes: 2, now: () => tNow, idleEvictMs, protectedConversationIds: new Set(['conv-1']),
+        })),
+        'evict',
+      );
+      expect(ev.evicted.conversationId).toBe('conv-2');
+
+      const none = store.acquire('peggy-pool', 'conv-4', baseOpts({
+        maxPanes: 2, now: () => tNow, idleEvictMs, protectedConversationIds: new Set(['conv-1', 'conv-3']),
+      }));
+      expect(none.kind).toBe('exhausted');
+    });
+  });
 });

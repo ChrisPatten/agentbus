@@ -1836,4 +1836,121 @@ describe('journaling release hook (E66 S66.9)', () => {
       manager.stop();
     });
   });
+
+  describe('conversation_models (E95)', () => {
+    const CHAN = 'telegram:peggy:group:-100';
+    const rule = (extra: Record<string, unknown> = {}) => ({
+      match: { channel: CHAN, topic: 'thread:abc' }, model: 'haiku', keep_warm: false, ...extra,
+    });
+    const intercom = { contact_id: 'chris', channel: CHAN, topic: 'thread:abc' };
+
+    it('rule matches and normalises haiku to the catalog id; other conversations unaffected', async () => {
+      const { manager, paneLauncher } = makeManager({ panes: 2, model: 'claude-config-model', conversation_models: [rule()] });
+      await manager.ensureStarted();
+      await manager.resolveRoute('c-intercom', intercom);
+      await manager.resolveRoute('c-other', { contact_id: 'chris', channel: CHAN, topic: 'general' });
+      expect(paneLauncher.launch.mock.calls[0]![0].model).toBe('claude-haiku-5-5');
+      expect(paneLauncher.launch.mock.calls[1]![0].model).toBe('claude-config-model');
+    });
+
+    it('contact is optional but exact when given; absent topic equals general', async () => {
+      const { manager } = makeManager({
+        panes: 2,
+        conversation_models: [
+          { match: { channel: 'c1', contact: 'contact:chris' }, model: 'haiku', keep_warm: false },
+        ],
+      });
+      await manager.ensureStarted();
+      const resolved = (manager as unknown as { resolveModelFor(c: unknown): { source: string } }).resolveModelFor;
+      expect(resolved.call(manager, { contact_id: 'chris', channel: 'c1' }).source).toBe('conversation-rule');
+      expect(resolved.call(manager, { contact_id: 'chris', channel: 'c1', topic: 'general' }).source).toBe('conversation-rule');
+      expect(resolved.call(manager, { contact_id: 'kate', channel: 'c1' }).source).not.toBe('conversation-rule');
+      expect(resolved.call(manager, { contact_id: 'chris', channel: 'c1', topic: 'thread:x' }).source).not.toBe('conversation-rule');
+    });
+
+    it('precedence: schedule model > rule > injected agent/global/pool resolver', async () => {
+      const db = makeDb();
+      const cfg = makeCfg({ panes: 2, conversation_models: [rule()] });
+      const resolveModel = vi.fn(
+        (s: string | null): PoolResolvedModel =>
+          s ? { model: s, source: 'schedule' } : { model: 'agent-override-model', source: 'agent-override' },
+      );
+      const paneLauncher = makeFakeLauncher();
+      const manager = new PoolManager({ transcriptExists: () => true, cfg, db, busBaseUrl: 'http://x', paneLauncher, resolveModel });
+      await manager.ensureStarted();
+      await manager.resolveRoute('c1', intercom);
+      expect(paneLauncher.launch.mock.calls[0]![0].model).toBe('claude-haiku-5-5');
+      await manager.resolveRoute('c2', { ...intercom, scheduleModel: 'claude-sched' });
+      expect(paneLauncher.launch.mock.calls[1]![0].model).toBe('claude-sched');
+    });
+
+    it('no flapping: repeated messages on a ruled conversation never relaunch, even against an override', async () => {
+      const db = makeDb();
+      const cfg = makeCfg({ panes: 1, conversation_models: [rule()] });
+      const resolveModel = (): PoolResolvedModel => ({ model: 'agent-override-model', source: 'agent-override' });
+      const paneLauncher = makeFakeLauncher();
+      const manager = new PoolManager({ transcriptExists: () => true, cfg, db, busBaseUrl: 'http://x', paneLauncher, resolveModel });
+      await manager.ensureStarted();
+      await manager.resolveRoute('c1', intercom);
+      paneLauncher.launch.mockClear();
+      paneLauncher.release.mockClear();
+      for (let i = 0; i < 3; i++) await manager.resolveRoute('c1', intercom);
+      expect(paneLauncher.launch).not.toHaveBeenCalled();
+      expect(paneLauncher.release).not.toHaveBeenCalled();
+      expect(manager.leaseStore.findByConversation(manager.poolId, 'c1')?.model).toBe('claude-haiku-5-5');
+    });
+
+    it('an unresolvable rule model is dropped (logged), not fatal', async () => {
+      const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const { manager, paneLauncher } = makeManager({ panes: 1, model: 'cfg', conversation_models: [rule({ model: 'nonsense' })] });
+      await manager.ensureStarted();
+      await manager.resolveRoute('c1', intercom);
+      expect(paneLauncher.launch.mock.calls[0]![0].model).toBe('cfg');
+      expect(err).toHaveBeenCalled();
+      err.mockRestore();
+    });
+
+    it('keep_warm: exempt from hard-idle release and from eviction', async () => {
+      const { manager, paneLauncher } = makeManager({
+        panes: 2,
+        conversation_models: [rule({ keep_warm: true })],
+        lease: { idle_evict_ms: 1000, hard_idle_ms: 1000, park_timeout_ms: 300_000 },
+      });
+      await manager.ensureStarted();
+      await manager.resolveRoute('c-warm', intercom);
+      await manager.resolveRoute('c-b', { contact_id: 'x', channel: 'other' });
+      const old = new Date(Date.now() - 60_000);
+      for (const c of ['c-warm', 'c-b']) {
+        manager.leaseStore.touch(manager.poolId, manager.leaseStore.findByConversation(manager.poolId, c)!.pane_id, old);
+      }
+      paneLauncher.release.mockClear();
+      await manager.sweepHardIdle();
+      expect(manager.leaseStore.findByConversation(manager.poolId, 'c-warm')?.state).toBe('leased');
+      expect(manager.leaseStore.findByConversation(manager.poolId, 'c-b')).toBeNull();
+
+      // Re-fill the pool, then a new conversation must evict c-b's successor, never c-warm.
+      await manager.resolveRoute('c-b', { contact_id: 'x', channel: 'other' });
+      for (const c of ['c-warm', 'c-b']) {
+        manager.leaseStore.touch(manager.poolId, manager.leaseStore.findByConversation(manager.poolId, c)!.pane_id, old);
+      }
+      await manager.resolveRoute('c-new', { contact_id: 'y', channel: 'other' });
+      expect(manager.leaseStore.findByConversation(manager.poolId, 'c-warm')?.state).toBe('leased');
+      expect(manager.leaseStore.findByConversation(manager.poolId, 'c-new')).not.toBeNull();
+      expect(manager.leaseStore.findByConversation(manager.poolId, 'c-b')).toBeNull();
+    });
+
+    it('keep_warm is capped at capacity-1: a single-pane pool never goes warm', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const { manager } = makeManager({
+        panes: 1, max_panes: 1, conversation_models: [rule({ keep_warm: true })],
+        lease: { idle_evict_ms: 1000, hard_idle_ms: 1000, park_timeout_ms: 300_000 },
+      });
+      await manager.ensureStarted();
+      await manager.resolveRoute('c-warm', intercom);
+      manager.leaseStore.touch(manager.poolId, manager.leaseStore.findByConversation(manager.poolId, 'c-warm')!.pane_id, new Date(Date.now() - 60_000));
+      await manager.sweepHardIdle();
+      expect(manager.leaseStore.findByConversation(manager.poolId, 'c-warm')).toBeNull();
+      warn.mockRestore();
+    });
+  });
 });

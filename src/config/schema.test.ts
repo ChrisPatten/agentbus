@@ -777,3 +777,37 @@ describe('AppConfigSchema — tool_status (E79)', () => {
     expect(AppConfigSchema.safeParse({ ...base, tool_status: { mode: 'loud' } }).success).toBe(false);
   });
 });
+
+describe('cc-pool conversation_models (E95)', () => {
+  const parse = (extra: unknown) =>
+    AppConfigSchema.safeParse({
+      bus: { db_path: ':memory:' },
+      adapters: { 'cc-pool': { agent_id: 'peggy', tmux_session: 'p', claude_bin: '/c', conversation_models: extra } },
+      memory: {},
+    });
+
+  it('accepts a rule and defaults keep_warm to false', () => {
+    const r = parse([{ match: { channel: 'telegram:peggy:group:-1', topic: 'thread:abc' }, model: 'haiku' }]);
+    expect(r.success).toBe(true);
+    if (r.success) {
+      const rule = getCcPoolInstances(r.data)[0]!.conversation_models![0]!;
+      expect(rule.keep_warm).toBe(false);
+      expect(rule.model).toBe('haiku');
+    }
+  });
+
+  it('is optional', () => {
+    expect(getCcPoolInstances(AppConfigSchema.parse({
+      bus: { db_path: ':memory:' },
+      adapters: { 'cc-pool': { agent_id: 'peggy', tmux_session: 'p', claude_bin: '/c' } },
+      memory: {},
+    }))[0]!.conversation_models).toBeUndefined();
+  });
+
+  it('rejects a missing channel, empty model, and unknown keys', () => {
+    expect(parse([{ match: { topic: 't' }, model: 'haiku' }]).success).toBe(false);
+    expect(parse([{ match: { channel: 'c' }, model: '' }]).success).toBe(false);
+    expect(parse([{ match: { channel: 'c', bogus: 1 }, model: 'haiku' }]).success).toBe(false);
+    expect(parse([{ match: { channel: 'c' }, model: 'haiku', extra: true }]).success).toBe(false);
+  });
+});

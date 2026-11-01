@@ -45,6 +45,7 @@ import {
   type PoolLeaseRow,
 } from './types.js';
 import { getUnhandledSince } from './unhandled-work.js';
+import { BUILTIN_MODELS, loadCatalog, resolveModelQuery, type ModelEntry } from '../models/catalog.js';
 import { resolveModel as resolveModelFromStore, type ModelSource, type ResolvedModel } from '../adapters/model-override-loader.js';
 import type { MessageQueue } from '../core/queue.js';
 import { resolveBusToken, withBusToken } from '../core/bus-auth.js';
@@ -73,6 +74,10 @@ export type PoolResolvedModel = ResolvedModel;
  */
 function defaultTranscriptExists(sessionId: string, cwd: string): boolean {
   return claudeTranscriptExists(sessionId, cwd);
+}
+
+function stripContactPrefix(id: string): string {
+  return id.startsWith('contact:') ? id.slice('contact:'.length) : id;
 }
 
 function defaultResolveModel(cfgModel: string | undefined): (scheduleModel: string | null) => PoolResolvedModel {
@@ -182,6 +187,12 @@ export interface PoolManagerDeps {
    */
   resolveModel?: (scheduleModel: string | null) => PoolResolvedModel;
   /**
+   * E95 — catalog used to normalise `cfg.conversation_models[].model`
+   * (`haiku` -> concrete id) exactly as `/model` does. Defaults to the
+   * built-in catalog; `createPoolManagers()` passes the config-extended one.
+   */
+  modelCatalog?: ModelEntry[];
+  /**
    * Whether Claude has a resumable transcript for `sessionId` under `cwd`.
    * Defaults to checking `~/.claude/projects/<cwd-slug>/<id>.jsonl`; tests
    * inject a stub.
@@ -279,9 +290,34 @@ export class PoolManager {
   private readonly notifiedParkTimeout = new Set<string>();
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
   private running = false;
+  /** E95 — `cfg.conversation_models` with models normalised; invalid rules dropped (logged). */
+  private readonly conversationRules: Array<{
+    channel: string; topic: string; contact: string | undefined; model: string; keepWarm: boolean;
+  }>;
+  /** E95 — conversationIds seated by a keep_warm rule in this process; exempt from eviction/hard-idle release. */
+  private readonly warmConversationIds = new Set<string>();
 
   constructor(deps: PoolManagerDeps) {
     this.cfg = deps.cfg;
+    const catalog = deps.modelCatalog ?? BUILTIN_MODELS;
+    this.conversationRules = [];
+    for (const r of deps.cfg.conversation_models ?? []) {
+      const q = resolveModelQuery(r.model, catalog);
+      if (!q.ok) {
+        console.error(
+          `[pool:${deps.cfg.agent_id}] conversation_models rule for ${r.match.channel}/${r.match.topic ?? 'general'} ` +
+            `ignored — ${q.message}`,
+        );
+        continue;
+      }
+      this.conversationRules.push({
+        channel: r.match.channel,
+        topic: r.match.topic || 'general',
+        contact: r.match.contact ? stripContactPrefix(r.match.contact) : undefined,
+        model: q.entry.id,
+        keepWarm: r.keep_warm ?? false,
+      });
+    }
     this.db = deps.db;
     this.poolId = deps.cfg.agent_id;
     this.leaseStore = new LeaseStore(deps.db);
@@ -405,12 +441,14 @@ export class PoolManager {
     promptContext: PoolPromptContext,
   ): Promise<string> {
     try {
+      this.noteWarmth(conversationId, promptContext);
       const result = this.leaseStore.acquire(this.poolId, conversationId, {
         poolAgentId: this.cfg.agent_id,
         panes: this.cfg.panes,
         maxPanes: this.cfg.max_panes ?? this.cfg.panes,
         growth: this.cfg.growth,
         idleEvictMs: this.cfg.lease.idle_evict_ms,
+        protectedConversationIds: this.warmConversationIds,
       });
 
       if (result.kind === 'reuse') {
@@ -454,7 +492,7 @@ export class PoolManager {
       // E53 S53.4 — resolve BEFORE launching, so the very first launch of a
       // pane already carries the right --model (never a plain cfg.model
       // read inside pane.ts anymore — see LaunchParams.model's doc comment).
-      const resolved = this.resolveModelFn(promptContext.scheduleModel ?? null);
+      const resolved = this.resolveModelFor(promptContext);
 
       // Every non-reuse outcome (bound/grow/evict) is about to block on a
       // real launch — the ack handshake + readiness poll below can take
@@ -664,7 +702,7 @@ export class PoolManager {
     try {
       const lease = this.leaseStore.findByConversation(this.poolId, conversationId);
       if (!lease || lease.state !== 'leased') return { status: 'no-pane' };
-      const resolved = this.resolveModelFn(null);
+      const resolved = this.resolveModelFor({ ...promptContext, scheduleModel: null });
       if (resolved.model === undefined || resolved.model === lease.model) return { status: 'unchanged' };
       if (getUnhandledSince(this.db, lease) !== null) return { status: 'deferred' };
 
@@ -698,12 +736,54 @@ export class PoolManager {
     }
   }
 
+  /** E95 — first `conversation_models` rule matching this message, if any. */
+  private matchConversationRule(ctx: PoolPromptContext) {
+    const topic = ctx.topic || 'general';
+    const contact = stripContactPrefix(ctx.contact_id);
+    return this.conversationRules.find(
+      (r) => r.channel === ctx.channel && r.topic === topic && (r.contact === undefined || r.contact === contact),
+    );
+  }
+
+  /**
+   * E95 — the model for this message: schedule model, else a matching
+   * conversation rule, else the agent/global/pool chain (`resolveModelFn`).
+   * Deterministic in (channel, topic, contact), so a rule-matched conversation
+   * resolves the same model on every message and never flaps on reuse.
+   */
+  private resolveModelFor(ctx: PoolPromptContext): PoolResolvedModel {
+    const sched = ctx.scheduleModel && ctx.scheduleModel.trim().length > 0 ? ctx.scheduleModel : null;
+    if (!sched) {
+      const rule = this.matchConversationRule(ctx);
+      if (rule) return { model: rule.model, source: 'conversation-rule' };
+    }
+    return this.resolveModelFn(sched);
+  }
+
+  /**
+   * E95 keep_warm — mark the conversation warm when its rule asks for it, up
+   * to (capacity - 1) warm conversations so at least one pane stays
+   * claimable by everyone else.
+   */
+  private noteWarmth(conversationId: string, ctx: PoolPromptContext): void {
+    if (this.warmConversationIds.has(conversationId)) return;
+    if (!this.matchConversationRule(ctx)?.keepWarm) return;
+    const capacity = this.cfg.growth === 'dynamic' ? (this.cfg.max_panes ?? this.cfg.panes) : this.cfg.panes;
+    if (this.warmConversationIds.size >= capacity - 1) {
+      console.warn(
+        `[pool:${this.poolId}] keep_warm ignored for ${conversationId}: warm panes are capped at capacity-1 (${capacity - 1})`,
+      );
+      return;
+    }
+    this.warmConversationIds.add(conversationId);
+  }
+
   private async handleReuse(
     conversationId: string,
     lease: PoolLeaseRow,
     promptContext: PoolPromptContext,
   ): Promise<string> {
-    const resolved = this.resolveModelFn(promptContext.scheduleModel ?? null);
+    const resolved = this.resolveModelFor(promptContext);
     const mismatch = resolved.model !== undefined && resolved.model !== lease.model;
     if (!mismatch) return lease.agent_id;
 
@@ -1147,7 +1227,9 @@ export class PoolManager {
    */
   async sweepHardIdle(): Promise<void> {
     const cutoffIso = new Date(Date.now() - this.cfg.lease.hard_idle_ms).toISOString();
-    const idleRows = this.leaseStore.findIdleOlderThan(this.poolId, cutoffIso);
+    const idleRows = this.leaseStore
+      .findIdleOlderThan(this.poolId, cutoffIso)
+      .filter((r) => !(r.conversation_id && this.warmConversationIds.has(r.conversation_id)));
 
     for (const row of idleRows) {
       if (row.conversation_id) {
@@ -1512,12 +1594,13 @@ export function createPoolManagers(
     // `defaultResolveModel`'s narrower schedule/config-only behavior.
     const resolveModel = (scheduleModel: string | null): PoolResolvedModel =>
       resolveModelFromStore({ scheduleModel, db, agentId, configModel: cfg.model });
+    const modelCatalog = loadCatalog(config);
     const busToken = resolveBusToken(config);
     // E67 — native memory: panes load the pool's memory dir through auto memory.
     const layout = memoryLayout(memorySettingsFor(config, agentId), cfg.working_dir ?? process.cwd());
     const autoMemoryDir = usesNativeMemory(layout, runtimeCapabilities('cc-pool')) ? layout.memoryDir : null;
     managers.set(agentId, new PoolManager({
-      cfg, db, busBaseUrl, queue, resolveModel, ...(busToken ? { busToken } : {}), ...(autoMemoryDir ? { autoMemoryDir } : {}),
+      cfg, db, busBaseUrl, queue, resolveModel, modelCatalog, ...(busToken ? { busToken } : {}), ...(autoMemoryDir ? { autoMemoryDir } : {}),
     }));
   }
   return managers;

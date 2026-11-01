@@ -49,6 +49,7 @@ const NOT_ROUTED = "This chat isn't routed to an agent whose model I can change.
 
 const SOURCE_WORDING: Record<ModelSource, string> = {
   schedule: 'from a schedule',
+  'conversation-rule': 'pinned for this conversation by config',
   'agent-override': 'set with /model',
   'global-override': 'global override',
   config: 'from config',

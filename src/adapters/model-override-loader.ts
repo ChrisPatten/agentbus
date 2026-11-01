@@ -44,7 +44,7 @@ export function resolveModelOverride(db: Database.Database, agentId: string | nu
   return row?.model ?? null;
 }
 
-export type ModelSource = 'schedule' | 'agent-override' | 'global-override' | 'config' | 'cli-default';
+export type ModelSource = 'schedule' | 'conversation-rule' | 'agent-override' | 'global-override' | 'config' | 'cli-default';
 
 export interface ResolvedModel {
   model: string | undefined;
@@ -56,6 +56,8 @@ export interface ResolvedModel {
  *
  *   1. `opts.scheduleModel`, if it's a non-empty string — the fired
  *      schedule's own `model`.
+ *   (E95: a cc-pool `conversation_models` rule slots in between 1 and 2; it is
+ *   applied by `PoolManager`, which knows the conversation, not here.)
  *   2. An override scoped to `opts.agentId`.
  *   3. The global override.
  *   4. `opts.configModel` — the pool's or headless instance's configured
