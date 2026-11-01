@@ -973,12 +973,25 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       const parsed = parseHarnessEvent(req.body);
       if ('error' in parsed) return reply.status(400).send({ ok: false, error: parsed.error });
       const result = journalEvents.handle(parsed);
-      if (!result.ok) return reply.status(result.status).send({ ok: false, error: result.error });
       if (deps.intercom && parsed.event === 'turn-ended') {
         // E90: the Stop hook ends the interaction window's turn for the surface following this conversation.
-        const row = db.prepare('SELECT conversation_id FROM sessions WHERE id = ?').get(result.session_id) as { conversation_id: string } | undefined;
-        deps.intercom.onTurnEnded(row?.conversation_id);
+        // A freshly launched pane's bus session has no claude_session_id yet (journal returns 404), so fall
+        // back to the pool lease, which already carries the conversation id.
+        let conversationId: string | undefined;
+        if (result.ok && result.session_id) {
+          const row = db.prepare('SELECT conversation_id FROM sessions WHERE id = ?').get(result.session_id) as { conversation_id: string } | undefined;
+          conversationId = row?.conversation_id;
+        }
+        if (!conversationId && poolManagers) {
+          for (const manager of poolManagers.values()) {
+            const pane = manager.leaseStore.list(manager.poolId).find((p) => p.claude_session_id === parsed.harness_session_id);
+            const conv = (pane as { conversation_id?: string | null } | undefined)?.conversation_id;
+            if (conv) { conversationId = conv; break; }
+          }
+        }
+        deps.intercom.onTurnEnded(conversationId);
       }
+      if (!result.ok) return reply.status(result.status).send({ ok: false, error: result.error });
       return result;
     });
   }

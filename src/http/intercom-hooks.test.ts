@@ -48,6 +48,18 @@ describe('Intercom activity hooks', () => {
       { fn: 'onTurnEnded', arg: 'conv-1' },
     ]);
   });
+
+  it('falls back to the pool lease when the journal has no bus session yet (fresh pane)', async () => {
+    const s = setup();
+    const journalEvents = { handle: () => ({ ok: false as const, status: 404, error: 'no bus session for this harness_session_id (pane turn marked ended)' }) };
+    const manager = { poolId: 'peggy', leaseStore: { list: () => [{ pane_id: 'peggy:grow-1', claude_session_id: 'h-fresh', conversation_id: 'conv-1' }] } };
+    const poolManagers = new Map([['agent:peggy', manager]]) as unknown as Parameters<typeof createHttpServer>[0]['poolManagers'];
+    const server = await createHttpServer({ config, db: s.db, registry: new AdapterRegistry(), queue: s.queue, pipeline: new PipelineEngine(), intercom: s.intercom, journalEvents: journalEvents as never, poolManagers });
+    closers.push(() => server.close());
+    const res = await server.inject({ method: 'POST', url: '/api/v1/journal/events', payload: { harness_session_id: 'h-fresh', event: 'turn-ended' } });
+    expect(res.statusCode).toBe(404);
+    expect(s.calls).toEqual([{ fn: 'onTurnEnded', arg: 'conv-1' }]);
+  });
 });
 
 describe('glance on agent messages (I3)', () => {
