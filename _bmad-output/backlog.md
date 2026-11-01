@@ -4,6 +4,15 @@ Feature ideas and future work that hasn't been scoped into an epic yet. Promote 
 
 ## Ideas
 
+### Intercom: pushes from other sessions carry into the next Intercom turn (backlog 2026-11-01, Chris)
+Other sessions and automations push items to the device (extends E89 notifications). Every pushed item is also queued as pending context for the Intercom conversation, the way Main's pending context and `share_context` (E69/E82) work, so when Chris next talks back on the dial the Intercom session already knows what was shown ("what was that about?" just works). Needs: push API/tool that targets a surface, the item rendered on the dial, and injection into the followed conversation's next turn with a "shown on the device at HH:MM" label. Likely folds into E89 as a story or becomes its own epic.
+
+### Intercom session delegates heavy work (backlog 2026-11-01, Chris)
+The Intercom conversation (Haiku, warm, E95) should stay fast: for anything complicated it starts a background Sonnet agent, tells Chris at once it is working on it (one glance line), and notifies the device when done (E89 attention + reply). Behavioural part can live in the agent's guidance today; the bus part is a reliable "done" notification from a background task to the surface, ideally without a new user turn.
+
+### Per-conversation session-start prompt (backlog 2026-11-01, Chris)
+A configurable prompt injected at the start of every new Claude session for a given channel/topic/contact (not only the first message of a brand-new Telegram topic, which is what `create_telegram_topic` context does today). Natural home: a `session_prompt` (or `append_system_prompt`) field on cc-pool `conversation_models` rules (E95), so one rule sets model, warmth and opening instructions for a conversation such as Intercom.
+
 ### cc-pool: launch fencing and orphaned tmux server → promoted to E88 (backlog 2026-10-31)
 See `_bmad-output/epics/E88-pool-launch-fencing-and-orphan-server.md`. An orphaned `peggy-pool` tmux server's hidden sessions polled as the pane agent ids, ate their messages and faked launch readiness; E88 adds a per-launch token, shell-ready typing, post-start scratch cleanup and orphan-server detection.
 
