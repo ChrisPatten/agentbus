@@ -6,7 +6,7 @@ These are the tools AgentBus gives your agent. Claude Code loads them automatica
 
 | Tool | What it does |
 |---|---|
-| `reply` | Answers a message. Takes the `message_id` shown in the incoming message as `[id:…]`, and a `body`. The answer goes back on the same channel, in the same thread or topic. Also takes `choices`, `silent`, `no_preview` and `pin`, as `send_message` does. |
+| `reply` | Answers a message. Takes the `message_id` shown in the incoming message as `[id:…]`, and a `body`. The answer goes back on the same channel, in the same thread or topic. Also takes `choices`, `silent`, `no_preview`, `pin` and `glance`, as `send_message` does. |
 | `send_message` | Starts a message to a contact on any channel. See below. |
 | `share_context` | Hands a note to Main without showing you a message. See below. |
 | `send_email` | Starts a new email. See below. |
@@ -33,6 +33,7 @@ These are the tools AgentBus gives your agent. Claude Code loads them automatica
 | `silent` | no | `true` delivers on Telegram without a notification sound |
 | `no_preview` | no | `true` stops Telegram from showing a preview card for links |
 | `pin` | no | `true` pins the message on Telegram after it's sent |
+| `glance` | no | A one-line summary, at most 100 characters, for small displays such as [Intercom](/channels/intercom). Longer text is cut; if you leave it out, the bus uses the message's first sentence. Other channels ignore it. |
 
 Other channels ignore `silent`, `no_preview` and `pin`.
 
