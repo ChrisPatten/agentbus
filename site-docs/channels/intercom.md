@@ -118,6 +118,7 @@ Pairing codes work once and expire after 12 hours. To unpair a phone, press and 
 
 - Type under the dial and tap **Send**. The message goes into the followed conversation as if you had typed it there.
 - Tap **Large** to fill the width of the phone; **True size** returns to the 1.75-inch dial. The choice is remembered.
+- Turn the phone sideways to see just the dial, with the text field and buttons hidden. The dial is drawn at the real size of the Compact (1.75 inches), centred and clear of the notch. To get the inch exactly right on your phone, open the app once with `?calibrate=1`, hold a ruler to the bar and tap + or - until it measures 1 inch; it is remembered. Turn it back upright to type.
 - Add `?demo` to the address to see all the screens, including a notification sequence, with sample data and without a connection.
 
 ## Notifications

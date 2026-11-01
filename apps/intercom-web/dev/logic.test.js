@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { hourToAngle, polar, arcPath, daySpans, assignLanes, nextEvent, clockText, backoffDelay, glanceOf, parsePairInput, replyIsFresh, Outbox, shortTime } from '../logic.js';
+import { hourToAngle, polar, arcPath, daySpans, assignLanes, nextEvent, clockText, backoffDelay, glanceOf, parsePairInput, replyIsFresh, Outbox, shortTime, physicalDialSize, clampPpi, DEFAULT_PPI } from '../logic.js';
 import { IntercomSocket } from '../socket.js';
 
 const TZ = 'America/New_York';
@@ -105,5 +105,23 @@ describe('socket', () => {
     const s = new IntercomSocket({ token: 't', url: 'ws://x', WS: FakeWS, timers, handlers: { onUnauthorized: () => unauth++ } });
     s.connect(); FakeWS.last.onclose({ code: 4401 });
     expect(unauth).toBe(1); expect(s.stopped).toBe(true);
+  });
+});
+
+describe('physicalDialSize', () => {
+  it('is inches times ppi: 1.75 in at 160 is 280 px', () => {
+    expect(physicalDialSize(160)).toBe(280);
+    expect(physicalDialSize(153)).toBe(268);
+    expect(physicalDialSize(160, 1.48)).toBe(237);
+  });
+  it('clamps to fit the height (dial plus bezel)', () => {
+    expect(physicalDialSize(160, 1.75, 369)).toBe(280);
+    expect(physicalDialSize(160, 1.75, 200)).toBe(184);
+  });
+  it('clamps ppi and falls back on bad input', () => {
+    expect(clampPpi('abc')).toBe(DEFAULT_PPI);
+    expect(clampPpi(5)).toBe(100);
+    expect(clampPpi(999)).toBe(260);
+    expect(physicalDialSize(NaN, -1)).toBe(280);
   });
 });

@@ -1,7 +1,7 @@
 // Intercom web app: wires the socket, state and dial screens together.
 import { render } from './screens.js';
 import { IntercomSocket, store, apiUrl } from './socket.js';
-import { parsePairInput, replyIsFresh, applyNotification, activeItems, needsList, infoList, attentionLevel, cycleId, isQuietHours, waitingCount, pickScreen } from './logic.js';
+import { parsePairInput, replyIsFresh, applyNotification, activeItems, needsList, infoList, attentionLevel, cycleId, isQuietHours, waitingCount, pickScreen, LANDSCAPE_QUERY, physicalDialSize, clampPpi, DIAL_INCHES, DEFAULT_PPI } from './logic.js';
 import { runDemo, STEPS } from './demo.js';
 import { createWakeKeeper } from './wake.js';
 
@@ -30,11 +30,30 @@ function loadPair() {
 }
 
 /* ---------- sizing ---------- */
+// Landscape shows the dial at the Compact's physical size: inches x CSS px per inch (calibratable).
+function safeGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
+function safeSet(k, v) { try { localStorage.setItem(k, v); } catch { /* ignore */ } }
+if (params.has('ppi')) safeSet('intercom.ppi', String(clampPpi(params.get('ppi'))));
+function getPpi() { const v = safeGet('intercom.ppi'); return v == null ? DEFAULT_PPI : clampPpi(v); }
+function getDiam() { const d = Number(params.get('diam')); return d > 0 ? d : DIAL_INCHES; }
+function wireCalibrate() {
+  if (!params.has('calibrate')) return;
+  const box = $('calibrate'), bar = $('calbar'), val = $('calval');
+  const paint = () => { const p = getPpi(); bar.style.width = `${p}px`; val.textContent = `${p} px/in`; applySize(); };
+  const bump = (d) => { safeSet('intercom.ppi', String(clampPpi(getPpi() + d))); paint(); };
+  $('calminus').addEventListener('click', () => bump(-1));
+  $('calplus').addEventListener('click', () => bump(1));
+  box.hidden = false; paint();
+}
 function applySize() {
   const large = store.get('intercom.large') === '1';
   const wrap = document.querySelector('.stagewrap');
   let dial = 268;
-  if (large) {
+  let landscape = false;
+  try { landscape = window.matchMedia(LANDSCAPE_QUERY).matches; } catch { /* no matchMedia: portrait */ }
+  if (landscape) {
+    dial = physicalDialSize(getPpi(), getDiam(), wrap.clientHeight || document.documentElement.clientHeight - 24);
+  } else if (large) {
     const w = (wrap.clientWidth || document.documentElement.clientWidth - 32);
     const h = wrap.clientHeight || w;
     dial = Math.floor(Math.min(w, h) * 466 / 506);
@@ -303,6 +322,7 @@ function takePairCode() {
 
 function boot() {
   applySize();
+  wireCalibrate();
   wireUi();
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') { wake.evaluate(); sock?.nudge(); fetchToday(); update(); }

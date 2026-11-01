@@ -4,7 +4,7 @@ html,body{height:100%;background:#000;color:var(--cream);overscroll-behavior:non
 body{position:fixed;inset:0;overflow:hidden;font-family:"Avenir Next",-apple-system,"Helvetica Neue",Helvetica,sans-serif;
   background:var(--page);-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;
   padding:max(env(safe-area-inset-top),12px) max(env(safe-area-inset-right),16px) max(env(safe-area-inset-bottom),12px) max(env(safe-area-inset-left),16px)}
-.page{height:100%;display:flex;flex-direction:column;align-items:center;overflow:hidden}
+.page{position:relative;height:100%;display:flex;flex-direction:column;align-items:center;overflow:hidden}
 .top{width:100%;display:flex;justify-content:space-between;align-items:center;min-height:44px}
 .dotbtn{display:flex;align-items:center;gap:8px;padding:10px 8px 10px 0;font-size:16px;color:var(--dim);background:none;border:0;font-family:inherit}
 .dot{width:12px;height:12px;border-radius:50%;background:var(--grey);display:inline-block}
@@ -81,3 +81,16 @@ form.send button:disabled{opacity:.4}
 /* Readability: a black halo keeps dial text clear of the coloured rings (Chris, Nov 1). */
 .face .label,.face .big,.face .peggy,.face .sec,.face .datey,.face .allday,.face .clock,.face .next,.face .dim-line,.face .quiet-clock,.face .quiet-label,.face .quiet-wait,.face .ntitle,.face .nbody,.face .nhint,.face .ncount,.face .notey{
   text-shadow:0 0 3px #000,0 0 6px #000,0 0 10px #000,0 0 16px #000}
+/* Landscape (phone on its side): dial only. Bezel and dial are sized in app.js (physicalDialSize) to the Compact's
+   physical size (inches x CSS px per inch), clamped to the height. Compose UI and size toggle are hidden; the status dot floats top-left. */
+@media (orientation:landscape) and (max-height:600px){
+  .under,.size{display:none}
+  .top{position:absolute;top:0;left:0;width:auto;z-index:2;pointer-events:none}
+  .dotbtn{pointer-events:auto}
+  .stagewrap{height:100%}
+}
+.calibrate{position:absolute;right:max(env(safe-area-inset-right),16px);bottom:max(env(safe-area-inset-bottom),12px);z-index:6;background:#1c1913;border:1px solid #3a352d;border-radius:12px;padding:10px;font-size:14px;color:var(--dim)}
+.calbar{height:10px;background:var(--brass);border-radius:2px;margin-bottom:8px;max-width:100%}
+.calrow{display:flex;align-items:center;gap:12px;justify-content:space-between}
+.calrow button{font-size:20px;width:44px;height:36px;border-radius:18px;border:1px solid #3a352d;background:none;color:var(--cream);font-family:inherit}
+.calhint{margin-top:6px;font-size:12px;max-width:200px}

@@ -292,3 +292,32 @@ export function needsLayout(item, total = 1) {
   const buttons = Math.min(3, (item.actions || []).length) + 1;
   return buttons <= 2 && String(item.title || '').length <= 16 && total <= 9 ? 'stack' : 'grid';
 }
+
+/** Media query that switches the page to the dial-only landscape layout (see styles.css). */
+export const LANDSCAPE_QUERY = '(orientation: landscape) and (max-height: 600px)';
+
+/** Physical size of the Compact's dial as documented by the project (1.75 in, 466 px). Overridable with ?diam=. */
+export const DIAL_INCHES = 1.75;
+/** Default CSS px per inch: iPhones are about 153 to 163. Calibrated per phone with ?calibrate=1 or ?ppi=. */
+export const DEFAULT_PPI = 160;
+export const PPI_MIN = 100, PPI_MAX = 260;
+
+/** Parse and clamp a PPI value; anything unusable gives the default. */
+export function clampPpi(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_PPI;
+  return Math.min(PPI_MAX, Math.max(PPI_MIN, Math.round(n * 10) / 10));
+}
+
+/**
+ * Landscape dial diameter in CSS px: the physical diameter times CSS px per inch, so it looks the
+ * size of the real device. The bezel adds 20/466 of the dial on each side (506/466 in all); if
+ * dial plus bezel would not fit `availH` (viewport height after safe-area and padding) it is
+ * clamped to fit. No clamp is needed on iPhones at the default ppi.
+ */
+export function physicalDialSize(ppi, inches = DIAL_INCHES, availH = Infinity) {
+  const want = Math.round(clampPpi(ppi) * (Number(inches) > 0 ? Number(inches) : DIAL_INCHES));
+  const h = Number(availH);
+  if (!Number.isFinite(h) || h <= 0) return want;
+  return Math.max(1, Math.min(want, Math.floor(h * 466 / 506)));
+}
