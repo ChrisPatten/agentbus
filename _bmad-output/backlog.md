@@ -4,6 +4,9 @@ Feature ideas and future work that hasn't been scoped into an epic yet. Promote 
 
 ## Ideas
 
+### cc-pool: launch fencing and orphaned tmux server → promoted to E88 (backlog 2026-10-31)
+See `_bmad-output/epics/E88-pool-launch-fencing-and-orphan-server.md`. An orphaned `peggy-pool` tmux server's hidden sessions polled as the pane agent ids, ate their messages and faked launch readiness; E88 adds a per-launch token, shell-ready typing, post-start scratch cleanup and orphan-server detection.
+
 ### /stop does nothing on cc-pool → promoted to E85 (backlog 2026-10-29)
 See `_bmad-output/epics/E85-stop-command-for-cc-pool.md`. `/stop` only knows cc-headless runners; E85 sends Escape to the conversation's leased pool pane.
 
