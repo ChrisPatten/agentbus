@@ -40,7 +40,7 @@ Errors come back as `{ "content": [{ "type": "text", "text": "Error: ..." }], "i
 
 Fetches the original message, swaps sender and recipient, and posts the reply on the same channel and topic.
 
-Input: `{ "message_id": "<bus id from [id:...]>", "body": "...", "choices": ["A", "B"] }` (`choices` optional; see [Choice buttons](#choice-buttons))
+Input: `{ "message_id": "<bus id from [id:...]>", "body": "...", "choices": ["A", "B"], "glance": "..." }` (`choices` optional, see [Choice buttons](#choice-buttons); `glance` optional, see [Glance](#glance))
 Output: `{ "success": true, "outbound_message_id": "<uuid>" }`
 
 The reply carries `metadata.origin` (see [Origin metadata](#origin-metadata)).
@@ -60,6 +60,7 @@ Sends to any contact on any channel. Validates the channel through `GET /api/v1/
 | `metadata` | no | Free-form object. A caller-supplied `origin` key is replaced (see below) |
 | `choices` | no | 1-8 single-choice labels, each non-empty and at most 64 characters. See [Choice buttons](#choice-buttons) |
 | `silent`, `no_preview`, `pin` | no | Telegram delivery options, see [Send options](#send-options) |
+| `glance` | no | One-line summary for glance displays (Intercom), at most 100 characters. See [Glance](#glance) |
 | `source` | no | Short label naming what is sending, for example `Ambient scan`. Stamped as `metadata.origin.label`; when the message lands in a conversation this session isn't running in, that conversation's agent sees it with this label as context (E69) |
 
 For a proactive send, call `get_session` or `list_sessions` first and use the `topic` it returns rather than guessing.
@@ -147,6 +148,10 @@ See [TELEGRAM_ADAPTER.md](TELEGRAM_ADAPTER.md#choice-buttons) for Telegram tap h
 | `pin` | Pin the delivered message silently. A pin failure (for example missing the Pin Messages right) is logged, not returned; use `pin_message` to see the error |
 
 There is deliberately no `effect` option: Telegram rejects message effects in group chats (verified in the E81 spike).
+
+### Glance
+
+`reply` and `send_message` (E90) take an optional `glance`: a plain line of at most 100 characters for small round displays such as Intercom (`docs/INTERCOM.md`). A longer value is truncated at a word boundary with `…`; it is never rejected. It is stored in `metadata.glance` of the outbound message and ignored by Telegram, email, the app and Siri. When the agent passes none, the bus derives one from the first sentence of the body (markdown stripped, skipping abbreviations such as `Mr.`), cut to 100 characters on a word boundary. When a message arrives from Intercom, a system line in the prompt says so and asks for 1-3 sentences plus a `glance`.
 
 ### `send_email`
 

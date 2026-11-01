@@ -86,6 +86,9 @@ import type { SiriAdapter } from '../adapters/siri.js';
 import type { AppAdapter } from '../adapters/app.js';
 import type { HeadlessCapacitySnapshot } from '../adapters/cc-headless.js';
 import { registerAppRoutes } from './app-routes.js';
+import { registerIntercomRoutes, isIntercomUrl } from './intercom-routes.js';
+import type { IntercomService } from '../intercom/service.js';
+import { resolveGlance } from '../intercom/glance.js';
 import { VERSION } from '../version.js';
 import { recordAgentPoll, getLastPollAt } from './agent-liveness.js';
 import type { RuntimeResolver } from '../core/runtime-resolver.js';
@@ -121,6 +124,8 @@ export interface HttpServerDeps {
    */
   siri?: SiriAdapter;
   app?: AppAdapter;
+  /** E90/E91 — when present (and `adapters.intercom.enabled`), the `/intercom` and `/api/v1/intercom` routes are mounted. */
+  intercom?: IntercomService;
   getHeadlessSnapshots?: () => HeadlessCapacitySnapshot[];
   /**
    * Optional — one PoolManager per configured `cc-pool` instance (E48),
@@ -831,6 +836,8 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     const expectedToken = config.bus.auth_token;
     server.addHook('onRequest', async (req, reply) => {
       if (req.url === '/api/v1/health') return;
+      // E90: Intercom has its own auth (surface tokens, one-time pairing codes); a browser cannot send X-Bus-Token.
+      if (isIntercomUrl(req.url)) return;
       const provided = req.headers['x-bus-token'];
       if (provided !== expectedToken) {
         return reply.status(401).send({ ok: false, error: 'Unauthorized' });
@@ -946,6 +953,7 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
         const pane = manager.leaseStore.list(manager.poolId).find((p) => p.claude_session_id === sessionId);
         if (pane) {
           manager.leaseStore.markTurnEnded(manager.poolId, pane.pane_id);
+          deps.intercom?.onTurnEnded((pane as { conversation_id?: string | null }).conversation_id);
         }
       }
       return { ok: true };
@@ -966,6 +974,11 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       if ('error' in parsed) return reply.status(400).send({ ok: false, error: parsed.error });
       const result = journalEvents.handle(parsed);
       if (!result.ok) return reply.status(result.status).send({ ok: false, error: result.error });
+      if (deps.intercom && parsed.event === 'turn-ended') {
+        // E90: the Stop hook ends the interaction window's turn for the surface following this conversation.
+        const row = db.prepare('SELECT conversation_id FROM sessions WHERE id = ?').get(result.session_id) as { conversation_id: string } | undefined;
+        deps.intercom.onTurnEnded(row?.conversation_id);
+      }
       return result;
     });
   }
@@ -1384,6 +1397,12 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       }
     }
 
+    // E90 (I3): an agent message carries a glance (at most 100 characters). The caller's own is
+    // truncated, a missing one derived from the body. Adapters other than Intercom ignore it.
+    if (data.sender.startsWith('agent:') && data.payload.type === 'text') {
+      metadata['glance'] = resolveGlance(metadata['glance'], data.payload.body);
+    }
+
     const envelope: MessageEnvelope = {
       id: data.id ?? randomUUID(),
       timestamp: data.timestamp ?? new Date().toISOString(),
@@ -1536,6 +1555,8 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       if (adapter?.capabilities.typing && typeof adapter.startTyping === 'function') {
         adapter.startTyping(req.body.contact_id ?? '', req.params.id, req.body.topic, req.body.conversation_id);
       }
+      // E90: mirror the turn's activity to Intercom surfaces following this conversation.
+      deps.intercom?.onTyping({ channel: req.params.id, contactId: req.body.contact_id, topic: req.body.topic, conversationId: req.body.conversation_id });
       return { ok: true };
     },
   );
@@ -1555,6 +1576,9 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     const adapter = registry.lookupPrimaryByChannel(req.params.id);
     if (adapter?.capabilities.toolStatus && typeof adapter.reportToolCall === 'function' && req.body.text) {
       adapter.reportToolCall(req.body.contact_id ?? '', req.body.text, req.params.id, req.body.topic, req.body.placeholder, req.body.conversation_id);
+    }
+    if (req.body.text) {
+      deps.intercom?.onToolStatus({ channel: req.params.id, contactId: req.body.contact_id, topic: req.body.topic, conversationId: req.body.conversation_id, text: req.body.text });
     }
     return { ok: true };
   });
@@ -2634,6 +2658,11 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       }),
     });
     deps.app.setActivityListener(bridge.activity);
+  }
+
+  // /intercom + /api/v1/intercom/* — Intercom surfaces (E90/E91): static web app, pairing, WebSocket.
+  if (config.adapters.intercom?.enabled && deps.intercom) {
+    await registerIntercomRoutes(server, { config: config.adapters.intercom, db, service: deps.intercom });
   }
 
   return server;

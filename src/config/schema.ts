@@ -549,6 +549,64 @@ export const AppAdapterSchema = z.object({
 });
 export type AppAdapterConfig = z.infer<typeof AppAdapterSchema>;
 
+
+/**
+ * E90/E91 — Intercom: a glanceable surface (iPhone web app, later the Compact
+ * ESP32 device) that follows one existing conversation. Each surface has its
+ * own long random token, read from the env var named by `token_env` (never
+ * written in the YAML). See docs/INTERCOM.md.
+ */
+export const IntercomFollowSchema = z.object({
+  /** Contact id, e.g. `chris`. A `contact:` prefix is accepted and stripped. */
+  contact: z.string().min(1).transform((v) => v.replace(/^contact:/, '')),
+  /** Channel of the followed conversation, e.g. `telegram:peggy` (the DM) or a group channel. */
+  channel: z.string().min(1),
+  /** Forum-topic id (`thread:...`). Omit to follow the channel's main conversation. */
+  topic: z.string().min(1).optional(),
+});
+export type IntercomFollowConfig = z.infer<typeof IntercomFollowSchema>;
+
+export const IntercomSurfaceSchema = z.object({
+  id: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/, 'surface id must be lowercase letters, digits, - or _'),
+  /** Name of the env var holding this surface's token (at least 32 characters). */
+  token_env: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/),
+  profile: z.string().min(1).default('round466'),
+  follow: IntercomFollowSchema,
+});
+export type IntercomSurfaceConfig = z.infer<typeof IntercomSurfaceSchema>;
+
+export const IntercomAdapterSchema = z.object({
+  enabled: z.boolean().default(true),
+  /** How long the interaction window stays open after the agent's turn ends. */
+  interaction_grace_s: z.number().int().min(0).max(3600).default(120),
+  /** Post a silent `⌨️ text` echo of each surface message into the followed Telegram chat. */
+  echo_to_followed: z.boolean().default(true),
+  /** Durable-event replay window per surface. */
+  event_retention_days: z.number().int().positive().default(7),
+  ping_interval_ms: z.number().int().min(1000).default(30_000),
+  /** A socket that sends no valid hello within this time is closed with 4401. */
+  hello_timeout_ms: z.number().int().min(100).default(5000),
+  /** A running turn with no signal for this long is shown as idle and its window starts closing. */
+  activity_stale_s: z.number().int().min(10).default(900),
+  pair_ttl_hours: z.number().positive().default(12),
+  pair_rate_limit_per_min: z.number().int().positive().default(10),
+  calendar: z.object({
+    /** Calendar names as `calctl calendars` reports them (case, emoji and punctuation are ignored when matching). */
+    calendars: z.array(z.string().min(1)).default([]),
+    cache_s: z.number().int().min(0).default(300),
+    calctl_path: z.string().min(1).default('calctl'),
+    timezone: z.string().min(1).default('America/New_York'),
+  }).prefault({}),
+  surfaces: z.array(IntercomSurfaceSchema).default([]),
+}).superRefine((cfg, ctx) => {
+  const seen = new Set<string>();
+  cfg.surfaces.forEach((s, i) => {
+    if (seen.has(s.id)) ctx.addIssue({ code: 'custom', message: `Duplicate intercom surface id "${s.id}"`, path: ['surfaces', i, 'id'] });
+    seen.add(s.id);
+  });
+});
+export type IntercomAdapterConfig = z.infer<typeof IntercomAdapterSchema>;
+
 const AdaptersConfigSchema = z.object({
   telegram: z.union([TelegramAdapterSchema, z.record(z.string(), TelegramAdapterSchema)]).optional(),
   email: z.union([EmailAdapterSchema, z.record(z.string(), EmailAdapterSchema)]).optional(),
@@ -559,6 +617,7 @@ const AdaptersConfigSchema = z.object({
   pebble: PebbleAdapterSchema.optional(),
   siri: SiriAdapterSchema.optional(),
   app: AppAdapterSchema.optional(),
+  intercom: IntercomAdapterSchema.optional(),
   slack: SlackAdapterSchema.optional(),
 });
 

@@ -6,7 +6,7 @@ bus:
   http_port: 3000
   # host: 127.0.0.1           # default: loopback only. 0.0.0.0 exposes every route to the LAN;
   #                           # set auth_token if you do that. See docs/DEPLOYMENT.md.
-  # auth_token: ${BUS_TOKEN}  # if set, every request except /api/v1/health needs X-Bus-Token.
+  # auth_token: ${BUS_TOKEN}  # if set, every request except /api/v1/health (and the Intercom routes) needs X-Bus-Token.
   #                           # AgentBus's own agents/pool panes/hooks send it automatically
   #                           # (child processes get it as AGENTBUS_BUS_TOKEN).
   db_path: ~/.agentbus/agentbus.db
@@ -72,6 +72,26 @@ adapters:
   #   reply_timeout_ms: 25000        # server-side cap on how long an ask waits (1000-60000)
   #   max_body_bytes: 8192
   #   debug_delay_ms: 0              # device testing only; refused when NODE_ENV=production
+  # ── Intercom (E90/E91) — docs/INTERCOM.md ────────────────────────────────────
+  # Glanceable surfaces (iPhone web app, later the Compact) that follow one existing
+  # conversation: status always, replies only to what the surface sent. Tokens come
+  # from the env vars named by token_env (>= 32 chars; `openssl rand -hex 24`).
+  # Pair a browser with: npx tsx scripts/intercom-pair.ts <surface_id> --base https://host
+  # /intercom and /api/v1/intercom skip bus.auth_token (they use surface tokens).
+  # intercom:
+  #   enabled: true
+  #   interaction_grace_s: 120        # replies keep showing this long after the agent's turn ends
+  #   echo_to_followed: true          # silent "⌨️ text" note in the followed Telegram chat
+  #   event_retention_days: 7         # replay window for a surface that was offline
+  #   calendar:
+  #     calendars: ["Home", "Family", "Patriots 🏈"]   # names as `calctl calendars` shows them; empty = all
+  #     cache_s: 300
+  #     timezone: America/New_York
+  #   surfaces:
+  #     - id: iphone-proto
+  #       token_env: INTERCOM_IPHONE_TOKEN
+  #       profile: round466
+  #       follow: { contact: me, channel: telegram:peggy }   # add topic: thread:... for a forum topic
   # ── Slack (outbound POC, E76) — docs/SLACK_ADAPTER.md ───────────────────────
   # send() POSTs {slack_user_id, message} to an n8n webhook with an HS256 JWT;
   # n8n posts the DM. Setup: integrations/n8n/slack-relay/README.md.

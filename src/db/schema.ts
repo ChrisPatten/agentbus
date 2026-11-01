@@ -219,6 +219,11 @@ function loadMigrations(): Migration[] {
       description: "app_events rebuilt with the 'choice' kind and choice_prompt_id (E86)",
       sql: readFileSync(join(migrationsDir, '043_app_choice_events.sql'), 'utf-8'),
     },
+    {
+      version: 44,
+      description: 'Intercom pairing codes, durable per-surface events and send idempotency (E90/E91)',
+      sql: readFileSync(join(migrationsDir, '044_intercom.sql'), 'utf-8'),
+    },
   ];
 }
 

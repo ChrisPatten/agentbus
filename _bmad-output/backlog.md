@@ -7,6 +7,9 @@ Feature ideas and future work that hasn't been scoped into an epic yet. Promote 
 ### cc-pool: launch fencing and orphaned tmux server → promoted to E88 (backlog 2026-10-31)
 See `_bmad-output/epics/E88-pool-launch-fencing-and-orphan-server.md`. An orphaned `peggy-pool` tmux server's hidden sessions polled as the pane agent ids, ate their messages and faked launch readiness; E88 adds a per-launch token, shell-ready typing, post-start scratch cleanup and orphan-server detection.
 
+### Intercom: glanceable surface for Peggy → promoted to E89–E93 (backlog 2026-10-31)
+See `_bmad-output/epics/E90-intercom-channel-follow.md`, `E91-intercom-surface.md`, `E89-user-notifications.md`, `E92-intercom-fast-voice.md` and `E93-intercom-iphone-web-prototype.md`. A round 466x466 touch device (the Compact) and, first, an iPhone web app follow Chris's Telegram DM with Peggy: status always, replies only to what the surface sent, short glance lines first. E90 and E91 backend M0 is built; the web app is E93; notifications (E89) and push-to-talk (E92) are scoped but not started. Wake word and voiceprint (E94) are planned for the Compact only.
+
 ### /stop does nothing on cc-pool → promoted to E85 (backlog 2026-10-29)
 See `_bmad-output/epics/E85-stop-command-for-cc-pool.md`. `/stop` only knows cc-headless runners; E85 sends Escape to the conversation's leased pool pane.
 

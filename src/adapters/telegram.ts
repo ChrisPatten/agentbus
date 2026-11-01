@@ -772,6 +772,20 @@ export class TelegramAdapter implements AdapterInstance {
     // E81: a tool-built Telegram-native message (location, venue, contact,
     // document, rich message, input prompt). Absent or invalid falls through to
     // the plain-text body, which is also what every other channel delivers.
+    // E90: the silent Intercom echo is bookkeeping. It is posted as plain text and never
+    // stops the typing loop or takes over the live tool-status draft of a running turn.
+    if (envelope.metadata['intercom_echo'] === true) {
+      try {
+        const sent = await this.callTelegram<TelegramMessage>('sendMessage', {
+          chat_id: chatId, text: splitMessage(envelope.payload.body)[0]!, ...extraBase,
+          disable_notification: true, link_preview_options: { is_disabled: true },
+        });
+        return { success: true, platformMessageId: String(sent.message_id) };
+      } catch (err) {
+        return { success: false, error: `Intercom echo failed: ${String(err)}`, retryable: false };
+      }
+    }
+
     const special = parseTelegramSend(envelope.metadata['telegram_send']);
     if (special === null) {
       console.warn(`${this.tag} Ignoring invalid metadata.telegram_send on ${envelope.id}; sending the plain-text body`);

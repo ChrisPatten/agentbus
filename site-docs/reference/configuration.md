@@ -42,6 +42,7 @@ One block per channel or runtime you want to run. Leave a block out to turn it o
 | `email` | [Email](/channels/email) |
 | `app` | [Mac app](/channels/mac-app) |
 | `siri` | [Siri](/channels/siri) |
+| `intercom` | [Intercom](/channels/intercom) |
 | `pebble` | [Pebble](/channels/pebble) |
 | `slack` | [Slack](/channels/slack) |
 | `cc-headless` | [cc-headless](/runtimes/cc-headless) |

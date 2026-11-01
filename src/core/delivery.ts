@@ -36,6 +36,11 @@ export interface DeliveryWorkerDeps {
    * `tool-error` feedback event when an agent sent it). Errors are logged.
    */
   onFailed?: (envelope: import('../types/envelope.js').MessageEnvelope, reason: string) => void;
+  /**
+   * E90 — called after an adapter confirmed delivery (and the queue row was acked).
+   * Used by Intercom to mirror agent replies. Must not throw; errors are logged and ignored.
+   */
+  onDelivered?: (envelope: import('../types/envelope.js').MessageEnvelope, adapterId: string) => void;
 }
 
 export class DeliveryWorker {
@@ -43,6 +48,7 @@ export class DeliveryWorker {
   private readonly registry: AdapterRegistry;
   private readonly db: Database.Database;
   private readonly onFailed: DeliveryWorkerDeps['onFailed'];
+  private readonly onDelivered: DeliveryWorkerDeps['onDelivered'];
   private readonly primaryChannels: ReadonlySet<string>;
   private stopping = false;
   private timer: ReturnType<typeof setTimeout> | null = null;
@@ -52,6 +58,7 @@ export class DeliveryWorker {
     this.registry = deps.registry;
     this.db = deps.db;
     this.onFailed = deps.onFailed;
+    this.onDelivered = deps.onDelivered;
     this.primaryChannels = new Set(deps.primaryChannels ?? []);
   }
 
@@ -125,6 +132,13 @@ export class DeliveryWorker {
         // success, so a closed client cannot lose a message between queue ACK
         // and this worker's best-effort transcript log.
         if (adapter.id !== 'app') this.logOutboundTranscript(messageId, envelope);
+        if (this.onDelivered) {
+          try {
+            this.onDelivered(envelope, adapter.id);
+          } catch (err) {
+            console.error(`[delivery] onDelivered for ${messageId} failed: ${String(err)}`);
+          }
+        }
       } else if (result.retryable && (envelope.metadata['retry_count'] as number ?? 0) < MAX_RETRIES) {
         // Put back in queue for retry — reset to pending
         console.warn(`[delivery] Retryable failure for ${messageId}: ${result.error}`);

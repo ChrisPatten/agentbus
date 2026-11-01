@@ -36,6 +36,7 @@ Technical reference for operators and contributors. The public landing page live
 | [PEBBLE_ADAPTER.md](PEBBLE_ADAPTER.md) | Pebble Ring voice-memo webhook |
 | [SLACK_ADAPTER.md](SLACK_ADAPTER.md) | Slack channel (outbound POC): DMs through a JWT-authenticated n8n webhook |
 | [SIRI_ADAPTER.md](SIRI_ADAPTER.md) | Siri channel: the Peggy iOS app's ask endpoint, prompt contract, tailnet exposure, latency probe |
+| [INTERCOM.md](INTERCOM.md) | Intercom surfaces (E90/E91): pairing, static web app, WebSocket protocol, follow engine, glance |
 | [ATTACHMENTS.md](ATTACHMENTS.md) | Inbound images and files, per-agent media config, TTL sweep |
 | [THREADING.md](THREADING.md) | Thread-scoped sessions shared by email and Telegram topics |
 | [CHANNEL_RELAY.md](CHANNEL_RELAY.md) | Re-submit a message on another channel with a templated body |

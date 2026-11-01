@@ -6,7 +6,7 @@ The bus runs a small web API on your computer. AgentBus's own parts use it to ta
 
 - **Address.** `http://127.0.0.1:3000` by default (`bus.host` and `bus.http_port`). It's only reachable from the same computer unless you change `bus.host`.
 - **Format.** Requests and responses are JSON. Successful responses include `"ok": true`; errors include `"ok": false` and an `error` message.
-- **Authentication.** None by default. The Mac app, Siri and Pebble routes check their own per-contact token. If you set [`bus.auth_token`](/reference/configuration#bus), every request except `GET /api/v1/health` must also send `X-Bus-Token`; AgentBus's own agents and hooks do this for you.
+- **Authentication.** None by default. The Mac app, Siri and Pebble routes check their own per-contact token. If you set [`bus.auth_token`](/reference/configuration#bus), every request except `GET /api/v1/health` and the Intercom paths must also send `X-Bus-Token`; AgentBus's own agents and hooks do this for you.
 
 Try it from a terminal:
 
@@ -152,4 +152,5 @@ These are used by devices and apps, each with its own token. They're described o
 |---|---|
 | `/api/v1/app/…` | The [Mac app](/channels/mac-app) |
 | `/api/v1/siri/ask`, `/api/v1/siri/health` | The [Siri](/channels/siri) shortcut |
+| `/intercom/…`, `/api/v1/intercom/…` | The [Intercom](/channels/intercom) screen: web app, pairing, WebSocket. They use their own tokens, not `bus.auth_token` |
 | `/api/v1/webhooks/pebble` | The [Pebble](/channels/pebble) ring, through your proxy |
