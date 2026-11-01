@@ -27,7 +27,7 @@ body{position:fixed;inset:0;overflow:hidden;font-family:"Avenir Next",-apple-sys
 .datey{font-size:28px;letter-spacing:2px;position:relative}
 .allday{font-size:26px;position:relative;max-width:300px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}
 .clock{font-size:130px;font-weight:400;line-height:1;letter-spacing:-3px;margin:4px 0 10px;position:relative}
-.next{font-size:36px;font-weight:700;color:var(--amber);max-width:268px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;position:relative}
+.next{font-size:28px;font-weight:600;color:var(--amber);max-width:268px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;position:relative}
 .dim-line{font-size:28px;position:relative}
 .btn{border-radius:40px;height:72px;line-height:66px;width:300px;font-size:34px;font-weight:700;margin:6px 0;border:3px solid var(--grey);color:var(--cream);position:relative}
 .btn.ok{background:var(--green);border-color:var(--green);color:#081a09}.btn.danger{border-color:var(--red);color:var(--red)}
