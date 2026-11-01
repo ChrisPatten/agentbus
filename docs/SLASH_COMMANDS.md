@@ -324,7 +324,7 @@ The target is the first route for this message whose adapter is `cc-pool` or `cc
 -> Override removed. Pokeclaude is now on Sonnet 5.5 (claude-sonnet-5-5) — from config. Takes effect on the next message.
 ```
 
-On Telegram the picker is a set of inline buttons (the E74 mechanism); elsewhere it's a numbered list. See [Choices](#choices).
+On Telegram the picker is a set of inline buttons (the E74 mechanism), and in the Mac app it is a row of buttons under the message (E86); elsewhere it's a numbered list. See [Choices](#choices).
 
 **Queries.** Matching is case-insensitive. Spaces, `-`, and `_` between family and version are equivalent, and a leading `claude` is optional.
 
@@ -414,7 +414,7 @@ invocation. Any future command can call `registerFollowUp` for its own
 
 ### Choices
 
-A handler can return `choices` to offer a picker. Telegram renders them with the E74 choice-button mechanism ([TELEGRAM_ADAPTER.md](TELEGRAM_ADAPTER.md#choice-buttons)); other channels get a numbered list.
+A handler can return `choices` to offer a picker. Telegram renders them with the E74 choice-button mechanism ([TELEGRAM_ADAPTER.md](TELEGRAM_ADAPTER.md#choice-buttons)) and the Mac app as buttons (E86, [APP_ADAPTER.md](APP_ADAPTER.md#choice-buttons-e86)); other channels get a numbered list.
 
 ```typescript
 interface CommandChoice {
@@ -436,6 +436,7 @@ Picking a choice runs `/<command> <args>`, so the handler must accept its own `a
 Rendering depends on the originating channel:
 
 - **Telegram channels (`telegram`, `telegram:...`).** The response goes out with `metadata.choices` (the labels) and `metadata.choice_commands` (the slash command each tap runs, e.g. `/model claude-opus-5-5`). The Telegram adapter stores both in the `choice_prompts` row (`labels` and the nullable `commands` JSON column, migration 039) and renders one inline button per choice with `choice:<uuid>:<index>` callback data. On a tap, after the usual E74 checks (allow-listed sender, addressee, not expired, atomic answer), the adapter injects the stored slash command as the tapping user's inbound message through the normal pipeline instead of `[tapped] <label>`, so it takes the same command path as a typed command. A choice with no command payload (plain E74 prompts, agent `choices`) still injects `[tapped] <label>`. Prompts expire after 24 hours.
+- **The Mac app (`app`, E86).** The same `metadata.choices` and `metadata.choice_commands` go to the app adapter, which stores them in an `app` `choice_prompts` row with the transcript row and the app draws buttons. A tap (the WebSocket `choice` frame) passes the same checks through the shared `resolveChoiceTap` (`src/choices/tap.ts`) and injects the stored slash command, bound to the picker's session; the ack is `command`. No numbered list and no follow-up capture, so the next app message in any session is never taken as a pick. Prompts expire after `adapters.app.choice_ttl_hours` (default 24).
 - **Every other channel.** The bus appends a numbered list and `Reply with a number to choose.` to the body, then registers a choice follow-up for the sender (`registerChoiceFollowUp`, in memory, 10 minutes). A reply of `2`, or text equal to a choice's `args` or `label` (case-insensitive), runs that choice. Any other reply consumes the capture and proceeds as a normal message, like [follow-up capture](#follow-up-capture-for-command-authors).
 
 **Known limitation.** The dedup stage (Stage 30) drops a message whose sender and text match one seen in the same 30-second window. Tapping the same command button twice within 30 seconds, or typing a command a button would inject, runs it only once.

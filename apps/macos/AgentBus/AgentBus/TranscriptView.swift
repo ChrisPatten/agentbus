@@ -8,12 +8,14 @@ enum TranscriptItem: Identifiable {
     case day(String, id: String)
     case message(CachedMessage, status: String?)
     case note(String, id: String)
+    /// A button tap, as "You chose **label**" in the note style (E86). Carries the label.
+    case choiceNote(String, id: String)
     case pending(PendingSend)
     case divider(ContextDivider)
 
     var id: String {
         switch self {
-        case .day(_, let id), .note(_, let id): id
+        case .day(_, let id), .note(_, let id), .choiceNote(_, let id): id
         case .message(let message, _): message.id
         case .pending(let row): "pending-" + row.id
         case .divider(let divider): divider.id
@@ -21,7 +23,7 @@ enum TranscriptItem: Identifiable {
     }
 
     /// Interleaves day labels, chooses the send-state label per operator message,
-    /// and turns `/clear` and scheduled prompts into centered notes.
+    /// and turns `/clear`, scheduled prompts and button taps into centered notes.
     @MainActor static func build(_ messages: [CachedMessage], pending: [PendingSend], session: CachedSession?, activity: String) -> [TranscriptItem] {
         var items: [TranscriptItem] = []
         let calendar = Calendar.current
@@ -43,7 +45,9 @@ enum TranscriptItem: Identifiable {
         for message in messages where !ContextDivider.hidesClearCommand(message, in: session) {
             dayLabel(message.date, id: message.id)
             let body = message.body.trimmingCharacters(in: .whitespacesAndNewlines)
-            if message.isOperator && body == "/clear" {
+            if message.isOperator, let answer = message.choiceAnswer {
+                items.append(.choiceNote(answer.label, id: message.id))
+            } else if message.isOperator && body == "/clear" {
                 let when = message.date.map { " · " + BusDate.stamp($0) } ?? ""
                 items.append(.note("Cleared with /clear" + when, id: message.id))
             } else if message.isOperator && message.scheduled {
@@ -196,6 +200,10 @@ struct TranscriptView<Bar: View>: View {
                     .frame(maxWidth: .infinity)
                 }
                 .environment(\.revealMessage, reveal)
+                // Nil while offline: taps are not queued, so callback buttons disable (E86).
+                .environment(\.chooseChoice, connection.state == .connected ? { id, index in
+                    Task { try? await connection.choose(message: id, index: index) }
+                } : nil)
                 .scrollPosition($position)
                 .defaultScrollAnchor(.bottom)
                 .safeAreaInset(edge: .bottom, spacing: 0) { bar }
@@ -289,6 +297,9 @@ struct TranscriptRow: View {
             Text(label).font(.caption.weight(.semibold)).foregroundStyle(.secondary).frame(maxWidth: .infinity)
         case .note(let text, _):
             Text(text).font(.caption2).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: .infinity)
+        case .choiceNote(let label, _):
+            Text("You chose \(Text(label).bold())").font(.caption2).foregroundStyle(.secondary)
+                .multilineTextAlignment(.center).frame(maxWidth: .infinity)
         case .divider(let divider):
             ContextDividerView(divider: divider)
         case .message(let message, let status):
@@ -419,6 +430,8 @@ extension EnvironmentValues {
     @Entry var revealMessage: ((String) -> Void)?
     /// PgUp (-1) and PgDn (1) pressed in the composer scroll the transcript.
     @Entry var pageTranscript: ((Int) -> Void)?
+    /// Taps a callback button: (message ID, item index). Set by `TranscriptView`; nil while offline.
+    @Entry var chooseChoice: ((String, Int) -> Void)?
 }
 
 struct AgentMessageView: View {
@@ -449,6 +462,10 @@ struct AgentMessageView: View {
             }
             if !message.body.isEmpty { MarkdownView(message.body, replyTarget: ReplyRef(message)).equatable() }
             ForEach(message.attachments.map { AttachmentInfo($0) }) { AttachmentCard(info: $0) }
+            if let choices = message.choices, !choices.items.isEmpty {
+                ChoiceButtonsView(messageID: message.id, choices: choices,
+                                  pendingIndex: message.choicePendingIndex, error: message.choiceError)
+            }
         }
         .frame(maxWidth: 680, alignment: .leading)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -464,6 +481,113 @@ struct AgentMessageView: View {
             Button("Copy Message") { copyToPasteboard(message.body) }
         }
         .accessibilityAction(named: "Copy Message") { copyToPasteboard(message.body) }
+    }
+}
+
+/// An agent message's buttons (E86): one to a row, or two when every label is 12 characters or fewer.
+/// A callback button sends a `choice` frame through `chooseChoice`; copy and link buttons act on this Mac
+/// and send nothing. The state comes from the cached message, so `choice` events and history redraw it.
+struct ChoiceButtonsView: View {
+    let messageID: String
+    let choices: ChoiceSet
+    let pendingIndex: Int?
+    let error: String?
+    @Environment(\.chooseChoice) private var choose
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Grid(horizontalSpacing: 8, verticalSpacing: 8) {
+                ForEach(rows, id: \.self) { row in
+                    GridRow {
+                        ForEach(row, id: \.self) { index in
+                            ChoiceButton(item: choices.items[index], state: state(index)) { choose?(messageID, index) }
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: choices.columns == 2 ? 360 : 420, alignment: .leading)
+            if choices.isExpired { Text("Expired").font(.caption2).foregroundStyle(.secondary) }
+            if let error { Text(error).font(.caption2).foregroundStyle(.red) }
+        }
+    }
+
+    private var rows: [[Int]] {
+        let count = choices.items.count, columns = choices.columns
+        return stride(from: 0, to: count, by: columns).map { Array($0..<min($0 + columns, count)) }
+    }
+
+    /// Pending disables every button; answered leaves only the chosen one marked; expired disables all.
+    /// Offline (no `choose`) disables only callback buttons: copy and link need no connection.
+    private func state(_ index: Int) -> ChoiceButton.Mode {
+        if let pendingIndex { return index == pendingIndex ? .pending : .disabled }
+        switch choices.status {
+        case "answered": return index == choices.chosenIndex ? .chosen : .disabled
+        case "open":
+            switch choices.items[index].action {
+            case .send: return choose != nil && choices.promptID != nil ? .enabled : .disabled
+            case .copy, .open: return .enabled
+            case .unavailable: return .disabled
+            }
+        default: return .disabled
+        }
+    }
+}
+
+private struct ChoiceButton: View {
+    enum Mode { case enabled, disabled, pending, chosen }
+    let item: ChoiceItem
+    let mode: Mode
+    let send: () -> Void
+    @State private var copied = false
+    @Environment(\.openURL) private var openURL
+
+    init(item: ChoiceItem, state: Mode, send: @escaping () -> Void) {
+        self.item = item; self.mode = state; self.send = send
+    }
+
+    var body: some View {
+        let button = Button(action: tap) {
+            HStack(spacing: 5) {
+                if mode == .pending { ProgressView().controlSize(.small) }
+                if mode == .chosen || copied { Image(systemName: "checkmark") }
+                else if item.copyText != nil { Image(systemName: "doc.on.doc") }
+                else if item.url != nil { Image(systemName: "arrow.up.right") }
+                Text(copied ? "Copied" : item.label).multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .controlSize(.large)
+        .tint(tint)
+        .help(item.url ?? (item.copyText != nil ? "Copy to the clipboard" : ""))
+        Group {
+            // The chosen button stays drawn at full strength, but does nothing.
+            if mode == .chosen {
+                button.buttonStyle(.borderedProminent).allowsHitTesting(false).accessibilityAddTraits(.isSelected)
+            } else {
+                button.buttonStyle(.bordered).disabled(mode != .enabled)
+            }
+        }
+    }
+
+    private var tint: Color? {
+        switch item.style {
+        case "primary": .accentColor
+        case "success": .green
+        case "danger": .red
+        default: nil
+        }
+    }
+
+    private func tap() {
+        switch item.action {
+        case .send: send()
+        case .copy(let text):
+            copyToPasteboard(text)
+            copied = true
+            Task { try? await Task.sleep(for: .seconds(1.5)); copied = false }
+        case .open(let url): openURL(url)
+        case .unavailable: break
+        }
     }
 }
 

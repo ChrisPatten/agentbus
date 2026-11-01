@@ -340,7 +340,8 @@ if (siri) registry.register(siri);
 // E76 (S76.0) — outbound-only Slack DMs through an n8n webhook.
 if (config.adapters.slack?.enabled) registry.register(new SlackAdapter(config.adapters.slack, config.contacts));
 const app = config.adapters.app?.enabled
-  ? new AppAdapter(db, (contactId) => routedAgent(config, contactId), getHeadlessSnapshots) : undefined;
+  ? new AppAdapter(db, (contactId) => routedAgent(config, contactId), getHeadlessSnapshots,
+    { choiceTtlHours: config.adapters.app.choice_ttl_hours }) : undefined;
 if (app) registry.register(app);
 
 const journalStatus = { db, engine: journalEngine, resolver: runtimeResolver, advisories, gate: journalGate, memorySetup };

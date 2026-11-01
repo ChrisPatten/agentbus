@@ -10,6 +10,9 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+### Added
+- **Choice buttons in the Mac app (E86).** `choices` on `reply` and `send_message` now render as buttons under the agent's message in the Mac app, as on Telegram, instead of a numbered list: plain labels (E74), styled buttons, and copy and link buttons that act on the Mac alone (E81). A click reaches the agent as `[tapped] <label>` in the same conversation. The chosen button keeps a checkmark, the others are disabled, and the tap shows as a compact "You chose …" note. Command choices such as `/model`'s picker (E54) are buttons in the app too and run the command when clicked, replacing the numbered-list follow-up that any later app message could consume. Only the addressed contact can answer, once. Prompts expire after `adapters.app.choice_ttl_hours` (default 24). Answered and expired state reaches every connected Mac through a new durable `choice` event and shows in history after a reload. The new `choice` WebSocket frame is acked with `queued`, `command` or `rejected` (`already_answered`, `expired`, `forbidden`, `not_found`, `invalid_choice`, `delivery_failed`; a rejected delivery reopens the prompt so you can click again). Migration 043 rebuilds `app_events` to allow the new kind. The app protocol stays version 1. An older Mac app shows these messages with no choices, so update the bus and the app together.
+
 ### Fixed
 - **`status` works in cc-headless conversation turns.** `mcp__agentbus__status` is now in the turn's `--allowedTools`, next to `reply` and `send_message`. Before, a `claude -p` turn refused the call unless the agent's own project settings allowed it: the status line still showed, but the agent got a permission error back.
 

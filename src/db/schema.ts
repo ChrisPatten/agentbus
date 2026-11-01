@@ -214,6 +214,11 @@ function loadMigrations(): Migration[] {
       description: 'input_prompts for the ask_input tool (E81)',
       sql: readFileSync(join(migrationsDir, '042_input_prompts.sql'), 'utf-8'),
     },
+    {
+      version: 43,
+      description: "app_events rebuilt with the 'choice' kind and choice_prompt_id (E86)",
+      sql: readFileSync(join(migrationsDir, '043_app_choice_events.sql'), 'utf-8'),
+    },
   ];
 }
 

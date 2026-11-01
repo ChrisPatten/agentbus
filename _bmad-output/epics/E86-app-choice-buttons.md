@@ -6,7 +6,7 @@
 | Dependencies | E74 (Telegram choice buttons, `choice_prompts`), E54 (command choices), E81 (buttons v2: style, copy_text, url), E59 (app adapter protocol v1), E62 (Mac client) |
 | Story Count | 6 |
 | Estimated Complexity | L |
-| Status | Scoped — not started |
+| Status | Complete (live tap check on baxter-mac-test passed 2026-10-30; /model picker, expiry and second-window sync not yet checked live) |
 
 Source: operator request, 2026-10-29.
 
@@ -59,6 +59,53 @@ Checked against `dev` at `4f6c7ed` on 2026-10-29.
 | Offline taps | Not queued. Buttons are disabled while the socket is disconnected. |
 | Protocol version | Stays **1**. The message fields, event kind and frame are all additive. |
 | Approvals | Out of scope. `E74-app-channel-approvals` (planned) rebuilds the same `app_events` CHECK, so whichever epic lands second adds its kind to it. |
+
+## Wire Contract
+
+Fixed before S86.2 so the bus and the Mac client can be built in parallel. Every addition is optional and additive. Clients ignore fields and event kinds they don't know.
+
+**Message object** (history page items and `message` event `data`). There are two new optional fields.
+
+On an outbound message that carries choices:
+```json
+"choices": {
+  "prompt_id": "<uuid>" | null,
+  "items": [{ "label": "Approve", "style": "success", "copy_text": "...", "url": "https://..." }],
+  "status": "open" | "answered" | "expired",
+  "chosen_index": 1 | null
+}
+```
+- In `items`, `style`, `copy_text` and `url` are each optional, and an item never has both `copy_text` and `url`.
+- `prompt_id` is null when no item is a callback button. That means every item has `copy_text` or `url`, nothing is tappable back to the bus, and `status` is always `open`.
+
+On an inbound message that is a tap:
+```json
+"choice_answer": { "prompt_id": "<uuid>", "index": 1, "label": "Approve" }
+```
+
+**Server event** (durable, in the per-contact `seq` stream):
+```json
+{ "type": "event", "seq": 812, "event": "choice",
+  "data": { "message_id": "<prompt message id>", "session_id": "...", "conversation_id": "...",
+            "choices": { /* the full object above, current state */ } } }
+```
+- The bus records one event when a prompt is answered and one when it expires.
+- The client replaces the cached message's `choices` with `data.choices`.
+- If the message isn't cached, the client ignores the event; history carries the state.
+
+**Client frame:**
+```json
+{ "type": "choice", "client_msg_id": "<uuid>", "prompt_id": "<uuid>", "index": 1 }
+```
+`index` is the item's position in `items`. Only items without `copy_text` and `url` may be sent.
+
+**Ack:**
+```json
+{ "type": "ack", "client_msg_id": "<uuid>", "status": "queued" | "command" | "rejected", "reason"?: "already_answered" | "expired" | "forbidden" | "not_found" | "invalid_choice" | "delivery_failed" | "<other text>" }
+```
+- `queued`: the tap was injected as `[tapped] <label>`.
+- `command`: the choice's slash command ran.
+- `already_answered`: final. The state arrives in a `choice` event.
 
 ## Exit Criteria
 

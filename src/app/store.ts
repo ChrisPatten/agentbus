@@ -5,8 +5,10 @@ import { channelMatches, topicForThreadKey } from '../pipeline/types.js';
 import { getThread, upsertThread } from '../pipeline/thread-store.js';
 import { ensureOutboundAppSession } from './outbound.js';
 import { sessionCanResume } from './resume.js';
+import { choicesSchema, choiceAttrs, choiceLabel } from '../choices/validate.js';
+import type { ChoicePrompt, ChoicePromptStatus } from '../choices/types.js';
 
-export interface AppEvent { seq: number; event: 'message' | 'session'; data: Record<string, unknown> }
+export interface AppEvent { seq: number; event: 'message' | 'session' | 'choice'; data: Record<string, unknown> }
 
 /**
  * SQL condition (transcripts aliased `t`): not a bus-originated system-only
@@ -189,7 +191,7 @@ export function listSessions(db: Database.Database, contactId: string, agentId: 
 export function readEvents(db: Database.Database, contactId: string, agentId: string, after: number, through: number, config?: AppConfig): AppEvent[] {
   const rows = db.prepare(`SELECT seq, kind, session_id, transcript_id, rotation FROM app_events
     WHERE contact_id = ? AND seq > ? AND seq <= ? ORDER BY seq`).all(contactId, after, through) as
-    {seq:number;kind:'message'|'session';session_id:string;transcript_id:string|null;rotation:number}[];
+    {seq:number;kind:'message'|'session'|'choice';session_id:string;transcript_id:string|null;rotation:number}[];
   const events: AppEvent[] = [];
   for (const row of rows) {
     const session = visibleSession(db, contactId, agentId, row.session_id);
@@ -200,6 +202,14 @@ export function readEvents(db: Database.Database, contactId: string, agentId: st
       if (row.rotation === 1 && isMainRow(session) && session.ended_at)
         data['rotated'] = { previous_session_id: session.id, ended_at: session.ended_at, reason: endReason(session.end_reason) };
       events.push({ seq: row.seq, event: 'session', data });
+    } else if (row.kind === 'choice') {
+      // E86: the prompt message's current choice state. A hidden or missing
+      // message is skipped, like a message event.
+      const message = db.prepare(`SELECT * FROM transcripts t WHERE t.id = ? AND t.session_id = ? AND ${VISIBLE_TRANSCRIPT}`)
+        .get(row.transcript_id, row.session_id) as Record<string, unknown> | undefined;
+      const choices = message ? messageChoices(db, message) : undefined;
+      if (message && choices) events.push({ seq: row.seq, event: 'choice', data: {
+        message_id: message['message_id'], session_id: message['session_id'], conversation_id: message['conversation_id'], choices } });
     } else {
       const message = db.prepare(`SELECT * FROM transcripts t WHERE t.id = ? AND t.session_id = ? AND ${VISIBLE_TRANSCRIPT}`)
         .get(row.transcript_id, row.session_id) as Record<string, unknown> | undefined;
@@ -212,8 +222,76 @@ export function readEvents(db: Database.Database, contactId: string, agentId: st
 const endReason = (reason: string | null | undefined): 'idle' | 'clear' | null =>
   reason === 'idle' || reason === 'clear' ? reason : null;
 
+/** E86: the client-facing `choices` object of a message (wire contract in docs/APP_ADAPTER.md). */
+export interface MessageChoices {
+  prompt_id: string | null;
+  items: Array<{ label: string; style?: string; copy_text?: string; url?: string }>;
+  status: ChoicePromptStatus;
+  chosen_index: number | null;
+}
+
+/**
+ * E86: the `choices` of an outbound app message, or undefined. The items come
+ * from the row's `metadata.choices`; the state comes from its `choice_prompts`
+ * row (`bus_message_id` = the message id). With no prompt row (every item is
+ * a copy or link button) it is `open` with a null `prompt_id`. An open prompt
+ * past `expires_at` reads as expired even before the sweep marks it.
+ */
+export function messageChoices(db: Database.Database, row: Record<string, unknown>, meta?: Record<string, unknown>): MessageChoices | undefined {
+  if (row['direction'] !== 'outbound' || row['channel'] !== 'app') return undefined;
+  const metadata = meta ?? JSON.parse(String(row['metadata'] ?? '{}')) as Record<string, unknown>;
+  if (metadata['choices'] === undefined) return undefined;
+  const parsed = choicesSchema.safeParse(metadata['choices']);
+  if (!parsed.success) return undefined;
+  const items = parsed.data.map(item => ({ label: choiceLabel(item), ...(choiceAttrs(item) ?? {}) }));
+  const prompt = db.prepare(`SELECT id, status, chosen_index, expires_at FROM choice_prompts
+    WHERE channel = 'app' AND bus_message_id = ? ORDER BY created_at DESC LIMIT 1`).get(row['message_id']) as
+    Pick<ChoicePrompt, 'id' | 'status' | 'chosen_index' | 'expires_at'> | undefined;
+  if (!prompt) return { prompt_id: null, items, status: 'open', chosen_index: null };
+  const status = prompt.status === 'open' && prompt.expires_at < new Date().toISOString() ? 'expired' : prompt.status;
+  return { prompt_id: prompt.id, items, status, chosen_index: status === 'answered' ? prompt.chosen_index : null };
+}
+
+/** E86: `{prompt_id, index, label}` on an inbound row that is a choice tap (any channel), or undefined. */
+function choiceAnswer(db: Database.Database, row: Record<string, unknown>, meta: Record<string, unknown>):
+  { prompt_id: string; index: number; label: string } | undefined {
+  const promptId = meta['choice_prompt_id']; const index = meta['choice_index'];
+  if (row['direction'] !== 'inbound' || typeof promptId !== 'string' || typeof index !== 'number') return undefined;
+  let label = typeof meta['choice_label'] === 'string' ? meta['choice_label'] : undefined;
+  if (label === undefined) {
+    const labels = (db.prepare('SELECT labels FROM choice_prompts WHERE id = ?').get(promptId) as {labels:string}|undefined)?.labels;
+    const fromPrompt = labels ? (JSON.parse(labels) as unknown[])[index] : undefined;
+    label = typeof fromPrompt === 'string' ? fromPrompt : String(row['body'] ?? '').replace(/^\[tapped\] /, '');
+  }
+  return { prompt_id: promptId, index, label };
+}
+
+/**
+ * E86: records a durable `choice` event for a prompt's message after it is
+ * answered or expires. The event points at the outbound transcript row
+ * (`transcript_id`) and takes the next per-contact seq, as session events
+ * do. False (nothing written) when the message has no app transcript row.
+ */
+export function recordChoiceEvent(db: Database.Database, prompt: Pick<ChoicePrompt, 'id' | 'bus_message_id'>): boolean {
+  if (!prompt.bus_message_id) return false;
+  const row = db.prepare(`SELECT id, session_id, contact_id FROM transcripts
+    WHERE message_id = ? AND direction = 'outbound' AND channel = 'app' ORDER BY rowid DESC LIMIT 1`)
+    .get(prompt.bus_message_id) as {id:string;session_id:string;contact_id:string}|undefined;
+  if (!row) return false;
+  db.transaction(() => {
+    db.prepare(`INSERT INTO app_event_counters(contact_id,seq) VALUES (?,1)
+      ON CONFLICT(contact_id) DO UPDATE SET seq = seq + 1`).run(row.contact_id);
+    db.prepare(`INSERT INTO app_events(contact_id,seq,kind,session_id,transcript_id,choice_prompt_id,created_at)
+      VALUES (?,(SELECT seq FROM app_event_counters WHERE contact_id = ?),'choice',?,?,?,?)`)
+      .run(row.contact_id, row.contact_id, row.session_id, row.id, prompt.id, new Date().toISOString());
+  })();
+  return true;
+}
+
 export function messageInfo(db: Database.Database, row: Record<string, unknown>, seq: number): Record<string, unknown> {
   const meta = JSON.parse(String(row['metadata'] ?? '{}')) as Record<string, unknown>;
+  const choices = messageChoices(db, row, meta);
+  const answer = choiceAnswer(db, row, meta);
   const attachments = Array.isArray(meta['attachments']) ? meta['attachments'] as Record<string, unknown>[] : [];
   // Only app whole-message references (E72) carry a string message_id;
   // Telegram quotes use platform_message_id and must not produce reply_to.
@@ -226,6 +304,8 @@ export function messageInfo(db: Database.Database, row: Record<string, unknown>,
     seq, direction: row['direction'],
     cursor: row['id'],
     ...(replyTo ? { reply_to: replyTo } : {}),
+    ...(choices ? { choices } : {}),
+    ...(answer ? { choice_answer: answer } : {}),
     arrival_channel: row['channel'], body: row['body'], created_at: row['created_at'],
     scheduled: meta['scheduled'] === true,
     attachments: attachments.map(a => ({ id: a['id'] ?? null, type: a['type'],

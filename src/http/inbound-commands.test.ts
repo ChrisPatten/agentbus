@@ -716,6 +716,22 @@ describe('processInbound — command choices (E54 on E74)', () => {
     expect(sys.registry.consumeFollowUp('telegram', 'contact:chris')).toBeNull();
   });
 
+  it('in the Mac app, choices ride the button path too, with no numbered list or follow-up (E86)', async () => {
+    const appAdapter = makeStubAdapter('app', 'app');
+    adapterRegistry.register(appAdapter);
+    const sys = system();
+    await send('app', '/pickme', sys);
+    const env = (appAdapter.send as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    expect(env.payload.body).toBe('Pick one');
+    expect(env.metadata.choices).toEqual(['Opus 5.5', 'Haiku 5.5']);
+    expect(env.metadata.choice_commands).toEqual(['/pickme claude-opus-5-5', '/pickme claude-haiku-5-5']);
+    expect(sys.registry.consumeFollowUp('app', 'contact:chris')).toBeNull();
+    // A later "2" in the app is an ordinary message, not a pick.
+    const result = await send('app', '2', sys);
+    expect('reason' in result && result.reason).not.toBe('command_handled');
+    expect(pick).not.toHaveBeenCalled();
+  });
+
   it('clips choices to E74 limits (8 labels, 64 characters) before sending', async () => {
     const sys = createCommandSystem({ adapterRegistry, queue, db, config: stubConfig });
     sys.registry.register({

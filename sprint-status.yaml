@@ -1311,7 +1311,7 @@ epics:
       S83.5: complete  # share_context for the Telegram DM (channel input, session creation)
       S83.6: complete  # Docs, Peggy instruction (live check on Peggy passed)
   E86:
-    status: planned
+    status: complete  # live tap check on baxter-mac-test passed 2026-10-30; /model picker, expiry and second-window sync not yet checked live
     notes: >
       Choice buttons in the Mac app: E74 labels, E54 command pickers and E81
       style/copy/link buttons, drawn in the transcript instead of the numbered
@@ -1322,12 +1322,12 @@ epics:
       a compact "You chose" note. Shared tap logic extracted from telegram.ts.
       Epic: _bmad-output/epics/E86-app-choice-buttons.md.
     stories:
-      S86.1: pending  # Shared choice logic (parse.ts, tap.ts), Telegram refactor
-      S86.2: pending  # App prompt persistence, migration 043, choice event
-      S86.3: pending  # messageInfo choices / choice_answer, readEvents
-      S86.4: pending  # choice WS frame, command pickers on the app
-      S86.5: pending  # Mac client: protocol, store, buttons, compact note
-      S86.6: pending  # Docs, changelog, live check
+      S86.1: complete  # Shared choice logic (parse.ts, tap.ts), Telegram refactor
+      S86.2: complete  # App prompt persistence, migration 043, choice event
+      S86.3: complete  # messageInfo choices / choice_answer, readEvents
+      S86.4: complete  # choice WS frame, command pickers on the app
+      S86.5: complete  # Mac client: protocol, store, buttons, compact note
+      S86.6: complete  # Docs, changelog; live tap check passed (A/B/C + copy button)
   E87:
     status: pending
     notes: >

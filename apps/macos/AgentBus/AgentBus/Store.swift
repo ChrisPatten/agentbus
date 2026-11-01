@@ -66,6 +66,14 @@ import SwiftData
     var replyToJSON: Data? = nil
     /// Routes the message to Main's one item whichever of Main's rows it was logged in (E69).
     var conversationID: String? = nil
+    /// An agent message's buttons and their state, replaced by `choice` events and history (E86). JSON, like `replyToJSON`.
+    var choicesJSON: Data? = nil
+    /// On an operator tap row: the button it answered, drawn as a "You chose …" note.
+    var choiceAnswerJSON: Data? = nil
+    /// Local only: the button whose tap awaits its ack. Cleared by the ack, a disconnect or a launch.
+    var choicePendingIndex: Int? = nil
+    /// Local only: why the last tap was rejected, shown under the buttons.
+    var choiceError: String? = nil
 
     init(_ value: BusMessage) {
         id = value.messageID; sessionID = value.sessionID; seq = value.seq
@@ -75,11 +83,23 @@ import SwiftData
         attachmentJSON = (try? JSONEncoder().encode(value.attachments)) ?? Data()
         replyToJSON = value.replyTo.flatMap { try? JSONEncoder().encode($0) }
         conversationID = value.conversationID
+        choicesJSON = value.choices.flatMap { try? JSONEncoder().encode($0) }
+        choiceAnswerJSON = value.choiceAnswer.flatMap { try? JSONEncoder().encode($0) }
         sendState = "sent"; clientMsgID = nil
     }
     var attachments: [BusAttachment] { (try? JSONDecoder().decode([BusAttachment].self, from: attachmentJSON)) ?? [] }
     var replyTo: ReplyRef? { replyToJSON.flatMap { try? JSONDecoder().decode(ReplyRef.self, from: $0) } }
     var toolTrail: [String] { toolTrailJSON.flatMap { try? JSONDecoder().decode([String].self, from: $0) } ?? [] }
+    var choices: ChoiceSet? { choicesJSON.flatMap { try? JSONDecoder().decode(ChoiceSet.self, from: $0) } }
+    var choiceAnswer: ChoiceAnswer? { choiceAnswerJSON.flatMap { try? JSONDecoder().decode(ChoiceAnswer.self, from: $0) } }
+    /// Takes the bus's current state. A prompt that is no longer open drops any local tap state.
+    /// Returns false when nothing changed, so an unchanged history page doesn't redraw the row.
+    @discardableResult func setChoices(_ value: ChoiceSet) -> Bool {
+        guard let data = try? JSONEncoder().encode(value), data != choicesJSON else { return false }
+        choicesJSON = data
+        if !value.isOpen { choicePendingIndex = nil; choiceError = nil }
+        return true
+    }
 }
 
 @Model final class CachedState {
@@ -133,6 +153,22 @@ extension ReplyRef {
     }
 }
 
+/// Plain wording for a rejected tap's reason. `already_answered` shows nothing: the `choice` event brings the state.
+enum ChoiceRejection {
+    static func explain(_ reason: String?) -> String? {
+        switch reason {
+        case "already_answered": nil
+        case "expired": "This choice has expired."
+        case "forbidden": "This choice isn't yours to answer."
+        case "not_found": "This choice is no longer available."
+        case "invalid_choice": "That option isn't available."
+        case "delivery_failed": "Couldn't send your choice. Try again."
+        case let text?: "Couldn't send your choice: \(text)"
+        case nil: "Couldn't send your choice."
+        }
+    }
+}
+
 /// What a pending send was aimed at, captured before its row is deleted on ack.
 struct AckedTarget: Equatable { let kind: String; let sessionID: String? }
 
@@ -150,6 +186,11 @@ struct AckedTarget: Equatable { let kind: String; let sessionID: String? }
         var descriptor = FetchDescriptor<CachedMessage>(predicate: #Predicate { $0.id == id })
         descriptor.fetchLimit = 1
         return ((try? context.fetchCount(descriptor)) ?? 0) > 0
+    }
+    func message(_ id: String) -> CachedMessage? {
+        var descriptor = FetchDescriptor<CachedMessage>(predicate: #Predicate { $0.id == id })
+        descriptor.fetchLimit = 1
+        return try? context.fetch(descriptor).first
     }
     func messages(_ sessionID: String) -> [CachedMessage] {
         let descriptor = FetchDescriptor<CachedMessage>(predicate: #Predicate { $0.sessionID == sessionID },
@@ -172,6 +213,9 @@ struct AckedTarget: Equatable { let kind: String; let sessionID: String? }
         if let row = try context.fetch(descriptor).first {
             // Rows cached from an older bus learn their conversation when history reloads.
             if row.conversationID == nil { row.conversationID = value.conversationID }
+            // Choice state is the one thing about a stored message that changes (E86).
+            if let choices = value.choices { row.setChoices(choices) }
+            if row.choiceAnswerJSON == nil, let answer = value.choiceAnswer { row.choiceAnswerJSON = try? JSONEncoder().encode(answer) }
         } else { context.insert(CachedMessage(value)) }
         learnMainRow(from: value)
         if save { try context.save() }
@@ -181,6 +225,10 @@ struct AckedTarget: Equatable { let kind: String; let sessionID: String? }
         if let message = frame.data?.message { try upsert(message, save: false) }
         if let session = frame.data?.session { merge(session) }
         if let rotated = frame.data?.rotated { record(rotated.boundary) }
+        // A prompt that isn't cached is ignored; its history page carries the state.
+        if frame.event == "choice", let id = frame.data?.messageID, let choices = frame.data?.choices {
+            message(id)?.setChoices(choices)
+        }
         state.cursor = seq
         try context.save()
         return frame.data?.message != nil
@@ -222,6 +270,36 @@ struct AckedTarget: Equatable { let kind: String; let sessionID: String? }
         let descriptor = FetchDescriptor<CachedMessage>(predicate: #Predicate { $0.id == messageID })
         guard !lines.isEmpty, let row = try context.fetch(descriptor).first else { return }
         row.toolTrailJSON = try JSONEncoder().encode(lines); row.toolSeconds = seconds
+        try context.save()
+    }
+    /// Marks a tapped button as waiting for its ack, clearing the last rejection.
+    func setChoicePending(_ messageID: String, index: Int?) throws {
+        guard let row = message(messageID) else { return }
+        row.choicePendingIndex = index
+        if index != nil { row.choiceError = nil }
+        try context.save()
+    }
+    /// Applies a tap's ack. Success marks the prompt answered until the `choice` event confirms it; a
+    /// rejection clears the spinner and keeps the reason (nil for `already_answered`, whose state comes by event).
+    func finishChoice(_ messageID: String, index: Int, status: String, reason: String?) throws {
+        guard let row = message(messageID) else { return }
+        row.choicePendingIndex = nil
+        if status == "rejected" {
+            row.choiceError = ChoiceRejection.explain(reason)
+        } else if let choices = row.choices, choices.isOpen {
+            row.setChoices(choices.answered(index))
+        }
+        try context.save()
+    }
+    /// Drops every unacknowledged tap: on launch and on disconnect, since taps are never resent.
+    func clearChoicePending(errors: Bool = false) throws {
+        let descriptor = FetchDescriptor<CachedMessage>(predicate: #Predicate { $0.choicePendingIndex != nil || $0.choiceError != nil })
+        let rows = try context.fetch(descriptor)
+        guard !rows.isEmpty else { return }
+        for row in rows {
+            row.choicePendingIndex = nil
+            if errors { row.choiceError = nil }
+        }
         try context.save()
     }
     func retry(_ id: String) throws {

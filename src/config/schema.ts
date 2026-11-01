@@ -535,6 +535,8 @@ export const AppAdapterSchema = z.object({
   event_retention_days: z.number().int().positive().default(30),
   max_upload_bytes: z.number().int().positive().default(25 * 1024 * 1024),
   ping_interval_ms: z.number().int().min(1000).default(30_000),
+  /** E86: hours before an unanswered choice-button prompt in the Mac app expires (default 24). */
+  choice_ttl_hours: z.number().positive().optional(),
   /** E69: retire Main's Claude session after this much operator/agent inactivity. 0 disables. */
   main_idle_rotation_ms: z.number().int().min(0).default(43_200_000),
   /** E69: foreign messages injected into the next Main turn as dated context. E82 adds hidden `share_context` notes. */
