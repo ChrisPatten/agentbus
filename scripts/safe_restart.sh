@@ -16,8 +16,8 @@
 #       the restart succeeded. Belt-and-suspenders alongside the scheduled
 #       wake-up from step 1 during the E40 transition — see docs/SCHEDULING.md.
 #   3b. Unhealthy -> stash any uncommitted changes (never discard work),
-#       checkout `main` (the last released/stable branch), npm ci if the
-#       lockfile changed, restart again, poll again.
+#       checkout `main` (the last released/stable branch) WITHOUT npm install
+#       (it would mutate the shared node_modules), restart again, poll again.
 #   4a. Healthy after rollback -> notify Peggy (mentions the rollback so it
 #       gets surfaced to Chris, and that the broken commit(s) are still
 #       sitting untouched on the original branch for later investigation).
@@ -25,9 +25,15 @@
 #       (send_direct_email.py), bypassing AgentBus entirely, since bus-core
 #       being down means its own send_email path is unusable too.
 #
-# Usage: scripts/safe_restart.sh [--notify-channel <channel>] [--notify-topic <topic>]
-#   Both optional. If omitted, falls back to the generic system/safe-restart
-#   channel/topic (today's behavior).
+# Usage: scripts/safe_restart.sh [--dry-run] [--notify-channel <channel>] [--notify-topic <topic>]
+#   Channel/topic optional. If omitted, falls back to the generic
+#   system/safe-restart channel/topic (today's behavior).
+#   --dry-run: runs in the foreground, resolves pm2, polls health for one
+#   HEALTH_TIMEOUT_S window and prints what it would do. Restarts nothing,
+#   creates no schedules, sends no notifications, touches no git state.
+# Environment:
+#   PM2_BIN           pm2 binary to use (overrides auto-resolution)
+#   HEALTH_TIMEOUT_S  seconds to wait for health (default 90)
 # Logs to logs/safe_restart/<timestamp>.log (also tees to stdout).
 
 set -uo pipefail
@@ -52,7 +58,10 @@ set -uo pipefail
 # this block runs unchanged in the detached copy, logging to the same
 # LOG_FILE as before; only the original foreground invocation's own stdout
 # mirroring is lost, since it now exits immediately after handing off.
-if [ -z "${SAFE_RESTART_DETACHED:-}" ]; then
+DRY_RUN=0
+for _a in "$@"; do [ "$_a" = "--dry-run" ] && DRY_RUN=1; done
+
+if [ "$DRY_RUN" = "0" ] && [ -z "${SAFE_RESTART_DETACHED:-}" ]; then
   export SAFE_RESTART_DETACHED=1
   python3 -c '
 import os, sys
@@ -73,11 +82,13 @@ LOG_FILE="$LOG_DIR/${TS}.log"
 HEALTH_URL="http://127.0.0.1:3000/api/v1/health"
 AGENTBUS_INBOUND_URL="http://127.0.0.1:3000/api/v1/inbound"
 AGENTBUS_SCHEDULES_URL="http://127.0.0.1:3000/api/v1/schedules"
-HEALTH_TIMEOUT_S=30
+HEALTH_TIMEOUT_S="${HEALTH_TIMEOUT_S:-90}"
+HEALTH_LOG_EVERY_S=15
 HEALTH_POLL_INTERVAL_S=2
 WAKEUP_STALE_AFTER_MS=$(( 45 * 60 * 1000 ))
 CHRIS_EMAIL="chris@chrispatten.dev"
-PM2="$REPO_ROOT/node_modules/.bin/pm2"
+PM2=""
+PM2_LOCAL="$REPO_ROOT/node_modules/.bin/pm2"
 
 NOTIFY_CHANNEL=""
 NOTIFY_TOPIC=""
@@ -91,6 +102,9 @@ while [ $# -gt 0 ]; do
       NOTIFY_TOPIC="${2:-}"
       shift 2
       ;;
+    --dry-run)
+      shift
+      ;;
     *)
       shift
       ;;
@@ -101,8 +115,49 @@ log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
 }
 
+# Extracts the JSON array from noisy pm2 output (e.g. the ">>>> In-memory PM2
+# is out-of-date" banner a version-mismatched client prints to stdout).
+extract_pm2_json() {
+  python3 -c "
+import sys
+t = sys.stdin.read()
+lines = t.splitlines()
+start = next((i for i, l in enumerate(lines) if l.startswith('[')), None)
+if start is None:
+    sys.exit(1)
+sys.stdout.write('\\n'.join(lines[start:]))
+"
+}
+
+# Resolves which pm2 client to use. Order: $PM2_BIN, pm2 on PATH,
+# /opt/homebrew/bin/pm2, local node_modules (last resort). The first
+# candidate whose `jlist` parses and carries no "out-of-date" banner (i.e.
+# matches the running daemon) wins; otherwise the first existing candidate.
+resolve_pm2() {
+  local candidates=() c first=""
+  # An explicit override is honored as-is (no daemon-match probing).
+  if [ -n "${PM2_BIN:-}" ]; then
+    [ -x "$PM2_BIN" ] || { log "ERROR: PM2_BIN=$PM2_BIN is not executable."; return 1; }
+    PM2="$PM2_BIN"; return 0
+  fi
+  c="$(command -v pm2 2>/dev/null)"; [ -n "$c" ] && candidates+=("$c")
+  candidates+=("/opt/homebrew/bin/pm2" "$PM2_LOCAL")
+  for c in "${candidates[@]}"; do
+    [ -x "$c" ] || continue
+    [ -z "$first" ] && first="$c"
+    local out
+    out="$("$c" jlist 2>/dev/null)"
+    if ! echo "$out" | /usr/bin/grep -q 'out-of-date' && echo "$out" | extract_pm2_json >/dev/null 2>&1; then
+      PM2="$c"; return 0
+    fi
+    log "pm2 candidate $c does not match the running daemon (noise or unparsable jlist); trying next."
+  done
+  PM2="$first"
+  [ -n "$PM2" ]
+}
+
 pm2_bus_core_status() {
-  "$PM2" jlist 2>/dev/null | python3 -c "
+  "$PM2" jlist 2>/dev/null | extract_pm2_json 2>/dev/null | python3 -c "
 import json, sys
 try:
     data = json.load(sys.stdin)
@@ -116,19 +171,36 @@ print('unknown')
 "
 }
 
-# Polls health for up to HEALTH_TIMEOUT_S seconds. Returns 0 if both the HTTP
-# health endpoint reports ok AND pm2 itself reports the process as "online"
-# (catches the case where the endpoint briefly responds during a crash loop
-# but pm2 is still restarting it repeatedly).
+# Alternate liveness check: `pm2 pid bus-core` prints a nonzero pid when online.
+pm2_bus_core_pid_alive() {
+  local pid
+  pid="$("$PM2" pid bus-core 2>/dev/null | /usr/bin/grep -Eo '^[0-9]+$' | tail -1)"
+  [ -n "$pid" ] && [ "$pid" != "0" ] && kill -0 "$pid" 2>/dev/null
+}
+
+# Polls health for up to HEALTH_TIMEOUT_S seconds, logging progress every
+# HEALTH_LOG_EVERY_S. Returns 0 if the HTTP health endpoint reports ok AND
+# pm2 sees bus-core online (jlist status "online", or failing that a live
+# `pm2 pid`). Catches the case where the endpoint briefly responds during a
+# crash loop but pm2 is still restarting it repeatedly.
 check_health() {
-  local deadline=$(( $(date +%s) + HEALTH_TIMEOUT_S ))
-  while [ "$(date +%s)" -lt "$deadline" ]; do
-    local resp
+  local start now deadline next_log
+  start="$(date +%s)"; deadline=$(( start + HEALTH_TIMEOUT_S )); next_log=$(( start + HEALTH_LOG_EVERY_S ))
+  while :; do
+    now="$(date +%s)"
+    [ "$now" -lt "$deadline" ] || break
+    local resp http_ok=0 st="n/a"
     resp="$(curl -sf --max-time 3 "$HEALTH_URL" 2>/dev/null)"
     if [ -n "$resp" ] && echo "$resp" | /usr/bin/grep -q '"ok":true'; then
-      if [ "$(pm2_bus_core_status)" = "online" ]; then
+      http_ok=1
+      st="$(pm2_bus_core_status)"
+      if [ "$st" = "online" ] || { [ "$st" = "unknown" ] && pm2_bus_core_pid_alive; }; then
         return 0
       fi
+    fi
+    if [ "$now" -ge "$next_log" ]; then
+      log "  health poll: $(( now - start ))s/${HEALTH_TIMEOUT_S}s elapsed, http_ok=$http_ok pm2_status=$st"
+      next_log=$(( now + HEALTH_LOG_EVERY_S ))
     fi
     sleep "$HEALTH_POLL_INTERVAL_S"
   done
@@ -236,6 +308,11 @@ email_chris_direct() {
 }
 
 log "=== safe_restart.sh starting ==="
+if ! resolve_pm2; then
+  log "ERROR: no pm2 binary found (PM2_BIN, PATH, /opt/homebrew/bin, local). Aborting before any restart."
+  exit 1
+fi
+log "Using pm2: $PM2 (version $("$PM2" -v 2>/dev/null | tail -1)); health timeout ${HEALTH_TIMEOUT_S}s"
 
 if [ -z "$NOTIFY_CHANNEL" ] || [ -z "$NOTIFY_TOPIC" ]; then
   log "No --notify-channel/--notify-topic provided - falling back to generic system/safe-restart for the durable wake-up schedule."
@@ -246,6 +323,19 @@ fi
 BEFORE_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 BEFORE_COMMIT="$(git rev-parse --short HEAD)"
 log "Current branch: $BEFORE_BRANCH @ $BEFORE_COMMIT"
+
+if [ "$DRY_RUN" = "1" ]; then
+  log "DRY RUN: would create a durable wake-up schedule, then run: AGENTBUS_CONFIG=config.yaml $PM2 startOrRestart ecosystem.config.cjs"
+  log "DRY RUN: polling health now (no restart performed)..."
+  if check_health; then
+    log "DRY RUN: health OK (pm2 status: $(pm2_bus_core_status)). A real run would restart and expect this to pass."
+  else
+    log "DRY RUN: health NOT OK within ${HEALTH_TIMEOUT_S}s (pm2 status: $(pm2_bus_core_status))."
+  fi
+  log "DRY RUN: on failure it would stash tracked changes, checkout main (no npm install), restart, and re-poll."
+  log "=== dry run done ==="
+  exit 0
+fi
 
 create_wakeup_schedule "first restart attempt, $BEFORE_BRANCH@$BEFORE_COMMIT"
 restart_bus_core
@@ -261,10 +351,13 @@ fi
 log "UNHEALTHY after restart. Capturing pm2 logs, then attempting rollback to main..."
 "$PM2" logs bus-core --lines 80 --nostream >>"$LOG_FILE" 2>&1 || true
 
-# Never discard uncommitted work — stash it first (git safety protocol).
-if [ -n "$(git status --porcelain)" ]; then
-  log "Uncommitted changes present - stashing before rollback (stash message includes timestamp for recovery)."
-  git stash push -u -m "safe_restart auto-stash $TS" >>"$LOG_FILE" 2>&1
+# Never discard uncommitted work - stash tracked changes only. Untracked
+# files are left in place (they do not conflict with checkout in practice and
+# stashing them with -u has swept up unrelated files before).
+STASHED=0
+if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+  log "Tracked uncommitted changes present - stashing before rollback (message includes timestamp for recovery)."
+  git stash push -m "safe_restart auto-stash $TS" >>"$LOG_FILE" 2>&1 && STASHED=1
 fi
 
 git fetch origin main >>"$LOG_FILE" 2>&1 || true
@@ -272,10 +365,15 @@ git checkout main >>"$LOG_FILE" 2>&1
 ROLLBACK_COMMIT="$(git rev-parse --short HEAD)"
 log "Checked out main @ $ROLLBACK_COMMIT"
 
-if ! git diff --quiet "$BEFORE_COMMIT" "$ROLLBACK_COMMIT" -- package-lock.json 2>/dev/null; then
-  log "package-lock.json differs between $BEFORE_COMMIT and $ROLLBACK_COMMIT - running npm ci"
-  npm ci >>"$LOG_FILE" 2>&1
-fi
+# Deliberately NO npm install/ci here. main can be far behind the working
+# branch, and installing its lockfile into the shared node_modules removes or
+# downgrades packages the branch needs (Nov 2, 2026 incident). The rollback
+# only needs a known-good code path running.
+log "Skipping npm install on rollback (would mutate node_modules the original branch depends on)."
+RETURN_CMDS="git checkout $BEFORE_BRANCH"
+[ "$STASHED" = "1" ] && RETURN_CMDS="$RETURN_CMDS && git stash pop"
+RETURN_CMDS="$RETURN_CMDS && npm install   # only if node_modules was altered"
+log "To return to the previous state: cd $REPO_ROOT && $RETURN_CMDS"
 
 create_wakeup_schedule "post-rollback restart attempt, main@$ROLLBACK_COMMIT"
 
@@ -284,7 +382,7 @@ restart_bus_core
 log "Checking health again after rollback (timeout ${HEALTH_TIMEOUT_S}s)..."
 if check_health; then
   log "Healthy after rollback to main."
-  notify_peggy "[safe-restart] bus-core failed to come up on $BEFORE_BRANCH@$BEFORE_COMMIT and was automatically rolled back to main@$ROLLBACK_COMMIT, where it is now healthy. The broken commit(s) are still on $BEFORE_BRANCH untouched (any uncommitted changes were stashed, not lost) — needs investigation before retrying."
+  notify_peggy "[safe-restart] bus-core failed to come up on $BEFORE_BRANCH@$BEFORE_COMMIT and was automatically rolled back to main@$ROLLBACK_COMMIT, where it is now healthy. The broken commit(s) are still on $BEFORE_BRANCH untouched (any tracked uncommitted changes were stashed, not lost). To return: $RETURN_CMDS — needs investigation before retrying."
   log "=== done (rolled back, recovered) ==="
   exit 0
 fi
@@ -298,7 +396,9 @@ This means AgentBus itself is down right now — Peggy cannot receive or send me
 
 Log file: ${LOG_FILE}
 
-Please check pm2 logs / the log file above when you're able. bus-core is currently sitting on the main branch, not ${BEFORE_BRANCH} — the broken work is preserved there untouched."
+Please check pm2 logs / the log file above when you're able. bus-core is currently sitting on the main branch, not ${BEFORE_BRANCH} — the broken work is preserved there untouched.
+
+To return: cd ${REPO_ROOT} && ${RETURN_CMDS}"
 
 if email_chris_direct "AgentBus bus-core is DOWN — manual intervention needed" "$EMAIL_BODY"; then
   log "Fallback email sent to $CHRIS_EMAIL."

@@ -11,6 +11,7 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 ## [Unreleased]
 
 ### Fixed
+- **`safe_restart.sh` no longer false-fails and no longer damages `node_modules` on rollback.** It used the repo-local pm2 6.0.14 against a 7.0.3 daemon; the client's "In-memory PM2 is out-of-date" stdout banner broke `jlist` parsing, so health never passed and it rolled back to `main` twice. pm2 is now resolved (`PM2_BIN`, PATH, `/opt/homebrew/bin/pm2`, local last, skipping clients that print the banner), `jlist` JSON is extracted from noisy output, and `pm2 pid bus-core` is an alternate liveness check. `HEALTH_TIMEOUT_S` is env-overridable (default 90, progress logged every 15 s). Rollback skips `npm install` (it removed `@fastify/websocket` and downgraded `ws` on the live tree), stashes tracked changes only, and logs the commands to return. New `--dry-run` and `scripts/tests/test_safe_restart_pm2_noise.sh`.
 - **Intercom Needs-you screen: duplicate Got it and unreadable long text.** The web app no longer adds its automatic Got it when an action is already labelled "Got it" (case-insensitive), and the `notify` tool description now says a Got it button is always added so agents should not include one. Tapping the title or body of a Needs-you item opens a scrollable view of the full text with the buttons below and a Back button; a "Tap to read" hint shows only when the text is probably truncated.
 
 ### Added
