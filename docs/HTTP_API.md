@@ -354,6 +354,7 @@ E82, E83. Hands a note to a contact's primary conversation (Main, or with `chann
 | `body` | yes | Non-blank. The note as Main will read it, rendered with its timestamp and label, must fit `adapters.app.pending_context.max_chars` (default 4000); otherwise the call fails with `413` rather than truncating |
 | `source` | yes | Up to 120 characters, whitespace collapsed to one line. Becomes `origin.label`, the label the agent sees (for example `Claude Code: baxter`) |
 | `channel` | no | `app` (default, Main) or a primary channel such as `telegram:peggy` (exact; not a group or thread). Unlisted or unrouted channels are `400` |
+| `topic` | no | A Telegram forum topic of `channel`'s bot: `thread:<hash>` or its captured name. The note is stored in that topic's conversation (group channel from the `threads` store, so the key matches inbound messages). Only with a Telegram channel (`app` is `400`); unknown, malformed or ambiguous is `400`; a call from a turn in that topic is `409`. The `201` response then also carries `topic` |
 | `sender` | no | The calling agent's id. Used for the journal-run gate below, and (E83) to stamp the origin from the sender's pane lease: a pane leased to the target conversation is rejected with `409` |
 | `origin` | no | What the caller's MCP server stamped (`kind: 'turn'` with `agent_id` and `conversation_id`, or `kind: 'external'`). Its label is replaced by `source`; without it the origin is `{ kind: 'external', label: source }` |
 

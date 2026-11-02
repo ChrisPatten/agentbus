@@ -70,8 +70,9 @@ Gives the agent in the Mac app's Main a note about work you finished in another 
 | `body` | yes | The note: what happened, where the result is, what's still open |
 | `source` | yes | Where it comes from, such as `Claude Code: my-project`. Main sees this label. |
 | `channel` | no | `app` (default) is Main in the Mac app. Pass a listed private-chat channel such as `telegram:assistant` to brief an agent through its Telegram chat. |
+| `topic` | no | With a Telegram `channel`, a forum topic of that bot's group, as its `thread:<hash>` id (what `create_telegram_topic` returns) or its name. The note goes to that topic's conversation instead of the private chat. Not allowed with `app`. |
 
-Notes older than 24 hours are skipped, a note too long for the context budget is refused (shorten it and try again), and it can't be called from Main itself. To tell you something or ask a question, use `send_message`. See [Proactive messages](/features/proactive-messages#letting-main-know-without-a-message).
+Notes older than 24 hours are skipped, a note too long for the context budget is refused (shorten it and try again), and it can't be called from Main itself (or, with `topic`, from inside the topic it targets). To tell you something or ask a question, use `send_message`. See [Proactive messages](/features/proactive-messages#letting-main-know-without-a-message).
 
 ### Notifications
 

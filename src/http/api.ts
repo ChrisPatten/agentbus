@@ -178,6 +178,8 @@ const ContextShareSchema = z.object({
   source: z.string().min(1).max(120),
   /** E83: `app` (Main) or a primary channel such as `telegram:peggy`. */
   channel: z.string().min(1).default('app'),
+  /** Telegram forum topic of `channel`'s bot: `thread:<hash>` or its name. */
+  topic: z.string().min(1).optional(),
   sender: z.string().min(1).optional(),
   origin: z.discriminatedUnion('kind', [
     z.object({ kind: z.literal('turn'), agent_id: z.string(), conversation_id: z.string().min(1), label: z.string().optional() }),
@@ -1516,11 +1518,11 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     // E83 — a cc-pool pane running a turn in the target conversation must not hand itself context.
     const paneOrigin = data.sender ? paneTurnOrigin(db, data.sender, data.origin) : null;
     const result = shareContext(db, config, {
-      contactId: data.to.replace(/^contact:/, ''), body: data.body, source: data.source, channel: data.channel,
+      contactId: data.to.replace(/^contact:/, ''), body: data.body, source: data.source, channel: data.channel, topic: data.topic,
       origin: paneOrigin ?? data.origin,
     });
     if (!result.ok) return reply.status(result.status).send({ ok: false, error: result.error });
-    return reply.status(201).send({ ok: true, id: result.messageId, conversation_id: result.conversationId, session_id: result.sessionId });
+    return reply.status(201).send({ ok: true, id: result.messageId, conversation_id: result.conversationId, session_id: result.sessionId, ...(result.topic ? { topic: result.topic } : {}) });
   });
 
   // GET /api/v1/messages/:id

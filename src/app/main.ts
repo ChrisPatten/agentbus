@@ -53,6 +53,14 @@ export function isPrimaryConversation(db: Database.Database, conversationId: str
   return primaryConversationChannel(db, conversationId, config) !== null;
 }
 
+function holdsSharedContext(db: Database.Database, conversationId: string, row: { channel: string; topic: string }, config: AppConfig): boolean {
+  if (!row.topic.startsWith('thread:')) return false;
+  const bot = row.channel.replace(/:group:-?\d+$/, '');
+  if (bot === row.channel || !primaryChannels(config).includes(bot)) return false;
+  return !!db.prepare(`SELECT 1 FROM transcripts WHERE conversation_id = ? AND direction = 'outbound'
+    AND json_extract(metadata, '$.context_only') = 1 LIMIT 1`).get(conversationId);
+}
+
 /** E83 — the channel of a primary conversation (`app` for Main), or null when it isn't one. */
 export function primaryConversationChannel(db: Database.Database, conversationId: string, config: AppConfig): string | null {
   const row = db.prepare(`SELECT channel, topic FROM conversation_registry WHERE id = ?`)
@@ -60,7 +68,8 @@ export function primaryConversationChannel(db: Database.Database, conversationId
   if (!row) return null;
   // E89 — a conversation an enabled Intercom surface follows (for example a forum topic) also reads pending context.
   if (followedConversationIds(config).has(conversationId)) return row.channel;
-  if (row.topic !== MAIN_TOPIC) return null;
+  // A forum topic of a listed bot's group reads pending context once `share_context` has put a note in it.
+  if (row.topic !== MAIN_TOPIC) return holdsSharedContext(db, conversationId, row, config) ? row.channel : null;
   return row.channel === 'app' || primaryChannels(config).includes(row.channel) ? row.channel : null;
 }
 

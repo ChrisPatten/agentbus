@@ -141,13 +141,14 @@ function registerShareContextTool(server: McpServer, busBaseUrl: string, agentId
     {
       description:
         "Hand a note to Main (the operator's main conversation in the Mac app), or to an agent's Telegram DM when you pass `channel`, " +
+        'or to one of that bot\'s Telegram forum topics when you also pass `topic`, ' +
         'so that conversation knows about it on its next turn. ' +
         'Nothing is shown to the user: no message, no notification, no unread badge, and the agent is not woken. ' +
         'Use it to pass on the outcome of work you finished in a Claude Code session (an artifact you finished, ' +
         'a decision you made, a result worth knowing). One note per finished piece of work; make it self-contained. ' +
         'Do not use it to notify the operator, ask a question or request an answer: use send_message for that. ' +
         'Notes older than 24 hours are not passed on, and a note too long for the context budget is rejected, ' +
-        'so summarize rather than paste. Cannot be called from a turn in the conversation it targets.',
+        'so summarize rather than paste. Cannot be called from a turn in the conversation it targets (including the topic named by `topic`).',
       inputSchema: {
         to: z.string().min(1).describe('Contact whose conversation receives the note (e.g. "contact:chris")'),
         body: z.string().min(1).describe('The note: what happened and what Main should know, self-contained and concise'),
@@ -164,14 +165,23 @@ function registerShareContextTool(server: McpServer, busBaseUrl: string, agentId
             'Where the note goes: "app" (default) is Main in the Mac app. Pass an agent\'s Telegram DM channel ' +
               '(e.g. "telegram:peggy") when that agent is set up to receive shared context there.',
           ),
+        topic: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            'Optional Telegram forum topic of the `channel` bot to deliver to instead of its DM: the "thread:<hash>" id ' +
+              '(as create_telegram_topic returns and send_message takes) or the topic\'s name. Only with a Telegram ' +
+              'channel; rejected with "app". Omit for the DM (or Main).',
+          ),
       },
     },
-    async ({ to, body, source, channel }) => {
+    async ({ to, body, source, channel, topic }) => {
       try {
         const res = await fetch(`${busBaseUrl}/api/v1/context`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ to, body, source, channel, sender: toPrefixedAgentId(agentId), origin: originFromEnv(agentId, source) }),
+          body: JSON.stringify({ to, body, source, channel, ...(topic ? { topic } : {}), sender: toPrefixedAgentId(agentId), origin: originFromEnv(agentId, source) }),
         });
         const data = (await res.json()) as { ok: boolean; id?: string; error?: string; reason?: string };
         if (!data.ok) {
