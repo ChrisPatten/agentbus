@@ -310,7 +310,7 @@ describe('Intercom follow engine', () => {
       const { frames, socket } = fakeSocket();
       const client: Client = { socket, surface: surface(), ready: false, cursor: 0, lastPong: Date.now() };
       await service.attach(client, 0);
-      expect(frames.map((f) => f.type === 'event' ? f.event : f.type)).toEqual(['welcome', 'activity', 'calendar']);
+      expect(frames.map((f) => f.type === 'event' ? f.event : f.type)).toEqual(['welcome', 'activity', 'calendar', 'desk']);
       expect(frames[1].data).toEqual({ state: 'running', status_text: 'Working on it', interaction_id: null });
     });
 
