@@ -41,11 +41,16 @@ export interface ShareContextRequest {
   source: string;
   /** `app` (Main, the default) or a primary channel such as `telegram:peggy`. */
   channel?: string;
+  /**
+   * A Telegram forum topic of `channel`'s bot: its `thread:<hash>` id, or its name as captured in the
+   * `threads` store. The note goes to that topic's conversation instead of the DM. Telegram channels only.
+   */
+  topic?: string;
   origin?: ShareOrigin;
 }
 
 export type ShareContextResult =
-  | { ok: true; messageId: string; conversationId: string; sessionId: string }
+  | { ok: true; messageId: string; conversationId: string; sessionId: string; topic?: string }
   | { ok: false; status: 400 | 409 | 413; error: string };
 
 /** Runtimes that read pending context: cc-headless in `runBatch`, cc-pool through the pipeline stage. */
@@ -56,9 +61,44 @@ export function normalizeSource(source: string): string {
   return source.replace(/\s+/g, ' ').trim();
 }
 
+const THREAD_ID_RE = /^thread:[0-9a-f]{16}$/;
+
+export type ResolvedTopic = { ok: true; channel: string; topic: string; name?: string } | { ok: false; error: string };
+
+/**
+ * Resolve a forum topic of the Telegram bot `botChannel` to the (group channel, `thread:<hash>`) pair its
+ * inbound messages carry. The adapter records every topic it sees or creates in the `threads` store under the
+ * derived group channel (`<bot>:group:<chatId>`), with the captured name in `metadata.topicName`; the
+ * conversation key is `computeConversationId(contact, groupChannel, topic)`, exactly as route-resolve builds it.
+ */
+export function resolveTelegramTopic(db: Database.Database, botChannel: string, topicArg: string): ResolvedTopic {
+  const wanted = topicArg.trim();
+  if (!wanted) return { ok: false, error: 'topic must not be empty' };
+  const rows = db.prepare('SELECT channel, topic, metadata FROM threads').all() as Array<{ channel: string; topic: string; metadata: string }>;
+  const inBot = rows.filter((r) => r.channel.startsWith(`${botChannel}:group:`));
+  const nameOf = (r: { metadata: string }): string | undefined => {
+    try { return (JSON.parse(r.metadata) as { topicName?: string }).topicName; } catch { return undefined; }
+  };
+  if (wanted.startsWith('thread:')) {
+    if (!THREAD_ID_RE.test(wanted)) return { ok: false, error: `Malformed topic id "${wanted}": expected thread:<16 hex characters>, as returned by create_telegram_topic.` };
+    const hit = inBot.find((r) => r.topic === wanted);
+    if (!hit) return { ok: false, error: `Unknown topic "${wanted}" for ${botChannel}: no forum topic with that id has been seen or created by this bot.` };
+    const name = nameOf(hit);
+    return { ok: true, channel: hit.channel, topic: hit.topic, ...(name ? { name } : {}) };
+  }
+  const hits = inBot.filter((r) => nameOf(r)?.trim().toLowerCase() === wanted.toLowerCase());
+  if (hits.length === 0) return { ok: false, error: `Unknown topic "${wanted}" for ${botChannel}: no forum topic with that name is known. Pass its thread:<hash> id instead.` };
+  if (hits.length > 1) return { ok: false, error: `Topic name "${wanted}" is ambiguous (${hits.map((h) => h.topic).join(', ')}): pass the thread:<hash> id.` };
+  return { ok: true, channel: hits[0]!.channel, topic: hits[0]!.topic, name: nameOf(hits[0]!)! };
+}
+
 export function shareContext(db: Database.Database, config: AppConfig, req: ShareContextRequest, now = new Date()): ShareContextResult {
   const channel = req.channel?.trim() || 'app';
   const isApp = channel === 'app';
+  const topicArg = req.topic?.trim();
+  if (topicArg && isApp) {
+    return { ok: false, status: 400, error: 'topic is only valid with a Telegram channel (e.g. channel "telegram:peggy"); the app channel is Main.' };
+  }
   const where = isApp ? 'Main' : channel;
   const source = normalizeSource(req.source);
   if (!source) return { ok: false, status: 400, error: 'source is required: name where this note comes from (e.g. "Claude Code: baxter")' };
@@ -79,8 +119,22 @@ export function shareContext(db: Database.Database, config: AppConfig, req: Shar
       return { ok: false, status: 400, error: `Contact "${req.contactId}" has no Telegram identity (contacts.${req.contactId}.platforms.telegram), so ${channel} has no conversation with them` };
     }
   }
-  const route = routedTarget(config, req.contactId, channel);
-  if (!route) return { ok: false, status: 400, error: `${isApp ? 'App channel' : `Channel "${channel}"`} is not routed for this contact` };
+  if (topicArg && !(channel === 'telegram' || channel.startsWith('telegram:'))) {
+    return { ok: false, status: 400, error: `topic is only valid with a Telegram channel, not "${channel}".` };
+  }
+  // With a topic the note lands in that forum topic's conversation: the group channel and thread id its inbound messages use.
+  let convChannel = channel;
+  let convTopic = MAIN_TOPIC;
+  let topicName: string | undefined;
+  if (topicArg) {
+    const resolved = resolveTelegramTopic(db, channel, topicArg);
+    if (!resolved.ok) return { ok: false, status: 400, error: resolved.error };
+    convChannel = resolved.channel;
+    convTopic = resolved.topic;
+    topicName = resolved.name;
+  }
+  const route = routedTarget(config, req.contactId, convChannel);
+  if (!route) return { ok: false, status: 400, error: `${isApp ? 'App channel' : `Channel "${convChannel}"`} is not routed for this contact` };
   const agentId = route.recipientId;
   // For any other runtime the note would sit unread.
   if (!READS_PENDING_CONTEXT.has(route.adapterId)) {
@@ -92,15 +146,17 @@ export function shareContext(db: Database.Database, config: AppConfig, req: Shar
     if (!target.ok) return { ok: false, status: 400, error: target.error };
   }
 
-  const conversationId = computeConversationId(req.contactId, channel, MAIN_TOPIC);
+  const conversationId = computeConversationId(req.contactId, convChannel, convTopic);
   if (req.origin?.kind === 'turn' && req.origin.conversation_id === conversationId) {
     return { ok: false, status: 409, error: isApp
       ? 'share_context cannot be called from a turn in Main: Main already has this context. Use send_message if the operator should see something.'
-      : `share_context cannot be called from a turn in ${channel}: that conversation already has this context. Use send_message if the user should see something.` };
+      : topicArg
+        ? `share_context cannot be called from a turn in the topic it targets (${topicName ?? convTopic}): that conversation already has this context. Use send_message if the user should see something.`
+        : `share_context cannot be called from a turn in ${channel}: that conversation already has this context. Use send_message if the user should see something.` };
   }
 
   // Reject rather than truncate: the injected item is the whole rendered line, label and timestamp included.
-  const { max_chars } = pendingContextLimits(config, pendingContextAgent(config, channel));
+  const { max_chars } = pendingContextLimits(config, pendingContextAgent(config, convChannel));
   const line = pendingItemLine({ id: '', message_id: '', created_at: now.toISOString(), body: req.body, label: source, kind: 'context' }, { now });
   if (line.length > max_chars) {
     return { ok: false, status: 413, error: `Context is too long: with its label and timestamp it takes ${line.length} characters ` +
@@ -119,12 +175,12 @@ export function shareContext(db: Database.Database, config: AppConfig, req: Shar
       ORDER BY (ended_at IS NULL) DESC, started_at DESC, rowid DESC LIMIT 1`).get(conversationId) as { id: string } | undefined;
     const sessionId = existing?.id ?? (isApp
       ? ensureOutboundAppSession(db, req.contactId, agentId, MAIN_TOPIC)
-      : ensurePrimarySession(db, req.contactId, channel, MAIN_TOPIC, agentId)).sessionId;
+      : ensurePrimarySession(db, req.contactId, convChannel, convTopic, agentId)).sessionId;
     logOutboundTranscript(db, {
-      messageId, conversationId, sessionId, channel, contactId: req.contactId, body: req.body,
+      messageId, conversationId, sessionId, channel: convChannel, contactId: req.contactId, body: req.body,
       metadata: { origin, [CONTEXT_ONLY_KEY]: true }, silent: true,
     });
-    return { ok: true, messageId, conversationId, sessionId };
+    return { ok: true, messageId, conversationId, sessionId, ...(topicArg ? { topic: convTopic } : {}) };
   })();
 }
 

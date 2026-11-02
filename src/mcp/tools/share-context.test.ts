@@ -60,6 +60,16 @@ describe('share_context tool (E82)', () => {
       origin: { kind: 'external', label: 'Claude Code: baxter' } } });
   });
 
+  it('passes an optional topic through to the bus and omits it otherwise', async () => {
+    fetchMock.mockResolvedValueOnce(ok({ ok: true, id: 'ctx-2' }));
+    await call({ to: 'contact:chris', body: 'x', source: 'y', channel: 'telegram:peggy', topic: 'thread:0123456789abcdef' });
+    expect(posted().body).toMatchObject({ channel: 'telegram:peggy', topic: 'thread:0123456789abcdef' });
+    fetchMock.mockClear();
+    fetchMock.mockResolvedValueOnce(ok({ ok: true, id: 'ctx-3' }));
+    await call({ to: 'contact:chris', body: 'x', source: 'y' });
+    expect(posted().body).not.toHaveProperty('topic');
+  });
+
   it('stamps a turn origin when run inside a turn, so the bus can reject a call from Main', async () => {
     vi.stubEnv('AGENTBUS_TURN_CONVERSATION_ID', 'conv-main');
     fetchMock.mockResolvedValueOnce({ ok: false, json: async () => ({ ok: false, error: 'share_context cannot be called from a turn in Main' }) });
@@ -73,7 +83,7 @@ describe('share_context tool (E82)', () => {
     const client = await connect((s) => registerMessagingTools(s, BUS_URL, 'baxter'));
     const tool = (await client.listTools()).tools.find((t) => t.name === 'share_context')!;
     expect(tool.inputSchema.required).toEqual(expect.arrayContaining(['to', 'body', 'source']));
-    expect(Object.keys(tool.inputSchema.properties!).sort()).toEqual(['body', 'channel', 'source', 'to']);
+    expect(Object.keys(tool.inputSchema.properties!).sort()).toEqual(['body', 'channel', 'source', 'to', 'topic']);
     expect(tool.inputSchema.required).not.toContain('channel'); // E83: defaults to app
     for (const missing of ['to', 'body', 'source']) {
       const args: Record<string, unknown> = { to: 'contact:chris', body: 'x', source: 'y' };
