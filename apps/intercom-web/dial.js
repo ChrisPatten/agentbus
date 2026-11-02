@@ -1,5 +1,5 @@
 // SVG builders for the dial rims.
-import { C, RING_R, LANE_GAP, arcPath, polar, daySpans, assignLanes, tzParts } from './logic.js';
+import { C, RING_R, LANE_GAP, arcPath, polar, daySpans, assignLanes, tzParts, ringSegments, deskStateColor, PRESSURE_COLORS } from './logic.js';
 
 const PALETTE = ['#e39aab', '#74c978', '#ffb347', '#5fc0b3', '#9db4ff', '#c9a0ff'];
 
@@ -11,12 +11,15 @@ function colorFor(ev) {
 }
 
 /** Day-dial rim: 24 h ring, midnight at top, one arc per event, gold now-dot. */
-export function dayRingSvg(events, now, tz, halo = false) {
+export function dayRingSvg(events, now, tz, halo = false, pressure = null) {
   const { timed } = daySpans(events, now, tz);
   const lanes = assignLanes(timed);
   const nowH = tzParts(now, tz).hours;
   let s = `<svg viewBox="0 0 466 466" aria-hidden="true">`;
-  if (halo) {
+  if (pressure) {
+    // Leave-by pressure replaces the attention halo: green, amber, red, and a gentle pulse under five minutes.
+    s += `<circle class="${pressure === 'pulse' ? 'prs-pulse' : ''}" cx="${C}" cy="${C}" r="225" fill="none" stroke="${PRESSURE_COLORS[pressure]}" stroke-width="6"/>`;
+  } else if (halo) {
     s += `<defs><filter id="hb" x="-10%" y="-10%" width="120%" height="120%"><feGaussianBlur stdDeviation="5"/></filter></defs>` +
       `<circle cx="${C}" cy="${C}" r="224" fill="none" stroke="#ffb347" stroke-width="14" opacity=".7" filter="url(#hb)"/>` +
       `<circle cx="${C}" cy="${C}" r="225" fill="none" stroke="#ffb347" stroke-width="5"/>`;
@@ -53,4 +56,29 @@ export function waveRingSvg() {
     pts.push(`${(C + r * Math.cos(a)).toFixed(1)},${(C + r * Math.sin(a)).toFixed(1)}`);
   }
   return `<svg viewBox="0 0 466 466" aria-hidden="true"><polygon class="wave" points="${pts.join(' ')}" fill="none" stroke="#ffb347" stroke-width="6"/></svg>`;
+}
+
+/** SVG arc between two angles in radians (0 at the top, clockwise). */
+function segPath(a0, a1, r) {
+  const pt = (a) => [C + r * Math.sin(a), C - r * Math.cos(a)];
+  const [x1, y1] = pt(a0);
+  const [x2, y2] = pt(a1);
+  const f = (n) => Math.round(n * 10) / 10;
+  return `M${f(x1)} ${f(y1)} A${r} ${r} 0 ${a1 - a0 > Math.PI ? 1 : 0} 1 ${f(x2)} ${f(y2)}`;
+}
+
+/** Status face rim: one segment per session, coloured by state; an amber breathing ring while something needs you. */
+export function statusRingSvg(sessions, needsYou = false) {
+  let s = `<svg viewBox="0 0 466 466" aria-hidden="true">`;
+  if (needsYou) {
+    s += `<circle class="breathe" cx="${C}" cy="${C}" r="225" fill="none" stroke="#ffb347" stroke-width="7"/>`;
+  }
+  if (!sessions.length) {
+    s += `<circle cx="${C}" cy="${C}" r="${RING_R}" fill="none" stroke="#1f1d1a" stroke-width="20"/>`;
+  } else {
+    ringSegments(sessions.length).forEach((seg, i) => {
+      s += `<path d="${segPath(seg.a0, seg.a1, RING_R)}" stroke="${deskStateColor(sessions[i].state)}" stroke-width="20" fill="none" stroke-linecap="butt"/>`;
+    });
+  }
+  return s + '</svg>';
 }

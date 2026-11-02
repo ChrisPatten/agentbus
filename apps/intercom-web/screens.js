@@ -1,14 +1,14 @@
 // HTML for each dial screen. All inner content is laid out in the 466 design square.
 // Readability: text >= 26px, primary >= 34px, clock >= 110px, buttons >= 72px, <= 4 buttons,
 // nothing inside the outer 30px.
-import { escapeHtml as e, daySpans, nextEvent, clockText, dateText, shortTime, allDayLine, glanceOf, needsLayout, isAckLabel, needsMore } from './logic.js';
-import { dayRingSvg, workingRingSvg, waveRingSvg } from './dial.js';
+import { escapeHtml as e, daySpans, nextEvent, clockText, dateText, shortTime, allDayLine, glanceOf, needsLayout, isAckLabel, needsMore, deskCounts, statusLines, listRows } from './logic.js';
+import { dayRingSvg, workingRingSvg, waveRingSvg, statusRingSvg } from './dial.js';
 
-export const SCREENS = ['idle', 'listening', 'working', 'reply', 'choice', 'needs', 'draft', 'done', 'quiet'];
+export const SCREENS = ['idle', 'listening', 'working', 'reply', 'choice', 'needs', 'draft', 'done', 'quiet', 'status'];
 
 const btn = (label, cls = '') => `<div class="btn ${cls}">${e(label)}</div>`;
 
-export function idle({ events, now, tz, calendarKnown = true, notes = 0, halo = false }) {
+export function idle({ events, now, tz, calendarKnown = true, notes = 0, halo = false, departure = null }) {
   const { timed, allDay } = daySpans(events, now, tz);
   const next = nextEvent(timed, now, tz);
   const ad = allDayLine(allDay);
@@ -16,10 +16,15 @@ export function idle({ events, now, tz, calendarKnown = true, notes = 0, halo = 
   if (next) nextHtml = `<div class="next">${e(shortTime(next.startH))} · ${e(next.title)}</div>`;
   else nextHtml = `<div class="sec dim-line">${calendarKnown ? 'Clear for today' : 'Diary unavailable'}</div>`;
   const noteHtml = notes ? `<div class="sec notey" data-act="note"><span class="ndot"></span>${notes} ${notes === 1 ? 'note' : 'notes'}</div>` : '';
-  return `${dayRingSvg(events, now, tz, halo)}
-    <div class="sec datey">${e(dateText(now, tz))}</div>${noteHtml}
+  // Desk face 2: the leave line replaces the date while a departure is pending; the train line sits under the next event.
+  const dateHtml = departure
+    ? `<div class="sec datey leavey ${departure.dim ? 'dim' : departure.pressure}">${e(departure.text)}</div>`
+    : `<div class="sec datey">${e(dateText(now, tz))}</div>`;
+  const trainHtml = departure && departure.train ? `<div class="trainline${departure.train.delayed ? ' delayed' : ''}">${e(departure.train.text)}</div>` : '';
+  return `${dayRingSvg(events, now, tz, halo, departure ? departure.pressure : null)}
+    ${dateHtml}${noteHtml}
     ${ad ? `<div class="sec allday">${e(ad)}</div>` : ''}
-    <div class="clock">${e(clockText(now, tz))}</div>${nextHtml}`;
+    <div class="clock">${e(clockText(now, tz))}</div>${nextHtml}${trainHtml}`;
 }
 
 export function listening({ transcript = '' }) {
@@ -93,9 +98,26 @@ export function done({ word = 'Noted, and filed.', detail = '' }) {
     <div class="peggy" style="font-size:42px;margin-top:20px">${e(word)}</div>${detail ? `<div class="sec" style="margin-top:10px">${e(detail)}</div>` : ''}`;
 }
 
-export function quiet({ now, tz, waiting = 0 }) {
-  return `<div class="clock quiet-clock">${e(clockText(now, tz))}</div>
-    <div class="quiet-label">QUIET</div>${waiting ? `<div class="quiet-wait">${waiting} waiting</div>` : ''}`;
+/** Quiet face (22:00 to 06:30): colour only, no text, slow drifting light. */
+export function quiet({ tone = { color: '#5fc0b3', alpha: 0.1 } }) {
+  return `<div class="qface" style="--qc:${tone.color};--qa:${tone.alpha}"><i class="q1"></i><i class="q2"></i></div>`;
+}
+
+/** Desk face 1: agent status ring. Tap flips to a list of up to five sessions. `noticeFor(session)` says whether a row opens a card. */
+export function status({ desk, now, list = false, noticeFor = () => false }) {
+  const sessions = (desk && desk.sessions) || [];
+  const counts = deskCounts(desk);
+  const needs = counts.needs_you > 0;
+  if (list) {
+    const rows = listRows(sessions, now.getTime ? now.getTime() : now);
+    const body = rows.length
+      ? rows.map((r, i) => `<div class="srow${r.needs ? ' needs' : ''}"${r.needs && noticeFor(sessions[i]) ? ` data-act="session" data-id="${e(r.id)}"` : ''}>` +
+        `<span class="sdot" style="background:${r.color}"></span><div class="st"><div class="stitle">${e(r.title)}</div><div class="ssub">${e(r.sub)}</div></div></div>`).join('')
+      : '<div class="sec">No sessions</div>';
+    return `${statusRingSvg(sessions, needs)}<div class="slist">${body}</div>`;
+  }
+  const lines = statusLines(counts).map((l) => `<div class="scount ${l.kind}">${e(l.text)}</div>`).join('');
+  return `${statusRingSvg(sessions, needs)}${lines}`;
 }
 
 export function pairing({ error = '' }) {
@@ -109,7 +131,7 @@ export function offline({ connecting }) {
     <div class="big" style="font-size:40px;margin-top:14px">${connecting ? 'One moment' : 'Reconnecting'}</div>`;
 }
 
-const R = { idle, listening, working, reply, choice, needs, draft, done, quiet, pairing, offline };
+const R = { idle, listening, working, reply, choice, needs, draft, done, quiet, status, pairing, offline };
 export function render(name, props = {}) {
   return R[name](props);
 }

@@ -321,3 +321,112 @@ export function physicalDialSize(ppi, inches = DIAL_INCHES, availH = Infinity) {
   if (!Number.isFinite(h) || h <= 0) return want;
   return Math.max(1, Math.min(want, Math.floor(h * 466 / 506)));
 }
+
+/* ---------- desk mode (E94) ---------- */
+
+export const DESK_COLORS = { working: '#5fc0b3', waiting: '#ffb347', stuck: '#ef6a5d', idle: '#4a453d', finished: '#c9a14a' };
+export const DESK_LABELS = { working: 'working', waiting: 'waiting', stuck: 'stuck', idle: 'idle', finished: 'finished' };
+export const PRESSURE_COLORS = { calm: '#74c978', amber: '#ffb347', red: '#ef6a5d', pulse: '#ef6a5d', late: '#ef6a5d' };
+export const LATE_MIN = 10;
+
+export const deskStateColor = (state) => DESK_COLORS[state] || DESK_COLORS.idle;
+/** A session "needs you" when it is waiting on you or stuck (Chris, Nov 1; confirm in the PR). */
+export const sessionNeedsYou = (s) => s.state === 'waiting' || s.state === 'stuck';
+
+/** Counts for the status face: the server's, else derived from the session list. */
+export function deskCounts(desk) {
+  const list = (desk && desk.sessions) || [];
+  const c = desk && desk.counts;
+  return {
+    working: c && typeof c.working === 'number' ? c.working : list.filter((s) => s.state === 'working').length,
+    needs_you: c && typeof c.needs_you === 'number' ? c.needs_you : list.filter(sessionNeedsYou).length,
+  };
+}
+
+/** The centre lines of the status face: a line is left out when its count is zero; nothing active gives "All quiet". */
+export function statusLines(counts) {
+  const lines = [];
+  if (counts.working > 0) lines.push({ text: `${counts.working} working`, kind: 'working' });
+  if (counts.needs_you > 0) lines.push({ text: `${counts.needs_you} needs you`, kind: 'needs' });
+  if (!lines.length) lines.push({ text: 'All quiet', kind: 'quiet' });
+  return lines;
+}
+
+/** Equal arc segments around the rim with a gap between them; angles in radians, 0 at the top, clockwise. */
+export function ringSegments(n, gapDeg = 8) {
+  if (n <= 0) return [];
+  const step = (2 * Math.PI) / n;
+  const gap = n === 1 ? 0.001 : Math.min((gapDeg * Math.PI) / 180, step * 0.5);
+  return Array.from({ length: n }, (_, i) => ({ a0: i * step + gap / 2, a1: (i + 1) * step - gap / 2 }));
+}
+
+/** "now", "4m", "2h", "3d". */
+export function ageText(since, nowMs) {
+  const t = Date.parse(since || '');
+  if (isNaN(t)) return '';
+  const m = Math.max(0, Math.floor((nowMs - t) / 60000));
+  if (m < 1) return 'now';
+  if (m < 60) return `${m}m`;
+  if (m < 48 * 60) return `${Math.floor(m / 60)}h`;
+  return `${Math.floor(m / 1440)}d`;
+}
+
+/** Up to five rows for the status list: needs-you first (the server already sorts), title, state label, age. */
+export function listRows(sessions, nowMs, max = 5) {
+  return (sessions || []).slice(0, max).map((s) => ({
+    id: s.id, title: s.title || s.channel || 'Session', state: s.state, color: deskStateColor(s.state),
+    sub: `${DESK_LABELS[s.state] || s.state} · ${ageText(s.since, nowMs)}`.replace(/ · $/, ''), needs: sessionNeedsYou(s),
+  }));
+}
+
+/** The notice card a "needs you" row opens: an active notification whose source is the session title or whose key is the session id (optionally followed by `:...`). */
+export function matchNotice(session, items) {
+  if (!session) return null;
+  return items.find((n) => (n.source && n.source === session.title) || (n.key && (n.key === session.id || String(n.key).startsWith(`${session.id}:`)))) || null;
+}
+
+/**
+ * What the day face shows for a departure: `Leave in N min` within an hour, `Leave 7:20` beyond (dim),
+ * `Late` for up to ten minutes after, then nothing. `delay_min` shifts leave time and train time.
+ */
+export function departureView(dep, nowMs, tz) {
+  if (!dep || !dep.leave_at) return null;
+  const leave = Date.parse(dep.leave_at);
+  if (isNaN(leave)) return null;
+  const delay = Math.max(0, Number(dep.delay_min) || 0);
+  const leaveMs = leave + delay * 60000;
+  const mins = (leaveMs - nowMs) / 60000;
+  if (mins < -LATE_MIN) return null;
+  let kind, text, pressure;
+  if (mins <= 0) { kind = 'late'; text = 'Late'; pressure = 'late'; }
+  else {
+    pressure = mins > 30 ? 'calm' : mins >= 10 ? 'amber' : mins >= 5 ? 'red' : 'pulse';
+    if (mins <= 60) { kind = 'in'; text = `Leave in ${Math.ceil(mins)} min`; }
+    else { kind = 'time'; text = `Leave ${shortTime(tzParts(new Date(leaveMs), tz).hours)}`; }
+  }
+  let train = null;
+  if (dep.kind === 'train' && dep.train && dep.train.departs) {
+    const d = Date.parse(dep.train.departs);
+    if (!isNaN(d)) train = { text: `${shortTime(tzParts(new Date(d + delay * 60000), tz).hours)} train`, delayed: delay > 0 };
+  }
+  return { kind, text, pressure, dim: kind === 'time', train, minutes: mins };
+}
+
+/**
+ * The one place that decides which desk face shows (the seam for automatic switching later).
+ * Quiet hours win; otherwise the face the user last chose. Faces: 'day', 'status', 'quiet'.
+ */
+export function chooseDeskFace({ quiet = false, preferred = 'day' } = {}) {
+  if (quiet) return 'quiet';
+  return preferred === 'status' ? 'status' : 'day';
+}
+export const nextFace = (face) => (face === 'status' ? 'day' : 'status');
+
+/** Colour-only quiet face: red stuck, amber needs you, brass a note or bill waiting, teal calm. Brighter when something needs you. */
+export function quietTone({ counts = { working: 0, needs_you: 0 }, stuck = false, attention = 0, notes = 0 } = {}) {
+  const needs = counts.needs_you > 0 || attention > 0;
+  if (stuck) return { color: '#ef6a5d', alpha: 0.2, name: 'stuck' };
+  if (needs) return { color: '#ffb347', alpha: 0.2, name: 'needs' };
+  if (notes > 0) return { color: '#c9a14a', alpha: 0.12, name: 'notice' };
+  return { color: '#5fc0b3', alpha: 0.1, name: 'calm' };
+}

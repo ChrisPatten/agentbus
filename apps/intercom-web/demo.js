@@ -1,4 +1,5 @@
 // Scripted, server-free walkthrough of the nine mockup screens (?demo).
+import { departureView } from './logic.js';
 const TZ = 'America/New_York';
 export const DEMO_NOW = new Date('2026-11-02T07:52:00-05:00');
 const ev = (id, title, s, e, calendar, color) => ({
@@ -15,6 +16,17 @@ export const DEMO_EVENTS = [
   ev('h', 'Celtics', '20:30', '23:30', 'Boston Celtics', '#5fc0b3'),
 ];
 export const DEMO_CAL = { events: DEMO_EVENTS, tz: TZ };
+
+const ses = (id, title, state, since) => ({ id, title, state, channel: 'telegram:peggy', since });
+export const DEMO_DESK = {
+  sessions: [
+    ses('a', 'Intercom Build', 'waiting', '2026-11-02T07:48:00-05:00'), ses('b', 'Highlander Replacement', 'working', '2026-11-02T07:40:00-05:00'),
+    ses('c', 'Main', 'working', '2026-11-02T07:51:00-05:00'), ses('d', 'Paper Inbox', 'working', '2026-11-02T07:30:00-05:00'),
+    ses('e', 'Email scan', 'finished', '2026-11-02T07:45:00-05:00'), ses('f', 'Kindle', 'idle', '2026-11-02T06:10:00-05:00'),
+  ],
+  counts: { working: 3, needs_you: 1 },
+};
+const dep = (leave, delay = 0) => ({ label: '8:37 train', kind: 'train', leave_at: `2026-11-02T${leave}:00-05:00`, delay_min: delay, train: { number: '824', departs: '2026-11-02T08:37:00-05:00' } });
 
 const PHRASE = 'Look into 1Password for agents';
 
@@ -35,8 +47,18 @@ export const STEPS = [
     props: () => ({ to: 'Text to Kate', text: 'Heading to ENT. Back by 5:30.' }) },
   { name: 'done', title: 'Done', desc: 'Two seconds of the check mark and a word from me, then back to the day-dial.',
     props: () => ({ word: 'Noted, and filed.', detail: 'Water bill · $166' }) },
-  { name: 'quiet', title: 'Face-down / night', desc: 'Turned over, or after 10 PM: no glow, dim display, messages wait. (Later phase.)',
-    props: () => ({ now: new Date('2026-11-02T22:41:00-05:00'), tz: TZ, waiting: 2 }) },
+  { name: 'quiet', title: 'Night', desc: 'After 10 PM: colour only, no text, slow drifting light. Teal is calm. (Amber needs you, red is stuck, brass is a notice waiting.)',
+    props: () => ({ tone: { color: '#5fc0b3', alpha: 0.1 } }) },
+  { name: 'quiet', title: 'Night, needs you', desc: 'The same face, amber and a little brighter, when something waits on you.',
+    props: () => ({ tone: { color: '#ffb347', alpha: 0.2 } }) },
+  { name: 'status', title: 'Agent status ring', desc: 'One segment per session: teal working, amber waiting on you, red stuck, brass just finished, grey idle. The rim breathes amber while anything needs you.',
+    props: () => ({ desk: DEMO_DESK, now: DEMO_NOW }) },
+  { name: 'status', title: 'Status list', desc: 'Tap the ring for up to five sessions: title, state and age. Titles only, never message text.',
+    props: () => ({ desk: DEMO_DESK, now: DEMO_NOW, list: true }) },
+  { name: 'idle', title: 'Day ring with leave-by', desc: 'The date line becomes “Leave in N min”; the rim goes green, amber under 30 minutes, red under 10, pulsing under 5. The train sits under the next event.',
+    props: () => ({ events: DEMO_EVENTS, now: DEMO_NOW, tz: TZ, departure: departureView(dep('08:06'), DEMO_NOW.getTime(), TZ) }) },
+  { name: 'idle', title: 'Train delayed', desc: 'A delay turns the train line amber and moves it to the new time.',
+    props: () => ({ events: DEMO_EVENTS, now: DEMO_NOW, tz: TZ, departure: departureView(dep('08:06', 6), DEMO_NOW.getTime(), TZ) }) },
   { name: 'idle', title: 'A quiet note', desc: 'A low-key item adds a brass dot and “1 note” under the date, with no glow. Tap it to read. The amber line on the rim means something else needs you.',
     props: () => ({ events: DEMO_EVENTS, now: DEMO_NOW, tz: TZ, notes: 1, halo: true }) },
   { name: 'needs', title: 'Urgent, several items', desc: 'Urgent items pulse slowly. With more than one, “1 of 3” shows; swipe or tap it to move through them. Up to three actions, plus Got it.',

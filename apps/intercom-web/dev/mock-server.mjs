@@ -3,6 +3,8 @@
 // Pair with code "demo-code". Typing "long: ..." returns a long reply; "/revoke" closes with 4401.
 // Notifications (E89): a sample one appears ~2.5 s after connect. Type `notify: Title` (attention, 2 actions),
 // `notify!: Title` (urgent, 3 actions), `note: Title` (info) to raise more; `clear:` resolves them all.
+// Desk mode (E94): GET /api/v1/intercom/desk and `desk` events. Type `desk: needs` (a session waiting on you),
+// `desk: stuck`, `desk: delay N` (train delayed N min), `desk: leave N` (leave in N min; negative = late), `desk: clear`.
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -34,6 +36,35 @@ function calendar() {
   ] };
 }
 
+// Desk mode mock: a few sessions and a train whose leave time is `leaveMin` from when it was set.
+const sess = (id, title, state, minsAgo) => ({ id, title, state, channel: 'telegram:peggy', since: new Date(Date.now() - minsAgo * 60000).toISOString() });
+const baseSessions = () => [sess('s-main', 'Main', 'working', 3), sess('s-hl', 'Highlander Replacement', 'working', 12), sess('s-paper', 'Paper Inbox', 'finished', 4), sess('s-kindle', 'Kindle', 'idle', 95)];
+let deskState = { extra: [], delay: 0, leaveAt: Date.now() + 45 * 60000 };
+function deskPayload() {
+  const sessions = [...deskState.extra, ...baseSessions()];
+  const rank = { stuck: 0, waiting: 1, working: 2, finished: 3, idle: 4 };
+  sessions.sort((a, b) => rank[a.state] - rank[b.state]);
+  const leave = new Date(deskState.leaveAt);
+  const departs = new Date(deskState.leaveAt + 15 * 60000);
+  return {
+    generated_at: new Date().toISOString(), sessions,
+    counts: { working: sessions.filter((x) => x.state === 'working').length, needs_you: sessions.filter((x) => x.state === 'waiting' || x.state === 'stuck').length },
+    departure: { label: 'train', kind: 'train', leave_at: iso(leave), train: { number: '824', departs: iso(departs) }, ...(deskState.delay ? { delay_min: deskState.delay } : {}) },
+  };
+}
+const pushDesk = () => bcast('desk', deskPayload());
+function typedDesk(body) {
+  const m = body.match(/^desk:\s*(\w+)\s*(-?\d+)?/i); if (!m) return false;
+  const cmd = m[1].toLowerCase(); const n = m[2] === undefined ? null : Number(m[2]);
+  if (cmd === 'needs') deskState.extra.push(sess(`s-wait-${deskState.extra.length}`, 'Intercom Build', 'waiting', 2));
+  else if (cmd === 'stuck') deskState.extra.push(sess(`s-stuck-${deskState.extra.length}`, 'Email scan', 'stuck', 8));
+  else if (cmd === 'delay') deskState.delay = n ?? 5;
+  else if (cmd === 'leave') deskState.leaveAt = Date.now() + (n ?? 12) * 60000;
+  else if (cmd === 'clear') deskState = { extra: [], delay: 0, leaveAt: Date.now() + 45 * 60000 };
+  else return false;
+  pushDesk(); return true;
+}
+
 const server = http.createServer((req, res) => {
   const u = new URL(req.url, 'http://x');
   const json = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
@@ -44,6 +75,7 @@ const server = http.createServer((req, res) => {
     }); return;
   }
   if (u.pathname === '/api/v1/intercom/today') return authed ? json(200, calendar()) : json(401, {});
+  if (u.pathname === '/api/v1/intercom/desk') return authed ? json(200, deskPayload()) : json(401, {});
   if (u.pathname === '/api/v1/intercom/health') return authed ? json(200, { surface_id: 'mock-surface', follow: { contact: 'chris', channel: 'telegram:peggy' }, version: 'mock', connected_clients: wss.clients.size }) : json(401, {});
   if (u.pathname === '/intercom') { res.writeHead(301, { Location: '/intercom/' }); return res.end(); }
   if (u.pathname.startsWith('/intercom/')) {
@@ -123,6 +155,7 @@ wss.on('connection', (ws) => {
       if (!reset) durable.filter((e) => e.seq > f.cursor).forEach((e) => out(ws, e));
       out(ws, { type: 'event', event: 'activity', data: { state: 'idle', status_text: null, interaction_id: null } });
       out(ws, { type: 'event', event: 'calendar', data: calendar() });
+      out(ws, { type: 'event', event: 'desk', data: deskPayload() });
       for (const n of notes.values()) if (n.state !== 'resolved' && n.state !== 'expired') out(ws, { type: 'event', event: 'notification', data: n });
       sendAttention(ws);
       setTimeout(() => { if (![...notes.values()].length) raise('Leave for the dentist', { body: 'Dr. Alvarez at 9:00, 18 min drive', actions: [{ label: 'Leaving now', style: 'success' }, { label: 'Snooze 10' }] }); }, 2500);
@@ -143,6 +176,7 @@ wss.on('connection', (ws) => {
     } else if (f.type === 'send') {
       if (f.body === '/revoke') return ws.close(4401);
       if (/^clear:/i.test(f.body || '')) { out(ws, { type: 'ack', client_msg_id: f.client_msg_id, status: 'queued', message_id: `in-${Date.now()}`, interaction_id: 'x' }); for (const n of [...notes.values()]) setState(n, 'resolved'); return; }
+      if (typedDesk(f.body || '')) return out(ws, { type: 'ack', client_msg_id: f.client_msg_id, status: 'queued', message_id: `in-${Date.now()}`, interaction_id: 'x' });
       if (typedNotify(f.body || '')) return out(ws, { type: 'ack', client_msg_id: f.client_msg_id, status: 'queued', message_id: `in-${Date.now()}`, interaction_id: 'x' });
       if (seen.has(f.client_msg_id)) return out(ws, seen.get(f.client_msg_id));
       const iid = `int-${Date.now()}`;

@@ -44,6 +44,9 @@ adapters:
 | `event_retention_days` | `7` | How long a screen that was offline can catch up on missed replies |
 | `calendar.calendars` | all | Calendars to draw on the ring, by the names Calendar uses. Case, emoji and punctuation don't matter |
 | `calendar.cache_s` | `300` | How long the calendar is reused |
+| `desk.commute_file` | `integrations/intercom/commute.json` | Train timetable and holidays behind the "Leave in N min" line |
+| `desk.plan_file` | `/Users/chrispatten/workspace/peggy-claude-code/memory/project_commute_plan.md` | Office-day plan (fenced `commute-plan` block: office days, AM/PM train, lead time, per-date overrides). Trains show only on office days; re-read when the file changes |
+| `desk.event_travel_min` | `20` | Rough travel time for a calendar event with a location (an estimate; no routing service) |
 | `surfaces[].follow` | | `contact`, `channel`, and optionally `topic` to follow a Telegram forum topic |
 
 Restart the bus after you add the block. Intercom's pages (`/intercom` and `/api/v1/intercom`) are the only ones a screen needs, so if you use Tailscale serve, expose just those two paths. They don't use `bus.auth_token`; each screen has its own token.
@@ -88,7 +91,9 @@ Intercom is a small round display for your agent: your day around the rim, what 
 | Reply | The agent answered something you sent from Intercom. A short line first; tap to read all of it and scroll; double-tap to dismiss. |
 | Done | A check mark and a few words for about two seconds after the exchange ends. |
 | Needs you | Something is waiting for you. The dial glows amber (an urgent item pulses), with a title, one line of detail and up to three buttons plus **Got it**. |
-| Quiet | Between 10 PM and 6:30 AM. A dim clock; nothing glows, and a line shows how many items are waiting. |
+| Agent status | A desk face you swipe to. A ring with one segment per agent session (teal working, amber waiting on you, red stuck, brass just finished, grey idle), with counts such as "3 working" and "1 needs you" in the middle. Tap for a list of sessions. |
+| Day-dial with leave-by | The day-dial with a "Leave in 12 min" line, a rim that goes green, amber, then red as the time nears, and the next train (for example "5:37 train"). Swipe to switch between the two desk faces. |
+| Quiet | Between 10 PM and 6:30 AM. Colour only, no text: teal is calm, amber needs you, red is stuck, brass is a notice waiting. |
 
 #### Notifications
 
@@ -98,7 +103,7 @@ If the one-line detail is cut short, "Tap to read" appears under it; tap the tex
 
 A low-priority item does not glow. Instead a small brass dot and "1 note" appear under the date on the day-dial; tap it to read the item. A thin amber line around the day-dial's rim shows that something that needs you is waiting.
 
-From 10 PM to 6:30 AM the dial stays dark: no glow, and the Quiet screen says how many items are waiting. The hours are fixed for now and follow the phone's clock.
+From 10 PM to 6:30 AM the dial stays dark: no glow, and the Quiet screen is a slowly drifting colour with no text. The hours are fixed for now and follow the phone's clock.
 
 The app keeps your phone's screen on while it is open, except during those quiet hours, when the phone is allowed to sleep. On iPhone this needs iOS 18.4 or later for an app on the Home Screen, and Low Power Mode may still dim and lock the screen.
 

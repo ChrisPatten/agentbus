@@ -94,3 +94,28 @@ form.send button:disabled{opacity:.4}
 .calrow{display:flex;align-items:center;gap:12px;justify-content:space-between}
 .calrow button{font-size:20px;width:44px;height:36px;border-radius:18px;border:1px solid #3a352d;background:none;color:var(--cream);font-family:inherit}
 .calhint{margin-top:6px;font-size:12px;max-width:200px}
+/* Desk mode (E94) */
+.leavey{letter-spacing:.5px;font-size:30px;font-weight:600}
+.leavey.calm{color:var(--green)}.leavey.amber{color:var(--amber)}.leavey.red,.leavey.pulse,.leavey.late{color:var(--red)}.leavey.dim{color:var(--dim);font-weight:500}
+.trainline{font-size:28px;font-weight:600;color:var(--dim);position:relative;margin-top:6px}
+.trainline.delayed{color:var(--amber)}
+.prs-pulse{animation:prspulse 1.6s ease-in-out infinite}
+@keyframes prspulse{50%{opacity:.35}}
+.scount{position:relative;font-weight:600;line-height:1.1}
+.scount.working{font-size:60px;color:#5fc0b3}.scount.needs{font-size:44px;color:var(--amber);margin-top:8px}.scount.quiet{font-size:60px;color:var(--dim)}
+.breathe{animation:breathe 5s ease-in-out infinite}
+@keyframes breathe{0%,100%{opacity:.25}50%{opacity:1}}
+.slist{position:relative;display:flex;flex-direction:column;gap:2px;width:280px}
+.srow{display:flex;align-items:center;gap:12px;text-align:left;height:56px}
+.srow[data-act]{cursor:pointer}
+.sdot{flex:none;width:16px;height:16px;border-radius:50%}
+.st{min-width:0}.stitle{font-size:30px;font-weight:600;line-height:1.1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:240px}
+.ssub{font-size:26px;color:var(--dim);line-height:1.1}.srow.needs .ssub{color:var(--amber)}
+.qface{position:absolute;inset:0;overflow:hidden;border-radius:50%;background:#000}
+.qface i{position:absolute;left:23px;top:23px;width:420px;height:420px;border-radius:50%;background:radial-gradient(circle,var(--qc) 0,transparent 66%);opacity:var(--qa);filter:blur(34px)}
+.qface .q1{animation:qd1 74s ease-in-out infinite alternate}
+.qface .q2{animation:qd2 97s ease-in-out infinite alternate;opacity:calc(var(--qa)*.7)}
+@keyframes qd1{from{transform:translate(-90px,-60px) scale(.9)}to{transform:translate(70px,80px) scale(1.15)}}
+@keyframes qd2{from{transform:translate(80px,60px) scale(1.1)}to{transform:translate(-70px,-90px) scale(.85)}}
+@media (prefers-reduced-motion:reduce){.breathe,.prs-pulse,.qface i{animation:none!important}.breathe{opacity:.85}.prs-pulse{opacity:1}}
+.face .scount,.face .leavey,.face .trainline,.face .stitle,.face .ssub{text-shadow:0 0 3px #000,0 0 6px #000,0 0 10px #000,0 0 16px #000}

@@ -112,6 +112,15 @@ describe('Intercom routes', () => {
       expect(res.status).toBe(200);
       expect(await res.json()).toMatchObject({ date: '2026-11-01', tz: 'America/New_York', events: [{ title: 'Dentist' }] });
     });
+    it('serves the desk summary behind the surface token', async () => {
+      expect((await fetch(`${base}/api/v1/intercom/desk`)).status).toBe(401);
+      const res = await fetch(`${base}/api/v1/intercom/desk`, { headers: { authorization: `Bearer ${TOKEN}` } });
+      expect(res.status).toBe(200);
+      const body = await res.json() as { sessions: unknown[]; counts: unknown; departure: unknown };
+      expect(body.sessions).toEqual([]);
+      expect(body.counts).toEqual({ working: 0, needs_you: 0 });
+      expect(body).toHaveProperty('departure');
+    });
     it('answers 503 when the calendar cannot be read', async () => {
       const failing = new IntercomService({ config: cfg, db, env: { T: TOKEN }, log: () => {}, calendar: { today: async () => { throw new Error('x'); } } as unknown as CalendarFeed,
         submitInbound: async () => ({ ok: true, queued: false, reason: 'x' }) });

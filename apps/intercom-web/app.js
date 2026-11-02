@@ -1,7 +1,7 @@
 // Intercom web app: wires the socket, state and dial screens together.
 import { render } from './screens.js';
 import { IntercomSocket, store, apiUrl } from './socket.js';
-import { parsePairInput, replyIsFresh, applyNotification, activeItems, needsList, infoList, attentionLevel, cycleId, isQuietHours, waitingCount, pickScreen, LANDSCAPE_QUERY, physicalDialSize, clampPpi, DIAL_INCHES, DEFAULT_PPI } from './logic.js';
+import { parsePairInput, replyIsFresh, applyNotification, activeItems, needsList, infoList, attentionLevel, cycleId, isQuietHours, pickScreen, deskCounts, departureView, chooseDeskFace, nextFace, quietTone, matchNotice, LANDSCAPE_QUERY, physicalDialSize, clampPpi, DIAL_INCHES, DEFAULT_PPI } from './logic.js';
 import { runDemo, STEPS } from './demo.js';
 import { createWakeKeeper } from './wake.js';
 
@@ -17,6 +17,7 @@ const S = {
   pair: loadPair(), conn: 'offline', offlineSince: Date.now(), activity: { state: 'idle', status_text: null },
   reply: null, expanded: false, doneUntil: 0, doneWord: DONE_WORDS[0], calendar: null, sentAt: 0, pairError: '', lastReplyId: null,
   notes: new Map(), hidden: new Map(), attention: null, nSel: null, nOpen: null, noteOpen: false, ownIids: new Set(), swipedAt: 0,
+  desk: null, face: loadFace(), statusList: false,
 };
 const forceQuiet = params.has('quiet') ? params.get('quiet') !== '0' : null; // dev: ?quiet previews the Quiet screen, ?quiet=0 shows the day screens at any hour
 let sock = null;
@@ -24,6 +25,20 @@ let lastHtml = '';
 let lastName = '';
 let replyTimer = null;
 const wake = createWakeKeeper({ tz: TZ_FALLBACK, forceQuiet });
+
+// Desk faces (E94): the user swipes to a face and it stays. ?face=status|day sets it too (dev, and for the mock server).
+function loadFace() {
+  try {
+    const q = new URLSearchParams(location.search).get('face');
+    if (q === 'status' || q === 'day') { localStorage.setItem('intercom.face', q); return q; }
+    return localStorage.getItem('intercom.face') === 'status' ? 'status' : 'day';
+  } catch { return 'day'; }
+}
+function setFace(face) {
+  S.face = face; S.statusList = false; S.swipedAt = Date.now();
+  store.set('intercom.face', face);
+  update();
+}
 
 function loadPair() {
   try { const p = JSON.parse(store.get('intercom.pair') || 'null'); return p && p.token ? p : null; } catch { return null; }
@@ -89,12 +104,16 @@ function computeView(now = new Date()) {
   const running = a.state === 'running' || a.state === 'queued';
   const own = running && !!a.interaction_id && S.ownIids.has(a.interaction_id);
   const sent = !!S.sentAt && Date.now() - S.sentAt < 6000;
-  const name = pickScreen({
+  let name = pickScreen({
     paired: !!S.pair,
     offline: S.conn !== 'online' && !S.reply && Date.now() - S.offlineSince > 1500,
     reply: !!S.reply, ownWorking: own || (sent && !running), done: Date.now() < S.doneUntil,
     needs: list.length > 0, quiet, otherWorking: running,
   });
+  if (name === 'idle' || name === 'quiet') {
+    const f = chooseDeskFace({ quiet: name === 'quiet', preferred: S.face });
+    name = f === 'quiet' ? 'quiet' : f === 'status' ? 'status' : 'idle';
+  }
   switch (name) {
     case 'pairing': return [name, { error: S.pairError }];
     case 'offline': return [name, { connecting: S.conn === 'connecting' }];
@@ -102,8 +121,12 @@ function computeView(now = new Date()) {
     case 'working': return [name, { status: running ? a.status_text : 'Sent' }];
     case 'done': return [name, { word: S.doneWord }];
     case 'needs': return [name, { item: list.find((n) => n.id === S.nSel), index: list.findIndex((n) => n.id === S.nSel), total: list.length, expanded: S.nOpen === S.nSel }];
-    case 'quiet': return [name, { now, tz, waiting: !S.attention ? items.length : waitingCount(S.attention, items, S.hidden) }];
-    default: return [name, { events: cal ? cal.events : [], now, tz, calendarKnown: !!cal, notes: infoList(items).length, halo: attentionLevel(attn) !== 'none' }];
+    case 'quiet': {
+      const sessions = (S.desk && S.desk.sessions) || [];
+      return [name, { tone: quietTone({ counts: deskCounts(S.desk), stuck: sessions.some((x) => x.state === 'stuck'), attention: attn.length, notes: infoList(items).length }) }];
+    }
+    case 'status': return [name, { desk: S.desk, now, list: S.statusList, noticeFor: (sess) => !!matchNotice(sess, items) }];
+    default: return [name, { events: cal ? cal.events : [], now, tz, calendarKnown: !!cal, notes: infoList(items).length, halo: attentionLevel(attn) !== 'none', departure: departureView(S.desk && S.desk.departure, now.getTime(), tz) }];
   }
 }
 
@@ -169,6 +192,7 @@ function onEvent(name, d) {
       S.reply = d; S.expanded = false; S.sentAt = 0; armReplyTimer();
       break;
     case 'calendar': S.calendar = d; break;
+    case 'desk': S.desk = d; break;
     default: break;
   }
   update();
@@ -182,7 +206,7 @@ function startSocket() {
       onState(st) { if (S.conn === 'online' && st !== 'online') S.offlineSince = Date.now(); S.conn = st; update(); if (st !== 'online') later(1600); },
       onEvent,
       onWelcome() { for (const id of S.hidden.keys()) sock.ackNotification(id); },
-      onReset() { S.notes.clear(); S.hidden.clear(); S.attention = null; S.reply = null; S.calendar = null; S.activity = { state: 'idle', status_text: null }; },
+      onReset() { S.notes.clear(); S.hidden.clear(); S.attention = null; S.reply = null; S.calendar = null; S.desk = null; S.activity = { state: 'idle', status_text: null }; },
       onAck(f) { if (f.interaction_id && f.status === 'queued') S.ownIids.add(f.interaction_id); if (f.status === 'rejected') { S.sentAt = 0; note(`Not sent: ${f.reason || 'rejected'}`); } },
       onUnauthorized() { unpair('Pairing was rejected. Open a new pairing link.'); },
       onError(f) { if (f.code === 'notification_not_found') update(); if (f.code === 'unauthorized') unpair('Pairing was rejected. Open a new pairing link.'); },
@@ -190,6 +214,7 @@ function startSocket() {
   });
   sock.start();
   fetchToday();
+  fetchDesk();
 }
 
 async function fetchToday() {
@@ -197,6 +222,15 @@ async function fetchToday() {
   try {
     const r = await fetch(apiUrl('api/v1/intercom/today'), { headers: { Authorization: `Bearer ${S.pair.token}` } });
     if (r.ok) { const c = await r.json(); if (!S.calendar || (c.generated_at || '') >= (S.calendar.generated_at || '')) S.calendar = c; update(); }
+  } catch { /* offline: fine */ }
+}
+
+// Poll fallback for the `desk` event (every 60 s, and on becoming visible).
+async function fetchDesk() {
+  if (!S.pair) return;
+  try {
+    const r = await fetch(apiUrl('api/v1/intercom/desk'), { headers: { Authorization: `Bearer ${S.pair.token}` } });
+    if (r.ok) { const d = await r.json(); if (!S.desk || (d.generated_at || '') >= (S.desk.generated_at || '')) S.desk = d; update(); }
   } catch { /* offline: fine */ }
 }
 
@@ -223,7 +257,7 @@ async function pair(code) {
 function unpair(msg = '') {
   sock?.stop(); sock = null;
   ['intercom.pair', 'intercom.cursor', 'intercom.outbox'].forEach(store.del);
-  Object.assign(S, { pair: null, conn: 'offline', reply: null, calendar: null, activity: { state: 'idle', status_text: null }, pairError: msg, sentAt: 0, doneUntil: 0, notes: new Map(), hidden: new Map(), attention: null, noteOpen: false });
+  Object.assign(S, { pair: null, conn: 'offline', reply: null, calendar: null, desk: null, statusList: false, activity: { state: 'idle', status_text: null }, pairError: msg, sentAt: 0, doneUntil: 0, notes: new Map(), hidden: new Map(), attention: null, noteOpen: false });
   update();
 }
 
@@ -239,7 +273,13 @@ function cycle(delta) {
   update();
 }
 function hide(item) { S.hidden.set(item.id, item.updated_at || ''); }
-function onAct({ act, i }) {
+function onAct({ act, i, id }) {
+  if (act === 'session') {
+    const sess = ((S.desk && S.desk.sessions) || []).find((x) => x.id === id);
+    const notice = matchNotice(sess, activeItems(S.notes, Date.now(), S.hidden));
+    if (notice) { S.noteOpen = true; S.nSel = notice.id; S.statusList = false; update(); }
+    return;
+  }
   if (act === 'note') { const info = infoList(activeItems(S.notes, Date.now(), S.hidden)); if (info.length) { S.noteOpen = true; S.nSel = info[0].id; update(); } return; }
   if (act === 'cycle') { cycle(1); return; }
   if (act === 'expand') { S.nOpen = S.nSel; update(); return; }
@@ -299,6 +339,7 @@ function wireUi() {
       if (dbl) { dismissReply(); return; }
       if (!S.expanded) { S.expanded = true; armReplyTimer(); update(); }
     } else if (Date.now() < S.doneUntil) { S.doneUntil = 0; update(); }
+    else if (lastName === 'status') { S.statusList = !S.statusList; update(); }
   });
   // Swipe left or right through several notifications.
   let sx = null;
@@ -307,6 +348,11 @@ function wireUi() {
     if (sx === null) return;
     const dx = ev.clientX - sx; sx = null;
     if (Math.abs(dx) > 40 && lastName === 'needs') { S.swipedAt = Date.now(); cycle(dx < 0 ? 1 : -1); }
+    else if (Math.abs(dx) > 40 && (lastName === 'idle' || lastName === 'status')) setFace(nextFace(S.face));
+  });
+  document.addEventListener('keydown', (ev) => {
+    if (ev.target && ev.target.tagName === 'INPUT') return;
+    if ((ev.key === 'ArrowLeft' || ev.key === 'ArrowRight') && (lastName === 'idle' || lastName === 'status')) setFace(nextFace(S.face));
   });
   $('dial').addEventListener('scroll', () => { if (S.reply) armReplyTimer(); }, true);
 }
@@ -325,7 +371,7 @@ function boot() {
   wireCalibrate();
   wireUi();
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') { wake.evaluate(); sock?.nudge(); fetchToday(); update(); }
+    if (document.visibilityState === 'visible') { wake.evaluate(); sock?.nudge(); fetchToday(); fetchDesk(); update(); }
   });
   window.addEventListener('online', () => sock?.nudge());
   wake.evaluate();
@@ -354,8 +400,9 @@ function boot() {
     const c = takePairCode();
     if (c) { unpair(); pair(c); }
   });
-  setInterval(update, 30000);
+  setInterval(update, 15000);
   setInterval(() => { if (S.pair) fetchToday(); }, 300000);
+  setInterval(() => { if (S.pair) fetchDesk(); }, 60000);
 }
 
 boot();

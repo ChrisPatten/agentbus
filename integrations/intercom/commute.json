@@ -1,0 +1,26 @@
+{
+  "_comment": "Desk-mode leave-by timetable (MBTA Providence/Stoughton). Source: peggy data/reference_commute.md. Update when the schedule changes. Times are local wall-clock in `timezone`. Which train shows on which day comes from the office-day plan (desk.plan_file); leave_at = departs - plan leave_before_min. Trains renumbered the week of Oct 26, 2026.",
+  "timezone": "America/New_York",
+  "holidays": [
+    "2026-11-26", "2026-11-27", "2026-12-24", "2026-12-25", "2026-12-28", "2026-12-29", "2026-12-30", "2026-12-31",
+    "2027-01-01", "2027-01-18", "2027-02-15", "2027-05-31", "2027-06-18", "2027-07-05", "2027-09-06",
+    "2027-11-25", "2027-11-26", "2027-12-24", "2027-12-27", "2027-12-28", "2027-12-29", "2027-12-30", "2027-12-31"
+  ],
+  "am": [
+    { "number": "6006", "departs": "06:32", "arrives": "07:19" },
+    { "number": "6008", "departs": "07:01", "arrives": "07:41" },
+    { "number": "6010", "departs": "07:42", "arrives": "08:29" },
+    { "number": "6012", "departs": "08:01", "arrives": "08:40" },
+    { "number": "6014", "departs": "08:37", "arrives": "09:22" },
+    { "number": "6016", "departs": "09:41", "arrives": "10:26" }
+  ],
+  "pm": [
+    { "number": "6021", "departs": "15:20", "arrives": "15:59" },
+    { "number": "6023", "departs": "15:47", "arrives": "16:20" },
+    { "number": "6025", "departs": "16:15", "arrives": "16:54" },
+    { "number": "6027", "departs": "16:52", "arrives": "17:25" },
+    { "number": "6029", "departs": "17:37", "arrives": "18:18" },
+    { "number": "6031", "departs": "18:22", "arrives": "19:01" },
+    { "number": "6033", "departs": "19:18", "arrives": "20:01" }
+  ]
+}

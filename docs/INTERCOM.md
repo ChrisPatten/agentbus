@@ -39,6 +39,9 @@ adapters:
 | `calendar.cache_s` | `300` | Seconds a `calctl` result is reused |
 | `calendar.calctl_path` | `calctl` | Binary to run |
 | `calendar.timezone` | `America/New_York` | Zone for "today" and the event offsets |
+| `desk.commute_file` | `integrations/intercom/commute.json` | Desk-mode timetable (E94): MBTA trains and holidays. See Desk mode below |
+| `desk.plan_file` | `/Users/chrispatten/workspace/peggy-claude-code/memory/project_commute_plan.md` | Office-day plan: a Markdown file with a fenced `commute-plan` block (office days, AM/PM train, lead time, per-date overrides). Re-read when its modification time changes |
+| `desk.event_travel_min` | `20` | Rough travel time for a calendar event that has a location. An **estimate**: no routing service is used |
 | `surfaces[].id` | | Lowercase letters, digits, `-`, `_` |
 | `surfaces[].token_env` | | Name of the env var holding the surface token. A surface whose variable is unset or shorter than 32 characters is skipped with a warning |
 | `surfaces[].profile` | `round466` | Display profile hint for the client |
@@ -71,6 +74,7 @@ The CLI reads the config the way bus-core does, so the environment variables the
 | `POST /api/v1/intercom/pair` | none | See above |
 | `GET /api/v1/intercom/health` | Bearer surface token | `{surface_id, follow, version, connected_clients}` |
 | `GET /api/v1/intercom/today` | Bearer | Calendar payload below; `503` if `calctl` fails and nothing is cached |
+| `GET /api/v1/intercom/desk` | Bearer | Desk-mode summary (E94), below |
 
 Calendar payload (from `calctl show date:YYYY-MM-DD --output json`, filtered to the configured calendars, titles untouched, all-day events first, then by start). `calctl` reports no colours, so each calendar gets a stable colour from a fixed palette.
 
@@ -78,6 +82,27 @@ Calendar payload (from `calctl show date:YYYY-MM-DD --output json`, filtered to 
 {"date":"2026-11-01","tz":"America/New_York","generated_at":"…",
  "events":[{"id":"…","title":"Busy","start":"2026-11-01T09:00:00-05:00","end":"…","all_day":false,"calendar":"Work","color":"#8e8e93"}]}
 ```
+
+Events from `calctl` that have a location carry it as an optional `location` string (used for the leave-by estimate).
+
+## Desk mode (E94)
+
+`GET /api/v1/intercom/desk` (same surface token as `/today`, no new public route) is the read-only summary behind the agent-status ring and the leave-by line. It is transport-neutral so the Compact reuses it.
+
+```json
+{"generated_at":"…",
+ "sessions":[{"id":"agent:peggy-pool-2","title":"Intercom Build","state":"waiting","channel":"telegram:peggy","since":"2026-11-02T15:40:00.000Z"}],
+ "counts":{"working":3,"needs_you":1},
+ "departure":{"label":"5:37 train","leave_at":"2026-11-02T17:07:00-05:00","kind":"train","train":{"number":"867","departs":"2026-11-02T17:37:00-05:00"}}}
+```
+
+- **Sessions** are the leased cc-pool panes (read through the lease store, approvals, open choice prompts and watchdog incidents, never message text). `state`: `stuck` (dead pane with a conversation, or an open watchdog incident), `waiting` (a pending approval or open choice prompt), `working` (launching, or a delivered message with no turn end yet), `finished` (a turn ended in the last 10 minutes), `idle`. Titles are the app topic title, the stored forum-topic name, or the channel. Sorted stuck, waiting, working, finished, idle; at most 12 (counts cover all). cc-headless instances are not included.
+- **`needs_you`** counts waiting plus stuck.
+- **`departure`** is null unless there is a train for today or a located event. Candidates are (1) the train line, only on an **office day** per the plan file, and (2) the next timed event with a location (start minus `desk.event_travel_min` minus a fixed 5-minute buffer; virtual locations such as Zoom or Teams are skipped). The earliest leave time that is not more than 10 minutes past wins. `leave_at` and `train.departs` are the scheduled times; an optional `delay_min` means clients add it to both. The bus has no delay source today, so it never sets `delay_min`; the dev mock does.
+- **Office-day plan** (`desk.plan_file`, the peggy repo's `memory/project_commute_plan.md`). Its last fenced block, tagged `commute-plan`, is YAML-like: `office_days: [tue, thu]`, `am_train: "6008"`, `pm_train: null`, `leave_before_min: 15`, `overrides: [{date: "2026-11-05", mode: "wfh"}, {date: "2026-11-06", mode: "office", am_train: "6010", pm_train: "6029"}]`. A date is an office day when its weekday is in `office_days` or an override has `mode: office`; an override with `mode: wfh` cancels it; a holiday in the timetable cancels it regardless. On an office day the AM train line is `am_train` (leave time = departs minus `leave_before_min`) and the PM line is `pm_train`; when `pm_train` is null there is no PM line (nothing is guessed). An override may carry its own `am_train`/`pm_train`; missing keys fall back to the plan's. On non-office days there is no train line at all. The file is stat-ed on each desk tick and re-parsed only when its mtime changes. A missing or malformed file is logged once and means no train line; located calendar events still produce leave-by lines.
+- **Timetable** `integrations/intercom/commute.json` (copied from the peggy repo's `data/reference_commute.md`; update when the MBTA schedule changes; trains renumbered the week of Oct 26, 2026, AM 6006 to 6016, PM 6021 to 6033). It lists trains and holidays only; which train shows when comes from the plan. BCG holidays through 2027 are listed in it.
+- **Event** `desk`: the same payload, sent after `calendar` on `welcome`, then whenever it changes (checked every 5 seconds, so at most one per 5 s). Ephemeral (no `seq`).
+- Face down turning the screen off is a device-only behaviour (the Compact's motion sensor); the web client does not implement it.
 
 ## WebSocket protocol v1 (`/api/v1/intercom/ws`)
 
@@ -100,6 +125,7 @@ After `welcome` the server replays durable events with `seq > cursor` (oldest fi
 | `interaction` | no | `{interaction_id, state: open\|closed}` |
 | `reply` | yes | `{message_id, interaction_id, glance, body, has_attachments, more_on_telegram, created_at}`. Only for agent outbound in the followed conversation while a window is open. `body` is plain text (markdown stripped, bullets as `•`), cut to 1,200 characters at a word boundary. `more_on_telegram` is true for attachments, choices, other Telegram-native messages, or a cut body |
 | `calendar` | no | The calendar payload. After `welcome`, then every 5 minutes and on date change |
+| `desk` | no | The desk-mode summary (E94). After `calendar` on `welcome`, then on change, at most once per 5 s |
 
 **Surface to server**
 
