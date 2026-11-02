@@ -132,7 +132,9 @@ Log files: `~/.agentbus/logs/bus-core-out.log` and `~/.agentbus/logs/bus-core-er
 
 ### Safe restart
 
-`scripts/safe_restart.sh [--notify-channel <channel>] [--notify-topic <topic>]` restarts bus-core from a detached process, waits for `/api/v1/health` to report healthy, and rolls back to `main` if it does not. Before restarting it creates a one-shot schedule with a 45-minute staleness ceiling, so the agent reports back in the conversation that asked for the restart even if the script itself is killed. Logs go to `logs/safe_restart/<timestamp>.log`. The script header describes the full sequence.
+`scripts/safe_restart.sh [--dry-run] [--notify-channel <channel>] [--notify-topic <topic>]` restarts bus-core from a detached process, waits for `/api/v1/health` to report healthy, and rolls back to `main` if it does not. Before restarting it creates a one-shot schedule with a 45-minute staleness ceiling, so the agent reports back in the conversation that asked for the restart even if the script itself is killed. Logs go to `logs/safe_restart/<timestamp>.log`. The script header describes the full sequence.
+
+The script picks its pm2 client in this order: `PM2_BIN`, `pm2` on `PATH`, `/opt/homebrew/bin/pm2`, then the repo-local `node_modules/.bin/pm2`, skipping any client whose `jlist` prints the "In-memory PM2 is out-of-date" banner (a client older than the daemon); the choice and version are logged at start. `HEALTH_TIMEOUT_S` (default 90) is overridable by environment and progress is logged every 15 s. Rollback to `main` does not run `npm install` (it can remove packages the original branch needs); the log prints the exact commands to return (`git checkout <branch> && git stash pop && npm install`), and only tracked changes are stashed. `--dry-run` runs in the foreground, resolves pm2 and polls health without restarting anything. Test the pm2-noise handling with `scripts/tests/test_safe_restart_pm2_noise.sh`.
 
 ## Configuration changes
 
