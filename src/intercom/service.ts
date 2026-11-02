@@ -30,7 +30,7 @@ import { computeConversationId } from '../pipeline/conversation-id.js';
 import { renderSystemBlock } from '../core/system-block.js';
 import { VERSION } from '../version.js';
 import { CalendarFeed, type CalendarPayload } from './calendar.js';
-import { buildDeparture, buildDeskPayload, deskSignature, loadCommute, type CommuteConfig, type DeskPayload, type DeskSession } from './desk.js';
+import { buildDeparture, buildDeskPayload, createPlanSource, deskSignature, loadCommute, type CommuteConfig, type CommutePlan, type DeskPayload, type DeskSession } from './desk.js';
 import { resolveGlance, surfaceBody } from './glance.js';
 import {
   acknowledgeNotification, attentionFor, expireDue, getNotification, isTerminal, openForSurface, publicNotification,
@@ -84,6 +84,8 @@ export interface IntercomDeps {
   deskSessions?: () => DeskSession[];
   /** E94 — leave-by timetable; loaded from `adapters.intercom.desk.commute_file` when absent. */
   commute?: CommuteConfig | null;
+  /** E94 — office-day plan source; built from `adapters.intercom.desk.plan_file` when absent. */
+  plan?: { get(): CommutePlan | null };
   env?: NodeJS.ProcessEnv;
   now?: () => number;
   log?: (line: string) => void;
@@ -124,6 +126,7 @@ export class IntercomService {
   private deskTimer: NodeJS.Timeout | null = null;
   private lastDeskSig = '';
   private readonly commute: CommuteConfig | null;
+  private readonly plan: { get(): CommutePlan | null };
   private lastCalendarDate = '';
   private readonly writeHits = new Map<string, number[]>();
 
@@ -131,6 +134,7 @@ export class IntercomService {
     const env = deps.env ?? process.env;
     this.calendar = deps.calendar ?? new CalendarFeed(deps.config.calendar);
     this.commute = deps.commute !== undefined ? deps.commute : loadCommute(deps.config.desk.commute_file, (l) => this.log(l));
+    this.plan = deps.plan ?? createPlanSource(deps.config.desk.plan_file, (l) => this.log(l));
     for (const s of deps.config.surfaces) {
       const token = env[s.token_env];
       if (!token || token.length < 32) {
@@ -278,7 +282,7 @@ export class IntercomService {
     try { events = (await this.calendar.today()).events; } catch { /* trains still work without the diary */ }
     return buildDeskPayload({
       now, sessions: this.deps.deskSessions?.() ?? [],
-      departure: buildDeparture({ now, commute: this.commute, events, eventTravelMin: this.deps.config.desk.event_travel_min, tz: this.deps.config.calendar.timezone }),
+      departure: buildDeparture({ now, commute: this.commute, plan: this.plan.get(), events, eventTravelMin: this.deps.config.desk.event_travel_min, tz: this.deps.config.calendar.timezone }),
     });
   }
 

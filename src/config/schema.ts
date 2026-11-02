@@ -623,8 +623,10 @@ export const IntercomAdapterSchema = z.object({
   }).prefault({}),
   /** Desk mode (E94): the leave-by estimate on the day face. */
   desk: z.object({
-    /** Timetable JSON (trains, travel minutes, buffer). Default: integrations/intercom/commute.json in the repo. */
+    /** Timetable JSON (trains, holidays). Default: integrations/intercom/commute.json in the repo. */
     commute_file: z.string().min(1).optional(),
+    /** Office-day plan (Markdown with a fenced `commute-plan` block: office_days, am_train, pm_train, leave_before_min, overrides). Re-read when its mtime changes. */
+    plan_file: z.string().min(1).default('/Users/chrispatten/workspace/peggy-claude-code/memory/project_commute_plan.md'),
     /** Rough travel time for a calendar event that has a location. An estimate: no routing service is used. */
     event_travel_min: z.number().int().min(0).max(240).default(20),
   }).prefault({}),

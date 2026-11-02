@@ -1,12 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { runMigrations } from '../db/schema.js';
 import { IntercomAdapterSchema } from '../config/schema.js';
 import type { CalendarEvent, CalendarFeed } from './calendar.js';
 import {
-  buildDeparture, buildDeskPayload, classifyPane, collectDeskSessions, DEFAULT_COMMUTE_FILE, deskCounts, deskSignature, isCommuteDay,
-  loadCommute, parseCommute, sortSessions, type CommuteConfig, type DeskSession, type PaneFacts,
+  buildDeparture, buildDeskPayload, classifyPane, collectDeskSessions, DEFAULT_COMMUTE_FILE, deskCounts, createPlanSource, deskSignature, isOfficeDay,
+  loadCommute, parseCommute, parseCommutePlan, sortSessions, type CommutePlan, type CommuteConfig, type DeskSession, type PaneFacts,
 } from './desk.js';
 import { IntercomService, type Client } from './service.js';
 
@@ -51,38 +53,114 @@ describe('sessions and counts', () => {
 });
 
 const COMMUTE: CommuteConfig = {
-  timezone: 'America/New_York', buffer_min: 5, am_travel_min: 10, pm_travel_min: 25, holidays: ['2026-11-26'],
-  am: [{ number: '814', departs: '07:01' }, { number: '818', departs: '07:42' }],
-  pm: [{ number: '867', departs: '17:37' }],
+  timezone: 'America/New_York', holidays: ['2026-11-26'],
+  am: [{ number: '6008', departs: '07:01' }, { number: '6010', departs: '07:42' }],
+  pm: [{ number: '6027', departs: '16:52' }, { number: '6029', departs: '17:37' }],
 };
+const PLAN: CommutePlan = { office_days: [2, 4], am_train: '6008', pm_train: null, leave_before_min: 15, overrides: [] };
 const at = (hhmm: string, day = '2026-11-03') => new Date(`${day}T${hhmm}:00-05:00`);
 const ev = (over: Partial<CalendarEvent>): CalendarEvent => ({ id: 'e', title: 'Dentist', start: '2026-11-03T16:00:00-05:00', end: '2026-11-03T17:00:00-05:00', all_day: false, calendar: 'Home', color: '#fff', ...over });
-const dep = (now: Date, events: CalendarEvent[] = [], commute: CommuteConfig | null = COMMUTE) =>
-  buildDeparture({ now, commute, events, eventTravelMin: 20, tz: 'America/New_York' });
+const dep = (now: Date, events: CalendarEvent[] = [], plan: CommutePlan | null = PLAN, commute: CommuteConfig | null = COMMUTE) =>
+  buildDeparture({ now, commute, plan, events, eventTravelMin: 20, tz: 'America/New_York' });
+const withPlan = (o: Partial<CommutePlan>): CommutePlan => ({ ...PLAN, ...o });
 
 describe('train selection', () => {
-  it('computes leave_at as departure minus travel minus buffer', () => {
+  it('Tuesday: leave_at is departure minus leave_before_min', () => {
     const d = dep(at('06:00'))!;
     expect(d.kind).toBe('train');
     expect(d.label).toBe('7:01 train');
-    expect(d.train).toEqual({ number: '814', departs: '2026-11-03T07:01:00-05:00' });
+    expect(d.train).toEqual({ number: '6008', departs: '2026-11-03T07:01:00-05:00' });
     expect(d.leave_at).toBe('2026-11-03T06:46:00-05:00');
   });
-  it('moves to the next train once the late grace has passed', () => {
-    expect(dep(at('06:50'))!.train!.number).toBe('814'); // 4 min past leave, still within the 10 minute grace
-    expect(dep(at('06:57'))!.train!.number).toBe('818');
+  it('Thursday is an office day too', () => {
+    expect(dep(at('06:00', '2026-11-05'))!.train!.number).toBe('6008');
   });
-  it('uses the PM list with the longer walk after the AM trains', () => {
-    const d = dep(at('12:00'))!;
-    expect(d.train!.number).toBe('867');
-    expect(d.leave_at).toBe('2026-11-03T17:07:00-05:00');
+  it('keeps the late grace, then shows nothing (no PM train set)', () => {
+    expect(dep(at('06:50'))!.train!.number).toBe('6008'); // 4 min past leave, within the 10 minute grace
+    expect(dep(at('06:57'))).toBeNull();
   });
-  it('returns null after the last train, on weekends and on holidays', () => {
-    expect(dep(at('17:30'))).toBeNull();
-    expect(dep(at('06:00', '2026-11-07'))).toBeNull();
+  it('Monday is not an office day: no train, and at 2026-11-02 16:24 ET nothing is produced', () => {
+    expect(dep(at('06:00', '2026-11-02'))).toBeNull();
+    expect(dep(at('16:24', '2026-11-02'))).toBeNull();
+    expect(dep(at('16:24', '2026-11-02'), [], withPlan({ pm_train: '6027' }))).toBeNull();
+  });
+  it('null pm_train yields no PM line; a set pm_train gives one', () => {
+    expect(dep(at('12:00'))).toBeNull();
+    const d = dep(at('12:00'), [], withPlan({ pm_train: '6027' }))!;
+    expect(d.train!.number).toBe('6027');
+    expect(d.leave_at).toBe('2026-11-03T16:37:00-05:00');
+  });
+  it('a wfh override cancels an office day', () => {
+    expect(dep(at('06:00'), [], withPlan({ overrides: [{ date: '2026-11-03', mode: 'wfh' }] }))).toBeNull();
+  });
+  it('an office override adds a day and may pick its own trains', () => {
+    const plan = withPlan({ overrides: [{ date: '2026-11-02', mode: 'office', am_train: '6010', pm_train: '6029' }] });
+    expect(dep(at('06:00', '2026-11-02'), [], plan)!.train!.number).toBe('6010');
+    expect(dep(at('12:00', '2026-11-02'), [], plan)!.train!.number).toBe('6029');
+    const dflt = withPlan({ overrides: [{ date: '2026-11-02', mode: 'office' }] });
+    expect(dep(at('06:00', '2026-11-02'), [], dflt)!.train!.number).toBe('6008');
+  });
+  it('an override applies to its own date only', () => {
+    const plan = withPlan({ overrides: [{ date: '2026-11-03', mode: 'wfh' }] });
+    expect(dep(at('06:00', '2026-11-05'), [], plan)!.train!.number).toBe('6008');
+  });
+  it('holidays, weekends, a missing plan and an unknown train number give no train', () => {
     expect(dep(at('06:00', '2026-11-26'))).toBeNull();
-    expect(isCommuteDay(COMMUTE, at('06:00', '2026-11-03'))).toBe(true);
-    expect(isCommuteDay(COMMUTE, at('06:00', '2026-11-08'))).toBe(false);
+    expect(dep(at('06:00', '2026-11-26'), [], withPlan({ overrides: [{ date: '2026-11-26', mode: 'office' }] }))).toBeNull();
+    expect(dep(at('06:00', '2026-11-07'))).toBeNull();
+    expect(dep(at('06:00'), [], null)).toBeNull();
+    expect(dep(at('06:00'), [], withPlan({ am_train: '9999' }))).toBeNull();
+    expect(isOfficeDay(COMMUTE, PLAN, at('06:00', '2026-11-03'))).toBe(true);
+    expect(isOfficeDay(COMMUTE, PLAN, at('06:00', '2026-11-02'))).toBe(false);
+  });
+  it('located events still produce a leave-by on a non-office day or with no plan', () => {
+    const e = ev({ start: '2026-11-02T17:00:00-05:00', location: 'Walpole, MA' });
+    expect(dep(at('16:24', '2026-11-02'), [e])!.kind).toBe('event');
+    expect(dep(at('16:24', '2026-11-02'), [e], null, null)!.kind).toBe('event');
+  });
+});
+
+describe('commute plan', () => {
+  const doc = (body: string) => `# Plan\n\nprose\n\n\`\`\`commute-plan\n${body}\n\`\`\`\n`;
+  const VALID = `office_days: [tue, thu]
+am_train: "6008"
+pm_train: null          # unknown
+leave_before_min: 15
+overrides: [{date: "2026-11-05", mode: "wfh"}, {date: "2026-11-06", mode: "office", am_train: "6010", pm_train: "6029"}]`;
+  it('parses a valid block', () => {
+    expect(parseCommutePlan(doc(VALID))).toEqual({
+      office_days: [2, 4], am_train: '6008', pm_train: null, leave_before_min: 15,
+      overrides: [{ date: '2026-11-05', mode: 'wfh' }, { date: '2026-11-06', mode: 'office', am_train: '6010', pm_train: '6029' }],
+    });
+  });
+  it('is tolerant: numeric trains, unquoted dates, bad entries dropped, defaults applied', () => {
+    const p = parseCommutePlan(doc('office_days: [Tuesday, bogus, THU]\nam_train: 6008\noverrides:\n  - {date: 2026-11-05, mode: wfh}\n  - {date: nope, mode: wfh}\n  - {date: "2026-11-06", mode: maybe}\n  - 7'));
+    expect(p).toMatchObject({ office_days: [2, 4], am_train: '6008', pm_train: null, leave_before_min: 15 });
+    expect(p.overrides).toEqual([{ date: '2026-11-05', mode: 'wfh' }]);
+  });
+  it('throws on a missing block or a malformed one', () => {
+    expect(() => parseCommutePlan('no block here')).toThrow();
+    expect(() => parseCommutePlan(doc('office_days: [tue\n  : : ['))).toThrow();
+    expect(() => parseCommutePlan(doc('- just\n- a list'))).toThrow();
+  });
+  it('source: missing and malformed files log once and return null; a changed mtime is re-read', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'plan-'));
+    const f = join(dir, 'plan.md');
+    const log = vi.fn();
+    const src = createPlanSource(f, log);
+    expect(src.get()).toBeNull();
+    expect(src.get()).toBeNull();
+    expect(log).toHaveBeenCalledTimes(1);
+    writeFileSync(f, 'garbage');
+    expect(src.get()).toBeNull();
+    expect(src.get()).toBeNull();
+    expect(log).toHaveBeenCalledTimes(2);
+    writeFileSync(f, doc(VALID));
+    expect(src.get()!.am_train).toBe('6008');
+    writeFileSync(f, doc(VALID.replace('"6008"', '"6010"')));
+    utimesSync(f, new Date(), new Date(Date.now() + 5000));
+    expect(src.get()!.am_train).toBe('6010');
+    expect(log).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -114,13 +192,14 @@ describe('commute file', () => {
     expect(parseCommute({ am: [], pm: [] })).toBeNull();
     expect(parseCommute(null)).toBeNull();
   });
-  it('ships a timetable matching the reference commute file', () => {
+  it('ships a timetable matching the reference commute file (renumbered Oct 26, 2026)', () => {
     const c = loadCommute()!;
-    expect(c.am.map((t) => t.number)).toEqual(['814', '818', '824']);
-    expect(c.pm.map((t) => t.number)).toEqual(['847', '851', '855', '857', '861', '867', '871']);
-    expect(c.pm.find((t) => t.number === '867')!.departs).toBe('17:37');
+    expect(c.am.map((t) => t.number)).toEqual(['6006', '6008', '6010', '6012', '6014', '6016']);
+    expect(c.pm.map((t) => t.number)).toEqual(['6021', '6023', '6025', '6027', '6029', '6031', '6033']);
+    expect(c.am.find((t) => t.number === '6008')!.departs).toBe('07:01');
+    expect(c.pm.find((t) => t.number === '6029')!.departs).toBe('17:37');
     expect(c.holidays).toContain('2026-11-26');
-    expect(JSON.parse(readFileSync(DEFAULT_COMMUTE_FILE, 'utf8')).buffer_min).toBe(5);
+    expect(JSON.parse(readFileSync(DEFAULT_COMMUTE_FILE, 'utf8')).buffer_min).toBeUndefined();
   });
   it('returns null for a missing file', () => {
     const log = vi.fn();
@@ -166,7 +245,7 @@ describe('IntercomService desk feed', () => {
   function build(sessions: () => DeskSession[]) {
     const db = new Database(':memory:'); runMigrations(db);
     const config = IntercomAdapterSchema.parse({ surfaces: [{ id: 's', token_env: 'T', follow: { contact: 'chris', channel: 'telegram:peggy' } }] });
-    return new IntercomService({ config, db, calendar, env: { T: 'a'.repeat(40) }, log: () => {}, commute: COMMUTE, deskSessions: sessions, submitInbound: async () => { throw new Error('unused'); } });
+    return new IntercomService({ config, db, calendar, env: { T: 'a'.repeat(40) }, log: () => {}, commute: COMMUTE, plan: { get: () => PLAN }, deskSessions: sessions, submitInbound: async () => { throw new Error('unused'); } });
   }
   it('answers desk() and sends a snapshot on attach', async () => {
     let list: DeskSession[] = [{ id: 'x', title: 'Main', state: 'working', channel: 'app', since: '2026-11-03T10:00:00Z' }];
