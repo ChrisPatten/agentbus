@@ -1,0 +1,26 @@
+{
+  "_comment": "Desk-mode leave-by timetable (MBTA Providence/Stoughton). Source: peggy data/reference_commute.md. Update when the schedule changes. Times are local wall-clock in `timezone`. leave_at = departs - travel_min - buffer_min.",
+  "timezone": "America/New_York",
+  "buffer_min": 5,
+  "am_travel_min": 10,
+  "pm_travel_min": 25,
+  "holidays": [
+    "2026-11-26", "2026-11-27", "2026-12-24", "2026-12-25", "2026-12-28", "2026-12-29", "2026-12-30", "2026-12-31",
+    "2027-01-01", "2027-01-18", "2027-02-15", "2027-05-31", "2027-06-18", "2027-07-05", "2027-09-06",
+    "2027-11-25", "2027-11-26", "2027-12-24", "2027-12-27", "2027-12-28", "2027-12-29", "2027-12-30", "2027-12-31"
+  ],
+  "am": [
+    { "number": "814", "departs": "07:01", "arrives": "07:41" },
+    { "number": "818", "departs": "07:42", "arrives": "08:27" },
+    { "number": "824", "departs": "08:37", "arrives": "09:22" }
+  ],
+  "pm": [
+    { "number": "847", "departs": "14:20", "arrives": "14:59" },
+    { "number": "851", "departs": "15:20", "arrives": "15:59" },
+    { "number": "855", "departs": "15:47", "arrives": "16:20" },
+    { "number": "857", "departs": "16:20", "arrives": "16:59" },
+    { "number": "861", "departs": "16:52", "arrives": "17:25" },
+    { "number": "867", "departs": "17:37", "arrives": "18:18" },
+    { "number": "871", "departs": "18:22", "arrives": "19:01" }
+  ]
+}

@@ -30,6 +30,7 @@ import { computeConversationId } from '../pipeline/conversation-id.js';
 import { renderSystemBlock } from '../core/system-block.js';
 import { VERSION } from '../version.js';
 import { CalendarFeed, type CalendarPayload } from './calendar.js';
+import { buildDeparture, buildDeskPayload, deskSignature, loadCommute, type CommuteConfig, type DeskPayload, type DeskSession } from './desk.js';
 import { resolveGlance, surfaceBody } from './glance.js';
 import {
   acknowledgeNotification, attentionFor, expireDue, getNotification, isTerminal, openForSurface, publicNotification,
@@ -79,6 +80,10 @@ export interface IntercomDeps {
   registry?: Pick<AdapterRegistry, 'lookupPrimaryByChannel'>;
   submitInbound: (message: InboundMessage, system?: InboundSystemOptions) => Promise<InboundResult | InboundAbort>;
   calendar?: CalendarFeed;
+  /** E94 — current desk-mode sessions (cc-pool panes). Absent: the desk feed reports none. */
+  deskSessions?: () => DeskSession[];
+  /** E94 — leave-by timetable; loaded from `adapters.intercom.desk.commute_file` when absent. */
+  commute?: CommuteConfig | null;
   env?: NodeJS.ProcessEnv;
   now?: () => number;
   log?: (line: string) => void;
@@ -104,6 +109,7 @@ export const NOTIFY_GUIDANCE =
   'Use reply()/send_message for content. When background work started from an Intercom turn finishes, notify with level "info" (or "attention" if a decision is needed) and a key, and reply the result.';
 
 const WRITE_WINDOW_MS = 60_000;
+const DESK_CHECK_MS = 5_000;
 
 export class IntercomService {
   readonly surfaces = new Map<string, Surface>();
@@ -115,12 +121,16 @@ export class IntercomService {
   readonly calendar: CalendarFeed;
   private sweepTimer: NodeJS.Timeout | null = null;
   private calendarTimer: NodeJS.Timeout | null = null;
+  private deskTimer: NodeJS.Timeout | null = null;
+  private lastDeskSig = '';
+  private readonly commute: CommuteConfig | null;
   private lastCalendarDate = '';
   private readonly writeHits = new Map<string, number[]>();
 
   constructor(private readonly deps: IntercomDeps) {
     const env = deps.env ?? process.env;
     this.calendar = deps.calendar ?? new CalendarFeed(deps.config.calendar);
+    this.commute = deps.commute !== undefined ? deps.commute : loadCommute(deps.config.desk.commute_file, (l) => this.log(l));
     for (const s of deps.config.surfaces) {
       const token = env[s.token_env];
       if (!token || token.length < 32) {
@@ -159,16 +169,20 @@ export class IntercomService {
     // Push the calendar every 5 minutes and at a date change.
     this.calendarTimer = setInterval(() => { void this.pushCalendar(); this.notificationTick(); }, 60_000);
     this.calendarTimer.unref();
+    // E94 — desk summary: checked every 5 s, pushed only when it changed, so never more than one per 5 s.
+    this.deskTimer = setInterval(() => { void this.pushDesk(); }, DESK_CHECK_MS);
+    this.deskTimer.unref();
   }
 
   stop(): void {
     if (this.sweepTimer) clearInterval(this.sweepTimer);
     if (this.calendarTimer) clearInterval(this.calendarTimer);
+    if (this.deskTimer) clearInterval(this.deskTimer);
     for (const st of this.state.values()) {
       if (st.staleTimer) clearTimeout(st.staleTimer);
       if (st.interaction?.closeTimer) clearTimeout(st.interaction.closeTimer);
     }
-    this.sweepTimer = this.calendarTimer = null;
+    this.sweepTimer = this.calendarTimer = this.deskTimer = null;
   }
 
   // ── Auth ─────────────────────────────────────────────────────────────────
@@ -254,6 +268,31 @@ export class IntercomService {
     } catch (err) {
       this.log(`warn: calendar unavailable: ${String(err)}`);
     }
+    try { this.raw(client.socket, { type: 'event', event: 'desk', data: await this.desk() }); }
+    catch (err) { this.log(`warn: desk snapshot failed: ${String(err)}`); }
+  }
+
+  /** E94 — the desk summary (agent sessions, counts, next departure). Read-only; no message text. */
+  async desk(now: Date = new Date(this.now())): Promise<DeskPayload> {
+    let events: Awaited<ReturnType<CalendarFeed['today']>>['events'] = [];
+    try { events = (await this.calendar.today()).events; } catch { /* trains still work without the diary */ }
+    return buildDeskPayload({
+      now, sessions: this.deps.deskSessions?.() ?? [],
+      departure: buildDeparture({ now, commute: this.commute, events, eventTravelMin: this.deps.config.desk.event_travel_min, tz: this.deps.config.calendar.timezone }),
+    });
+  }
+
+  private async pushDesk(): Promise<void> {
+    let ready = false;
+    for (const c of this.clients) if (c.ready) { ready = true; break; }
+    if (!ready) return;
+    try {
+      const payload = await this.desk();
+      const sig = deskSignature(payload);
+      if (sig === this.lastDeskSig) return;
+      this.lastDeskSig = sig;
+      for (const c of this.clients) if (c.ready) this.raw(c.socket, { type: 'event', event: 'desk', data: payload });
+    } catch (err) { this.log(`warn: desk push failed: ${String(err)}`); }
   }
 
   detach(client: Client): void { this.clients.delete(client); }

@@ -5,6 +5,7 @@
  *   POST /api/v1/intercom/pair             exchange a one-time pairing code for the surface token
  *   GET  /api/v1/intercom/health           Bearer <surface token>
  *   GET  /api/v1/intercom/today            Bearer; calendar payload for the day-dial
+ *   GET  /api/v1/intercom/desk             Bearer; desk-mode summary (sessions, counts, departure)
  *   GET  /api/v1/intercom/ws               WebSocket, hello-token handshake (browsers cannot set headers)
  *
  * These routes carry their own auth (surface tokens), so the global
@@ -123,6 +124,13 @@ export async function registerIntercomRoutes(server: FastifyInstance, deps: Inte
     if (!surface) return reply.code(401).send({ ok: false, error: 'unauthorized' });
     try { return await service.calendar.today(); }
     catch { return reply.code(503).send({ ok: false, error: 'calendar_unavailable' }); }
+  });
+
+  server.get('/api/v1/intercom/desk', async (req, reply) => {
+    const surface = bearer(req);
+    if (!surface) return reply.code(401).send({ ok: false, error: 'unauthorized' });
+    try { return await service.desk(); }
+    catch { return reply.code(503).send({ ok: false, error: 'desk_unavailable' }); }
   });
 
   // ── WebSocket ─────────────────────────────────────────────────────────────

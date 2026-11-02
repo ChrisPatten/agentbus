@@ -621,6 +621,13 @@ export const IntercomAdapterSchema = z.object({
     calctl_path: z.string().min(1).default('calctl'),
     timezone: z.string().min(1).default('America/New_York'),
   }).prefault({}),
+  /** Desk mode (E94): the leave-by estimate on the day face. */
+  desk: z.object({
+    /** Timetable JSON (trains, travel minutes, buffer). Default: integrations/intercom/commute.json in the repo. */
+    commute_file: z.string().min(1).optional(),
+    /** Rough travel time for a calendar event that has a location. An estimate: no routing service is used. */
+    event_travel_min: z.number().int().min(0).max(240).default(20),
+  }).prefault({}),
   surfaces: z.array(IntercomSurfaceSchema).default([]),
 }).superRefine((cfg, ctx) => {
   const seen = new Set<string>();

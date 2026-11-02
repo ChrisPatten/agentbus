@@ -7,6 +7,8 @@ import type { IntercomAdapterConfig } from '../config/schema.js';
 
 export interface CalendarEvent {
   id: string; title: string; start: string; end: string; all_day: boolean; calendar: string; color: string;
+  /** Free-text location from the calendar, when the event has one (used for the desk face's leave-by estimate). */
+  location?: string;
 }
 export interface CalendarPayload {
   date: string; tz: string; generated_at: string; events: CalendarEvent[];
@@ -61,7 +63,7 @@ export function isoInTz(date: Date, tz: string): string {
 }
 
 interface CalctlEvent {
-  id?: string; calendarName?: string; startDate?: string; endDate?: string; isAllDay?: boolean; title?: string;
+  id?: string; calendarName?: string; startDate?: string; endDate?: string; isAllDay?: boolean; title?: string; location?: string;
 }
 
 export function parseCalctl(json: string, allowed: readonly string[], tz: string): CalendarEvent[] {
@@ -76,6 +78,7 @@ export function parseCalctl(json: string, allowed: readonly string[], tz: string
       id: e.id ?? `${e.calendarName}:${e.startDate}:${e.title ?? ''}`,
       title: e.title ?? '', start: isoInTz(start, tz), end: isoInTz(end, tz),
       all_day: e.isAllDay === true, calendar: e.calendarName, color: colorFor(e.calendarName),
+      ...(e.location && e.location.trim() ? { location: e.location.trim() } : {}),
     });
   }
   // All-day first, then by start time.

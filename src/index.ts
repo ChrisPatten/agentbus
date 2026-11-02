@@ -43,6 +43,7 @@ import { SlackAdapter } from './adapters/slack.js';
 import { AppAdapter } from './adapters/app.js';
 import { routedAgent } from './app/store.js';
 import { primaryChannels } from './app/main.js';
+import { collectDeskSessions } from './intercom/desk.js';
 import { startHeadless, stopHeadless, getHeadlessSnapshots, buildMcpConfig } from './adapters/cc-headless.js';
 import { createPoolManagers } from './pool/pool-manager.js';
 import { RuntimeResolver } from './core/runtime-resolver.js';
@@ -366,6 +367,7 @@ const memoryRecent = new RecentFreshness({
 const intercom = config.adapters.intercom?.enabled
   ? new IntercomService({
     config: config.adapters.intercom, db, registry, notifications: config.notifications, appConfig: config,
+    deskSessions: () => collectDeskSessions(db, poolManagers.values()),
     submitInbound: (message, system) => processInbound(message, {
       queue, pipeline, config, db, registry, commandRegistry, pauseSet,
     }, system),
