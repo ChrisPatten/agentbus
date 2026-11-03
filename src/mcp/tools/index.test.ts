@@ -97,6 +97,22 @@ describe('reply tool — conversation_id forwarding (E48 S48.6)', () => {
     await client.close();
   });
 
+  it('stores answer_needed: true in metadata only when set (E96)', async () => {
+    fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ ok: true, message: makeOriginalEnvelope() }) });
+    fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ ok: true, id: 'reply-msg-a' }) });
+    fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ ok: true, message: makeOriginalEnvelope() }) });
+    fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ ok: true, id: 'reply-msg-b' }) });
+
+    const client = await makeClient();
+    await client.callTool({ name: 'reply', arguments: { message_id: 'orig-msg-1', body: 'Which day?', answer_needed: true } });
+    await client.callTool({ name: 'reply', arguments: { message_id: 'orig-msg-1', body: 'Done.', answer_needed: false } });
+    const meta = (i: number) => (JSON.parse((fetchMock.mock.calls[i]! as [string, { body: string }])[1].body) as { metadata: Record<string, unknown> }).metadata;
+    expect(meta(1)['answer_needed']).toBe(true);
+    expect(meta(3)).not.toHaveProperty('answer_needed');
+
+    await client.close();
+  });
+
   it('sends metadata: {} when the original has no conversation_id (unchanged fallback behavior)', async () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,

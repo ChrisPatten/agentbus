@@ -43,7 +43,7 @@ import { runtimeCapabilities } from '../core/runtime-capabilities.js';
 import type { MessageEnvelope } from '../types/envelope.js';
 import { formatMessagesForSampling } from './message-format.js';
 import { isSystemOnly } from '../core/system-block.js';
-import { TurnStatusTracker, loadPhrases, DEFAULT_PHRASES_PATH, type PhrasesFile } from './tool-status.js';
+import { TurnStatusTracker, loadPhrases, DEFAULT_PHRASES_PATH, STATUS_TOOL_NAME, sanitizeStatusText, sanitizeSubject, type PhrasesFile } from './tool-status.js';
 import { resolveModel } from './model-override-loader.js';
 import { hashBlock, shouldSendBlock, markBlockSent, clearLedger, detectCompaction } from './context-ledger.js';
 import { HeadlessLimiter, type TurnClass } from './headless-limiter.js';
@@ -882,13 +882,21 @@ class HeadlessInstance {
    * `toolStatus` capability. Email channels have no equivalent primitive, so
    * skip the call entirely, matching startTyping's existing email skip.
    * `topic` (E28) further targets a specific Telegram forum topic.
+   * E96: `subject` (from `status(subject)`) rides along; with no line (`text`
+   * empty) only the subject is posted, which email channels also get.
    */
-  private reportToolCall(channel: string, contactId: string, text: string, topic?: string, conversationId?: string, transient = false): void {
-    if (channel === 'email' || channel.startsWith('email:')) return;
+  private reportToolCall(channel: string, contactId: string, text: string, topic?: string, conversationId?: string, transient = false, subject?: string): void {
+    const email = channel === 'email' || channel.startsWith('email:');
+    if (email && !subject) return;
+    const line = email ? '' : text;
+    if (!line && !subject) return;
     this.busFetch(`${this.busBaseUrl}/api/v1/adapters/${channel}/tool-status`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contact_id: contactId, text, topic, conversation_id: conversationId, ...(transient ? { placeholder: true } : {}) }),
+      body: JSON.stringify({
+        contact_id: contactId, ...(line ? { text: line } : {}), topic, conversation_id: conversationId,
+        ...(line && transient ? { placeholder: true } : {}), ...(subject ? { subject } : {}),
+      }),
     }).catch(() => {});
   }
 
@@ -1198,7 +1206,9 @@ class HeadlessInstance {
       onToolCall: (call) => {
         // E79: succinct phrases (or raw lines, per tool_status.mode); a fresh tracker per turn.
         const line = statusTracker.next(call);
-        if (line) this.reportToolCall(channel, contactId, line.text, topic, conversationId, line.transient);
+        // E96: a valid `status(subject)` rides along (or alone, when the line is suppressed).
+        const subject = call.name === STATUS_TOOL_NAME && sanitizeStatusText(call.input['text']) ? sanitizeSubject(call.input['subject']) : null;
+        if (line || subject) this.reportToolCall(channel, contactId, line?.text ?? '', topic, conversationId, line?.transient ?? false, subject ?? undefined);
       },
       scheduleModel,
       sourceLabel,

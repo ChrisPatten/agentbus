@@ -2,7 +2,7 @@
 
 ## Mac app API
 
-When `adapters.intercom.enabled` is true, the bus also serves the Intercom web app at `/intercom/` (static, no auth) and `POST /api/v1/intercom/pair` (one-time pairing code), `GET /api/v1/intercom/health`, `GET /api/v1/intercom/today` (Bearer surface token) and `GET /api/v1/intercom/ws` (hello-token WebSocket). See [INTERCOM.md](INTERCOM.md). With `notifications.enabled` it also serves `/api/v1/notifications` (below).
+When `adapters.intercom.enabled` is true, the bus also serves the Intercom web app at `/intercom/` (static, no auth) and `POST /api/v1/intercom/pair` (one-time pairing code), `GET /api/v1/intercom/health`, `GET /api/v1/intercom/today` (Bearer surface token) and `GET /api/v1/intercom/ws` (hello-token WebSocket). See [INTERCOM.md](INTERCOM.md). It also serves the Surface API v2 under `/api/v1/surface/*` (E96, device credentials; [below](#surface-api-e96)). With `notifications.enabled` it also serves `/api/v1/notifications` (below).
 
 When `adapters.app.enabled` is true, `/api/v1/app/*` uses `Authorization: Bearer <contacts.*.platforms.app.token>` and also `X-Bus-Token` when `bus.auth_token` is set. `GET /api/v1/app/ws` upgrades to the durable JSON WebSocket protocol. `GET /api/v1/app/sessions` lists the routed agent's visible sessions; `GET /api/v1/app/sessions/:id/messages` pages transcript history; `POST /api/v1/app/attachments` uploads one multipart file; `GET /api/v1/app/commands` returns the command manifest; `GET /api/v1/app/health` reports routing and capacity. Main is listed once, aggregated over its rotating session rows, and its history pages across them with `boundaries` (E69). See [APP_ADAPTER.md](APP_ADAPTER.md) for frame shapes and cursor semantics.
 
@@ -16,19 +16,23 @@ bus-core serves a JSON API on `bus.host:bus.http_port` (default `127.0.0.1:3000`
 
 ### Authentication
 
-If `bus.auth_token` is set, every request except `GET /api/v1/health` and the Intercom routes (`/intercom`, `/api/v1/intercom/*`, which carry their own surface-token auth; E90) and, when `notifications.enabled`, `/api/v1/notifications*` (own Bearer tokens; E89) must send a matching `X-Bus-Token` header or it receives `401`. The Pebble webhook additionally requires its own per-contact bearer token; the two checks are layered. The comparison is not constant time; the token is a shared secret between local processes, not a user password.
+If `bus.auth_token` is set, every request except `GET /api/v1/health`, the Intercom routes (`/intercom`, `/api/v1/intercom/*`, which carry their own surface-token auth; E90), the Surface API (`/api/v1/surface/*`, device credentials; E96) and, when `notifications.enabled`, `/api/v1/notifications*` (own Bearer tokens; E89) must send a matching `X-Bus-Token` header or it receives `401`. The Pebble webhook additionally requires its own per-contact bearer token; the two checks are layered. The comparison is not constant time; the token is a shared secret between local processes, not a user password.
 
 AgentBus's own clients send the header automatically when a token is configured: the `claude-code` MCP server (`src/adapters/cc.ts`: polling loop and every MCP tool), `cc-headless`, the `cc-pool` manager and pane readiness poll, and the pool hook scripts in `scripts/hooks/`. They share `src/core/bus-auth.ts`, which only attaches the header to requests for the bus's own base URL. The token comes from the loaded config's `bus.auth_token`, falling back to the `AGENTBUS_BUS_TOKEN` environment variable. `cc-headless` passes `AGENTBUS_BUS_TOKEN` to its `claude -p` children, and `cc-pool` sets it in every pane window it creates, so the pane's MCP server and hook scripts inherit it. The hooks read `AGENTBUS_BUS_TOKEN` (else the older `AGENTBUS_TOKEN` or `AGENTBUS_TOKEN_FILE`; the bus address from `AGENTBUS_URL`) and hand the header to `curl` on stdin (`-K -`), keeping it out of the process list. With no token configured, none of these requests change.
 
 ### Binding to the LAN
 
-Set `bus.host: 0.0.0.0` to accept connections from other hosts, for example a reverse proxy on another machine. This exposes every route. Set `bus.auth_token` and restrict the proxy to the paths you intend to expose. See [DEPLOYMENT.md](DEPLOYMENT.md#exposing-bus-core-to-a-reverse-proxy).
+Set `bus.host: 0.0.0.0` to accept connections from other hosts, for example a reverse proxy on another machine. This exposes every route. For Intercom devices on the LAN, prefer the separate TLS surface listener (`surface_api`, E96): it serves only the surface paths and refuses everything else with `404`, while bus-core stays on `127.0.0.1`. See [SURFACE_API.md](SURFACE_API.md#the-surface-listener). Set `bus.auth_token` and restrict the proxy to the paths you intend to expose. See [DEPLOYMENT.md](DEPLOYMENT.md#exposing-bus-core-to-a-reverse-proxy).
 
 ## Route index
 
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/api/v1/health` | Liveness, adapter health, agent runtimes, queue counts |
+| GET | `/api/v1/surface/health`, `/state`, `/conversations/:id`, `/assets/:hash` | Surface API v2 reads (E96; Bearer device credential) |
+| POST | `/api/v1/surface/actions` | Fire an Event, notice or approval action from a device (E96) |
+| POST | `/api/v1/surface/pair` | Redeem a one-time pairing code into a device credential (E96; no auth) |
+| GET | `/api/v1/surface/ws` | WebSocket, protocol v2 (E96) |
 | POST, PATCH, GET | `/api/v1/notifications` | Raise, update and list Intercom notifications (E89; Bearer token from `notifications.api_tokens_env`) |
 | GET | `/api/v1/pool` | cc-pool pane leases and parked-queue depth (when configured) |
 | POST | `/api/v1/pool/:agentId/turn-ended` | Real-time pane activity signal, fed by a `Stop` hook (superseded by `/api/v1/journal/events`) |
@@ -399,6 +403,20 @@ E81, used by the `edit_message`, `pin_message` and `unpin_message` tools. `:id` 
 | 400 | `{ "ok": false, "error" }`: missing `body`, invalid `choices`, a channel without the action, or the adapter refused (multi-part message, wrong kind, too long, missing Pin Messages right) |
 | 404 | No registry row for the id |
 | 502 | The adapter threw |
+
+## Surface API (E96)
+
+Registered when `adapters.intercom.enabled`, on the main port and (with `surface_api.enabled`) on the separate TLS listener. Every route except `pair` takes `Authorization: Bearer <device credential>` and answers `401 {"ok":false,"error":"unauthorized"}` without a valid, non-revoked one. Full contract, frames and object shapes: [SURFACE_API.md](SURFACE_API.md).
+
+| Method | Path | Answer |
+|---|---|---|
+| GET | `/api/v1/surface/health` | `{ok, surface_id, follow, version, connected_clients, device_id, scope, protocol: 2}` |
+| GET | `/api/v1/surface/state` | `{surface_id, device_id, server_time, revs, resources}`, every resource with its rev; `Cache-Control: no-store` |
+| GET | `/api/v1/surface/conversations/:id?before=&limit=` | A transcript page `{conversation_id, title, messages, next_before}` (limit 1-100, default 30). `400 invalid_query`; `404 not_found` for a conversation the surface may not read or that does not exist |
+| GET | `/api/v1/surface/assets/:hash` | A file from `<db dir>/surface-assets/` named by its sha256; `404 not_found` otherwise |
+| POST | `/api/v1/surface/actions` | `{object, action_id, idempotency_key, draft?}` to an `action_result`. `400` invalid, `403` read-only device, `429` rate limited, else `200` |
+| POST | `/api/v1/surface/pair` | `{code}` to `{surface_id, device_id, credential, token, scope, profile, cert_fingerprint}`. `400`, `404` unknown, `409` `device_limit`, `410` expired or used, `429`, `503` surface gone. `POST /api/v1/intercom/pair` is the same handler |
+| GET | `/api/v1/surface/ws` | WebSocket; `hello` with `protocol: 2` and `revs` |
 
 ## Notifications (E89)
 

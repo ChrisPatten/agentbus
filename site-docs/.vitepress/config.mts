@@ -49,6 +49,7 @@ export default defineConfig({
           { text: 'Mac app', link: '/channels/mac-app' },
           { text: 'Siri', link: '/channels/siri' },
           { text: 'Intercom', link: '/channels/intercom' },
+          { text: 'Intercom devices', link: '/channels/intercom-devices' },
           { text: 'Pebble', link: '/channels/pebble' },
           { text: 'Slack', link: '/channels/slack' },
         ],

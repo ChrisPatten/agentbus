@@ -18,7 +18,7 @@
  */
 import { mkdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { loadConfig } from './config/loader.js';
 import { getTelegramInstances, getEmailInstances } from './config/schema.js';
 import { getDb, closeDb } from './db/client.js';
@@ -43,13 +43,17 @@ import { SlackAdapter } from './adapters/slack.js';
 import { AppAdapter } from './adapters/app.js';
 import { routedAgent } from './app/store.js';
 import { primaryChannels } from './app/main.js';
-import { collectDeskSessions } from './intercom/desk.js';
+import { collectDeskSessionDetails, collectDeskSessions } from './intercom/desk.js';
 import { startHeadless, stopHeadless, getHeadlessSnapshots, buildMcpConfig } from './adapters/cc-headless.js';
 import { createPoolManagers } from './pool/pool-manager.js';
 import { RuntimeResolver } from './core/runtime-resolver.js';
 import { createPoolRouteResolve } from './pipeline/stages/pool-route-resolve.js';
 import { DeliveryWorker } from './core/delivery.js';
 import { IntercomService } from './intercom/service.js';
+import { createSurfaceRuntime } from './surface/runtime.js';
+import { getConversationPage } from './surface/conversations.js';
+import { createSurfaceListener, type SurfaceListener } from './http/surface-listener.js';
+import { registerSurfaceServer } from './http/surface-routes.js';
 import { createCommandSystem } from './commands/index.js';
 import { createTorrentCommand } from './commands/torrent.js';
 import { createCostCommand } from './commands/cost.js';
@@ -364,15 +368,32 @@ const memoryRecent = new RecentFreshness({
 });
 // E90/E91 — Intercom: surfaces follow one existing conversation. Built here (not in the HTTP layer) so
 // the delivery worker below can hand it agent replies. Tokens come from the env vars the config names.
+const submitToPipeline = (message: Parameters<typeof processInbound>[0], system?: Parameters<typeof processInbound>[2]) => processInbound(message, {
+  queue, pipeline, config, db, registry, commandRegistry, pauseSet,
+}, system);
+// E96 — Surface API v2 (devices, resources, actions) rides on the Intercom config.
+const surfaceRuntime = config.adapters.intercom?.enabled
+  ? createSurfaceRuntime({
+    config, db, submitInbound: submitToPipeline,
+    deskSessions: () => collectDeskSessionDetails(db, poolManagers.values()),
+    approvals: () => ({ store: approvalStore, poolManagers, ...approvalHooks }),
+  })
+  : undefined;
 const intercom = config.adapters.intercom?.enabled
   ? new IntercomService({
     config: config.adapters.intercom, db, registry, notifications: config.notifications, appConfig: config,
     deskSessions: () => collectDeskSessions(db, poolManagers.values()),
-    submitInbound: (message, system) => processInbound(message, {
-      queue, pipeline, config, db, registry, commandRegistry, pauseSet,
-    }, system),
+    submitInbound: submitToPipeline,
+    ...(surfaceRuntime ? { surfaceApi: surfaceRuntime.surfaceApi } : {}),
   }) : undefined;
-const httpServer = await createHttpServer({ queue, registry, config, pipeline, db, commandRegistry, pauseSet, siri, app, intercom, poolManagers, getHeadlessSnapshots, runtimeResolver, advisories, journalEvents, journalGate, journalStatus, memoryRecent, approvalHooks, proposals: proposalService });
+if (intercom && surfaceRuntime) surfaceRuntime.bind(intercom);
+// Device-facing extras shared by the main port and the surface listener.
+const surfaceRouteExtras = {
+  assetDir: join(dirname(resolve(config.bus.db_path)), 'surface-assets'),
+  conversationPage: (input: { conversationId: string; before?: string; limit?: number }) => getConversationPage(db, input),
+};
+const httpServer = await createHttpServer({ queue, registry, config, pipeline, db, commandRegistry, pauseSet, siri, app, intercom, surfaceRoutes: surfaceRouteExtras,
+  ...(surfaceRuntime ? { surfacePublish: { hub: surfaceRuntime.hub, jobs: surfaceRuntime.jobs, onFlagsChanged: () => surfaceRuntime.refreshSessions() } } : {}), poolManagers, getHeadlessSnapshots, runtimeResolver, advisories, journalEvents, journalGate, journalStatus, memoryRecent, approvalHooks, proposals: proposalService });
 
 // E66 — busy notice for a held message: the channel's native queued/status
 // signal where it has one, a short text elsewhere, nothing on email.
@@ -569,6 +590,8 @@ async function shutdown() {
   stopHeadless();
   for (const pool of poolManagers.values()) pool.stop();
   clearInterval(maintenanceTimer);
+  surfaceRuntime?.stop();
+  await surfaceListener?.close().catch(() => {});
   const stops = registry.list().map((a) => a.stop().catch(() => {}));
   Promise.allSettled(stops).finally(() => {
     httpServer.close().finally(() => {
@@ -585,6 +608,31 @@ process.on('SIGINT', () => void shutdown());
 
 await httpServer.listen({ port: config.bus.http_port, host: config.bus.host });
 console.log(`AgentBus bus-core ready — HTTP ${config.bus.host}:${config.bus.http_port}`);
+
+// E96 — the surface listener: only the surface API and the web app, on the LAN, over TLS.
+let surfaceListener: SurfaceListener | undefined;
+if (config.surface_api.enabled) {
+  if (!intercom?.surfaceApi) {
+    console.warn('[surface] surface_api.enabled but adapters.intercom is not enabled; the surface listener is not started');
+  } else {
+    // The listener exists so bus-core's own API and MCP stay on loopback; say so when they do not.
+    if (!['127.0.0.1', 'localhost', '::1'].includes(config.bus.host)) {
+      console.warn(`[surface] bus.host is ${config.bus.host}: bus-core's own API and MCP are reachable from other hosts. Set bus.host to 127.0.0.1 and let devices use the surface listener.`);
+    }
+    // A bad certificate or a busy port must not take bus-core down with it.
+    try {
+      surfaceListener = await createSurfaceListener({
+        config: config.surface_api,
+        register: (server) => registerSurfaceServer(server, { config, db, intercom, ...surfaceRouteExtras }),
+      });
+      await surfaceListener.listen();
+    } catch (err) {
+      console.error(`[surface] surface listener not started: ${err instanceof Error ? err.message : String(err)}`);
+      await surfaceListener?.close().catch(() => {});
+      surfaceListener = undefined;
+    }
+  }
+}
 
 // Start platform adapters and delivery worker after HTTP server is listening
 for (const adapter of registry.list()) {

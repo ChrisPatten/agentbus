@@ -11,6 +11,7 @@
  * and platform metadata stay in the adapter (Telegram) or route (Mac app).
  */
 import type { ChoiceStore } from './store.js';
+import { clearAnswerNeededOnTap } from '../surface/answer-needed.js';
 import type { ChoicePrompt } from './types.js';
 
 export type ChoiceTapOutcome = 'answered' | 'already_answered' | 'expired' | 'invalid_choice' | 'not_found' | 'forbidden';
@@ -25,6 +26,8 @@ export interface ChoiceTapAnswered {
   command: string | null;
   /** Inbound metadata every platform carries on the tap's message. */
   metadata: { choice_prompt_id: string; choice_index: number };
+  /** E96 S96.6: true when this tap cleared the conversation's `answer_needed` flag (push a sessions delta). */
+  answer_needed_cleared: boolean;
 }
 
 export interface ChoiceTapRejected {
@@ -75,6 +78,8 @@ export function resolveChoiceTap(
         body: command ?? `[tapped] ${result.label}`,
         command,
         metadata: { choice_prompt_id: promptId, choice_index: index },
+        // E96 S96.6: a tap answers the open question. Not restored by `store.reopen()`.
+        answer_needed_cleared: clearAnswerNeededOnTap(store.db, result.prompt, contactId),
       };
     }
   }

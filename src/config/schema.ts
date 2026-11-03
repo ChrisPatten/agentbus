@@ -592,10 +592,18 @@ export type IntercomFollowConfig = z.infer<typeof IntercomFollowSchema>;
 
 export const IntercomSurfaceSchema = z.object({
   id: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/, 'surface id must be lowercase letters, digits, - or _'),
-  /** Name of the env var holding this surface's token (at least 32 characters). */
-  token_env: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/),
+  /**
+   * Name of the env var holding this surface's legacy shared token (at least 32 characters).
+   * E96: optional. When set, the token becomes the surface's `legacy` device credential at
+   * startup, so a phone paired before E96 keeps working. New devices pair with their own credential.
+   */
+  token_env: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/).optional(),
   profile: z.string().min(1).default('round466'),
   follow: IntercomFollowSchema,
+  /** E96 — bare agent ids allowed to publish to this surface (Events, slots, widgets). `*` allows any agent. Empty: nobody. */
+  publishers: z.array(z.string().min(1)).default([]),
+  /** E96 — paired (non-revoked) devices allowed at once. */
+  max_devices: z.number().int().min(1).max(50).default(10),
 });
 export type IntercomSurfaceConfig = z.infer<typeof IntercomSurfaceSchema>;
 
@@ -656,6 +664,37 @@ export const NotificationsConfigSchema = z.object({
   rate_limit_per_min: z.number().int().positive().default(30),
 });
 export type NotificationsConfig = z.infer<typeof NotificationsConfigSchema>;
+
+/**
+ * E96 — Surface API v2: a second listener for `/api/v1/surface/*` and the static
+ * web app, bound to the LAN with TLS. bus-core's own routes stay on `bus.host:bus.http_port`.
+ * Surfaces themselves are still declared under `adapters.intercom.surfaces`. See docs/SURFACE_API.md.
+ */
+export const SurfaceApiConfigSchema = z.object({
+  /** Start the separate surface listener. The `/api/v1/surface/*` routes are also mounted on the main port (localhost) either way. */
+  enabled: z.boolean().default(false),
+  host: z.string().min(1).default('0.0.0.0'),
+  port: z.number().int().min(1).max(65535).default(3443),
+  /** PEM files. Required when `enabled` (plain HTTP on the LAN is refused). Generate with `scripts/surface-cert.ts`. */
+  tls: z.object({ cert: z.string().min(1), key: z.string().min(1) }).optional(),
+  /** Per-resource replay log kept for delta resume, in revisions. Older revs get a `reset`. */
+  log_retention_revs: z.number().int().min(10).max(10_000).default(500),
+  /** Rapid changes to one resource are coalesced into at most one delta per this window. */
+  delta_coalesce_ms: z.number().int().min(0).max(5000).default(250),
+  /** Idempotency keys for actions are remembered this long. */
+  action_key_ttl_hours: z.number().positive().default(48),
+  /** `POST /actions` and WS `action` frames per device per minute. */
+  action_rate_limit_per_min: z.number().int().positive().default(30),
+  sessions: z.object({
+    /** A session with no activity for this long drops out of the sessions resource (unless it needs you). */
+    activity_timeout_min: z.number().int().min(1).default(30),
+    /** Include system sessions (scheduled routines, bus and agent-to-agent conversations) in the sessions resource. */
+    include_system: z.boolean().default(false),
+  }).prefault({}),
+}).superRefine((cfg, ctx) => {
+  if (cfg.enabled && !cfg.tls) ctx.addIssue({ code: 'custom', message: 'surface_api.tls (cert, key) is required when surface_api.enabled is true', path: ['tls'] });
+});
+export type SurfaceApiConfig = z.infer<typeof SurfaceApiConfigSchema>;
 
 const AdaptersConfigSchema = z.object({
   telegram: z.union([TelegramAdapterSchema, z.record(z.string(), TelegramAdapterSchema)]).optional(),
@@ -1106,6 +1145,7 @@ export const AppConfigSchema = z.object({
   tool_status: ToolStatusConfigSchema.default({ mode: 'phrases' }),
   adapters: AdaptersConfigSchema,
   notifications: NotificationsConfigSchema.optional(),
+  surface_api: SurfaceApiConfigSchema.prefault({}),
   contacts: z.record(z.string(), ContactSchema).default({}).superRefine((contacts, ctx) => {
     for (const [key, contact] of Object.entries(contacts)) {
       if (contact.id !== key) {

@@ -12,6 +12,7 @@ Errors come back as `{ "content": [{ "type": "text", "text": "Error: ..." }], "i
 | `send_message` | Send to any contact on any channel | Always |
 | `share_context` | Hand a Claude Code session's outcome to Main as hidden context (no message) | Always |
 | `notify`, `update_notification`, `list_notifications` | Raise, change or clear a short-lived "needs you" item on the Intercom dial (E89) | Always (answers "not enabled" unless `notifications.enabled`) |
+| `list_surfaces`, `surface_publish_event`, `surface_remove_event`, `surface_set_slot`, `surface_clear_slot`, `surface_write_widget`, `surface_remove_widget`, `clear_answer_needed` | Publish Events (cards with buttons), slot overrides and widget data to Intercom surfaces; clear an answer-needed flag (E96) | Always (a surface must list the agent in `publishers`) |
 | `send_email` | Start a new email thread to an allowlisted address | An email adapter is configured |
 | `react_to_message` | Emoji reaction on a message | Always |
 | `create_telegram_topic` | Create a forum topic in a Telegram group | A Telegram adapter is configured |
@@ -167,6 +168,25 @@ There is deliberately no `effect` option: Telegram rejects message effects in gr
 
 The same `key` while the item is open updates it in place and puts it back to `active`. Use `notify` for short-lived "needs you soon" states (leaving time, a bill due today, a draft awaiting approval, a job finished), with a `key` you can resolve later; use `reply` / `send_message` for content. When background work started from an Intercom turn finishes, `notify` with `level: "info"` (or `"attention"` if a decision is needed) and a key, and `reply` the result.
 
+### Intercom surfaces (E96)
+
+Surface publishing tools; full semantics, routes and bounds in [SURFACE_API.md](SURFACE_API.md#agent-publishing-tools-s965). They call `/api/v1/surface-publish/*` with the shared bus auth, naming the agent. A surface accepts writes only from agents in its `publishers` list; errors (unknown surface, not a publisher, a bound exceeded) come back as readable messages.
+
+| Tool | Input |
+|---|---|
+| `list_surfaces` | none; returns the surfaces you may publish to and what each follows |
+| `surface_publish_event` | `surface`, `id`, `title` (80), `body?` (500), `level?` (`info` default \| `attention` \| `urgent`), `at?`, `end?`, `expires_at?` (default 24 h, at most 14 days), `actions?` (up to 3 of `{id, label (24), style?, confirm?: {draft, prompt?}, once? (default true), run: {body, sends_on_behalf?}}`) |
+| `surface_remove_event` | `surface`, `id` |
+| `surface_set_slot` | `surface`, `slot`, `text` (60), `icon?`, `color?`, `until` (at most 24 h ahead) |
+| `surface_clear_slot` | `surface`, `slot` |
+| `surface_write_widget` | `surface`, `id`, `type`, `data` (a JSON object up to 4 KB) |
+| `surface_remove_widget` | `surface`, `id` |
+| `clear_answer_needed` | `conversation_id?`, or `channel` + `contact` + `topic?`; with none, cc-headless uses the current turn's conversation |
+
+A button's `run.body` is the message you receive (as if the followed contact sent it) when it is tapped; a button that makes you send something on the user's behalf must set `sends_on_behalf: true` and carry the exact text in `confirm.draft`, which the device shows before the tap counts.
+
+`reply` and `send_message` also take `answer_needed: true` (next to `choices`) when you need the user's answer before you can continue: the conversation shows as needs-you on Intercom until they tap a button, reply, or you call `clear_answer_needed`.
+
 ### `send_email`
 
 Starts a new email thread, as opposed to `reply`, which threads into a received message. Sends on the first configured email channel. `to` defaults to the first allowlisted address in `contacts[*].platforms.email.address`; any other `to` must also be on that allowlist or nothing is sent. `body` is Markdown and renders as HTML. See [EMAIL_ADAPTER.md](EMAIL_ADAPTER.md#agent-initiated-email-send_email-tool).
@@ -222,6 +242,8 @@ All of these enqueue the same envelope as `send_message` (so the contact allow-l
 
 Input: `{ "text": "Comparing the quotes" }`
 Output: `{ "success": true, "status": "Comparing the quotes" }`, or an error when the text is empty after cleaning, longer than 40 characters, or more than 5 words.
+
+Optional `subject` (E96, at most 60 characters): what the whole session is about, e.g. `"Kitchen quote comparison"`. It is stored per conversation and shown in the Intercom sessions list (`docs/SURFACE_API.md`).
 
 Sets the short status line the user sees (Telegram's draft message) while you work. Use plain words about what you are doing; never paths, message text or other content. Letters, digits, spaces and `' , . & / -` survive; everything else (Markdown, control characters) is replaced by a space. The tool only validates: the layer that watches the turn's tool calls (cc-headless's stream parser, or the pool's tool-status hook) posts the text to the turn's chat and then keeps the automatic phrases quiet for the rest of the turn (turn-long, no timer) until your next `status` call. The call itself never shows a line of its own, and nothing is shown once you have delivered your reply, on email, or when `tool_status.mode` is `raw`. Optional: without it the automatic phrases are shown. See [TELEGRAM_ADAPTER.md](TELEGRAM_ADAPTER.md#live-tool-call-status-stream).
 
