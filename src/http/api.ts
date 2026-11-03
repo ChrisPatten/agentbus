@@ -137,7 +137,7 @@ export interface HttpServerDeps {
   /** E96 — extras for the device-facing surface routes (conversation pages, assets). */
   surfaceRoutes?: Omit<SurfaceServerDeps, 'config' | 'db' | 'intercom'>;
   /** E96 S96.5 — agent publishing (`/api/v1/surface-publish/*`) and the sessions refresh after a flag changes. */
-  surfacePublish?: { hub: ResourceHub; jobs: JobStore; onFlagsChanged?: () => void };
+  surfacePublish?: { hub: ResourceHub; jobs: JobStore; onFlagsChanged?: () => void; assetDir?: string; assetMaxBytes?: number };
   getHeadlessSnapshots?: () => HeadlessCapacitySnapshot[];
   /**
    * Optional — one PoolManager per configured `cc-pool` instance (E48),
@@ -2730,9 +2730,10 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
     await registerSurfaceServer(server, { config, db, intercom: deps.intercom, ...deps.surfaceRoutes });
     if (deps.surfacePublish) {
       const intercomService = deps.intercom;
-      const { hub, jobs, onFlagsChanged } = deps.surfacePublish;
+      const { hub, jobs, onFlagsChanged, assetDir, assetMaxBytes } = deps.surfacePublish;
       registerSurfacePublishRoutes(server, {
         db, hub, jobs,
+        ...(assetDir ? { assetDir } : {}), ...(assetMaxBytes ? { assetMaxBytes } : {}),
         surfaces: () => [...intercomService.surfaces.values()].map((s) => ({ id: s.id, follow: intercomService.followJson(s), publishers: s.publishers })),
         ...(onFlagsChanged ? { onAnswerNeededCleared: () => onFlagsChanged() } : {}),
       });

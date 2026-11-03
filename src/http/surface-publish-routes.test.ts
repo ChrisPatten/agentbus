@@ -53,6 +53,8 @@ function fakeJobs(db: Database.Database) {
   const store: JobStore = {
     replaceForEvent(surface, eventId, list) { db.prepare('INSERT OR REPLACE INTO fake_jobs (k, v) VALUES (?, ?)').run(`${surface}/${eventId}`, JSON.stringify(list)); return []; },
     removeForEvent(surface, eventId) { const n = jobs.get(`${surface}/${eventId}`)?.length ?? 0; db.prepare('DELETE FROM fake_jobs WHERE k = ?').run(`${surface}/${eventId}`); return n; },
+    replaceForSlot() { return []; },
+    removeForSlot() { return 0; },
     get: () => null,
   };
   return { store, jobs };

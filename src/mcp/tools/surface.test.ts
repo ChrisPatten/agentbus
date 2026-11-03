@@ -7,7 +7,7 @@ import { registerSurfaceTools } from './surface.js';
 
 const BUS_URL = 'http://bus:4000';
 const healthState: HealthState = { status: 'healthy', busReachable: true, lastPollAt: null, consecutiveFailures: 0 };
-const NAMES = ['list_surfaces', 'surface_publish_event', 'surface_remove_event', 'surface_set_slot', 'surface_clear_slot', 'surface_write_widget', 'surface_remove_widget', 'clear_answer_needed'];
+const NAMES = ['list_surfaces', 'surface_publish_event', 'surface_remove_event', 'surface_set_slot', 'surface_clear_slot', 'surface_write_widget', 'surface_remove_widget', 'surface_set_face', 'surface_upload_asset', 'clear_answer_needed'];
 
 async function connect(register: (s: McpServer) => void) {
   const server = new McpServer({ name: 'test', version: '0.0.1' });
@@ -101,5 +101,62 @@ describe('surface tools (E96)', () => {
     vi.stubEnv('AGENTBUS_TURN_CONVERSATION_ID', 'conv-9');
     await call('clear_answer_needed', {});
     expect(sent(1)).toEqual({ url: `${BUS_URL}/api/v1/surface-publish/answer-needed/clear`, method: 'POST', body: { conversation_id: 'conv-9', agent_id: 'peggy-pool-1' } });
+  });
+  it('publish_event passes the ring fields through and documents them', async () => {
+    fetchMock.mockResolvedValueOnce(json(201, { ok: true, id: 'dentist' }));
+    const fields = {
+      at: '2026-11-05T15:00:00Z', end: '2026-11-05T16:00:00Z', layer: 'overlap', color: 'orange', travel: { minutes: 20, mode: 'drive' },
+      detail: { description: 'Crown', location: '1 Main St', image: 'a'.repeat(64) }, opens: 'conversation', conversation_id: 'abc',
+    };
+    await call('surface_publish_event', { surface: 'compact', id: 'dentist', title: 'Dentist', ...fields });
+    expect(sent().body).toMatchObject({ title: 'Dentist', ...fields });
+    const c = await connect((s) => registerSurfaceTools(s, BUS_URL, 'peggy'));
+    const ev = (await c.listTools()).tools.find((t) => t.name === 'surface_publish_event')!;
+    await c.close();
+    expect(ev.description).toMatch(/ring/i);
+    expect(ev.description).toMatch(/description 600, location 120/);
+    expect(Object.keys((ev.inputSchema as { properties: object }).properties)).toEqual(expect.arrayContaining(['layer', 'color', 'travel', 'detail', 'opens', 'conversation_id']));
+  });
+
+  it('set_slot sends lines, widgets and a primary action; set_face PUTs the layout', async () => {
+    fetchMock.mockResolvedValue(json(200, { ok: true }));
+    await call('surface_set_slot', { surface: 'compact', slot: 'context', lines: ['a', 'b'], until: '2026-11-03T20:00:00Z' });
+    expect(sent(0)).toMatchObject({ url: `${BUS_URL}/api/v1/surface-publish/compact/slots/context`, method: 'PUT', body: { lines: ['a', 'b'] } });
+    await call('surface_set_slot', { surface: 'compact', slot: 'context', widgets: ['w1'], until: '2026-11-03T20:00:00Z' });
+    expect(sent(1).body).toMatchObject({ widgets: ['w1'] });
+    await call('surface_set_slot', { surface: 'compact', slot: 'primary', text: 'Leave now', until: '2026-11-03T20:00:00Z', action: { id: 'go', label: 'Go', run: { body: 'tapped' } } });
+    expect(sent(2).body).toMatchObject({ action: { id: 'go', label: 'Go', run: { body: 'tapped' } } });
+    await call('surface_set_face', { surface: 'compact', id: 'day', layout: { slots: { event_ring: true, context: 'lines' } } });
+    expect(sent(3)).toMatchObject({ url: `${BUS_URL}/api/v1/surface-publish/compact/faces/day`, method: 'PUT', body: { layout: { slots: { event_ring: true, context: 'lines' } }, agent_id: 'peggy-pool-1' } });
+  });
+
+  it('upload_asset POSTs the raw bytes with the content type, from base64 or from a file', async () => {
+    fetchMock.mockResolvedValue(json(201, { ok: true, hash: 'h', reference: 'h' }));
+    const r = await call('surface_upload_asset', { data_base64: Buffer.from('png bytes').toString('base64'), content_type: 'image/png' });
+    expect(JSON.parse(text(r))).toEqual({ hash: 'h', reference: 'h' });
+    const [url, init] = fetchMock.mock.calls[0] as [string, { method: string; headers: Record<string, string>; body: Uint8Array }];
+    expect(url).toBe(`${BUS_URL}/api/v1/surface-publish/assets?agent_id=peggy-pool-1`);
+    expect(init.method).toBe('POST');
+    expect(init.headers['Content-Type']).toBe('image/png');
+    expect(Buffer.from(init.body).toString()).toBe('png bytes');
+
+    const { writeFileSync, mkdtempSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const file = join(mkdtempSync(join(tmpdir(), 'asset-')), 'qr.svg');
+    writeFileSync(file, '<svg></svg>');
+    await call('surface_upload_asset', { path: file });
+    const second = fetchMock.mock.calls[1] as [string, { headers: Record<string, string> }];
+    expect(second[1].headers['Content-Type']).toBe('image/svg+xml');
+  });
+
+  it('upload_asset needs a source and a known type, and returns the bus error', async () => {
+    expect((await call('surface_upload_asset', {})).isError).toBe(true);
+    expect((await call('surface_upload_asset', { path: '/nonexistent/file.xyz', content_type: undefined })).isError).toBe(true);
+    expect(fetchMock).not.toHaveBeenCalled();
+    fetchMock.mockResolvedValueOnce(json(400, { ok: false, error: 'the file is not a PNG (bad signature)' }));
+    const r = await call('surface_upload_asset', { data_base64: 'aGk=', content_type: 'image/png' });
+    expect(r.isError).toBe(true);
+    expect(text(r)).toBe('Error: the file is not a PNG (bad signature)');
   });
 });

@@ -374,7 +374,7 @@ const submitToPipeline = (message: Parameters<typeof processInbound>[0], system?
 // E96 — Surface API v2 (devices, resources, actions) rides on the Intercom config.
 const surfaceRuntime = config.adapters.intercom?.enabled
   ? createSurfaceRuntime({
-    config, db, submitInbound: submitToPipeline,
+    config, db, submitInbound: submitToPipeline, registry,
     deskSessions: () => collectDeskSessionDetails(db, poolManagers.values()),
     approvals: () => ({ store: approvalStore, poolManagers, ...approvalHooks }),
   })
@@ -393,7 +393,7 @@ const surfaceRouteExtras = {
   conversationPage: (input: { conversationId: string; before?: string; limit?: number }) => getConversationPage(db, input),
 };
 const httpServer = await createHttpServer({ queue, registry, config, pipeline, db, commandRegistry, pauseSet, siri, app, intercom, surfaceRoutes: surfaceRouteExtras,
-  ...(surfaceRuntime ? { surfacePublish: { hub: surfaceRuntime.hub, jobs: surfaceRuntime.jobs, onFlagsChanged: () => surfaceRuntime.refreshSessions() } } : {}), poolManagers, getHeadlessSnapshots, runtimeResolver, advisories, journalEvents, journalGate, journalStatus, memoryRecent, approvalHooks, proposals: proposalService });
+  ...(surfaceRuntime ? { surfacePublish: { hub: surfaceRuntime.hub, jobs: surfaceRuntime.jobs, onFlagsChanged: () => surfaceRuntime.refreshSessions(), assetDir: surfaceRouteExtras.assetDir, assetMaxBytes: config.surface_api.asset_max_bytes } } : {}), poolManagers, getHeadlessSnapshots, runtimeResolver, advisories, journalEvents, journalGate, journalStatus, memoryRecent, approvalHooks, proposals: proposalService });
 
 // E66 — busy notice for a held message: the channel's native queued/status
 // signal where it has one, a short text elsewhere, nothing on email.

@@ -5,8 +5,10 @@
  *   GET    /api/v1/surface-publish/surfaces?agent_id=...   surfaces this agent may publish to
  *   PUT    /api/v1/surface-publish/:surface/events/:id     create or replace an Event (and its action jobs)
  *   DELETE /api/v1/surface-publish/:surface/events/:id     remove an Event and its jobs
- *   PUT    /api/v1/surface-publish/:surface/slots/:slot    set a slot override
- *   DELETE /api/v1/surface-publish/:surface/slots/:slot    clear a slot override
+ *   PUT    /api/v1/surface-publish/:surface/slots/:slot    set a slot override (primary: optional action; context: lines or widgets)
+ *   DELETE /api/v1/surface-publish/:surface/slots/:slot    clear a slot override (and the job behind its button)
+ *   PUT    /api/v1/surface-publish/:surface/faces/:id      change an existing face: enabled, order, layout
+ *   POST   /api/v1/surface-publish/assets?agent_id=...     upload an image (raw body; PNG, JPEG, SVG); content-addressed
  *   PUT    /api/v1/surface-publish/:surface/widgets/:id    write widget data
  *   DELETE /api/v1/surface-publish/:surface/widgets/:id    remove a widget
  *   POST   /api/v1/surface-publish/answer-needed/clear     clear a conversation's answer-needed flag
@@ -23,7 +25,8 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import type Database from 'better-sqlite3';
 import { BoundsError, BOUNDS, ID_RE, type JobStore, type ResourceHub, type ResourceName } from '../surface/types.js';
-import { validateEvent, validateSlot, validateWidget, type FollowTarget } from '../surface/validate.js';
+import { checkRingCapacity, SLOT_CONTEXT, validateEvent, validateFaceLayout, validateSlot, validateWidget, type FollowTarget } from '../surface/validate.js';
+import { ASSET_TYPES, assetContentType, assetExists, storeAsset } from '../surface/assets.js';
 import { clearAnswerNeeded } from '../surface/flags.js';
 import { computeConversationId } from '../pipeline/conversation-id.js';
 
@@ -38,6 +41,10 @@ export interface SurfacePublishDeps {
   jobs: JobStore;
   db: Database.Database;
   now?: () => number;
+  /** Directory of content-addressed assets (`<db dir>/surface-assets`). Without it the upload route is not registered and `detail.image` is not checked. */
+  assetDir?: string;
+  /** Largest accepted upload, bytes (default 1 MiB). */
+  assetMaxBytes?: number;
   /** Called after an answer-needed flag was cleared (e.g. to rebuild the sessions resource). */
   onAnswerNeededCleared?: (conversationId: string) => void;
 }
@@ -138,6 +145,11 @@ export function registerSurfacePublishRoutes(server: FastifyInstance, deps: Surf
         const { agent_id: _a, ...input } = body;
         const { event, jobs } = validateEvent({ ...input, id: req.params.id }, { follow: surface.follow, source: `agent:${bare(agentId)}`, now: t });
         const existing = notBusOwned(surface.id, event.id);
+        checkRingCapacity(Object.values(deps.hub.snapshot(surface.id, 'events').items), event, t);
+        const image = event.detail?.image;
+        if (image && deps.assetDir && !assetExists(deps.assetDir, image)) {
+          throw new BoundsError(`detail.image ${image} is not in the asset store; upload the file first (surface_upload_asset) and use the hash it returns`);
+        }
         checkCapacity(surface.id, 'events', event.id, BOUNDS.eventsPerSurface, 'live events',
           (item) => typeof item['expires_at'] !== 'string' || Date.parse(item['expires_at']) > t);
         if (existing && typeof existing['created_at'] === 'string') event.created_at = existing['created_at'];
@@ -178,10 +190,16 @@ export function registerSurfacePublishRoutes(server: FastifyInstance, deps: Surf
       if (!surface) return reply;
       return guarded(reply, () => {
         const { agent_id: _a, ...input } = body;
-        const slot = validateSlot({ ...input, id: req.params.slot }, { source: `agent:${bare(agentId)}`, now: now() });
+        const { slot, jobs } = validateSlot({ ...input, id: req.params.slot }, {
+          source: `agent:${bare(agentId)}`, now: now(), follow: surface.follow,
+          widgetExists: (wid) => deps.hub.get(surface.id, 'widgets', wid) !== null,
+        }, true);
         checkCapacity(surface.id, 'slots', slot.id, BOUNDS.slotsPerSurface, 'slot overrides');
-        const rev = deps.hub.apply(surface.id, 'slots', [{ op: 'set', id: slot.id, value: slot as unknown as Record<string, unknown> }]);
-        return { ok: true, surface: surface.id, slot: slot.id, until: slot.until, rev };
+        const rev = deps.db.transaction(() => {
+          deps.jobs.replaceForSlot(surface.id, slot.id, jobs, `agent:${bare(agentId)}`);
+          return deps.hub.apply(surface.id, 'slots', [{ op: 'set', id: slot.id, value: slot as unknown as Record<string, unknown> }]);
+        })();
+        return { ok: true, surface: surface.id, slot: slot.id, until: slot.until, rev, ...(slot.action ? { action: slot.action.id } : {}) };
       });
     },
   );
@@ -194,8 +212,12 @@ export function registerSurfacePublishRoutes(server: FastifyInstance, deps: Surf
       return guarded(reply, () => {
         checkId(req.params.slot, 'slot');
         const existing = deps.hub.get(surface.id, 'slots', req.params.slot);
-        const rev = existing ? deps.hub.apply(surface.id, 'slots', [{ op: 'remove', id: req.params.slot }]) : null;
-        return { ok: true, surface: surface.id, slot: req.params.slot, removed: !!existing, ...(rev !== null ? { rev } : {}) };
+        const result = deps.db.transaction(() => {
+          const jobsRemoved = deps.jobs.removeForSlot(surface.id, req.params.slot);
+          const rev = existing ? deps.hub.apply(surface.id, 'slots', [{ op: 'remove', id: req.params.slot }]) : null;
+          return { jobsRemoved, rev };
+        })();
+        return { ok: true, surface: surface.id, slot: req.params.slot, removed: !!existing, jobs_removed: result.jobsRemoved, ...(result.rev !== null ? { rev: result.rev } : {}) };
       });
     },
   );
@@ -226,11 +248,75 @@ export function registerSurfacePublishRoutes(server: FastifyInstance, deps: Surf
       return guarded(reply, () => {
         checkId(req.params.id, 'id');
         const existing = deps.hub.get(surface.id, 'widgets', req.params.id);
+        const context = deps.hub.get(surface.id, 'slots', SLOT_CONTEXT);
+        if (existing && Array.isArray(context?.['widgets']) && (context['widgets'] as unknown[]).includes(req.params.id)) {
+          throw new BoundsError(`widget "${req.params.id}" is bound to the "${SLOT_CONTEXT}" slot; update or clear that slot first`);
+        }
         const rev = existing ? deps.hub.apply(surface.id, 'widgets', [{ op: 'remove', id: req.params.id }]) : null;
         return { ok: true, surface: surface.id, id: req.params.id, removed: !!existing, ...(rev !== null ? { rev } : {}) };
       });
     },
   );
+
+  // ── Faces ──────────────────────────────────────────────────────────────────
+  // Faces are seeded by the bus; an agent may reorder, disable or give one a slot layout. Body: { enabled?, order?, layout? }
+  // (`layout: null` removes the layout). Unknown faces are refused.
+  server.put<{ Params: { surface: string; id: string }; Querystring: Record<string, string> }>(
+    `${P}/:surface/faces/:id`, { bodyLimit: BODY_LIMIT },
+    async (req, reply) => {
+      const body = asBody(req.body);
+      const agentId = agentOf(body, req.query);
+      const surface = authorize(reply, req.params.surface, agentId);
+      if (!surface) return reply;
+      return guarded(reply, () => {
+        checkId(req.params.id, 'id');
+        const existing = deps.hub.get(surface.id, 'faces', req.params.id);
+        if (!existing) {
+          const known = Object.keys(deps.hub.snapshot(surface.id, 'faces').items);
+          throw new BoundsError(`unknown face "${req.params.id}"${known.length ? `; faces on this surface: ${known.join(', ')}` : ''}`);
+        }
+        const patch: Record<string, unknown> = {};
+        if (body['enabled'] !== undefined) {
+          if (typeof body['enabled'] !== 'boolean') throw new BoundsError('enabled must be true or false');
+          patch['enabled'] = body['enabled'];
+        }
+        if (body['order'] !== undefined) {
+          if (!Number.isInteger(body['order']) || (body['order'] as number) < 0 || (body['order'] as number) > 99) throw new BoundsError('order must be a whole number from 0 to 99');
+          patch['order'] = body['order'];
+        }
+        if (body['layout'] !== undefined) patch['layout'] = body['layout'] === null ? null : validateFaceLayout(body['layout']);
+        if (Object.keys(patch).length === 0) throw new BoundsError('nothing to change: pass enabled, order or layout');
+        const rev = deps.hub.apply(surface.id, 'faces', [{ op: 'patch', id: req.params.id, value: patch }]);
+        return { ok: true, surface: surface.id, id: req.params.id, rev };
+      });
+    },
+  );
+
+  // ── Assets ─────────────────────────────────────────────────────────────────
+  // Raw body, Content-Type image/png | image/jpeg | image/svg+xml. Any agent that publishes to at least one
+  // surface may upload (the shared bus token authenticates the process; devices never reach this prefix).
+  if (deps.assetDir) {
+    const assetDir = deps.assetDir;
+    const limit = deps.assetMaxBytes ?? 1_048_576;
+    for (const type of Object.keys(ASSET_TYPES)) {
+      if (!server.hasContentTypeParser(type)) server.addContentTypeParser(type, { parseAs: 'buffer', bodyLimit: limit }, (_req, body, done) => done(null, body));
+    }
+    server.post<{ Querystring: Record<string, string> }>(`${P}/assets`, { bodyLimit: limit }, async (req, reply) => {
+      const agentId = agentOf({}, req.query);
+      if (!agentId) return reply.code(400).send({ ok: false, error: 'agent_id is required' });
+      if (publishableSurfaces(deps.surfaces(), agentId).length === 0) {
+        return reply.code(403).send({ ok: false, error: `agent "${bare(agentId)}" is not a publisher of any surface, so it may not upload assets` });
+      }
+      const type = assetContentType(req.headers['content-type']);
+      if (!type || !Buffer.isBuffer(req.body)) {
+        return reply.code(415).send({ ok: false, error: `send the file as the raw request body with Content-Type ${Object.keys(ASSET_TYPES).join(', ')}` });
+      }
+      return guarded(reply, () => {
+        const stored = storeAsset(assetDir, type, req.body as Buffer);
+        return reply.code(stored.created ? 201 : 200).send({ ok: true, ...stored, reference: stored.hash });
+      });
+    });
+  }
 
   // ── Answer needed ──────────────────────────────────────────────────────────
   // Body: { conversation_id } or { channel, contact, topic? }. Any agent with the bus token may clear.
