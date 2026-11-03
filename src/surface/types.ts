@@ -324,3 +324,54 @@ export const ACTION_ID_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 export const WIDGET_TYPE_RE = /^[a-z0-9][a-z0-9_.-]{0,39}$/;
 
 export const SURFACE_PROTOCOL_VERSION = 2;
+
+// ── Module interfaces (implemented by devices.ts, actions.ts) ───────────────
+
+/** S96.1 — device registry. Implemented by `src/surface/devices.ts`. */
+export interface DeviceStore {
+  /** Mirror `adapters.intercom.surfaces` into `surfaces`; create or rotate each surface's legacy device from its `token_env`. */
+  syncFromConfig(surfaces: { id: string; profile: string; follow: SurfaceRow['follow']; token_env?: string; max_devices?: number }[], env: NodeJS.ProcessEnv): void;
+  surface(id: string): SurfaceRow | null;
+  /** Resolve a credential to its non-revoked device. Timing-safe; updates nothing. */
+  authenticate(credential: string | undefined): Device | null;
+  /** Mint a one-time pairing code (stored hashed) for a new device on `surfaceId`. */
+  createPairCode(input: { surfaceId: string; name: string; profile?: string; scope?: DeviceScope; ttlMs: number }): { code: string; expires_at: string };
+  /**
+   * Redeem a v2 code (surface_pair_codes) or a v1 code (intercom_pair_codes): creates the
+   * device and returns its credential. Enforces `max_devices`.
+   */
+  redeem(code: string, certFingerprint: string | null):
+    | { ok: true; result: PairResult; device: Device }
+    | { ok: false; reason: 'unknown' | 'expired' | 'used' | 'surface_unavailable' | 'device_limit' };
+  list(surfaceId?: string, includeRevoked?: boolean): Device[];
+  get(deviceId: string): Device | null;
+  /** Returns the revoked device, or null when unknown or already revoked. Callers close its sockets. */
+  revoke(deviceId: string): Device | null;
+  touch(deviceId: string): void;
+}
+
+/** A job to store behind one action of an Event (input to {@link JobStore.replaceForEvent}). */
+export interface NewJob {
+  action_id: string;
+  channel: string;
+  sender: string;
+  topic?: string;
+  payload_body: string;
+  sends_on_behalf: boolean;
+  confirm_draft: string | null;
+  once: boolean;
+  expires_at: string | null;
+}
+
+/** S96.4 — job storage. Implemented by `src/surface/actions.ts`. */
+export interface JobStore {
+  /** Replace every job behind `events:<eventId>:*` with `jobs` (in one transaction). */
+  replaceForEvent(surfaceId: string, eventId: string, jobs: NewJob[], createdBy: string): SurfaceJob[];
+  removeForEvent(surfaceId: string, eventId: string): number;
+  get(surfaceId: string, objectRef: string): SurfaceJob | null;
+}
+
+/** S96.4 — the one handler behind `POST /actions` and the WS `action` frame. */
+export interface ActionHandler {
+  handle(device: Device, request: unknown): Promise<ActionResult>;
+}
