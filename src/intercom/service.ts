@@ -449,12 +449,15 @@ export class IntercomService {
     const d = client.device;
     if (!api || !d) return;
     const nowIso = new Date(this.now()).toISOString();
-    try { api.devices.touch(d.id); } catch { /* best effort */ }
-    const existing = api.hub.get(client.surface.id, 'device', d.id);
-    const value = existing
-      ? { ...patch, last_seen_at: nowIso }
-      : { id: d.id, name: d.name, profile: d.profile, scope: d.scope, connected: false, last_seen_at: nowIso, battery: null, quiet: false, view: null, ...patch };
-    this.applyResource(client.surface.id, 'device', [{ op: existing ? 'patch' : 'set', id: d.id, value }]);
+    // Best effort: also runs from socket close handlers, possibly during shutdown.
+    try {
+      api.devices.touch(d.id);
+      const existing = api.hub.get(client.surface.id, 'device', d.id);
+      const value = existing
+        ? { ...patch, last_seen_at: nowIso }
+        : { id: d.id, name: d.name, profile: d.profile, scope: d.scope, connected: false, last_seen_at: nowIso, battery: null, quiet: false, view: null, ...patch };
+      this.applyResource(client.surface.id, 'device', [{ op: existing ? 'patch' : 'set', id: d.id, value }]);
+    } catch (err) { this.log(`warn: device state update failed: ${String(err)}`); }
   }
 
   /** `{"type":"view","view":"conversation:<id>"|null}` */
