@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { createStore, applyDelta, applyState, revsOf, activeSlot, faceOrder, stepFace, faceLayout, approvalItems } from '../surface.js';
-import { ringModel, hitTest, ballHit, pointToHours, scrubStart, scrubMove, scrubRelease, scrubActive, scrubRemaining, scrubInfo, SNAP_MS, TICK_HIT_TOL, OVERLAP_R, PRIMARY, OVERLAP_W, travelDeparture, pickDeparture, primaryView, nextUp, contextView, widgetView, colorValue, countdownText } from '../dayv2.js';
+import { ringModel, hitTest, nearestRingEvent, carouselOrder, inRingBand, RING_TAP, ballHit, pointToHours, scrubStart, scrubMove, scrubRelease, scrubActive, scrubRemaining, scrubInfo, SNAP_MS, TICK_HIT_TOL, OVERLAP_R, PRIMARY, OVERLAP_W, travelDeparture, pickDeparture, primaryView, nextUp, contextView, widgetView, colorValue, countdownText } from '../dayv2.js';
 import { polar, RING_R } from '../logic.js';
 import { statusModel, RING_CAP, sessionsFromDesk, mergeOlder, appendMessage } from '../statusv2.js';
 import { interpretResult, needsConfirm, buildRequest, ButtonStates, submitAction, btnKey } from '../actions.js';
@@ -447,5 +447,82 @@ describe('surface rendering', () => {
   });
   it('renders every demo step', () => {
     for (const s of STEPS) expect(render(s.name, s.props(0))).toBeTruthy();
+  });
+});
+
+describe('ring tap carousel', () => {
+  const at = (h, r = 208) => polar(h, r);
+  const mk = (list) => ringModel(list, NOW, TZ);
+  const m = mk([ev('late', '15:00', '16:00'), ev('tk', '12:00', null), ev('early', '09:00', '10:00'), ev('ov', '09:30', '09:45', { layer: 'overlap' }), ev('tk2', '15:00', null)]);
+  describe('carouselOrder', () => {
+    it('orders segments and ticks together by start; a segment precedes a tick at the same time', () => {
+      expect(carouselOrder(m).map((x) => x.id)).toEqual(['early', 'ov', 'tk', 'late', 'tk2']);
+      expect(carouselOrder(m).map((x) => x.kind)).toEqual(['seg', 'seg', 'tick', 'seg', 'tick']);
+    });
+    it('keeps past Events and is empty for an empty or missing model', () => {
+      expect(carouselOrder(m)[0].id).toBe('early'); // 09:00 is "now" in the fixture, earlier ones would be past too
+      expect(carouselOrder(mk([]))).toEqual([]);
+      expect(carouselOrder(null)).toEqual([]);
+    });
+  });
+  describe('nearestRingEvent', () => {
+    it('picks the Event whose start is nearest the tapped hour, anywhere on the ring', () => {
+      expect(nearestRingEvent(...at(11.6, 175), m)).toEqual({ kind: 'tick', id: 'tk' });
+      expect(nearestRingEvent(...at(14.9, 240), m)).toEqual({ kind: 'seg', id: 'late' });
+      expect(nearestRingEvent(...at(3), m)).toEqual({ kind: 'seg', id: 'early' });
+    });
+    it('a tap inside a segment span wins even when a tick starts closer', () => {
+      const w = mk([ev('wide', '08:00', '14:00'), ev('tk', '12:30', null)]);
+      expect(nearestRingEvent(...at(10), w)).toEqual({ kind: 'seg', id: 'wide' }); // tick is 2.5 h away, but 10 is inside the span
+    });
+    it('measures to the start only outside the span, around midnight too', () => {
+      const w = mk([ev('a', '23:00', '23:30'), ev('b', '03:00', '04:00')]);
+      expect(nearestRingEvent(...at(0.5), w)).toEqual({ kind: 'seg', id: 'a' }); // 1.5 h from 23:00, 2.5 h from 03:00
+    });
+    it('an exact tie goes to the earlier Event', () => {
+      const w = mk([ev('a', '10:00', null), ev('b', '12:00', null)]);
+      expect(nearestRingEvent(...at(11), w)).toEqual({ kind: 'tick', id: 'a' });
+      const x = mk([ev('tk', '11:00', null), ev('sg', '11:00', '12:00')]);
+      expect(nearestRingEvent(...at(10), x)).toEqual({ kind: 'seg', id: 'sg' }); // same start: segment first
+    });
+    it('returns null for an empty model so a tap does nothing', () => {
+      expect(nearestRingEvent(...at(10), mk([]))).toBeNull();
+    });
+  });
+  describe('ring band', () => {
+    it('is generous: just inside the inner track to just outside the rim, not the centre', () => {
+      expect(inRingBand(...polar(5, 208))).toBe(true);
+      expect(inRingBand(...polar(5, RING_TAP.in + 1))).toBe(true);
+      expect(inRingBand(...polar(5, RING_TAP.out - 1))).toBe(true);
+      expect(inRingBand(...polar(5, 160))).toBe(false);
+      expect(inRingBand(233, 233)).toBe(false);
+    });
+    it('covers a spot well away from any bar or tick', () => {
+      expect(hitTest(...at(20, 208), m)).toBeNull();
+      expect(inRingBand(...at(20, 208))).toBe(true);
+      expect(nearestRingEvent(...at(20, 208), m)).not.toBeNull();
+    });
+  });
+  describe('carousel card', () => {
+    const e1 = { ...ev('d', '09:00', '10:00', { body: 'Second floor.', detail: { location: '12 Main', description: 'Bring card.' }, travel: { minutes: 20, mode: 'drive' }, actions: [{ id: 'go', label: 'Go' }] }), color: 'orange' };
+    it('shows the counter, the Event focus content and its buttons', () => {
+      const h = render('carousel', { ev: e1, tz: TZ, index: 1, total: 4 });
+      expect(h).toContain('2 of 4');
+      expect(h).toContain('data-act="cprev"');
+      expect(h).toContain('data-act="cnext"');
+      expect(h).toContain('Second floor.');
+      expect(h).toContain('12 Main');
+      expect(h).toContain('Bring card.');
+      expect(h).toContain('20 min by drive');
+      expect(h).toContain('data-act="efire"');
+      expect(h).toContain('data-act="back"');
+      expect(h).not.toContain('copenconv');
+    });
+    it('offers Open conversation for an opens: conversation Event, and marks a past card', () => {
+      const h = render('carousel', { ev: { ...e1, opens: 'conversation', conversation_id: 'c1' }, tz: TZ, index: 0, total: 1, past: true });
+      expect(h).toContain('data-act="copenconv"');
+      expect(h).toContain('class="scroller car past"');
+      expect(h).toContain('carr off');
+    });
   });
 });

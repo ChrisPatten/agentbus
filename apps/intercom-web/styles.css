@@ -174,3 +174,17 @@ form.send button:disabled{opacity:.4}
 .face svg.wg{position:relative;inset:auto;width:38px;height:38px}
 .face svg.ws{position:relative;inset:auto;width:80px;height:28px}
 .btn.pbtn.ok{background:transparent}
+/* Event carousel (ring tap): counter row with arrows, dots, and a slide on swipe */
+.cnav{display:flex;align-items:center;justify-content:space-between;max-width:300px;margin:-14px auto 0}
+.ccount{font-size:28px;font-weight:600;letter-spacing:1px;color:var(--dim)}
+.carr{width:72px;height:72px;line-height:64px;font-size:56px;font-weight:600;color:var(--cream);border-radius:50%}
+.carr.off{opacity:.25;pointer-events:none}
+.cdots{display:flex;justify-content:center;gap:10px;margin:-6px 0 6px}
+.cdots i{width:10px;height:10px;border-radius:50%;background:#4a453d}
+.cdots i.on{background:var(--amber)}
+.car.past .ftitle,.car.past .fbody{color:var(--dim)}
+.car.past .label{opacity:.7}
+.car.slide-l{animation:slidel .22s ease-out}.car.slide-r{animation:slider .22s ease-out}
+@keyframes slidel{from{transform:translateX(60px);opacity:0}to{transform:none;opacity:1}}
+@keyframes slider{from{transform:translateX(-60px);opacity:0}to{transform:none;opacity:1}}
+@media (prefers-reduced-motion:reduce){.car.slide-l,.car.slide-r{animation:none}}

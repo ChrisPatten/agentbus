@@ -12,6 +12,7 @@ export const TICK_HIT_TOL = 30; // design px: ticks are thin, so their target is
 export const TICK_HIT_PAD = 10; // design px added to each side of the tick's rim band for hit purposes
 export const SCRUB_BALL_TOL = 34; // design px around the progress ball that starts a scrub
 export const SNAP_MS = 4000;
+export const RING_TAP = { in: 166, out: 250 }; // design px: the generous band whose taps open the Event carousel (inner track to just past the rim)
 
 const NAMED = { orange: '#ff9f43', red: '#ef6a5d', green: '#74c978', blue: '#6fa8ff', purple: '#c9a0ff', yellow: '#f4d35e', teal: '#5fc0b3', pink: '#e39aab', gray: '#8e8e93', white: '#f6eedb' };
 /** `#rgb`, `#rrggbb` or a named colour from the bus; anything else gives the fallback. */
@@ -124,6 +125,42 @@ export function hitTest(x, y, model, tol = HIT_TOL) {
     const dr = Math.max(0, Math.abs(r - sg.r) - sg.w / 2);
     const dh = h >= sg.startH && h <= sg.endH ? 0 : Math.min(hoursApart(h, sg.startH), hoursApart(h, sg.endH));
     consider('seg', sg.id, Math.hypot(dr, dh * pxPerHour), sg.layer === 'overlap');
+  }
+  return best ? { kind: best.kind, id: best.id } : null;
+}
+
+/** Is (x, y) in the ring band, the area whose taps open the Event carousel? */
+export function inRingBand(x, y) {
+  const r = radiusOf(x, y);
+  return r >= RING_TAP.in && r <= RING_TAP.out;
+}
+
+/**
+ * Every ring Event of the day (segments and ticks) in carousel order: by start time, a segment before a tick at the
+ * same time, then by id. Items are `{ kind: 'seg'|'tick', id, startH }`. Past Events stay in the list.
+ */
+export function carouselOrder(model) {
+  if (!model) return [];
+  const all = [
+    ...model.segs.map((s) => ({ kind: 'seg', id: s.id, startH: s.startH, span: [s.startH, s.endH] })),
+    ...model.ticks.map((t) => ({ kind: 'tick', id: t.id, startH: t.h, span: null })),
+  ];
+  all.sort((a, b) => a.startH - b.startH || (a.kind === b.kind ? 0 : a.kind === 'seg' ? -1 : 1) || String(a.id).localeCompare(String(b.id)));
+  return all.map(({ kind, id, startH }) => ({ kind, id, startH }));
+}
+
+/**
+ * The ring Event closest in time to where the user tapped, or null when the day has none. Distance is measured around
+ * the 24 h ring from the tapped hour to the Event's start (zero when the tap falls inside a segment's span; a tick uses
+ * its time). Equal distances go to the earlier Event. Returns `{ kind, id }`; does not look at the radius (see inRingBand).
+ */
+export function nearestRingEvent(x, y, model) {
+  const h = pointToHours(x, y);
+  let best = null;
+  for (const it of carouselOrder(model)) {
+    const seg = it.kind === 'seg' ? model.segs.find((s) => s.id === it.id) : null;
+    const d = seg && h >= seg.startH && h <= seg.endH ? 0 : hoursApart(h, it.startH);
+    if (!best || d < best.d - 1e-9) best = { kind: it.kind, id: it.id, d }; // strict <: the list is in start order, so ties keep the earlier
   }
   return best ? { kind: best.kind, id: best.id } : null;
 }

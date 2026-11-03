@@ -3,7 +3,7 @@ import { render } from './screens.js';
 import { IntercomSocket, store, apiUrl } from './socket.js';
 import { parsePairInput, replyIsFresh, applyNotification, activeItems, needsList, infoList, attentionLevel, cycleId, isQuietHours, pickScreen, deskCounts, departureView, chooseDeskFace, quietTone, matchNotice, LANDSCAPE_QUERY, physicalDialSize, clampPpi, DIAL_INCHES, DEFAULT_PPI, LEVEL_RANK, tzParts } from './logic.js';
 import { createStore, applyDelta, applyState, revsOf, itemsOf, activeSlot, faceOrder, stepFace, faceLayout, approvalItems } from './surface.js';
-import { ringModel, hitTest, ballHit, pointToHours, scrubStart, scrubMove, scrubRelease, scrubActive, scrubRemaining, SNAP_MS, pickDeparture, travelDeparture } from './dayv2.js';
+import { ringModel, carouselOrder, nearestRingEvent, inRingBand, ballHit, pointToHours, scrubStart, scrubMove, scrubRelease, scrubActive, scrubRemaining, SNAP_MS, pickDeparture, travelDeparture } from './dayv2.js';
 import { ButtonStates, submitAction, needsConfirm, btnKey } from './actions.js';
 import { sessionsFromDesk, sessionsFromStore, mergeOlder, appendMessage } from './statusv2.js';
 import { runDemo, STEPS } from './demo.js';
@@ -96,6 +96,29 @@ function ensureImage(hash) {
     .then((r) => (r.ok ? r.blob() : Promise.reject(new Error(String(r.status)))))
     .then((b) => { S.images.set(hash, URL.createObjectURL(b)); update(); })
     .catch(() => { S.images.delete(hash); });
+}
+
+/** The ring Events of today in carousel order, with the model they came from. */
+function carouselNow(now = new Date()) {
+  const model = ringModel(itemsOf(S.store, 'events'), now, tzNow());
+  return { model, order: carouselOrder(model) };
+}
+/** Open the ring Event carousel on `id` (the Event nearest the tap). Does nothing with no Events. */
+function openCarousel(id) {
+  const { order } = carouselNow();
+  if (!order.length) return;
+  for (const it of order) { const ev = S.store.items.events[it.id]; if (ev && ev.detail && ev.detail.image) ensureImage(ev.detail.image); }
+  openView({ type: 'carousel', id });
+}
+/** Move the carousel by `d` cards (wraps round); the swipe direction picks the slide animation. */
+function stepCarousel(d) {
+  if (!S.view || S.view.type !== 'carousel') return;
+  const { order } = carouselNow();
+  const i = order.findIndex((x) => x.id === S.view.id);
+  if (i < 0 || order.length < 2) return;
+  S.view = { type: 'carousel', id: order[(i + d + order.length) % order.length].id };
+  S.slideDir = d > 0 ? 'l' : 'r';
+  armViewTimer(); update();
 }
 
 function openEvent(id) {
@@ -210,13 +233,14 @@ function show(name, props) {
   const rec = sc && prev === name ? { top: sc.scrollTop, h: sc.scrollHeight, bottom: sc.scrollHeight - sc.scrollTop - sc.clientHeight < 60 } : null;
   face.innerHTML = html;
   const nsc = face.querySelector('[data-scroller]');
-  if (nsc) {
+  const newCard = sc && nsc && sc.dataset.card !== nsc.dataset.card; // a different carousel card starts at the top
+  if (nsc && !newCard) {
     const c = S.convo;
     if (name === 'convo' && c && (c.stick || (rec && rec.bottom)) && !c.prepend) { nsc.scrollTop = nsc.scrollHeight; if (c.stick && !c.loading) c.stick = false; }
     else if (name === 'convo' && c && c.prepend && rec) { nsc.scrollTop = rec.top + (nsc.scrollHeight - rec.h); if (!c.loading) c.prepend = false; }
     else if (rec) nsc.scrollTop = rec.top;
   }
-  if (prev === name && (name === 'convo' || name === 'event' || name === 'approval' || name === 'draft' || S.scrub)) return;
+  if (prev === name && (name === 'convo' || name === 'event' || name === 'carousel' || name === 'approval' || name === 'draft' || S.scrub)) return;
   face.classList.remove('fade');
   void face.offsetWidth;
   face.classList.add('fade');
@@ -263,6 +287,18 @@ function computeView(now = new Date()) {
       const ev = S.store.items.events[S.view.id];
       if (!ev) { queueMicrotask(closeView); return ['offline', { connecting: true }]; }
       return [name, { ev, tz, btn: btnFn, image: ev.detail && ev.detail.image ? S.images.get(ev.detail.image) || null : null }];
+    }
+    case 'carousel': {
+      const { model, order } = carouselNow(now);
+      const i = order.findIndex((x) => x.id === S.view.id);
+      const ev = i >= 0 ? S.store.items.events[S.view.id] : null;
+      if (!ev) { queueMicrotask(closeView); return ['offline', { connecting: true }]; }
+      const img = ev.detail && ev.detail.image;
+      if (img) ensureImage(img);
+      const it = order[i];
+      const m = it.kind === 'seg' ? model.segs.find((x) => x.id === it.id) : model.ticks.find((x) => x.id === it.id);
+      const dir = S.slideDir; S.slideDir = '';
+      return [name, { ev, tz, btn: btnFn, image: img ? S.images.get(img) || null : null, index: i, total: order.length, past: !!(m && m.past), dir }];
     }
     case 'approval': {
       const ev = S.store.items.events[S.view.id];
@@ -486,6 +522,13 @@ function onAct(d) {
   if (act === 'expand') { S.nOpen = S.nSel; update(); return; }
   if (act === 'collapse') { S.nOpen = null; update(); return; }
   if (act === 'back') { closeView(); return; }
+  if (act === 'cprev') { stepCarousel(-1); return; }
+  if (act === 'cnext') { stepCarousel(1); return; }
+  if (act === 'copenconv') {
+    const ev = S.view && S.view.type === 'carousel' && S.store.items.events[S.view.id];
+    if (ev && ev.conversation_id) openConvo(ev.conversation_id, ev.title);
+    return;
+  }
   if (act === 'dhold') { closeView(); return; }
   if (act === 'slotaction') {
     const slot = activeSlot(S.store, 'primary', now);
@@ -580,18 +623,21 @@ function wireUi() {
       if (!S.expanded) { S.expanded = true; armReplyTimer(); update(); }
     } else if (Date.now() < S.doneUntil) { S.doneUntil = 0; update(); }
     else if (lastName === 'idle' && S.v2) {
+      // A tap anywhere in the ring band (not on the ball) opens the carousel on the Event nearest in time.
       const p = designPoint(ev);
       const now = new Date();
-      const hit = hitTest(p.x, p.y, ringModel(itemsOf(S.store, 'events'), now, tzNow()));
-      if (hit) openEvent(hit.id);
+      if (faceLayout(S.store, 'day').ring !== false && inRingBand(p.x, p.y) && !ballHit(p.x, p.y, tzParts(now, tzNow()).hours)) {
+        const hit = nearestRingEvent(p.x, p.y, ringModel(itemsOf(S.store, 'events'), now, tzNow()));
+        if (hit) openCarousel(hit.id);
+      }
     }
   });
   // Swipe left or right through several notifications, or between faces. A press on the progress ball scrubs instead.
-  let sx = null;
+  let sx = null, sy0 = null;
   const dial = $('dial');
   dial.addEventListener('pointerdown', (ev) => {
     armViewTimer();
-    sx = ev.clientX;
+    sx = ev.clientX; sy0 = ev.clientY;
     if (lastName === 'idle' && S.v2 && !S.reply) {
       const p = designPoint(ev);
       const nowH = tzParts(new Date(), tzNow()).hours;
@@ -621,13 +667,18 @@ function wireUi() {
   dial.addEventListener('pointerup', (ev) => {
     if (endScrub()) { sx = null; return; }
     if (sx === null) return;
-    const dx = ev.clientX - sx; sx = null;
+    const dx = ev.clientX - sx, dy = ev.clientY - sy0; sx = null;
+    if (lastName === 'carousel') {
+      if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.3) { S.swipedAt = Date.now(); stepCarousel(dx < 0 ? 1 : -1); }
+      return;
+    }
     if (Math.abs(dx) > 40 && lastName === 'needs') { S.swipedAt = Date.now(); cycle(dx < 0 ? 1 : -1); }
     else if (Math.abs(dx) > 40 && (lastName === 'idle' || lastName === 'status')) moveFace(dx < 0 ? 1 : -1);
   });
   document.addEventListener('keydown', (ev) => {
     if (ev.target && ev.target.tagName === 'INPUT') return;
     if ((ev.key === 'ArrowLeft' || ev.key === 'ArrowRight') && (lastName === 'idle' || lastName === 'status')) moveFace(ev.key === 'ArrowRight' ? 1 : -1);
+    if ((ev.key === 'ArrowLeft' || ev.key === 'ArrowRight') && lastName === 'carousel') stepCarousel(ev.key === 'ArrowRight' ? 1 : -1);
     if (ev.key === 'Escape' && S.view) closeView();
   });
   $('dial').addEventListener('scroll', (ev) => {

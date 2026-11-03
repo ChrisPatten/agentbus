@@ -7,7 +7,7 @@ import { ringModel, nextUp, primaryView, contextView, scrubInfo, colorValue, cal
 import { createStore } from './surface.js';
 import { statusModel, bubbleSide } from './statusv2.js';
 
-export const SCREENS = ['idle', 'listening', 'working', 'reply', 'choice', 'needs', 'draft', 'done', 'quiet', 'status', 'event', 'approval', 'convo'];
+export const SCREENS = ['idle', 'listening', 'working', 'reply', 'choice', 'needs', 'draft', 'done', 'quiet', 'status', 'event', 'approval', 'carousel', 'convo'];
 
 const btn = (label, cls = '') => `<div class="btn ${cls}">${e(label)}</div>`;
 
@@ -173,19 +173,39 @@ const fmtRange = (ev, tz) => {
   return '';
 };
 
-/** Event focus: title, time, place, picture, description and the Event's buttons. */
-export function event({ ev, tz, btn = NO_BTN, image = null }) {
+/** The Event focus content: time, title, place, picture, description and the Event's buttons (no Back). */
+function eventBody(ev, tz, btn, image) {
   const d = ev.detail || {};
   const acts = (ev.actions || []).slice(0, 3).map((a) => actionBtn(a, btn(`events:${ev.id}`, a.id), 'data-act="efire"', ` data-aid="${e(a.id)}"`)).join('');
   const col = ev.color ? colorValue(ev.color, null) : null;
-  return `<div class="scroller" data-scroller>` +
-    `<div class="label"${col ? ` style="color:${e(col)}"` : ''}>${e(fmtRange(ev, tz))}</div>` +
+  return `<div class="label"${col ? ` style="color:${e(col)}"` : ''}>${e(fmtRange(ev, tz))}</div>` +
     `<div class="ftitle">${e(ev.title)}</div>` +
     `${d.location ? `<div class="floc">${e(d.location)}</div>` : ''}` +
     `${image ? `<img class="fimg" src="${e(image)}" alt="">` : ''}` +
     `${ev.body ? `<div class="fbody">${e(ev.body).replace(/\n/g, '<br>')}</div>` : ''}` +
     `${d.description ? `<div class="fbody dim">${e(d.description).replace(/\n/g, '<br>')}</div>` : ''}` +
-    `${acts}<div class="btn back" data-act="back">Back</div></div>`;
+    `${ev.travel && ev.travel.minutes > 0 ? `<div class="floc">${e(travelLine(ev))}</div>` : ''}` +
+    acts;
+}
+const travelLine = (ev) => `${ev.travel.minutes} min ${ev.travel.mode ? `by ${ev.travel.mode}` : 'travel'} before`;
+
+/** Event focus: title, time, place, picture, description and the Event's buttons. */
+export function event({ ev, tz, btn = NO_BTN, image = null }) {
+  return `<div class="scroller" data-scroller>${eventBody(ev, tz, btn, image)}<div class="btn back" data-act="back">Back</div></div>`;
+}
+
+/**
+ * The Day Dial's Event carousel: one card per ring Event, ordered by start. `index` is 0-based within `total`; a card is
+ * the Event focus content under a counter row (previous, "n of N", next). A past Event is greyed. An `opens: conversation`
+ * Event offers "Open conversation". Back closes to the Day Dial.
+ */
+export function carousel({ ev, tz, btn = NO_BTN, image = null, index = 0, total = 1, past = false, dir = '' }) {
+  const many = total > 1;
+  const nav = `<div class="cnav"><div class="carr${many ? '' : ' off'}" data-act="cprev" aria-label="Previous">‹</div>` +
+    `<div class="ccount">${index + 1} of ${total}</div><div class="carr${many ? '' : ' off'}" data-act="cnext" aria-label="Next">›</div></div>`;
+  const dots = many && total <= 9 ? `<div class="cdots">${Array.from({ length: total }, (_, i) => `<i${i === index ? ' class="on"' : ''}></i>`).join('')}</div>` : '';
+  const conv = ev.opens === 'conversation' && ev.conversation_id ? `<div class="btn ok" data-act="copenconv">Open conversation</div>` : '';
+  return `<div class="scroller car${past ? ' past' : ''}${dir ? ` slide-${dir}` : ''}" data-scroller data-card="${e(ev.id)}">${nav}${dots}${eventBody(ev, tz, btn, image)}${conv}<div class="btn back" data-act="back">Back</div></div>`;
 }
 
 /** Approval view for a bus approval Event: exactly what is being approved, with its approve and deny buttons. */
@@ -232,7 +252,7 @@ export function offline({ connecting }) {
     <div class="big" style="font-size:40px;margin-top:14px">${connecting ? 'One moment' : 'Reconnecting'}</div>`;
 }
 
-const R = { idle, listening, working, reply, choice, needs, draft, done, quiet, status, pairing, offline, event, approval, convo };
+const R = { idle, listening, working, reply, choice, needs, draft, done, quiet, status, pairing, offline, event, approval, carousel, convo };
 export function render(name, props = {}) {
   return R[name](props);
 }
