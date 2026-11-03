@@ -42,6 +42,7 @@ import {
   SURFACE_PROTOCOL_VERSION, type ActionHandler, type ActionResult, type ConversationMessage, type DeltaFrame, type Device, type DeviceStore,
   type ResourceHub, type ResourceName, type ResourceOp,
 } from '../surface/types.js';
+import { diffOps } from '../surface/resources.js';
 
 export const PROTOCOL_VERSION = 1;
 export const MAX_SEND_CHARS = 4000;
@@ -191,7 +192,7 @@ export class IntercomService {
         id: s.id, profile: s.profile, max_devices: s.max_devices, ...(s.token_env ? { token_env: s.token_env } : {}),
         follow: { contact: bareContact(s.follow.contact), channel: s.follow.channel, ...(s.follow.topic ? { topic: s.follow.topic } : {}) },
       })), env);
-      for (const s of this.surfaces.values()) this.seedFaces(s.id);
+      for (const s of this.surfaces.values()) { this.seedFaces(s.id); this.syncNotices(s); }
     }
   }
 
@@ -807,6 +808,7 @@ export class IntercomService {
       for (const s of this.targetedSurfaces(n)) {
         this.emitDurable(s, 'notification', publicNotification(n));
         this.emitAttention(s);
+        this.syncNotices(s);
       }
       if (carryContext && n.state === 'active') this.carryContext(n);
     } catch (err) { this.log(`warn: notification publish failed: ${String(err)}`); }
@@ -874,6 +876,33 @@ export class IntercomService {
       noteLine: `On the Intercom notification "${n.title}" (${n.source}, raised ${this.clock(n.created_at)})`.replace(/\s+/g, ' '),
       metadata: { notification_id: n.id },
     });
+  }
+
+  /** E96 — mirror the surface's open notifications into its `notices` resource. */
+  syncNotices(surface: Surface): void {
+    const api = this.deps.surfaceApi;
+    if (!api) return;
+    const next: Record<string, Record<string, unknown>> = {};
+    if (this.notificationsOn) {
+      for (const n of openForSurface(this.deps.db, surface.id)) next[n.id] = publicNotification(n) as unknown as Record<string, unknown>;
+    }
+    this.applyResource(surface.id, 'notices', diffOps(api.hub.snapshot(surface.id, 'notices').items, next));
+  }
+
+  /**
+   * E96 — `notices:<id>` actions from the shared action handler: the E89 notification action
+   * path (`[tapped] <label>` into the followed conversation), with the idempotency key as `client_msg_id`.
+   */
+  async noticeAction(device: Device, noticeId: string, actionId: string, idempotencyKey: string): Promise<ActionResult> {
+    const base = { type: 'action_result' as const, idempotency_key: idempotencyKey };
+    const surface = this.surfaces.get(device.surface_id);
+    const index = /^\d{1,2}$/.test(actionId) ? Number(actionId) : NaN;
+    if (!surface || !Number.isInteger(index)) return { ...base, status: 'failed', reason: 'invalid' };
+    const ack = await this.handleNotificationAction(surface, { client_msg_id: idempotencyKey, id: noticeId, index });
+    if (ack['type'] === 'error') return { ...base, status: 'failed', reason: ack['code'] === 'notification_not_found' ? 'not_found' : 'invalid' };
+    const messageId = typeof ack['message_id'] === 'string' ? { message_id: ack['message_id'] } : {};
+    if (ack['status'] === 'queued' || ack['status'] === 'command') return { ...base, status: 'done', ...messageId };
+    return { ...base, status: 'failed', reason: String(ack['reason'] ?? 'rejected'), ...messageId };
   }
 
   // ── Test/inspection helpers ──────────────────────────────────────────────
