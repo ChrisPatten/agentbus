@@ -174,3 +174,6 @@ Flagged by Chris, 2026-10-05. The macOS client's hand-rolled block parser (`apps
 
 ### Telegram: photos sent together (media group) are only partly delivered to the agent
 Reported by Chris, 2026-09-30, not yet investigated. Sending several screenshots at once silently drops some: one batch of 10 delivered no attachments, and later batches of 3 delivered 2. The dropped files were downloaded but never reached the agent's prompt, and the user saw no error. Suspects: `media_group_id` handling in the Telegram adapter, and attachment truncation when cc-pool coalesces messages into one turn. Report: `docs/bugs/2026-09-30-telegram-media-group-drops-images/REPORT.md`.
+
+### Surface API v2: surfaces, devices and the Compact data model → promoted to E96 (2026-11-03)
+See `_bmad-output/epics/E96-surface-api-v2.md`. Phase 1 of `peggy-claude-code/data/intercom/architecture.md`: surface/device split, separate TLS LAN listener, revisioned resources with delta push, action-triggered jobs, agent publishing tools, answer-needed flag, Conversation endpoint. Web client views (E97), widget runtime (E98), voice, firmware and the phone relay app are follow-ons.
