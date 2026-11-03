@@ -80,7 +80,9 @@ async function call(method, path, body) {
   const url = `${BASE}${path}`;
   if (DRY) { console.log(`${method} ${path}${body ? ' ' + JSON.stringify(body) : ''}`); return { ok: true, status: 0, json: {} }; }
   let r;
-  try { r = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined }); } catch (e) { console.error(`${method} ${path}: cannot reach ${BASE} (${e.cause?.code || e.message})`); process.exit(2); }
+  try { // A DELETE has no body, and Fastify answers 400 to a JSON content-type with an empty body.
+    const h = { ...headers }; if (!body) delete h['Content-Type'];
+    r = await fetch(url, { method, headers: h, body: body ? JSON.stringify(body) : undefined }); } catch (e) { console.error(`${method} ${path}: cannot reach ${BASE} (${e.cause?.code || e.message})`); process.exit(2); }
   let json = {}; try { json = await r.json(); } catch { /* none */ }
   const tag = r.ok ? 'ok ' : `ERR ${r.status}`;
   console.log(`${tag} ${method} ${path}${r.ok ? '' : ` ${json.error || json.message || ''}`}`);
