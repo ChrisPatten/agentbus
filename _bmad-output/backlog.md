@@ -19,8 +19,11 @@ See `_bmad-output/epics/E88-pool-launch-fencing-and-orphan-server.md`. An orphan
 ### cc-pool: per-conversation model and warm pane → promoted to E95 (backlog 2026-11-01)
 See `_bmad-output/epics/E95-pool-conversation-models.md`. The operator's Intercom topic should always run on Haiku and stay warm; `conversation_models` rules pin a model per channel/topic/contact and `keep_warm` exempts the pane from idle eviction.
 
+### Epic-number collision: E94 (noted 2026-11-03)
+The label E94 was used for Intercom desk mode (agent status ring, leave-by line; shipped, see the CHANGELOG and `docs/INTERCOM.md`), while this backlog had reserved E94 for the Compact's wake word and voiceprint (entry below). There is no `E94-*.md` epic file. When wake word and voiceprint are scoped, give them a new number (the next free one) rather than E94, and read "E94" in code comments and docs as desk mode. Raised by E96's Risks section.
+
 ### Intercom: glanceable surface for Peggy → promoted to E89–E93 (backlog 2026-10-31)
-See `_bmad-output/epics/E90-intercom-channel-follow.md`, `E91-intercom-surface.md`, `E89-user-notifications.md`, `E92-intercom-fast-voice.md` and `E93-intercom-iphone-web-prototype.md`. A round 466x466 touch device (the Compact) and, first, an iPhone web app follow Chris's Telegram DM with Peggy: status always, replies only to what the surface sent, short glance lines first. E90 and E91 backend M0 is built; the web app is E93; notifications (E89) and push-to-talk (E92) are scoped but not started. Wake word and voiceprint (E94) are planned for the Compact only.
+See `_bmad-output/epics/E90-intercom-channel-follow.md`, `E91-intercom-surface.md`, `E89-user-notifications.md`, `E92-intercom-fast-voice.md` and `E93-intercom-iphone-web-prototype.md`. A round 466x466 touch device (the Compact) and, first, an iPhone web app follow Chris's Telegram DM with Peggy: status always, replies only to what the surface sent, short glance lines first. E90 and E91 backend M0 is built; the web app is E93; notifications (E89) and push-to-talk (E92) are scoped but not started. Wake word and voiceprint (originally reserved as E94, a number since used by desk mode; see the collision note above) are planned for the Compact only.
 
 ### /stop does nothing on cc-pool → promoted to E85 (backlog 2026-10-29)
 See `_bmad-output/epics/E85-stop-command-for-cc-pool.md`. `/stop` only knows cc-headless runners; E85 sends Escape to the conversation's leased pool pane.

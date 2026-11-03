@@ -4,7 +4,9 @@ Intercom is a glanceable surface for a conversation that already exists. The fir
 
 A surface **follows** one conversation, normally Chris's Telegram DM with Peggy (`telegram:peggy`, contact `chris`). It always shows what the agent is doing (the E79 status line). It shows replies only for interactions that began on the surface. Everything still appears in Telegram as usual: Intercom adds a view and diverts nothing.
 
-Source: `src/intercom/` (service, store, calendar, glance), `src/http/intercom-routes.ts`, `scripts/intercom-pair.ts`. Epics: `_bmad-output/epics/E90-intercom-channel-follow.md`, `E91-intercom-surface.md`. This is protocol version **1**.
+Source: `src/intercom/` (service, store, calendar, glance), `src/http/intercom-routes.ts`, `scripts/intercom-pair.ts`. Epics: `_bmad-output/epics/E90-intercom-channel-follow.md`, `E91-intercom-surface.md`. This document describes protocol version **1**, which still works unchanged.
+
+**E96 (Surface API v2).** Surfaces now have **devices**: each paired device gets its own credential, can be listed and revoked, and can speak protocol **2** (revisioned resources with delta push, actions, a Conversation view) on `/api/v1/surface/*`, optionally over a separate TLS listener on the LAN. The contract is [SURFACE_API.md](SURFACE_API.md). What changed for v1 clients is summarised in [Surface API v2 and devices](#surface-api-v2-and-devices-e96) below.
 
 ## Configure the bus
 
@@ -19,9 +21,11 @@ adapters:
       cache_s: 300
     surfaces:
       - id: iphone-proto
-        token_env: INTERCOM_IPHONE_TOKEN     # env var holding the token (at least 32 characters)
+        token_env: INTERCOM_IPHONE_TOKEN     # optional since E96: a pre-E96 shared token, kept as a legacy device
         profile: round466
         follow: { contact: chris, channel: telegram:peggy }   # add topic: thread:... for a forum topic
+        publishers: [peggy]                  # E96: agents that may publish Events, slots and widgets
+        max_devices: 10                      # E96: paired devices allowed at once
 ```
 
 | Key | Default | Purpose |
@@ -43,17 +47,19 @@ adapters:
 | `desk.plan_file` | `/Users/chrispatten/workspace/peggy-claude-code/memory/project_commute_plan.md` | Office-day plan: a Markdown file with a fenced `commute-plan` block (office days, AM/PM train, lead time, per-date overrides). Re-read when its modification time changes |
 | `desk.event_travel_min` | `20` | Rough travel time for a calendar event that has a location. An **estimate**: no routing service is used |
 | `surfaces[].id` | | Lowercase letters, digits, `-`, `_` |
-| `surfaces[].token_env` | | Name of the env var holding the surface token. A surface whose variable is unset or shorter than 32 characters is skipped with a warning |
+| `surfaces[].token_env` | none | Optional (E96). Name of the env var holding a pre-E96 shared surface token (at least 32 characters). When set and usable, bus-core installs it at startup as the surface's legacy device `<id>-legacy`, so a phone paired before E96 keeps working. Unset or too short: a warning, no legacy device, and the surface still works through paired devices |
+| `surfaces[].publishers` | `[]` | E96. Bare agent ids allowed to publish Events, slots and widgets to the surface; `*` for any agent. See [SURFACE_API.md](SURFACE_API.md#configuration) |
+| `surfaces[].max_devices` | `10` | E96. Non-revoked devices allowed at once (1-50); the legacy device counts |
 | `surfaces[].profile` | `round466` | Display profile hint for the client |
 | `surfaces[].follow` | | `contact`, `channel`, optional `topic` |
 
-Mint a token with `openssl rand -hex 24` (48 characters). Tokens are never put in a URL or the YAML.
+New surfaces need no token: pair devices instead. If you keep a legacy token, mint it with `openssl rand -hex 24` (48 characters). Tokens and credentials are never put in a URL or the YAML.
 
-`bus.auth_token` does not apply to `/intercom` and `/api/v1/intercom/*`: a browser cannot send `X-Bus-Token`, and these routes carry their own auth. Tailscale serve should expose only those two path prefixes.
+`bus.auth_token` does not apply to `/intercom`, `/api/v1/intercom/*` and `/api/v1/surface/*`: a browser cannot send `X-Bus-Token`, and these routes carry their own auth. Tailscale serve should expose only those path prefixes. For devices on the LAN, use the separate TLS listener instead ([SURFACE_API.md](SURFACE_API.md#the-surface-listener)): it serves only these prefixes.
 
 ## Pairing
 
-A browser gets the token through a one-time code, so the token is never typed or placed in a URL.
+A browser gets its credential through a one-time code, so the credential is never typed or placed in a URL. Since E96 every redeemed code creates a **device** with its own credential; `scripts/surface-pair.ts` is the successor CLI (it also sets the device's name, profile and scope) and `scripts/intercom-pair.ts` keeps working. See [SURFACE_API.md](SURFACE_API.md#pairing).
 
 ```sh
 AGENTBUS_CONFIG=~/workspace/peggy-claude-code/agentbus-config.yaml \
@@ -62,7 +68,7 @@ AGENTBUS_CONFIG=~/workspace/peggy-claude-code/agentbus-config.yaml \
 
 It prints the code and the URL `https://…/intercom/#pair=CODE`. The CLI writes a sha256 hash of the code into the bus database (SQLite WAL, so bus-core can keep running) and needs no bus restart. Open the URL on the device; the code travels in the fragment, which is never sent to a server. The page exchanges it:
 
-`POST /api/v1/intercom/pair` with `{"code":"…"}` returns `200 {"surface_id":"…","token":"…"}`. `400` bad body, `404` unknown code, `410` expired or already used, `429` too many attempts (10 per minute per address), `503` the surface is not active (its token env var is not set in the bus). A code works once.
+`POST /api/v1/intercom/pair` with `{"code":"…"}` returns `200 {"surface_id":"…","token":"…", …}`: `token` is the new device's credential (also returned as `credential`, with `device_id`, `scope`, `profile` and `cert_fingerprint`; v1 clients ignore the extra fields). `400` bad body, `404` unknown code, `409` `device_limit` (the surface already has `max_devices` devices; the code is not spent), `410` expired or already used, `429` too many attempts (10 per minute per address), `503` the surface is no longer configured. A code works once. `POST /api/v1/surface/pair` is the same handler.
 
 The CLI reads the config the way bus-core does, so the environment variables the config references (and the `.env` beside it) must be available. The surface's own token variable need not be set for the CLI. Options: `--ttl` (`90m`, `12h`, `2d`), `--base`, `--config`, `--db`.
 
@@ -72,7 +78,7 @@ The CLI reads the config the way bus-core does, so the environment variables the
 |---|---|---|
 | `GET /intercom`, `/intercom/*` | none | Static files from `apps/intercom-web/` (relative to the repo root). `/intercom` redirects to `/intercom/`. MIME types set, `Cache-Control: no-cache`, no directory traversal (encoded `..`, backslashes, NUL bytes and symlinks leaving the root are refused). A missing directory gives 404, never 500 |
 | `POST /api/v1/intercom/pair` | none | See above |
-| `GET /api/v1/intercom/health` | Bearer surface token | `{surface_id, follow, version, connected_clients}` |
+| `GET /api/v1/intercom/health` | Bearer device credential (a legacy token through its legacy device) | `{surface_id, follow, version, connected_clients}` |
 | `GET /api/v1/intercom/today` | Bearer | Calendar payload below; `503` if `calctl` fails and nothing is cached |
 | `GET /api/v1/intercom/desk` | Bearer | Desk-mode summary (E94), below |
 
@@ -108,7 +114,7 @@ Events from `calctl` that have a location carry it as an optional `location` str
 
 Every frame is JSON with a `type`. The server pings every 30 s.
 
-**Handshake.** The first frame must be `hello`. Without a valid one within `hello_timeout_ms` (5 s), or with a bad token, the server closes with code **4401**.
+**Handshake.** The first frame must be `hello`. Its `token` is the device credential (or a legacy token). Without a valid one within `hello_timeout_ms` (5 s), or with a bad or revoked credential, the server closes with code **4401**. A socket whose device is revoked while connected is closed with **4403** `revoked` within 5 s. `hello.protocol: 2` (with `revs`) opts into protocol v2 on this path too; without it the connection is protocol v1 exactly.
 
 ```json
 {"type":"hello","token":"…","cursor":0,"client":"intercom-web/0.1"}
@@ -132,10 +138,10 @@ After `welcome` the server replays durable events with `seq > cursor` (oldest fi
 | Frame | Answer |
 |---|---|
 | `{"type":"send","client_msg_id":"<uuid>","body":"…"}` (1-4,000 characters) | `{"type":"ack","client_msg_id","status":"queued","message_id","interaction_id"}`, or `status:"rejected"` with `reason` (`invalid_body`, the pipeline's abort reason such as `Aborted at stage "dedup"`, `no_route`, `internal_error`), or `status:"command"` for a slash command the bus handled itself. Idempotent on `client_msg_id`: a retry gets the stored ack and nothing is enqueued twice, including after a restart. A rejected send is final for its id except `internal_error`, which is not stored |
-| `{"type":"state","quiet":false,"battery":null}` | none; stored in memory and logged only |
+| `{"type":"state","quiet":false,"battery":null}` | none; stored in memory and logged, and (E96) written to the device's item in the `device` resource |
 | `{"type":"ping"}` | `{"type":"pong"}` |
 
-Errors: `{"type":"error","code":"invalid_frame"\|"unauthorized"\|"internal_error"\|"notification_not_found"}`.
+Errors: `{"type":"error","code":"invalid_frame"\|"unauthorized"\|"internal_error"\|"notification_not_found"\|"read_only"}`. `read_only` (E96) answers `send` and `notification_action` from a device paired with `read_only` scope.
 
 **Notifications (E89).** When `notifications.enabled`, the server also sends `notification` (durable) and `attention` (ephemeral) events, plus a snapshot of open items after `welcome`, and accepts `notification_ack` and `notification_action` frames. The agent note on each surface message then also carries the notify-versus-message guidance. See [NOTIFICATIONS.md](NOTIFICATIONS.md).
 
@@ -181,11 +187,22 @@ Each interaction logs structured lines, `[intercom] {"evt":"latency","mark":"inb
 - **`calendar.calendars` empty means all calendars** (the contract only showed a list). The names in the contract's example list that `calctl` does not know today (`Red Sox 2026 ⚾`, `J Sports`) simply match nothing. The real calendars include `Chris Patten` and `BCG`, which the contract's list lacks; add them if they should appear.
 - **Slash commands.** A body such as `/status` goes through the same pipeline, is handled by the bus and answered on Telegram; the surface gets `status: "command"` and no window stays open.
 - **Dedup.** The pipeline's dedup stage still applies to surface sends. Identical text from the contact in the same channel and topic within `pipeline.dedup_window_ms` (30 s) is rejected (`Aborted at stage "dedup"`), whether it came from Telegram or the surface. A retry with the same `client_msg_id` never reaches the pipeline again; it gets the stored ack.
-- **Pairing against a surface with no token in the bus environment** returns `503 surface_unavailable` and the code is spent.
+- **Pairing** creates a device (E96); `503 surface_unavailable` now means only that the code's surface was removed from the config.
 
 ## Known gaps
 
 - Cold panes are not warmed (Q4); only measured.
 - A turn that started on another channel for a different conversation does not affect the surface (by design).
-- `state` frames (quiet, battery) are logged only.
+- `state` frames (quiet, battery) are logged and, since E96, shown in the `device` resource; the bus acts on neither.
 - Choice taps and voice (E92) are not built. Notifications (E89) are built: see [NOTIFICATIONS.md](NOTIFICATIONS.md).
+
+## Surface API v2 and devices (E96)
+
+The full contract is [SURFACE_API.md](SURFACE_API.md). For v1 operators and clients:
+
+- **Every credential is a device credential.** With `adapters.intercom.enabled`, bus-core keeps a device registry. Each pairing creates a device; a surface's old shared `token_env` token becomes the device `<surface>-legacy` at startup. The v1 routes and the v1 WebSocket accept device credentials exactly as they accepted the surface token, so an existing phone keeps working with its stored token.
+- **Several devices per surface** (up to `max_devices`, default 10). List and revoke them with `npx tsx scripts/surface-devices.ts list|revoke`. A revoked device gets `401` and `4401` from then on, and its open sockets close with `4403` within 5 s. Revoking the legacy device lasts until the next start while `token_env` is set.
+- **Read-only devices** (`--scope read_only` on `surface-pair.ts`) receive everything but cannot `send`, tap notification actions or fire actions.
+- **`/api/v1/intercom/*` is an alias.** The v2 paths are `/api/v1/surface/*`; the v1 paths keep the same handlers, credentials and WebSocket handler (protocol 2 is available on both) until the web prototype migrates in E97.
+- **Migration note (AgentBus to Intercom rename).** `/api/v1/surface` is deliberately product-neutral so the planned rename does not move the paths again. New clients should use `/api/v1/surface`; `/api/v1/intercom/*` stays only as the alias for the existing web prototype.
+- **LAN listener.** `surface_api.enabled` starts a separate TLS listener (default `0.0.0.0:3443`) that serves only `/api/v1/surface`, `/api/v1/intercom` and `/intercom`. Certificates come from `scripts/surface-cert.ts`; the pairing answer carries the certificate fingerprint for pinning.

@@ -34,6 +34,8 @@ The prompt still appears in the pane as normal, so you (or anyone attached to th
 
 Only the person the conversation is with can answer. A tap from anyone else gets "Not authorized".
 
+If you use [Intercom devices](/channels/intercom-devices#what-can-appear-on-the-dial), the same request also appears on your screens with the exact command or change and **Approve** and **Deny**. Whichever answer comes first wins, and the request disappears from the screens once it's answered anywhere.
+
 ## Set it up
 
 Approvals use a Claude Code hook in your agent's working folder.

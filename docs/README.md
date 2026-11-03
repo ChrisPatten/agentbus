@@ -37,6 +37,9 @@ Technical reference for operators and contributors. The public landing page live
 | [SLACK_ADAPTER.md](SLACK_ADAPTER.md) | Slack channel (outbound POC): DMs through a JWT-authenticated n8n webhook |
 | [SIRI_ADAPTER.md](SIRI_ADAPTER.md) | Siri channel: the Peggy iOS app's ask endpoint, prompt contract, tailnet exposure, latency probe |
 | [INTERCOM.md](INTERCOM.md) | Intercom surfaces (E90/E91): pairing, static web app, WebSocket protocol, follow engine, glance |
+| [SURFACE_API.md](SURFACE_API.md) | Surface API v2 (E96): surfaces and devices, TLS LAN listener, revisioned resources and delta push, actions and jobs, sessions, approvals, answer needed |
+| [INTERCOM_WEB.md](INTERCOM_WEB.md) | The Intercom iPhone web app (E93): screens, pairing, connection, demo and mock server |
+| [NOTIFICATIONS.md](NOTIFICATIONS.md) | User notifications for Intercom (E89): data model, writers, surface frames, the `notices` resource |
 | [ATTACHMENTS.md](ATTACHMENTS.md) | Inbound images and files, per-agent media config, TTL sweep |
 | [THREADING.md](THREADING.md) | Thread-scoped sessions shared by email and Telegram topics |
 | [CHANNEL_RELAY.md](CHANNEL_RELAY.md) | Re-submit a message on another channel with a templated body |

@@ -57,7 +57,7 @@ The client follows `m1-notifications-contract.md`. It keeps a map of `notificati
 
 ## Pairing
 
-Run `npx tsx scripts/intercom-pair.ts <surface_id>` on the bus host; it prints a URL like `https://host.ts.net/intercom/#pair=CODE`. Open it on the iPhone. The app reads the fragment, POSTs `{code}` to `/api/v1/intercom/pair`, stores `{surface_id, token}` in `localStorage` (`intercom.pair`) and removes the fragment with `history.replaceState`. The token is never put in a URL. Codes are single use. Long-press the connection dot to unpair (an in-page confirmation, then the stored credentials are cleared). A WebSocket close with code 4401 also returns the app to the pairing view.
+Run `npx tsx scripts/intercom-pair.ts <surface_id>` on the bus host; it prints a URL like `https://host.ts.net/intercom/#pair=CODE`. Open it on the iPhone. The app reads the fragment, POSTs `{code}` to `/api/v1/intercom/pair`, stores `{surface_id, token}` in `localStorage` (`intercom.pair`) and removes the fragment with `history.replaceState`. The token is never put in a URL. Codes are single use. Long-press the connection dot to unpair (an in-page confirmation, then the stored credentials are cleared). A WebSocket close with code 4401 also returns the app to the pairing view. Since E96 the stored `token` is the paired device's own credential (the pair answer also carries `credential`, `device_id`, `scope`, `profile` and `cert_fingerprint`, which the app ignores), and the app still talks to the `/api/v1/intercom/*` alias with protocol v1. When the device is revoked (`scripts/surface-devices.ts revoke`), the bus closes the socket with 4403; the app's reconnect is then refused with 4401 and it returns to the pairing view. See [SURFACE_API.md](SURFACE_API.md).
 
 ## Connection
 
