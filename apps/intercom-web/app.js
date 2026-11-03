@@ -150,6 +150,7 @@ async function fire({ object, actionId, action = null, draft, messageId }) {
 }
 /** Start an action: one with a confirm draft opens the draft view first; the Send there echoes the text back. */
 function startAction({ object, actionId, action, messageId }) {
+  if (!S.btns.canTap(btnKey(object, actionId, messageId))) return null; // already sent, expired or sending
   if (needsConfirm(action)) {
     S.draftCtx = { object, actionId, action, messageId, draft: action.confirm.draft, prompt: action.confirm.prompt || action.label };
     openView({ type: 'draft' });

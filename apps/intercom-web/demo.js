@@ -35,7 +35,7 @@ export const DEMO_SURFACE_EVENTS = [
   sev('ent', 'ENT', '16:10', '17:00', { color: 'orange', travel: { minutes: 25, mode: 'drive' }, body: 'Bring the CPAP card.', detail: { location: 'ENT Specialists, Plainville', description: 'Follow-up on the CPAP fitting.' }, actions: [{ id: 'here', label: 'I am here', style: 'primary', confirm: { draft: 'Arrived at the ENT. Back by 5:30.' } }] }),
   sev('kate', 'Kate dr', '16:30', '17:30', { layer: 'overlap', color: 'pink' }),
   sev('jprac', 'J practice', '16:20', '17:10', { layer: 'overlap', color: 'green' }),
-  sev('bill', 'Water bill due', '12:00', null, { level: 'attention', color: 'red', detail: { description: '$166.00 due today.' } }),
+  sev('bill', 'Water bill due', '12:00', null, { level: 'attention', detail: { description: '$166.00 due today.' } }),
 ];
 export const demoStore = (slots = {}) => { const st = createStore(); for (const e of DEMO_SURFACE_EVENTS) st.items.events[e.id] = e; Object.assign(st.items.slots, slots); return st; };
 const demoUntil = '2026-11-02T20:00:00-05:00';
@@ -72,7 +72,7 @@ export const STEPS = [
     props: () => ({ tone: { color: '#ffb347', alpha: 0.2 } }) },
   { name: 'status', title: 'Agent status', desc: 'Four sessions in view, scroll for more. One rim segment per session (eight, then +N). The subject if the agent set one, else the title. Amber means it needs you; the rim breathes. Tap a row for the conversation.',
     props: () => ({ sessions: sessionsFromDesk(DEMO_DESK).map((x, i) => ({ ...x, subject: i === 1 ? 'Choosing a Highlander' : null, needs_you: x.state === 'waiting', conversation_id: `c${i}` })), now: DEMO_NOW, tz: TZ }) },
-  { name: 'idle', title: 'Day Dial v2', desc: 'The agent chooses what the ring shows. Orange is the ENT with a dashed travel wedge before it; the narrow pink and green arcs are overlaps; the red tick at noon is a deadline. Drag the gold ball to scrub the day.',
+  { name: 'idle', title: 'Day Dial v2', desc: 'The agent chooses what the ring shows. Orange is the ENT with a dashed travel wedge before it; the narrow pink and green arcs are overlaps; the amber tick at noon is a deadline. Drag the gold ball to scrub the day.',
     props: () => ({ events: [], v2: true, surfaceEvents: DEMO_SURFACE_EVENTS, store: demoStore({ context: { id: 'context', lines: ['Water bill due today', 'Rain after 3'], until: demoUntil } }), now: DEMO_NOW, tz: TZ }) },
   { name: 'idle', title: 'Scrubbing', desc: 'While you drag the ball the centre shows what is at that time, or Free. Let go and it snaps back to now after about four seconds.',
     props: () => ({ events: [], v2: true, surfaceEvents: DEMO_SURFACE_EVENTS, store: demoStore(), now: DEMO_NOW, tz: TZ, scrub: { hours: 16.5 } }) },

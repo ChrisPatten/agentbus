@@ -171,3 +171,6 @@ form.send button:disabled{opacity:.4}
 .scroller .fbody,.scroller .fcode{max-width:none}
 .face .chead,.face .cnote,.face .sname,.face .sage{text-shadow:0 0 3px #000,0 0 6px #000}
 .scroller .btn{max-width:300px}
+.face svg.wg{position:relative;inset:auto;width:38px;height:38px}
+.face svg.ws{position:relative;inset:auto;width:80px;height:28px}
+.btn.pbtn.ok{background:transparent}
