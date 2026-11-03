@@ -43,6 +43,7 @@ import {
   type ResourceHub, type ResourceName, type ResourceOp,
 } from '../surface/types.js';
 import { diffOps } from '../surface/resources.js';
+import { conversationIdForEnvelope, messageForLiveAppend } from '../surface/conversations.js';
 
 export const PROTOCOL_VERSION = 1;
 export const MAX_SEND_CHARS = 4000;
@@ -484,6 +485,17 @@ export class IntercomService {
     }
   }
 
+  /** E96 S96.7 — a delivered or accepted message, appended live for devices viewing its conversation. Never throws. */
+  liveAppend(envelope: MessageEnvelope, conversationId?: string | null): void {
+    if (!this.deps.surfaceApi || this.clients.size === 0) return;
+    try {
+      const id = conversationId ?? conversationIdForEnvelope(envelope);
+      if (!id || !this.isViewed(id)) return;
+      const message = messageForLiveAppend(envelope, this.deps.db, new Date(this.now()));
+      if (message) this.appendConversation(id, message);
+    } catch (err) { this.log(`warn: live append failed: ${String(err)}`); }
+  }
+
   /** True when some v2 device is viewing this conversation (cheap check before building a message). */
   isViewed(conversationId: string): boolean {
     const view = `conversation:${conversationId}`;
@@ -650,6 +662,7 @@ export class IntercomService {
 
   /** DeliveryWorker hook: an outbound message was delivered. Never throws. */
   onDelivered(envelope: MessageEnvelope): void {
+    this.liveAppend(envelope);
     try {
       if (this.surfaces.size === 0) return;
       const meta = envelope.metadata ?? {};

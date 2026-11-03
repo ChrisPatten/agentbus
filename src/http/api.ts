@@ -88,6 +88,7 @@ import type { HeadlessCapacitySnapshot } from '../adapters/cc-headless.js';
 import { registerAppRoutes } from './app-routes.js';
 import { isIntercomUrl } from './intercom-routes.js';
 import { isSurfaceUrl, registerSurfaceServer, type SurfaceServerDeps } from './surface-routes.js';
+import { notifyInboundAccepted } from '../surface/inbound-hook.js';
 import { registerNotificationRoutes, isNotificationsApiUrl } from './notifications-routes.js';
 import type { IntercomService } from '../intercom/service.js';
 import { resolveGlance } from '../intercom/glance.js';
@@ -580,6 +581,8 @@ export async function processInbound(
     return { ok: true, queued: false, reason: ctx.abortReason ?? 'pipeline_abort' };
   }
   for (const block of system.blocks ?? []) attachSystemBlock(result.envelope.metadata, block);
+  // E96 — the contact wrote: clear its answer-needed flag; devices viewing the conversation get the line.
+  notifyInboundAccepted(result.envelope, result.conversationId, system.systemOnly === true);
 
   // ── Follow-up capture check (post-pipeline, pre slash-command dispatch) ──
   // A plain-text, non-slash-command message is checked against any pending

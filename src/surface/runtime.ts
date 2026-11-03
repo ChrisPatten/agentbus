@@ -11,14 +11,22 @@ import { certFingerprintFile } from './cert.js';
 import { createDeviceStore, type SurfaceDeviceStore } from './devices.js';
 import { createResourceHub, type ResourceHubImpl } from './resources.js';
 import { createActionHandler, createJobStore, sweepJobs } from './actions.js';
-import type { ActionResult, Device, JobStore } from './types.js';
+import type { JobStore } from './types.js';
+import type { DeskSessionDetail } from '../intercom/desk.js';
+import type { ResolveApprovalDeps } from '../approvals/resolve.js';
+import { buildSurfaceSessions, diffItems, sessionsAsItems } from './sessions.js';
+import { resolveApprovalFromSurface, syncApprovalEvents } from './approvals.js';
+import { clearAnswerNeededOnInbound, onAnswerNeededCleared } from './answer-needed.js';
+import { onInboundAccepted } from './inbound-hook.js';
 
 export interface SurfaceRuntimeDeps {
   config: AppConfig;
   db: Database.Database;
   submitInbound: (message: InboundMessage, system?: InboundSystemOptions) => Promise<InboundResult | InboundAbort>;
-  /** S96.7 — approve/deny a passed-through bus approval from a device. */
-  approvalAction?: (device: Device, approvalId: string, decision: 'approve' | 'deny', idempotencyKey: string) => Promise<ActionResult>;
+  /** S96.6 — the cc-pool panes as E94 classifies them (`collectDeskSessionDetails`). */
+  deskSessions?: () => DeskSessionDetail[];
+  /** S96.7 — the approvals resolution path (store, pools, hooks), read when a device answers. */
+  approvals?: () => ResolveApprovalDeps;
   log?: (line: string) => void;
 }
 
@@ -52,7 +60,14 @@ export function createSurfaceRuntime(deps: SurfaceRuntimeDeps): SurfaceRuntime {
     noticeAction: async (device, id, actionId, key) => service
       ? service.noticeAction(device, id, actionId, key)
       : { type: 'action_result', idempotency_key: key, status: 'failed', reason: 'internal_error' },
-    ...(deps.approvalAction ? { approvalAction: deps.approvalAction } : {}),
+    approvalAction: async (device, approvalId, decision, key) => {
+      const base = { type: 'action_result' as const, idempotency_key: key };
+      const surface = service?.surfaces.get(device.surface_id);
+      if (!deps.approvals || !surface) return { ...base, status: 'failed', reason: 'not_found' };
+      const out = await resolveApprovalFromSurface(deps.approvals(), { approvalId, decision, deviceId: device.id, contactId: surface.follow.contact });
+      syncApprovals();
+      return { ...base, status: out.status, ...(out.reason ? { reason: out.reason } : {}) };
+    },
   });
   const certFingerprint = cfg.tls ? certFingerprintFile(cfg.tls.cert) : null;
   if (cfg.enabled && !certFingerprint) log(`warn: could not read the surface certificate ${cfg.tls?.cert}; pairing payloads carry no fingerprint`);
@@ -66,17 +81,50 @@ export function createSurfaceRuntime(deps: SurfaceRuntimeDeps): SurfaceRuntime {
   };
   let sweepTimer: NodeJS.Timeout | null = null;
 
+  /** Sessions are the same on every surface; computed once per tick. */
+  const syncSessions = () => {
+    if (!service) return;
+    const list = buildSurfaceSessions({
+      db: deps.db, desk: deps.deskSessions?.() ?? [], now: Date.now(),
+      activityTimeoutMin: cfg.sessions.activity_timeout_min, includeSystem: cfg.sessions.include_system,
+    });
+    const next = sessionsAsItems(list);
+    for (const s of service.surfaces.values()) service.applyResource(s.id, 'sessions', diffItems(hub.snapshot(s.id, 'sessions').items, next));
+  };
+  const syncApprovals = () => {
+    if (!service || !deps.approvals) return;
+    for (const s of service.surfaces.values()) {
+      try { syncApprovalEvents(hub, s.id, deps.db, { contactId: s.follow.contact }); }
+      catch (err) { log(`warn: approval sync failed for ${s.id}: ${String(err)}`); }
+    }
+  };
+  const unsubscribe: (() => void)[] = [];
+
   return {
     devices, hub, jobs,
     surfaceApi: { devices, hub, actions, certFingerprint },
     bind(svc) {
       service = svc;
+      svc.onSurfaceTick(syncSessions);
+      svc.onSurfaceTick(syncApprovals);
+      unsubscribe.push(onAnswerNeededCleared(() => syncSessions()));
+      unsubscribe.push(onInboundAccepted((envelope, conversationId, systemOnly) => {
+        if (!systemOnly) {
+          clearAnswerNeededOnInbound(deps.db, {
+            channel: envelope.channel, contactId: envelope.sender, topic: envelope.topic, conversationId, metadata: envelope.metadata,
+          });
+        }
+        svc.liveAppend(envelope, conversationId);
+      }));
+      syncSessions();
+      syncApprovals();
       sweep();
       sweepTimer = setInterval(sweep, SWEEP_MS);
       sweepTimer.unref();
     },
     sweep,
     stop() {
+      for (const u of unsubscribe.splice(0)) u();
       if (sweepTimer) clearInterval(sweepTimer);
       sweepTimer = null;
       hub.flush();

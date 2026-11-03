@@ -43,7 +43,7 @@ import { SlackAdapter } from './adapters/slack.js';
 import { AppAdapter } from './adapters/app.js';
 import { routedAgent } from './app/store.js';
 import { primaryChannels } from './app/main.js';
-import { collectDeskSessions } from './intercom/desk.js';
+import { collectDeskSessionDetails, collectDeskSessions } from './intercom/desk.js';
 import { startHeadless, stopHeadless, getHeadlessSnapshots, buildMcpConfig } from './adapters/cc-headless.js';
 import { createPoolManagers } from './pool/pool-manager.js';
 import { RuntimeResolver } from './core/runtime-resolver.js';
@@ -51,6 +51,7 @@ import { createPoolRouteResolve } from './pipeline/stages/pool-route-resolve.js'
 import { DeliveryWorker } from './core/delivery.js';
 import { IntercomService } from './intercom/service.js';
 import { createSurfaceRuntime } from './surface/runtime.js';
+import { getConversationPage } from './surface/conversations.js';
 import { createSurfaceListener, type SurfaceListener } from './http/surface-listener.js';
 import { registerSurfaceServer } from './http/surface-routes.js';
 import { createCommandSystem } from './commands/index.js';
@@ -372,7 +373,11 @@ const submitToPipeline = (message: Parameters<typeof processInbound>[0], system?
 }, system);
 // E96 — Surface API v2 (devices, resources, actions) rides on the Intercom config.
 const surfaceRuntime = config.adapters.intercom?.enabled
-  ? createSurfaceRuntime({ config, db, submitInbound: submitToPipeline })
+  ? createSurfaceRuntime({
+    config, db, submitInbound: submitToPipeline,
+    deskSessions: () => collectDeskSessionDetails(db, poolManagers.values()),
+    approvals: () => ({ store: approvalStore, poolManagers, ...approvalHooks }),
+  })
   : undefined;
 const intercom = config.adapters.intercom?.enabled
   ? new IntercomService({
@@ -385,6 +390,11 @@ if (intercom && surfaceRuntime) surfaceRuntime.bind(intercom);
 // Device-facing extras shared by the main port and the surface listener.
 const surfaceRouteExtras = {
   assetDir: join(dirname(resolve(config.bus.db_path)), 'surface-assets'),
+  conversationPage: (input: { conversationId: string; before?: string; limit?: number }) => getConversationPage(db, input),
+  // A device reads the conversation it follows and any listed in its sessions resource.
+  canReadConversation: (surface: { id: string; conversationId: string }, conversationId: string) =>
+    conversationId === surface.conversationId
+    || Object.values(surfaceRuntime?.hub.snapshot(surface.id, 'sessions').items ?? {}).some((s) => s['conversation_id'] === conversationId),
 };
 const httpServer = await createHttpServer({ queue, registry, config, pipeline, db, commandRegistry, pauseSet, siri, app, intercom, surfaceRoutes: surfaceRouteExtras, poolManagers, getHeadlessSnapshots, runtimeResolver, advisories, journalEvents, journalGate, journalStatus, memoryRecent, approvalHooks, proposals: proposalService });
 
