@@ -68,6 +68,8 @@ export interface Client {
   protocol?: number;
   /** E96 — what the device reports it is showing (`view` frame), e.g. `conversation:<id>`. */
   view?: string | null;
+  /** E96 — the rev per resource this socket has been brought to; older frames are not sent again. */
+  revs?: Partial<Record<ResourceName, number>>;
 }
 
 /** E96 — Surface API v2 collaborators. Absent: the service behaves exactly as protocol v1 (shared surface tokens). */
@@ -337,6 +339,8 @@ export class IntercomService {
     if (clientName) client.clientName = clientName;
     const api = this.deps.surfaceApi;
     const v2 = client.protocol === SURFACE_PROTOCOL_VERSION && !!api;
+    // Send pending coalesced deltas to the other sockets first, so none is in flight across this resume.
+    if (v2) api.hub.flush();
     this.clients.add(client);
     this.raw(client.socket, {
       type: 'welcome', version: v2 ? SURFACE_PROTOCOL_VERSION : PROTOCOL_VERSION, surface_id: surface.id, follow: this.followJson(surface),
@@ -348,8 +352,9 @@ export class IntercomService {
     if (client.device) this.markDevice(client, { connected: true });
     // v2: bring each resource up to date (nothing, one coalesced delta, or a reset) before live deltas flow.
     if (v2) {
-      api.hub.flush();
-      for (const frame of api.hub.resume(surface.id, revs ?? {})) this.raw(client.socket, frame as unknown as Record<string, unknown>);
+      client.revs = { ...(revs ?? {}) };
+      for (const frame of api.hub.resume(surface.id, revs ?? {})) this.sendDelta(client, frame);
+      client.revs = api.hub.revs(surface.id);
     }
     const st = this.state.get(surface.id)!;
     this.raw(client.socket, { type: 'event', event: 'activity', data: st.activity });
@@ -406,8 +411,16 @@ export class IntercomService {
   /** Resource hub sink: push a delta to the surface's ready v2 sockets. */
   pushDelta(surfaceId: string, frame: DeltaFrame): void {
     for (const c of this.clients) {
-      if (c.surface.id === surfaceId && c.ready && c.protocol === SURFACE_PROTOCOL_VERSION) this.raw(c.socket, frame as unknown as Record<string, unknown>);
+      if (c.surface.id === surfaceId && c.ready && c.protocol === SURFACE_PROTOCOL_VERSION) this.sendDelta(c, frame);
     }
+  }
+
+  /** Send unless the socket already has this rev (a frame coalesced before its resume). */
+  private sendDelta(client: Client, frame: DeltaFrame): void {
+    const known = client.revs?.[frame.resource];
+    if (known !== undefined && frame.rev <= known) return;
+    this.raw(client.socket, frame as unknown as Record<string, unknown>);
+    (client.revs ??= {})[frame.resource] = frame.rev;
   }
 
   /** Apply ops to a resource; errors are logged, never thrown (computed resources sync on the next tick). */
