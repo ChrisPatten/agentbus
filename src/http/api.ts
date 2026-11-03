@@ -86,7 +86,8 @@ import type { SiriAdapter } from '../adapters/siri.js';
 import type { AppAdapter } from '../adapters/app.js';
 import type { HeadlessCapacitySnapshot } from '../adapters/cc-headless.js';
 import { registerAppRoutes } from './app-routes.js';
-import { registerIntercomRoutes, isIntercomUrl } from './intercom-routes.js';
+import { isIntercomUrl } from './intercom-routes.js';
+import { isSurfaceUrl, registerSurfaceServer, type SurfaceServerDeps } from './surface-routes.js';
 import { registerNotificationRoutes, isNotificationsApiUrl } from './notifications-routes.js';
 import type { IntercomService } from '../intercom/service.js';
 import { resolveGlance } from '../intercom/glance.js';
@@ -127,6 +128,8 @@ export interface HttpServerDeps {
   app?: AppAdapter;
   /** E90/E91 — when present (and `adapters.intercom.enabled`), the `/intercom` and `/api/v1/intercom` routes are mounted. */
   intercom?: IntercomService;
+  /** E96 — extras for the device-facing surface routes (conversation pages, assets). */
+  surfaceRoutes?: Omit<SurfaceServerDeps, 'config' | 'db' | 'intercom'>;
   getHeadlessSnapshots?: () => HeadlessCapacitySnapshot[];
   /**
    * Optional — one PoolManager per configured `cc-pool` instance (E48),
@@ -841,6 +844,8 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       if (req.url === '/api/v1/health') return;
       // E90: Intercom has its own auth (surface tokens, one-time pairing codes); a browser cannot send X-Bus-Token.
       if (isIntercomUrl(req.url)) return;
+      // E96: the surface API authenticates devices by their own credentials.
+      if (isSurfaceUrl(req.url)) return;
       // E89: the notification API carries its own Bearer tokens (notifications.api_tokens_env).
       if (config.notifications?.enabled && isNotificationsApiUrl(req.url)) return;
       const provided = req.headers['x-bus-token'];
@@ -2680,7 +2685,7 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
 
   // /intercom + /api/v1/intercom/* — Intercom surfaces (E90/E91): static web app, pairing, WebSocket.
   if (config.adapters.intercom?.enabled && deps.intercom) {
-    await registerIntercomRoutes(server, { config: config.adapters.intercom, db, service: deps.intercom });
+    await registerSurfaceServer(server, { config, db, intercom: deps.intercom, ...deps.surfaceRoutes });
     if (config.notifications?.enabled) registerNotificationRoutes(server, { config: config.notifications, service: deps.intercom });
   }
 

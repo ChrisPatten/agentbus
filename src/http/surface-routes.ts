@@ -19,10 +19,11 @@ import { extname, join } from 'node:path';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import websocket from '@fastify/websocket';
 import { z } from 'zod';
-import type { IntercomAdapterConfig } from '../config/schema.js';
+import type Database from 'better-sqlite3';
+import type { AppConfig, IntercomAdapterConfig } from '../config/schema.js';
 import type { IntercomService, Surface } from '../intercom/service.js';
 import { RESOURCE_NAMES, type ConversationPage, type Device, type SurfaceState } from '../surface/types.js';
-import { PairBody, redeemForDevice, surfaceSocketHandler } from './intercom-routes.js';
+import { PairBody, redeemForDevice, registerIntercomRoutes, surfaceSocketHandler } from './intercom-routes.js';
 
 export const SURFACE_PATH_PREFIX = '/api/v1/surface';
 /** True for URLs served by this module (they bypass the shared `X-Bus-Token` hook). */
@@ -51,6 +52,24 @@ const ConversationQuery = z.object({
   before: z.string().min(1).max(200).optional(),
   limit: z.coerce.number().int().min(1).max(100).optional(),
 });
+
+export interface SurfaceServerDeps extends Omit<SurfaceRouteDeps, 'config' | 'service'> {
+  config: AppConfig;
+  db: Database.Database;
+  intercom: IntercomService;
+}
+
+/**
+ * Everything a device needs on one server: the v1 Intercom routes (static app, alias) and,
+ * when the device store is on, the v2 surface routes. Used for the main port and the TLS listener.
+ */
+export async function registerSurfaceServer(server: FastifyInstance, deps: SurfaceServerDeps): Promise<void> {
+  const { config, db, intercom, ...extras } = deps;
+  const ic = config.adapters.intercom;
+  if (!ic) return;
+  await registerIntercomRoutes(server, { config: ic, db, service: intercom });
+  if (intercom.surfaceApi) await registerSurfaceRoutes(server, { config: ic, service: intercom, ...extras });
+}
 
 export async function registerSurfaceRoutes(server: FastifyInstance, deps: SurfaceRouteDeps): Promise<void> {
   const { service, config } = deps;
