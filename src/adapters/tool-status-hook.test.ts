@@ -164,4 +164,25 @@ describe.skipIf(!hasJq)('agentbus_tool_status_hook.sh phrase mode', { timeout: 6
     expect(posts[0]!.body['text']).toBe('Reading /a/b.md');
     expect(posts[0]!.body['placeholder']).toBeUndefined();
   });
+
+  it('carries a sanitised status subject with the session id, also after delivery (E96)', async () => {
+    const { url, seen } = await stubBus();
+    const session = `t-${randomUUID()}`;
+    await startTurn(url, session);
+    await post(url, session, 'mcp__agentbus__status', { text: 'Comparing quotes', subject: ' Kitchen *quote* comparison ' });
+    await settle(seen, 2);
+    expect(statusPosts(seen)[0]!.body).toMatchObject({ text: 'Comparing quotes', subject: 'Kitchen quote comparison', session_id: session });
+
+    await post(url, session, 'mcp__agentbus__status', { text: 'Checking', subject: 'x'.repeat(61) });
+    await settle(seen, 3);
+    expect(statusPosts(seen)[1]!.body).not.toHaveProperty('subject');
+
+    await post(url, session, 'mcp__agentbus__reply', { message_id: 'abc', body: 'hi' });
+    await post(url, session, 'mcp__agentbus__status', { text: 'Tidying up' });
+    await post(url, session, 'mcp__agentbus__status', { text: 'Tidying up', subject: 'Kitchen remodel' });
+    await settle(seen, 4);
+    const after = statusPosts(seen).slice(2);
+    expect(after).toHaveLength(1);
+    expect(after[0]!.body).toEqual({ contact_id: 'contact:chris', text: '', topic: 'general', subject: 'Kitchen remodel', session_id: session });
+  });
 });

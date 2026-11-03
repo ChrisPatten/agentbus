@@ -16,10 +16,13 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { formatToolCallSummary } from './tool-call-summary.js';
+import { BOUNDS } from '../surface/types.js';
 
 export const STATUS_TOOL_NAME = 'mcp__agentbus__status';
 export const STATUS_MAX_CHARS = 40;
 export const STATUS_MAX_WORDS = 5;
+/** E96: `status(subject)`, what the session is about. */
+export const SUBJECT_MAX_CHARS = BOUNDS.subject;
 
 /** Built-in fallback when no phrases file can be read. */
 const FALLBACK = 'Working on it';
@@ -100,6 +103,20 @@ export function sanitizeStatusText(text: unknown): string | null {
     .trim();
   if (!cleaned || cleaned.length > STATUS_MAX_CHARS) return null;
   if (cleaned.split(' ').length > STATUS_MAX_WORDS) return null;
+  return cleaned;
+}
+
+const cleanText = (text: string) => text.replace(/[^\p{L}\p{N} '’,.&/-]/gu, ' ').replace(/\s+/g, ' ').trim();
+
+/**
+ * E96 — sanitises a `status(subject)`: the same characters as
+ * {@link sanitizeStatusText}, at most {@link SUBJECT_MAX_CHARS} characters, no
+ * word limit. Null when absent, empty or too long. The hook applies the same rules.
+ */
+export function sanitizeSubject(subject: unknown): string | null {
+  if (typeof subject !== 'string') return null;
+  const cleaned = cleanText(subject);
+  if (!cleaned || cleaned.length > SUBJECT_MAX_CHARS) return null;
   return cleaned;
 }
 

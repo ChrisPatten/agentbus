@@ -17,6 +17,8 @@
  *   - propose_change (E68)
  *   - status (E79)
  *   - notify, update_notification, list_notifications (E89; Intercom attention items)
+ *   - list_surfaces, surface_publish_event, surface_remove_event, surface_set_slot, surface_clear_slot,
+ *     surface_write_widget, surface_remove_widget, clear_answer_needed (E96; surface publishing)
  *   - send_location, send_venue, send_contact, send_document, ask_input, send_rich, edit_message,
  *     pin_message, unpin_message (E81; only when a Telegram adapter is configured)
  */
@@ -43,6 +45,7 @@ import { registerJournalTools } from './journal.js';
 import { registerProposalTools } from './proposals.js';
 import { registerStatusTool } from './status.js';
 import { registerNotificationTools } from './notifications.js';
+import { registerSurfaceTools } from './surface.js';
 import { getTelegramInstances } from '../../config/schema.js';
 import { originFromEnv } from '../../core/origin.js';
 
@@ -92,6 +95,7 @@ export function registerAllTools(
   registerJournalTools(server, busBaseUrl, agentId);
   registerProposalTools(server, busBaseUrl, agentId);
   registerNotificationTools(server, busBaseUrl, agentId);
+  registerSurfaceTools(server, busBaseUrl, agentId);
   registerStatusTool(server);
   maybeRegisterEmailTool(server, busBaseUrl, agentId, config);
   maybeRegisterTelegramTools(server, busBaseUrl, agentId, config);
@@ -153,6 +157,7 @@ export function registerHeadlessTools(
   registerAdvisoryTools(server, busBaseUrl, agentId);
   registerProposalTools(server, busBaseUrl, agentId);
   registerNotificationTools(server, busBaseUrl, agentId);
+  registerSurfaceTools(server, busBaseUrl, agentId);
   registerStatusTool(server);
   maybeRegisterEmailTool(server, busBaseUrl, agentId, config);
   maybeRegisterTelegramTools(server, busBaseUrl, agentId, config);
@@ -199,7 +204,8 @@ function registerReplyTool(server: McpServer, busBaseUrl: string, agentId: strin
         'Pass `choices` to offer single-choice answers (tappable buttons on Telegram). ' +
         '`silent`, `no_preview` and `pin` tune Telegram delivery (no notification sound, no link card, pin after sending). ' +
         '`glance` is an optional one-line summary (at most 100 characters) for small glance displays such as Intercom. ' +
-        'When a message came from Intercom (the message says so), keep the reply to 1-3 sentences and pass `glance`.',
+        'When a message came from Intercom (the message says so), keep the reply to 1-3 sentences and pass `glance`. ' +
+        "Set `answer_needed` when you need the user's answer before you can continue (shows as needs-you on Intercom until they answer).",
       inputSchema: {
         message_id: z.string().describe('ID of the message to reply to'),
         body: z.string().min(1).describe('Text body of the reply'),
@@ -207,7 +213,7 @@ function registerReplyTool(server: McpServer, busBaseUrl: string, agentId: strin
         ...sendOptionFields,
       },
     },
-    async ({ message_id, body, choices, silent, no_preview, pin, glance }) => {
+    async ({ message_id, body, choices, silent, no_preview, pin, glance, answer_needed }) => {
       let original: MessageEnvelope;
       try {
         const res = await fetch(`${busBaseUrl}/api/v1/messages/${message_id}`);
@@ -232,7 +238,7 @@ function registerReplyTool(server: McpServer, busBaseUrl: string, agentId: strin
       const withChoices = applyChoices(
         original.channel,
         body,
-        applySendOptions(baseMetadata, { silent, no_preview, pin, glance }),
+        applySendOptions(baseMetadata, { silent, no_preview, pin, glance, answer_needed }),
         choices,
       );
       const replyBody = {
