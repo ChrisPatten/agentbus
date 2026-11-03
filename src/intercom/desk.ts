@@ -67,7 +67,7 @@ export function classifyPane(f: PaneFacts, nowMs: number): { state: DeskState; s
 
 const ORDER: Record<DeskState, number> = { stuck: 0, waiting: 1, working: 2, finished: 3, idle: 4 };
 
-export function sortSessions(list: DeskSession[]): DeskSession[] {
+export function sortSessions<T extends DeskSession>(list: T[]): T[] {
   return list.slice().sort((a, b) => ORDER[a.state] - ORDER[b.state] || b.since.localeCompare(a.since) || a.id.localeCompare(b.id));
 }
 
@@ -80,7 +80,14 @@ export function deskCounts(list: DeskSession[]): { working: number; needs_you: n
 
 interface PoolLike { poolId: string; leaseStore: { list(poolId: string): PoolLeaseRow[] } }
 
-/** Title for a conversation: the app topic title, a stored forum-topic name, or the channel. Never message text. */
+/**
+ * Title for a conversation: the app topic title, a stored forum-topic name, or the channel. Never message text.
+ * `channel` is '' when the conversation is not registered. Exported for the surface sessions/conversation views (E96).
+ */
+export function conversationTitle(db: Database.Database, conversationId: string | null, fallback: string): { title: string; channel: string } {
+  return titleFor(db, conversationId, fallback);
+}
+
 function titleFor(db: Database.Database, conversationId: string | null, fallback: string): { title: string; channel: string } {
   if (!conversationId) return { title: fallback, channel: '' };
   try {
@@ -99,14 +106,35 @@ function titleFor(db: Database.Database, conversationId: string | null, fallback
   } catch { return { title: fallback, channel: '' }; }
 }
 
+/**
+ * E96 S96.6 — a desk session plus the facts the surface `sessions` resource needs.
+ * Never part of the `/desk` payload, which stays {@link DeskSession}.
+ */
+export interface DeskSessionDetail extends DeskSession {
+  /** The pane's prefixed agent id (equal to `id`). */
+  agent_id: string;
+  conversation_id: string | null;
+  /** `conversation_registry.topic`; null when the conversation is not registered (yet). */
+  topic: string | null;
+  /** Latest of the lease's activity, its last turn end, the conversation's last inbound message and the lease time. */
+  last_activity_at: string;
+}
+
 /** Sessions from the cc-pool lease state, approvals, choice prompts and watchdog incidents. Read-only. */
 export function collectDeskSessions(db: Database.Database, pools: Iterable<PoolLike>, nowMs = Date.now()): DeskSession[] {
+  return collectDeskSessionDetails(db, pools, nowMs)
+    .slice(0, MAX_DESK_SESSIONS)
+    .map(({ id, title, state, channel, since }) => ({ id, title, state, channel, since }));
+}
+
+/** Every desk session (sorted as the desk sorts, not capped) with its conversation, topic and last activity. Read-only. */
+export function collectDeskSessionDetails(db: Database.Database, pools: Iterable<PoolLike>, nowMs = Date.now()): DeskSessionDetail[] {
   const nowIso = new Date(nowMs).toISOString();
   const rows = <T>(sql: string, ...args: unknown[]): T[] => { try { return db.prepare(sql).all(...args) as T[]; } catch { return []; } };
   const approvals = rows<{ agent_id: string; requested_at: string }>(`SELECT agent_id, requested_at FROM approval_requests WHERE status = 'pending' AND expires_at > ?`, nowIso);
   const choices = rows<{ channel: string; topic: string; created_at: string }>(`SELECT channel, topic, created_at FROM choice_prompts WHERE status = 'open' AND expires_at > ?`, nowIso);
   const incidents = rows<{ pool_id: string; pane_id: string; detected_at: string }>('SELECT pool_id, pane_id, detected_at FROM pane_incidents WHERE resolved_at IS NULL');
-  const out: DeskSession[] = [];
+  const out: DeskSessionDetail[] = [];
   for (const pool of pools) {
     let leases: PoolLeaseRow[] = [];
     try { leases = pool.leaseStore.list(pool.poolId); } catch { continue; }
@@ -114,7 +142,7 @@ export function collectDeskSessions(db: Database.Database, pools: Iterable<PoolL
       let unhandled: string | null = null;
       try { unhandled = lease.state === 'leased' ? getUnhandledSince(db, lease) : null; } catch { /* treat as handled */ }
       const reg = lease.conversation_id
-        ? rows<{ channel: string; topic: string }>('SELECT channel, topic FROM conversation_registry WHERE id = ?', lease.conversation_id)[0]
+        ? rows<{ channel: string; topic: string; last_seen: string }>('SELECT channel, topic, last_seen FROM conversation_registry WHERE id = ?', lease.conversation_id)[0]
         : undefined;
       const bare = toBareAgentId(lease.agent_id);
       const waits = [
@@ -129,10 +157,16 @@ export function collectDeskSessions(db: Database.Database, pools: Iterable<PoolL
       }, nowMs);
       if (!cls) continue;
       const t = titleFor(db, lease.conversation_id, bare);
-      out.push({ id: lease.agent_id, title: t.title, state: cls.state, channel: t.channel, since: cls.since });
+      const activity = [lease.last_activity_at, lease.last_turn_ended_at, reg?.last_seen, lease.leased_at]
+        .filter((v): v is string => typeof v === 'string' && !Number.isNaN(Date.parse(v)))
+        .sort((a, b) => Date.parse(b) - Date.parse(a))[0] ?? cls.since;
+      out.push({
+        id: lease.agent_id, title: t.title, state: cls.state, channel: t.channel, since: cls.since,
+        agent_id: lease.agent_id, conversation_id: lease.conversation_id, topic: reg?.topic ?? null, last_activity_at: activity,
+      });
     }
   }
-  return sortSessions(out).slice(0, MAX_DESK_SESSIONS);
+  return sortSessions(out);
 }
 
 // ── Departure ───────────────────────────────────────────────────────────────
