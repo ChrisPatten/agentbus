@@ -12,7 +12,7 @@ Errors come back as `{ "content": [{ "type": "text", "text": "Error: ..." }], "i
 | `send_message` | Send to any contact on any channel | Always |
 | `share_context` | Hand a Claude Code session's outcome to Main as hidden context (no message) | Always |
 | `notify`, `update_notification`, `list_notifications` | Raise, change or clear a short-lived "needs you" item on the Intercom dial (E89) | Always (answers "not enabled" unless `notifications.enabled`) |
-| `list_surfaces`, `surface_publish_event`, `surface_remove_event`, `surface_set_slot`, `surface_clear_slot`, `surface_write_widget`, `surface_remove_widget`, `clear_answer_needed` | Publish Events (cards with buttons), slot overrides and widget data to Intercom surfaces; clear an answer-needed flag (E96) | Always (a surface must list the agent in `publishers`) |
+| `list_surfaces`, `surface_publish_event`, `surface_remove_event`, `surface_set_slot`, `surface_clear_slot`, `surface_set_face`, `surface_upload_asset`, `surface_write_widget`, `surface_remove_widget`, `clear_answer_needed` | Publish Events (cards and ring segments with buttons), slot overrides (with a button or context lines/widgets), face layouts, images and widget data to Intercom surfaces; clear an answer-needed flag (E96) | Always (a surface must list the agent in `publishers`) |
 | `send_email` | Start a new email thread to an allowlisted address | An email adapter is configured |
 | `react_to_message` | Emoji reaction on a message | Always |
 | `create_telegram_topic` | Create a forum topic in a Telegram group | A Telegram adapter is configured |
@@ -175,9 +175,11 @@ Surface publishing tools; full semantics, routes and bounds in [SURFACE_API.md](
 | Tool | Input |
 |---|---|
 | `list_surfaces` | none; returns the surfaces you may publish to and what each follows |
-| `surface_publish_event` | `surface`, `id`, `title` (80), `body?` (500), `level?` (`info` default \| `attention` \| `urgent`), `at?`, `end?`, `expires_at?` (default 24 h, at most 14 days), `actions?` (up to 3 of `{id, label (24), style?, confirm?: {draft, prompt?}, once? (default true), run: {body, sends_on_behalf?}}`) |
+| `surface_publish_event` | `surface`, `id`, `title` (80), `body?` (500), `level?` (`info` default \| `attention` \| `urgent`), `at?`, `end?` (both set: a ring segment), `layer?` (`primary` \| `overlap`), `color?`, `travel?` (`{minutes, mode?}`), `detail?` (`{description (600), location (120), image (asset hash)}`), `opens?` (`focus` \| `conversation`), `conversation_id?`, `expires_at?` (default 24 h, at most 14 days), `actions?` (up to 3 of `{id, label (24), style?, confirm?: {draft, prompt?}, once? (default true), run: {body, sends_on_behalf?}}`) |
 | `surface_remove_event` | `surface`, `id` |
-| `surface_set_slot` | `surface`, `slot`, `text` (60), `icon?`, `color?`, `until` (at most 24 h ahead) |
+| `surface_set_slot` | `surface`, `slot` (`primary`, `context` or another name), `text?` (60), `lines?` (context, up to 2 x 40), `widgets?` (context, up to 3 existing widget ids), `action?` (primary, one button like an Event's), `icon?`, `color?`, `until` (at most 24 h ahead) |
+| `surface_set_face` | `surface`, `id`, `enabled?`, `order?`, `layout?` (`{slots: {event_ring?, primary?, context?: lines\|widgets}}` or null) |
+| `surface_upload_asset` | `path` or `data_base64` + `content_type` (`image/png`, `image/jpeg`, `image/svg+xml`); returns `hash` for `detail.image` |
 | `surface_clear_slot` | `surface`, `slot` |
 | `surface_write_widget` | `surface`, `id`, `type`, `data` (a JSON object up to 4 KB) |
 | `surface_remove_widget` | `surface`, `id` |

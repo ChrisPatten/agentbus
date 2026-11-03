@@ -113,14 +113,18 @@ Agents use these tools:
 | Tool | What it does |
 |---|---|
 | `list_surfaces` | Lists the surfaces the agent may publish to |
-| `surface_publish_event` / `surface_remove_event` | Puts a card on the dial, with up to three buttons, or takes it off |
-| `surface_set_slot` / `surface_clear_slot` | Overrides a slot on a face until a time you choose |
+| `surface_publish_event` / `surface_remove_event` | Puts a card on the dial, with up to three buttons, or takes it off. Give it a start and an end and it is drawn as a segment on the day ring, with an optional colour, travel time, detail (description, location, picture) and a choice of what a tap opens |
+| `surface_set_slot` / `surface_clear_slot` | Overrides a slot on a face until a time you choose. The primary slot can carry one button; the context slot shows up to two short lines or up to three widgets |
+| `surface_set_face` | Turns a face on or off, reorders it or sets which slots it shows |
+| `surface_upload_asset` | Uploads a picture (PNG, JPEG or a plain SVG, such as a QR code) to show on an event |
 | `surface_write_widget` / `surface_remove_widget` | Writes the data a widget shows |
 | `clear_answer_needed` | Clears the "needs you" mark on a conversation |
 
 An agent may publish only to a surface whose `publishers` list includes it. When an agent asks you something it needs answered before it can go on, it can mark the reply `answer_needed`; the session then shows as needing you until you tap a button or reply.
 
 ### Buttons that send on your behalf
+
+The choice buttons an agent attaches to a question can be tapped on the device as well: a tap counts exactly like tapping the button in Telegram, and the session stops showing as needing you.
 
 A button that would send a message for you, such as "Tell Sam I'm running late", always shows the exact text first. The device must send that same text back when you tap, or nothing is sent. Each button works once, and a tap after its card expires does nothing.
 

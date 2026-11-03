@@ -413,8 +413,8 @@ Registered when `adapters.intercom.enabled`, on the main port and (with `surface
 | GET | `/api/v1/surface/health` | `{ok, surface_id, follow, version, connected_clients, device_id, scope, protocol: 2}` |
 | GET | `/api/v1/surface/state` | `{surface_id, device_id, server_time, revs, resources}`, every resource with its rev; `Cache-Control: no-store` |
 | GET | `/api/v1/surface/conversations/:id?before=&limit=` | A transcript page `{conversation_id, title, messages, next_before}` (limit 1-100, default 30). `400 invalid_query`; `404 not_found` for a conversation the surface may not read or that does not exist |
-| GET | `/api/v1/surface/assets/:hash` | A file from `<db dir>/surface-assets/` named by its sha256; `404 not_found` otherwise |
-| POST | `/api/v1/surface/actions` | `{object, action_id, idempotency_key, draft?}` to an `action_result`. `400` invalid, `403` read-only device, `429` rate limited, else `200` |
+| GET | `/api/v1/surface/assets/:hash` | A file from `<db dir>/surface-assets/` named by its sha256; `404 not_found` otherwise. Uploaded with `POST /api/v1/surface-publish/assets` (publishers only, main port, bus token; see SURFACE_API.md) |
+| POST | `/api/v1/surface/actions` | `{object, action_id, idempotency_key, draft?, message_id?}` (`object`: `events:`, `notices:`, `slots:` or `conversations:`) to an `action_result`. `400` invalid, `403` read-only device, `429` rate limited, else `200` |
 | POST | `/api/v1/surface/pair` | `{code}` to `{surface_id, device_id, credential, token, scope, profile, cert_fingerprint}`. `400`, `404` unknown, `409` `device_limit`, `410` expired or used, `429`, `503` surface gone. `POST /api/v1/intercom/pair` is the same handler |
 | GET | `/api/v1/surface/ws` | WebSocket; `hello` with `protocol: 2` and `revs` |
 

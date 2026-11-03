@@ -39,6 +39,7 @@ The top-level `surface_api` block configures the LAN listener and the v2 runtime
 | `delta_coalesce_ms` | `250` | At most one delta per (surface, resource) per this window (0-5,000; 0 sends every change at once) |
 | `action_key_ttl_hours` | `48` | How long an action's idempotency key and its answer are remembered |
 | `action_rate_limit_per_min` | `30` | Actions (HTTP and WS) per device per sliding minute |
+| `asset_max_bytes` | `1048576` | Largest file the asset upload route accepts (1 KiB to 16 MiB) |
 | `sessions.activity_timeout_min` | `30` | An `idle` or `finished` session with no activity for this long drops out of the `sessions` resource (unless it needs you) |
 | `sessions.include_system` | `false` | Include system sessions (scheduled routines, `system` channels, agent-to-agent conversations) in `sessions` |
 
@@ -196,7 +197,7 @@ Pending coalesced deltas are flushed first, so the snapshot never trails what so
 
 ### `GET /assets/:hash`
 
-Files are content-addressed in `<directory of bus.db_path>/surface-assets/`, named `<sha256>.<ext>` (or just `<sha256>`). `hash` is 64 hex characters (case-insensitive). The file's sha256 is checked against its name on every request; a missing directory, unknown hash or mismatching content answers `404 not_found`. Content types by extension: png, jpg/jpeg, gif, webp, svg, bmp, json, bin (anything else `application/octet-stream`); `X-Content-Type-Options: nosniff`; `Cache-Control: public, max-age=31536000, immutable` (on the TLS listener too: its `no-store` default applies only to routes that set no `Cache-Control`). There is no upload API yet.
+Files are content-addressed in `<directory of bus.db_path>/surface-assets/`, named `<sha256>.<ext>` (or just `<sha256>`). Agents put files there with [`POST /api/v1/surface-publish/assets`](#assets-upload) (`surface_upload_asset`); devices only read. `hash` is 64 hex characters (case-insensitive). The file's sha256 is checked against its name on every request; a missing directory, unknown hash or mismatching content answers `404 not_found`. Content types by extension: png, jpg/jpeg, gif, webp, svg, bmp, json, bin (anything else `application/octet-stream`); `X-Content-Type-Options: nosniff`; `Cache-Control: public, max-age=31536000, immutable` (on the TLS listener too: its `no-store` default applies only to routes that set no `Cache-Control`).
 
 ### `POST /actions`
 
@@ -264,7 +265,13 @@ These are the item shapes inside resources (`src/surface/types.ts`).
 | `title` | string | At most 80 characters |
 | `body` | string? | At most 500 |
 | `level` | `info` \| `attention` \| `urgent` | |
-| `at`, `end` | ISO? | The time the event is about, for placement on the day dial |
+| `at`, `end` | ISO? | The time the event is about. **Ring placement:** only a `kind: event` with both `at` and `end` draws a segment on the Day Dial ring; with only `at` it is a card. Approvals never draw (the bus does not give them `at`/`end`) |
+| `layer` | `primary` \| `overlap`? | Ring layer (needs `at` and `end`); absent means `primary`. At any moment at most 1 `primary` and 2 `overlap` ring events may overlap in time; a publish that would break that is refused naming the clash |
+| `color` | string? | Ring segment colour (needs `at` and `end`): `#rgb`, `#rrggbb` or `orange`, `red`, `green`, `blue`, `purple`, `yellow`, `teal`, `pink`, `gray`, `white`. Stored lowercase |
+| `travel` | `{minutes, mode?}`? | Travel time before the event (needs `at` and `end`); drives the travel wedge and leave-by. `minutes` is a whole number 1-720, `mode` is `walk`, `drive`, `transit`, `bike` or `train` |
+| `detail` | `{description?, location?, image?}`? | The focus view's content. `description` at most 600 characters, `location` at most 120, `image` an asset hash (64 hex; `asset:<hash>` is accepted and stored as the bare hash). On publish the image must already be in the asset store |
+| `opens` | `focus` \| `conversation`? | What a tap opens; absent means `focus` |
+| `conversation_id` | string? | Required when `opens` is `conversation`, and only allowed then |
 | `expires_at` | ISO? | At most 14 days ahead. The bus removes the event after it; its actions answer `expired` |
 | `actions` | Action[] | At most 3 |
 | `approval` | `{approval_id?, tool?, detail}`? | For `kind: approval`: exactly what is being approved |
@@ -273,7 +280,12 @@ These are the item shapes inside resources (`src/surface/types.ts`).
 
 **Action** (a button on an Event or Approval): `id` (`[a-z0-9][a-z0-9_-]{0,31}`, unique within the object), `label` (at most 24 characters), `style?` (`default` \| `primary` \| `destructive`), `confirm?` (`{draft, prompt?}`; `draft` at most 2,000 characters, present when tapping sends something on Chris's behalf), `once?` (default true). The job behind a button stays on the bus; the device sees only this.
 
-**Slot** (`slots`, id = slot name): `id`, `text` (at most 60), `icon?`, `color?`, `until` (ISO, at most 24 hours ahead; the bus removes it then), `source`, `updated_at`.
+**Slot** (`slots`, id = slot name): `id`, `text?` (at most 60), `icon?`, `color?`, `until` (ISO, at most 24 hours ahead; the bus removes it then), `source`, `updated_at`. Two slot names have a meaning:
+
+- `primary`: `text` plus an optional `action` (one button, the [Action](#object-shapes) shape; its job is created with the slot and removed with it, see [slot actions](#actions-and-jobs)).
+- `context`: either `lines` (1-2 strings, each at most 40 characters) or `widgets` (1-3 ids of widgets that exist on the surface when the slot is set; a dangling id is refused, and a bound widget cannot be removed until the slot is updated or cleared). The legacy `text` form still validates.
+
+Any other slot name takes `text` (and `icon`, `color`) only. `lines`, `widgets` and `action` on the wrong slot are refused.
 
 **Widget** (`widgets`): `id`, `type` (`[a-z0-9][a-z0-9_.-]{0,39}`, e.g. `weather`, `countdown`), `data` (object, at most 4,096 bytes as JSON), `source`, `updated_at`.
 
@@ -281,7 +293,7 @@ These are the item shapes inside resources (`src/surface/types.ts`).
 
 **Notice** (`notices`): an E89 notification in its public shape, `{id, key, title, body, level, state, actions, source, created_at, updated_at, expires_at}` (see [NOTIFICATIONS.md](NOTIFICATIONS.md#the-data-model)).
 
-**Face** (`faces`, id = face name): `id`, `order`, `enabled`.
+**Face** (`faces`, id = face name): `id`, `order`, `enabled`, `layout?` (see [Faces](#faces)).
 
 **Device state** (`device`, id = device id): `id`, `name`, `profile`, `scope`, `connected`, `last_seen_at`, `battery` (number or null), `quiet`, `view` (what the device reports showing, e.g. `conversation:<id>`, or null).
 
@@ -298,6 +310,11 @@ From `BOUNDS` in `src/surface/types.ts`. Errors are `BoundsError`s whose message
 | `draft` | 2,000 characters | Job store, action requests; also the transcript text cut and approval `detail` |
 | `eventsPerSurface` | 50 live (non-expired) events | Resource store (a change may not raise the count above it) |
 | `slotText` | 60 characters | Publishing tools |
+| `contextLines` / `contextLineText` | 2 lines / 40 characters each | Publishing tools |
+| `contextWidgets` | 3 widget ids | Publishing tools |
+| `description` / `location` | 600 / 120 characters (`detail`) | Publishing tools |
+| `travelMinutes` | 720 | Publishing tools |
+| `ringPrimary` / `ringOverlap` | 1 / 2 overlapping ring events per layer | Publishing tools (checked against live events) |
 | `slotsPerSurface` | 12 | Resource store |
 | `slotMaxHours` | 24 | Publishing tools |
 | `widgetsPerSurface` | 24 | Resource store |
@@ -387,8 +404,9 @@ One handler serves `POST /api/v1/surface/actions` and the WS `action` frame.
 
 | Field | Rule |
 |---|---|
-| `object` | `events:<id>` or `notices:<id>` (id 1-128 characters, no `:` or whitespace) |
-| `action_id` | `[a-z0-9][a-z0-9_-]{0,31}`; for a notice, the action's index (`"0"`, `"1"`, ...) |
+| `object` | `events:<id>`, `notices:<id>`, `slots:<slot id>` (the primary slot's button) or `conversations:<conversation id>` (id 1-128 characters, no whitespace; no `:` except in a conversation id) |
+| `action_id` | `[a-z0-9][a-z0-9_-]{0,31}`; for a notice or a conversation, the button's index (`"0"`, `"1"`, ...) |
+| `message_id` | Optional, `conversations:` only: the bus message id the buttons are on (the `id` of the message in the conversation page). Default: the newest open prompt in the conversation |
 | `idempotency_key` | 1-100 characters, generated by the device, unique per tap. A retry of the same tap reuses it |
 | `draft` | Required, and must match exactly, when the action has `confirm.draft` (at most 2,000) |
 
@@ -405,6 +423,10 @@ One handler serves `POST /api/v1/surface/actions` and the WS `action` frame.
 
 **Notice actions** (`notices:<id>`, action id = index) go through the E89 `notification_action` path: the notification is acknowledged and `[tapped] <label>` is sent into the followed conversation like a surface send, with the idempotency key as `client_msg_id`. `queued` or `command` answers `done`; an unknown, terminal or untargeted notice `not_found`; a bad index `invalid`. See [NOTIFICATIONS.md](NOTIFICATIONS.md#surface-api-v2-e96).
 
+**Slot actions** (`slots:<slot id>`). The primary slot's button works exactly like an Event button: one job in `surface_jobs` under `slots:<slot id>:<action id>`, created in the same transaction as the slot, replaced when the slot is set again (keeping the fire count of a surviving action id), removed when the slot is cleared (`DELETE slots/:slot` answers `jobs_removed`) or replaced by a slot without an action. The job expires with the slot (`until`); a tap after that answers `expired`, and the job is kept a day like an Event's so a late tap is not `not_found`. One-shot, expiry and `confirm.draft` rules are the Event rules.
+
+**Conversation actions** (`conversations:<conversation id>`, action id = the button `index` shown in the conversation page (`GET /conversations/:id`)). A tap behaves like a Telegram tap on the same prompt (`resolveChoiceTap`): the prompt must be open and addressed to the surface's contact (or to nobody); the `open` to `answered` flip is atomic, so a double tap answers once; the pick is injected into the prompt's conversation as the followed contact (`[tapped] <label>`, or the choice's slash command), with `reply_to` the question, the choice metadata Telegram attaches (`choice_prompt_id`, `choice_index`, `choice_label`) and `origin: surface_action`; the conversation's `answer_needed` flag is cleared and the `sessions` resource updated; the prompt's Telegram keyboard is cleared (best effort). If the injection fails the prompt is reopened so the button can be tapped again (`internal_error`). The surface must be allowed to read the conversation (the one it follows, or one in its `sessions`), else `not_found`. Results: `done`; `already_done` (answered elsewhere or by an earlier key); `expired` (prompt past its expiry); `failed` with `invalid` (index out of range, or a copy/link button, which cannot be tapped from a surface), `forbidden` (prompt addressed to another contact), `not_found` (nothing open, unreadable conversation) or `no_route`. Device and read-only checks, rate limit and idempotency are the shared ones above.
+
 **Approval actions** (`events:approval-<id>`, action `approve` or `deny`) resolve the bus approval (see [Approvals](#approvals)).
 
 **Results.**
@@ -417,7 +439,8 @@ One handler serves `POST /api/v1/surface/actions` and the WS `action` frame.
 | `failed` | `invalid` | Malformed request (HTTP 400) |
 | `failed` | `read_only` | Read-only device (HTTP 403) |
 | `failed` | `rate_limited` | Over `action_rate_limit_per_min` (HTTP 429) |
-| `failed` | `not_found` | No such Event, action, job, notice or (addressed) approval |
+| `failed` | `not_found` | No such Event, slot, action, job, notice, open prompt or (addressed) approval |
+| `failed` | `forbidden` | A conversation prompt is addressed to another contact |
 | `failed` | `confirm_required` | Draft rule not met, or the request lacks the draft |
 | `failed` | `draft_mismatch` | The echoed draft differs |
 | `failed` | `no_route` | The injected message reached no agent |
@@ -458,7 +481,19 @@ A per-conversation flag (`surface_answer_needed`, one per conversation: a newer 
 
 ## Faces
 
-At startup each surface with an empty `faces` resource is seeded with `day` (order 0), `status` (1) and `desk` (2), all enabled. Nothing else writes `faces` yet.
+At startup each surface with an empty `faces` resource is seeded with `day` (order 0), `status` (1) and `desk` (2), all enabled, without a layout. An agent can change an existing face with `surface_set_face` (`PUT faces/:id`): `enabled`, `order` (0-99) and `layout`. It cannot create faces: a face is something the firmware or web app knows how to draw.
+
+`layout` is optional. Absent, the device's built-in layout for that face applies (a Compact's firmware draws the Day Dial the same way whether or not a layout is set). Present, it is exactly:
+
+```json
+{ "slots": { "event_ring": true, "primary": true, "context": "lines" } }
+```
+
+`event_ring` and `primary` are booleans (draw the ring events; show the primary slot, default the next Event), `context` is `"lines"` or `"widgets"` (which form of the `context` slot the face binds). Any other key is refused. `layout: null` in the tool removes it. Bigger layouts (positions, sizes) are deliberately not modelled here; they belong to a later custom-face epic.
+
+## Assets upload
+
+`POST /api/v1/surface-publish/assets?agent_id=<agent>` (tool `surface_upload_asset`). The body is the raw file, with `Content-Type` `image/png`, `image/jpeg` or `image/svg+xml` (a QR code is just a small PNG). Behind the shared bus token like the other publishing routes, and the agent must be a publisher of at least one surface (`403` otherwise); devices never reach this prefix (the TLS listener serves only `/api/v1/surface`). The bytes must match the declared type (PNG and JPEG signatures; SVG must be a static `<svg>` document: script, event handlers, `foreignObject`, `iframe`, `embed`, `object`, `javascript:` and entities are refused), and the size is limited by `surface_api.asset_max_bytes` (`413` over). The file is stored as `<directory of bus.db_path>/surface-assets/<sha256>.<png|jpg|svg>`, written to a temporary name and renamed, so the same bytes always give the same hash. Answer: `201` (new) or `200` (already stored) with `{ok, hash, reference, content_type, size, url, created}`; use `hash` as `detail.image` of an Event. `415` for another content type, `400` for bad bytes. Devices fetch it with `GET /api/v1/surface/assets/<hash>`. Nothing deletes assets yet; remove files by hand.
 
 ## Notices
 
@@ -479,11 +514,10 @@ Each device that has connected has an item in its surface's `device` resource. I
 
 ## Deviations and not yet reconciled
 
-- **Object shapes were defined here.** The epic names `peggy-claude-code/data/intercom/architecture.md` section 3 as the contract for Event, slot, session and conversation shapes and bounds. That document was not available on the machine where E96 was built, so the shapes and bounds in `src/surface/types.ts` (and this document) were written without it. Reconcile any difference in architecture.md first, then here.
+- **Object shapes were defined here, then reconciled.** E96 was built without `architecture.md` section 3; the follow-on (event shape, slots, faces, assets) brought the shapes in line with it. Where this implementation intentionally differs from the design, [SURFACE_API_CHANGES.md](SURFACE_API_CHANGES.md) lists it.
 - **Voice frames** are reserved in protocol v2 and not implemented.
-- **Assets have no upload API.** Files are placed in `<db dir>/surface-assets/` by hand, named by their sha256.
-- **Conversation buttons are display-only.** The page and live appends carry choice `buttons`, but there is no action object for choice prompts yet; a device cannot tap them through `POST /actions`.
-- **`faces` has no writer** beyond the startup seed; an agent cannot reorder faces yet.
+- **Assets are never deleted** and the store has no listing route.
+- **Widgets are data only.** There is no reactive key store and no sandboxed code; the slot-to-widget binding (`context.widgets`) is the only coupling.
 - **v1 re-pairing creates a device each time.** A phone that loses its stored token and pairs again with a v1 code gets a new device; after `max_devices` of them the code answers `409 device_limit` (which the v1 web app does not explain). Revoke stale devices with `scripts/surface-devices.ts`.
 
 ## Agent publishing tools (S96.5)
@@ -497,13 +531,15 @@ Agents publish through MCP tools, registered for cc-pool panes, Claude Code and 
 | `list_surfaces` | `GET surfaces?agent_id=` | Surfaces this agent may publish to, with their follow target |
 | `surface_publish_event` | `PUT :surface/events/:id` | Create or replace an Event (`201` new, `200` replaced; `created_at` kept) |
 | `surface_remove_event` | `DELETE :surface/events/:id` | Remove an Event and its jobs |
-| `surface_set_slot` | `PUT :surface/slots/:slot` | Override a face slot until `until` |
-| `surface_clear_slot` | `DELETE :surface/slots/:slot` | End the override |
+| `surface_set_slot` | `PUT :surface/slots/:slot` | Override a face slot until `until`; `primary` may carry an `action`, `context` takes `lines` or `widgets` |
+| `surface_clear_slot` | `DELETE :surface/slots/:slot` | End the override (and remove the job behind its button) |
+| `surface_set_face` | `PUT :surface/faces/:id` | Enable, reorder or give an existing face a `layout` |
+| `surface_upload_asset` | `POST assets` | Upload a PNG, JPEG or static SVG (raw body); returns the hash for `detail.image` |
 | `surface_write_widget` | `PUT :surface/widgets/:id` | Write a widget's `type` and `data` |
 | `surface_remove_widget` | `DELETE :surface/widgets/:id` | Remove a widget |
 | `clear_answer_needed` | `POST answer-needed/clear` | Clear a conversation's flag (`conversation_id`, or `channel` + `contact` + `topic`; with no arguments cc-headless uses its turn's conversation) |
 
-**Event input.** `{id, title, body?, level?, at?, end?, expires_at?, actions?}`. `expires_at` defaults to 24 hours ahead and must be in the future and at most 14 days ahead. Each action is `{id, label, style?, confirm?: {draft, prompt?}, once? (default true), run: {body, sends_on_behalf?}}`: `run.body` is the message injected into the surface's followed conversation (as the followed contact, like a scheduled fire) when the button is tapped. `sends_on_behalf: true` requires `confirm.draft`. Jobs always target the follow conversation. Editing an Event keeps the fire count of actions whose id survives, so a fired one-shot button is not re-armed. Agents cannot write `kind: approval` or change bus-owned Events. Every bound in [Bounds](#bounds) is checked and an over-limit call answers `400` with a message naming the field and the limit, and nothing is written (the jobs and the Event are written in one transaction).
+**Event input.** `{id, title, body?, level?, at?, end?, layer?, color?, travel?, detail?, opens?, conversation_id?, expires_at?, actions?}` (the ring fields are described under [Object shapes](#object-shapes)). `expires_at` defaults to 24 hours ahead and must be in the future and at most 14 days ahead. Each action is `{id, label, style?, confirm?: {draft, prompt?}, once? (default true), run: {body, sends_on_behalf?}}`: `run.body` is the message injected into the surface's followed conversation (as the followed contact, like a scheduled fire) when the button is tapped. `sends_on_behalf: true` requires `confirm.draft`. Jobs always target the follow conversation. Editing an Event keeps the fire count of actions whose id survives, so a fired one-shot button is not re-armed. Agents cannot write `kind: approval` or change bus-owned Events. Every bound in [Bounds](#bounds) is checked and an over-limit call answers `400` with a message naming the field and the limit, and nothing is written (the jobs and the Event are written in one transaction).
 
 **`answer_needed`** on `reply` and `send_message` (next to `choices`): stored as `metadata.answer_needed`; when true on agent-sent text, `POST /api/v1/messages` sets the conversation's flag (the reply's conversation, else the bound `metadata.conversation_id`, else the hash of recipient, channel and topic). A message without it never sets the flag. See [Answer needed](#answer-needed).
 
