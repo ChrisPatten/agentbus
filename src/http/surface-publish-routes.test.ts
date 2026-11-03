@@ -36,6 +36,7 @@ function fakeHub() {
     resume: () => [],
     flush: () => {},
     stop: () => {},
+    sweepExpired: () => [],
   };
   return { hub, applied };
 }

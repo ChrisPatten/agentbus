@@ -37,6 +37,8 @@ export interface SurfaceRuntime {
   surfaceApi: SurfaceApiDeps;
   /** Connect the hub's deltas and notice actions to the service, and register the tick work. */
   bind(service: IntercomService): void;
+  /** Rebuild the sessions resource now (after an answer-needed or subject change). */
+  refreshSessions(): void;
   /** Hourly maintenance: expired events/slots (and their jobs), old jobs and keys, spent pairing codes. */
   sweep(): void;
   stop(): void;
@@ -122,6 +124,7 @@ export function createSurfaceRuntime(deps: SurfaceRuntimeDeps): SurfaceRuntime {
       sweepTimer = setInterval(sweep, SWEEP_MS);
       sweepTimer.unref();
     },
+    refreshSessions: () => { try { syncSessions(); } catch (err) { log(`warn: sessions refresh failed: ${String(err)}`); } },
     sweep,
     stop() {
       for (const u of unsubscribe.splice(0)) u();

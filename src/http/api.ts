@@ -92,6 +92,8 @@ import { registerAppRoutes } from './app-routes.js';
 import { isIntercomUrl } from './intercom-routes.js';
 import { isSurfaceUrl, registerSurfaceServer, type SurfaceServerDeps } from './surface-routes.js';
 import { notifyInboundAccepted } from '../surface/inbound-hook.js';
+import { registerSurfacePublishRoutes } from './surface-publish-routes.js';
+import type { JobStore, ResourceHub } from '../surface/types.js';
 import { registerNotificationRoutes, isNotificationsApiUrl } from './notifications-routes.js';
 import type { IntercomService } from '../intercom/service.js';
 import { resolveGlance } from '../intercom/glance.js';
@@ -134,6 +136,8 @@ export interface HttpServerDeps {
   intercom?: IntercomService;
   /** E96 — extras for the device-facing surface routes (conversation pages, assets). */
   surfaceRoutes?: Omit<SurfaceServerDeps, 'config' | 'db' | 'intercom'>;
+  /** E96 S96.5 — agent publishing (`/api/v1/surface-publish/*`) and the sessions refresh after a flag changes. */
+  surfacePublish?: { hub: ResourceHub; jobs: JobStore; onFlagsChanged?: () => void };
   getHeadlessSnapshots?: () => HeadlessCapacitySnapshot[];
   /**
    * Optional — one PoolManager per configured `cc-pool` instance (E48),
@@ -1515,6 +1519,7 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
         ?? computeConversationId(data.recipient.replace(/^contact:/, ''), data.channel, data.topic || 'general');
       try {
         setAnswerNeeded(db, { conversationId: answerConversationId, messageId: id, agentId: data.sender.slice('agent:'.length) });
+        deps.surfacePublish?.onFlagsChanged?.();
       } catch (err) {
         console.error(`[messages] could not set answer_needed for ${answerConversationId.slice(0, 8)}: ${String(err)}`);
       }
@@ -1628,7 +1633,7 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
             .get(req.body.session_id) as { conversation_id: string } | undefined)?.conversation_id ?? null;
         }
         if (!conv && req.body.contact_id) conv = computeConversationId(req.body.contact_id.replace(/^contact:/, ''), req.params.id, req.body.topic || 'general');
-        if (conv) setSubject(db, conv, subject);
+        if (conv) { setSubject(db, conv, subject); deps.surfacePublish?.onFlagsChanged?.(); }
       } catch (err) {
         console.error(`[tool-status] could not store subject: ${String(err)}`);
       }
@@ -2723,6 +2728,15 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
   // /intercom + /api/v1/intercom/* — Intercom surfaces (E90/E91): static web app, pairing, WebSocket.
   if (config.adapters.intercom?.enabled && deps.intercom) {
     await registerSurfaceServer(server, { config, db, intercom: deps.intercom, ...deps.surfaceRoutes });
+    if (deps.surfacePublish) {
+      const intercomService = deps.intercom;
+      const { hub, jobs, onFlagsChanged } = deps.surfacePublish;
+      registerSurfacePublishRoutes(server, {
+        db, hub, jobs,
+        surfaces: () => [...intercomService.surfaces.values()].map((s) => ({ id: s.id, follow: intercomService.followJson(s), publishers: s.publishers })),
+        ...(onFlagsChanged ? { onAnswerNeededCleared: () => onFlagsChanged() } : {}),
+      });
+    }
     if (config.notifications?.enabled) registerNotificationRoutes(server, { config: config.notifications, service: deps.intercom });
   }
 

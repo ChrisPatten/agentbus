@@ -396,7 +396,8 @@ const surfaceRouteExtras = {
     conversationId === surface.conversationId
     || Object.values(surfaceRuntime?.hub.snapshot(surface.id, 'sessions').items ?? {}).some((s) => s['conversation_id'] === conversationId),
 };
-const httpServer = await createHttpServer({ queue, registry, config, pipeline, db, commandRegistry, pauseSet, siri, app, intercom, surfaceRoutes: surfaceRouteExtras, poolManagers, getHeadlessSnapshots, runtimeResolver, advisories, journalEvents, journalGate, journalStatus, memoryRecent, approvalHooks, proposals: proposalService });
+const httpServer = await createHttpServer({ queue, registry, config, pipeline, db, commandRegistry, pauseSet, siri, app, intercom, surfaceRoutes: surfaceRouteExtras,
+  ...(surfaceRuntime ? { surfacePublish: { hub: surfaceRuntime.hub, jobs: surfaceRuntime.jobs, onFlagsChanged: () => surfaceRuntime.refreshSessions() } } : {}), poolManagers, getHeadlessSnapshots, runtimeResolver, advisories, journalEvents, journalGate, journalStatus, memoryRecent, approvalHooks, proposals: proposalService });
 
 // E66 — busy notice for a held message: the channel's native queued/status
 // signal where it has one, a short text elsewhere, nothing on email.
