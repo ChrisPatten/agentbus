@@ -62,9 +62,15 @@ await shot('02-day-event-overlaps-tick-context.png');
 const t0 = await faceText();
 check('context lines and the Leave in N min line render', /Water bill due today/.test(t0) && /Leave in/.test(t0), JSON.stringify(t0.slice(0, 80)));
 
+const hoursOf = (iso) => { const d = new Date(iso); return d.getHours() + d.getMinutes() / 60; };
+const evAll = await ev(`fetch('/api/v1/surface/state',{headers:{Authorization:'Bearer mock-token-0123456789abcdef0123456789abcdef'}}).then(r=>r.json()).then(s=>Object.values(s.resources.events).filter(e=>e.kind!=='approval'&&e.at).map(e=>({id:e.id,title:e.title,at:e.at,end:e.end||null})))`);
+const todayYmd = new Date().toDateString();
+const todays = evAll.filter((e) => new Date(e.at).toDateString() === todayYmd).map((e) => ({ ...e, s: hoursOf(e.at), e: e.end ? hoursOf(e.end) : null })).sort((a, b) => a.s - b.s || (a.e === null) - (b.e === null));
+const apart = (a, b) => { const d = Math.abs(a - b) % 24; return Math.min(d, 24 - d); };
+const dist = (e, h) => (e.e !== null && h >= e.s && h <= e.e ? 0 : apart(h, e.s));
+const nearestAt = (h) => todays.reduce((b, e) => (dist(e, h) < dist(b, h) - 1e-9 ? e : b), todays[0]);
 // Tap the dentist segment, then the tick.
 const dent = await ev(`fetch('/api/v1/surface/state',{headers:{Authorization:'Bearer mock-token-0123456789abcdef0123456789abcdef'}}).then(r=>r.json()).then(s=>[s.resources.events.dentist.at,s.resources.events.bill.at,s.resources.events.ov1.at])`);
-const hoursOf = (iso) => { const d = new Date(iso); return d.getHours() + d.getMinutes() / 60; };
 const [dh, bh, oh] = dent.map(hoursOf);
 let [sx, sy] = await polarJs(dh + 0.5, 208); await tapDesign(sx, sy); await sleep(600);
 await shot('03-event-focus.png');
@@ -81,9 +87,37 @@ await tapSel('[data-aid="here"]'); await sleep(300);
 check('a one-shot button that is done is disabled (Already sent / Sent)', /Sent|Already/.test(await faceText()) && !(await faceText()).includes('Send this'));
 await tapSel('[data-act="back"]'); await sleep(400);
 [sx, sy] = await polarJs(bh, 212); await tapDesign(sx, sy); await sleep(500);
-check('tapping a tick opens its Event', (await faceText()).includes('Water bill'));
+// A seeded calendar-style Event may span the tick's time (a span wins a tie), so the card is the nearest Event by the rule, not always the tick.
+check('tapping on a tick opens the carousel on the nearest Event', (await faceHas('.car')) && (await faceText()).includes(nearestAt(bh).title), JSON.stringify((await faceText()).slice(0, 60)));
 await shot('05-tick-focus.png');
 await tapSel('[data-act="back"]'); await sleep(400);
+
+// Ring tap carousel: tap the ring away from any bar or tick; the carousel opens on the Event nearest in time.
+// the hour farthest from every start/end, so the tap lands on bare ring
+let tapH = 0, bestGap = -1;
+for (let h = 0; h < 24; h += 0.25) { const gap = Math.min(...todays.flatMap((e) => [apart(h, e.s), e.e === null ? 99 : apart(h, e.e), e.e !== null && h >= e.s && h <= e.e ? 0 : 99])); if (gap > bestGap) { bestGap = gap; tapH = h; } }
+const expected = nearestAt(tapH);
+[sx, sy] = await polarJs(tapH, 208); await tapDesign(sx, sy); await sleep(600);
+await shot('05b-carousel-open.png');
+const cardText = await faceText();
+check('a ring tap away from any bar opens the carousel on the nearest Event', await faceHas('.car') && cardText.includes(expected.title) && cardText.includes(`of ${todays.length}`), `${expected.title} @${tapH}h, ${JSON.stringify(cardText.slice(0, 40))}`);
+const idx0 = todays.indexOf(expected);
+check('the counter shows the Event\'s place in start order', cardText.includes(`${idx0 + 1} of ${todays.length}`));
+// Swipe left on the card: the next Event in start order.
+const swipe = async (dx) => { const [a, b] = await designToPage(233, 330); await mouse('mousePressed', a, b); await call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: a + dx / 2, y: b, button: 'left', buttons: 1 }); await call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: a + dx, y: b, button: 'left', buttons: 1 }); await mouse('mouseReleased', a + dx, b); await sleep(500); };
+await swipe(-120);
+const next = todays[(idx0 + 1) % todays.length];
+const t1 = await faceText();
+await shot('05c-carousel-swiped.png');
+check('swiping left moves to the next card', t1.includes(next.title) && t1.includes(`${((idx0 + 1) % todays.length) + 1} of ${todays.length}`), JSON.stringify(t1.slice(0, 40)));
+await swipe(120);
+check('swiping right moves back', (await faceText()).includes(`${idx0 + 1} of ${todays.length}`));
+await ev(`document.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowRight'}))`); await sleep(300);
+check('the right arrow key also advances', (await faceText()).includes(`${((idx0 + 1) % todays.length) + 1} of ${todays.length}`));
+await tapSel('[data-act="back"]'); await sleep(400);
+check('Back returns to the Day Dial', (await ev(`document.getElementById('dial').dataset.screen`)) === 'idle' && !(await faceHas('.car')));
+await tapDesign(233, 233); await sleep(300);
+check('a tap in the dead zone in the middle does nothing', !(await faceHas('.car')));
 
 // Scrub: grab the ball, drag to the dentist time.
 const nowH = await ev(`import('./logic.js').then(m=>m.tzParts(new Date()).hours)`);
