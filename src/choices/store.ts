@@ -25,7 +25,8 @@ function toPrompt(row: ChoicePromptRow): ChoicePrompt {
 }
 
 export class ChoiceStore {
-  private readonly db: Database.Database;
+  /** Public (read-only) so the tap path can clear the E96 answer-needed flag in the same database. */
+  readonly db: Database.Database;
 
   constructor(db: Database.Database) {
     this.db = db;
