@@ -229,6 +229,11 @@ function loadMigrations(): Migration[] {
       description: 'notifications table for Intercom attention items (E89)',
       sql: readFileSync(join(migrationsDir, '045_notifications.sql'), 'utf-8'),
     },
+    {
+      version: 46,
+      description: 'Surface API v2: surfaces, devices, revisioned resources, action jobs, answer-needed (E96)',
+      sql: readFileSync(join(migrationsDir, '046_surface_api.sql'), 'utf-8'),
+    },
   ];
 }
 

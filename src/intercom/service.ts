@@ -136,7 +136,7 @@ export class IntercomService {
     this.commute = deps.commute !== undefined ? deps.commute : loadCommute(deps.config.desk.commute_file, (l) => this.log(l));
     this.plan = deps.plan ?? createPlanSource(deps.config.desk.plan_file, (l) => this.log(l));
     for (const s of deps.config.surfaces) {
-      const token = env[s.token_env];
+      const token = s.token_env ? env[s.token_env] : undefined;
       if (!token || token.length < 32) {
         this.log(`warn: surface "${s.id}" skipped: env ${s.token_env} is ${token ? 'shorter than 32 characters' : 'not set'}`);
         continue;
@@ -212,7 +212,7 @@ export class IntercomService {
 
   tokenFor(surfaceId: string): string | null {
     const s = this.deps.config.surfaces.find((x) => x.id === surfaceId);
-    return s ? (this.deps.env ?? process.env)[s.token_env] ?? null : null;
+    return s?.token_env ? (this.deps.env ?? process.env)[s.token_env] ?? null : null;
   }
 
   connectedClients(surfaceId: string): number {
