@@ -15,11 +15,12 @@ import { createReadStream, existsSync, realpathSync, statSync } from 'node:fs';
 import { extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type Database from 'better-sqlite3';
-import type { FastifyInstance, FastifyRequest } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import websocket from '@fastify/websocket';
 import { z } from 'zod';
 import type { IntercomAdapterConfig } from '../config/schema.js';
 import { IntercomService, type Client, type SocketLike } from '../intercom/service.js';
+import type { ResourceName } from '../surface/types.js';
 import { createPairCode, redeemPairCode } from '../intercom/store.js';
 
 export const INTERCOM_PATH_PREFIXES = ['/intercom', '/api/v1/intercom'] as const;
@@ -64,8 +65,14 @@ export function resolveStaticPath(root: string, rawPath: string): string | null 
   }
 }
 
-const PairBody = z.object({ code: z.string().min(1).max(64) });
-const Hello = z.object({ type: z.literal('hello'), token: z.string().min(1), cursor: z.number().int().min(0).default(0), client: z.string().max(100).optional() });
+export const PairBody = z.object({ code: z.string().min(1).max(64) });
+const Hello = z.object({
+  type: z.literal('hello'), token: z.string().min(1), cursor: z.number().int().min(0).default(0), client: z.string().max(100).optional(),
+  /** E96 — 2 opts into deltas, actions and views. Absent or 1: protocol v1 exactly. */
+  protocol: z.number().int().min(1).max(2).optional(),
+  /** E96 — the device's last-seen rev per resource. */
+  revs: z.record(z.string(), z.number().int().min(0)).optional(),
+});
 const SendFrame = z.object({ type: z.literal('send'), client_msg_id: z.string().min(1).max(100), body: z.string() });
 
 export interface IntercomRouteDeps {
@@ -105,6 +112,8 @@ export async function registerIntercomRoutes(server: FastifyInstance, deps: Inte
     if (!service.pairAllowed(req.ip)) return reply.code(429).header('Retry-After', '60').send({ ok: false, error: 'rate_limited' });
     const body = PairBody.safeParse(req.body);
     if (!body.success) return reply.code(400).send({ ok: false, error: 'invalid_body' });
+    // E96: with the device store on, a code (v1 or v2) creates a device with its own credential.
+    if (service.surfaceApi) return redeemForDevice(service, body.data.code, reply);
     const result = redeemPairCode(deps.db, body.data.code);
     if (!result.ok) return reply.code(result.reason === 'unknown' ? 404 : 410).send({ ok: false, error: result.reason });
     const token = service.tokenFor(result.surface_id);
@@ -134,17 +143,34 @@ export async function registerIntercomRoutes(server: FastifyInstance, deps: Inte
   });
 
   // ── WebSocket ─────────────────────────────────────────────────────────────
-  const sockets = new Set<Client>();
-  const heartbeat = setInterval(() => {
-    for (const c of sockets) {
-      if (Date.now() - c.lastPong > 2 * config.ping_interval_ms + 5000) c.socket.close(1001, 'ping timeout');
-      else if (c.socket.readyState === 1) { try { c.socket.ping?.(); } catch { /* closing */ } }
-    }
-  }, config.ping_interval_ms);
-  heartbeat.unref();
-  server.addHook('onClose', async () => { clearInterval(heartbeat); service.stop(); });
+  server.get('/api/v1/intercom/ws', { websocket: true }, surfaceSocketHandler(server, service, config));
 
-  server.get('/api/v1/intercom/ws', { websocket: true }, (socket: SocketLike & { on: (e: string, l: (...a: any[]) => void) => void }) => {
+  service.start();
+}
+
+type WsSocket = SocketLike & { on: (e: string, l: (...a: any[]) => void) => void };
+
+/**
+ * The WebSocket handler behind `/api/v1/intercom/ws` (v1 alias) and `/api/v1/surface/ws` (E96).
+ * Protocol v1 frames work on both; `hello.protocol: 2` adds `delta`, `action` and `view`.
+ * One heartbeat per server.
+ */
+export function surfaceSocketHandler(server: FastifyInstance, service: IntercomService, config: IntercomAdapterConfig): (socket: WsSocket) => void {
+  const sockets = heartbeats.get(server) ?? (() => {
+    const set = new Set<Client>();
+    const heartbeat = setInterval(() => {
+      for (const c of set) {
+        if (Date.now() - c.lastPong > 2 * config.ping_interval_ms + 5000) c.socket.close(1001, 'ping timeout');
+        else if (c.socket.readyState === 1) { try { c.socket.ping?.(); } catch { /* closing */ } }
+      }
+    }, config.ping_interval_ms);
+    heartbeat.unref();
+    server.addHook('onClose', async () => { clearInterval(heartbeat); service.stop(); });
+    heartbeats.set(server, set);
+    return set;
+  })();
+
+  return (socket: WsSocket) => {
     let client: Client | null = null;
     const helloTimer = setTimeout(() => { if (!client) socket.close(4401, 'hello timeout'); }, config.hello_timeout_ms);
     const send = (frame: Record<string, unknown>) => { try { if (socket.readyState === 1) socket.send(JSON.stringify(frame)); } catch { /* closing */ } };
@@ -157,17 +183,22 @@ export async function registerIntercomRoutes(server: FastifyInstance, deps: Inte
       catch { if (!client) { socket.close(4401, 'invalid hello'); return; } send({ type: 'error', code: 'invalid_frame' }); return; }
       if (!client) {
         const hello = Hello.safeParse(frame);
-        const surface = hello.success ? service.surfaceForToken(hello.data.token) : null;
-        if (!hello.success || !surface) { send({ type: 'error', code: 'unauthorized' }); socket.close(4401, 'unauthorized'); return; }
+        const auth = hello.success ? service.authenticate(hello.data.token) : null;
+        if (!hello.success || !auth) { send({ type: 'error', code: 'unauthorized' }); socket.close(4401, 'unauthorized'); return; }
         clearTimeout(helloTimer);
-        client = { socket, surface, ready: false, cursor: 0, lastPong: Date.now() };
+        client = {
+          socket, surface: auth.surface, ready: false, cursor: 0, lastPong: Date.now(),
+          ...(auth.device ? { device: auth.device } : {}), protocol: hello.data.protocol ?? 1,
+        };
         sockets.add(client);
-        await service.attach(client, hello.data.cursor, hello.data.client);
+        await service.attach(client, hello.data.cursor, hello.data.client, hello.data.revs as Partial<Record<ResourceName, number>> | undefined);
         return;
       }
       if (frame['type'] === 'ping') { send({ type: 'pong' }); return; }
       if (!client.ready) { send({ type: 'error', code: 'unauthorized' }); return; }
+      const readOnly = client.device?.scope === 'read_only';
       if (frame['type'] === 'send') {
+        if (readOnly) { send({ type: 'error', code: 'read_only' }); return; }
         const parsed = SendFrame.safeParse(frame);
         if (!parsed.success) { send({ type: 'error', code: 'invalid_frame' }); return; }
         send(await service.handleSend(client.surface, parsed.data));
@@ -179,15 +210,32 @@ export async function registerIntercomRoutes(server: FastifyInstance, deps: Inte
         return;
       }
       if (frame['type'] === 'notification_action') {
+        if (readOnly) { send({ type: 'error', code: 'read_only' }); return; }
         send(await service.handleNotificationAction(client.surface, frame));
         return;
       }
-      if (frame['type'] === 'state') { service.setSurfaceState(client.surface, frame); return; }
+      if (frame['type'] === 'state') { service.setSurfaceState(client.surface, frame, client); return; }
+      if (client.protocol === 2 && frame['type'] === 'action') {
+        const { type: _t, ...request } = frame;
+        send(await service.handleAction(client.surface, client.device, request) as unknown as Record<string, unknown>);
+        return;
+      }
+      if (client.protocol === 2 && frame['type'] === 'view') { service.setView(client, frame['view']); return; }
       send({ type: 'error', code: 'invalid_frame' });
     })().catch(() => send({ type: 'error', code: 'internal_error' })); });
-  });
+  };
+}
+const heartbeats = new WeakMap<FastifyInstance, Set<Client>>();
 
-  service.start();
+/** E96 — redeem a pairing code into a new device. Shared by `/api/v1/intercom/pair` and `/api/v1/surface/pair`. */
+export function redeemForDevice(service: IntercomService, code: string, reply: FastifyReply) {
+  const api = service.surfaceApi!;
+  const res = api.devices.redeem(code, api.certFingerprint ?? null);
+  if (!res.ok) {
+    const status = res.reason === 'unknown' ? 404 : res.reason === 'surface_unavailable' ? 503 : res.reason === 'device_limit' ? 409 : 410;
+    return reply.code(status).send({ ok: false, error: res.reason });
+  }
+  return res.result;
 }
 
 /** CLI/test helper: write a pairing code for `surfaceId`. */

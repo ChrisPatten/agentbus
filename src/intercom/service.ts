@@ -38,6 +38,10 @@ import {
   type Notification, type NotifyInputT, type StateFilter, type UpdateInputT, type UpdateResult, type WriteResult,
 } from './notifications-store.js';
 import { appendEvent, cursorNeedsReset, eventBounds, getSend, putSend, readEvents, sweepEvents, sweepPairCodes, type StoredEvent } from './store.js';
+import {
+  SURFACE_PROTOCOL_VERSION, type ActionHandler, type ActionResult, type ConversationMessage, type DeltaFrame, type Device, type DeviceStore,
+  type ResourceHub, type ResourceName, type ResourceOp,
+} from '../surface/types.js';
 
 export const PROTOCOL_VERSION = 1;
 export const MAX_SEND_CHARS = 4000;
@@ -50,10 +54,33 @@ export interface Surface {
   follow: { contact: string; channel: string; topic: string | undefined };
   /** Conversation id of the followed (contact, channel, topic), as the pipeline computes it. */
   conversationId: string;
+  /** sha256 of the v1 shared token; empty when the surface has none (E96: devices carry their own credentials). */
   tokenHash: string;
+  /** E96 — bare agent ids allowed to publish to this surface. */
+  publishers: string[];
 }
 
-export interface Client { socket: SocketLike; surface: Surface; ready: boolean; cursor: number; lastPong: number; clientName?: string }
+export interface Client {
+  socket: SocketLike; surface: Surface; ready: boolean; cursor: number; lastPong: number; clientName?: string;
+  /** E96 — the paired device behind this socket (absent for v1 surface-token auth without a device store). */
+  device?: Device;
+  /** 1 (default) or 2. Only v2 clients receive `delta` and `conversation_append` frames. */
+  protocol?: number;
+  /** E96 — what the device reports it is showing (`view` frame), e.g. `conversation:<id>`. */
+  view?: string | null;
+}
+
+/** E96 — Surface API v2 collaborators. Absent: the service behaves exactly as protocol v1 (shared surface tokens). */
+export interface SurfaceApiDeps {
+  devices: DeviceStore;
+  hub: ResourceHub;
+  actions?: ActionHandler;
+  /** SHA-256 fingerprint of the surface listener's certificate, for the pairing payload. */
+  certFingerprint?: string | null;
+}
+
+/** Default faces seeded into an empty `faces` resource. */
+const DEFAULT_FACES = ['day', 'status', 'desk'];
 
 export type ActivityState = 'running' | 'queued' | 'idle';
 interface Activity { state: ActivityState; status_text: string | null; interaction_id: string | null }
@@ -93,6 +120,8 @@ export interface IntercomDeps {
   notifications?: NotificationsConfig;
   /** E89 — the full config, for routing the context carry-over into the followed conversation. */
   appConfig?: AppConfig;
+  /** E96 — devices, resources and actions. */
+  surfaceApi?: SurfaceApiDeps;
 }
 
 export const normalizeTopic = (topic: string | undefined | null): string => (!topic || topic === 'general' ? 'general' : topic);
@@ -137,20 +166,41 @@ export class IntercomService {
     this.plan = deps.plan ?? createPlanSource(deps.config.desk.plan_file, (l) => this.log(l));
     for (const s of deps.config.surfaces) {
       const token = s.token_env ? env[s.token_env] : undefined;
-      if (!token || token.length < 32) {
-        this.log(`warn: surface "${s.id}" skipped: env ${s.token_env} is ${token ? 'shorter than 32 characters' : 'not set'}`);
+      const tokenOk = !!token && token.length >= 32;
+      // E96: with a device store every configured surface is live (devices carry their own credentials);
+      // without one a surface needs its v1 shared token, as before.
+      if (!tokenOk && !deps.surfaceApi) {
+        this.log(`warn: surface "${s.id}" skipped: env ${s.token_env ?? '(token_env)'} is ${token ? 'shorter than 32 characters' : 'not set'}`);
         continue;
       }
       const follow = { contact: bareContact(s.follow.contact), channel: s.follow.channel, topic: s.follow.topic };
       const surface: Surface = {
         id: s.id, profile: s.profile, follow,
         conversationId: computeConversationId(follow.contact, follow.channel, normalizeTopic(follow.topic)),
-        tokenHash: sha256(token),
+        tokenHash: tokenOk ? sha256(token) : '',
+        publishers: s.publishers,
       };
       this.surfaces.set(s.id, surface);
-      this.byTokenHash.set(surface.tokenHash, surface);
+      if (surface.tokenHash) this.byTokenHash.set(surface.tokenHash, surface);
       this.state.set(s.id, { interaction: null, activity: { state: 'idle', status_text: null, interaction_id: null }, staleTimer: null, quiet: false, battery: null });
     }
+    if (deps.surfaceApi) {
+      deps.surfaceApi.devices.syncFromConfig(deps.config.surfaces.map((s) => ({
+        id: s.id, profile: s.profile, max_devices: s.max_devices, ...(s.token_env ? { token_env: s.token_env } : {}),
+        follow: { contact: bareContact(s.follow.contact), channel: s.follow.channel, ...(s.follow.topic ? { topic: s.follow.topic } : {}) },
+      })), env);
+      for (const s of this.surfaces.values()) this.seedFaces(s.id);
+    }
+  }
+
+  get surfaceApi(): SurfaceApiDeps | undefined { return this.deps.surfaceApi; }
+
+  private seedFaces(surfaceId: string): void {
+    const hub = this.deps.surfaceApi!.hub;
+    try {
+      if (Object.keys(hub.snapshot(surfaceId, 'faces').items).length > 0) return;
+      hub.apply(surfaceId, 'faces', DEFAULT_FACES.map((id, order) => ({ op: 'set' as const, id, value: { id, order, enabled: true } })));
+    } catch (err) { this.log(`warn: faces seed failed for ${surfaceId}: ${String(err)}`); }
   }
 
   private now(): number { return this.deps.now?.() ?? Date.now(); }
@@ -159,7 +209,12 @@ export class IntercomService {
     this.log(JSON.stringify({ evt: 'latency', mark, surface_id: surface.id, interaction_id: interaction.id, ms: this.now() - interaction.acceptedAt }));
   }
 
+  private started = false;
+
   start(): void {
+    // Idempotent: the main port and the surface listener (E96) both mount the routes that start it.
+    if (this.started) return;
+    this.started = true;
     const sweep = () => {
       try {
         sweepEvents(this.deps.db, this.deps.config.event_retention_days);
@@ -174,11 +229,29 @@ export class IntercomService {
     this.calendarTimer = setInterval(() => { void this.pushCalendar(); this.notificationTick(); }, 60_000);
     this.calendarTimer.unref();
     // E94 — desk summary: checked every 5 s, pushed only when it changed, so never more than one per 5 s.
-    this.deskTimer = setInterval(() => { void this.pushDesk(); }, DESK_CHECK_MS);
+    this.deskTimer = setInterval(() => { void this.pushDesk(); this.surfaceTick(); }, DESK_CHECK_MS);
     this.deskTimer.unref();
   }
 
+  /** E96 — collaborators that keep computed resources (sessions, approvals, notices) in sync; run on the 5 s tick. */
+  private readonly tickHooks: (() => void)[] = [];
+  onSurfaceTick(fn: () => void): void { this.tickHooks.push(fn); }
+
+  /** Runs the revocation check and the tick hooks now (also called every 5 s once started). */
+  surfaceTick(): void {
+    const api = this.deps.surfaceApi;
+    if (!api) return;
+    // A device revoked from the CLI (another process) loses its sockets within one tick.
+    for (const c of [...this.clients]) {
+      if (!c.device) continue;
+      const d = api.devices.get(c.device.id);
+      if (!d || d.revoked_at) this.closeClient(c, 4403, 'revoked');
+    }
+    for (const fn of this.tickHooks) { try { fn(); } catch (err) { this.log(`warn: surface tick failed: ${String(err)}`); } }
+  }
+
   stop(): void {
+    this.started = false;
     if (this.sweepTimer) clearInterval(this.sweepTimer);
     if (this.calendarTimer) clearInterval(this.calendarTimer);
     if (this.deskTimer) clearInterval(this.deskTimer);
@@ -191,8 +264,22 @@ export class IntercomService {
 
   // ── Auth ─────────────────────────────────────────────────────────────────
 
+  /** E96 — resolve a credential: a paired device (when the device store is on), else a v1 surface token. */
+  authenticate(token: string | undefined): { surface: Surface; device?: Device } | null {
+    if (!token) return null;
+    const api = this.deps.surfaceApi;
+    if (api) {
+      const device = api.devices.authenticate(token);
+      const surface = device ? this.surfaces.get(device.surface_id) : undefined;
+      return device && surface ? { surface, device } : null;
+    }
+    const surface = this.surfaceForToken(token);
+    return surface ? { surface } : null;
+  }
+
   surfaceForToken(token: string | undefined): Surface | null {
     if (!token) return null;
+    if (this.deps.surfaceApi) return this.authenticate(token)?.surface ?? null;
     const hash = sha256(token);
     const found = this.byTokenHash.get(hash);
     if (!found) return null;
@@ -221,11 +308,12 @@ export class IntercomService {
     return n;
   }
 
-  health(surface: Surface) {
+  health(surface: Surface, device?: Device) {
     return {
       ok: true, surface_id: surface.id,
       follow: this.followJson(surface), version: VERSION,
       connected_clients: this.connectedClients(surface.id),
+      ...(device ? { device_id: device.id, scope: device.scope, protocol: SURFACE_PROTOCOL_VERSION } : {}),
     };
   }
 
@@ -241,19 +329,28 @@ export class IntercomService {
   sendFrame(client: Client, frame: Record<string, unknown>): void { this.raw(client.socket, frame); }
 
   /** Complete the handshake: welcome, replay, then the activity snapshot and calendar. */
-  async attach(client: Client, cursor: number, clientName?: string): Promise<void> {
+  async attach(client: Client, cursor: number, clientName?: string, revs?: Partial<Record<ResourceName, number>>): Promise<void> {
     const surface = client.surface;
     const { latest } = eventBounds(this.deps.db, surface.id);
     const reset = cursorNeedsReset(this.deps.db, surface.id, cursor);
     client.cursor = reset ? latest : cursor;
     if (clientName) client.clientName = clientName;
+    const api = this.deps.surfaceApi;
+    const v2 = client.protocol === SURFACE_PROTOCOL_VERSION && !!api;
     this.clients.add(client);
     this.raw(client.socket, {
-      type: 'welcome', version: PROTOCOL_VERSION, surface_id: surface.id, follow: this.followJson(surface),
+      type: 'welcome', version: v2 ? SURFACE_PROTOCOL_VERSION : PROTOCOL_VERSION, surface_id: surface.id, follow: this.followJson(surface),
       latest_seq: latest, reset, server_time: new Date(this.now()).toISOString(),
+      ...(v2 ? { device_id: client.device?.id ?? null, scope: client.device?.scope ?? 'interactive', revs: api.hub.revs(surface.id) } : {}),
     });
     if (!reset) this.replay(client);
     client.ready = true;
+    if (client.device) this.markDevice(client, { connected: true });
+    // v2: bring each resource up to date (nothing, one coalesced delta, or a reset) before live deltas flow.
+    if (v2) {
+      api.hub.flush();
+      for (const frame of api.hub.resume(surface.id, revs ?? {})) this.raw(client.socket, frame as unknown as Record<string, unknown>);
+    }
     const st = this.state.get(surface.id)!;
     this.raw(client.socket, { type: 'event', event: 'activity', data: st.activity });
     if (st.interaction) this.raw(client.socket, { type: 'event', event: 'interaction', data: { interaction_id: st.interaction.id, state: 'open' } });
@@ -299,7 +396,83 @@ export class IntercomService {
     } catch (err) { this.log(`warn: desk push failed: ${String(err)}`); }
   }
 
-  detach(client: Client): void { this.clients.delete(client); }
+  detach(client: Client): void {
+    if (!this.clients.delete(client)) return;
+    if (client.device && ![...this.clients].some((c) => c.device?.id === client.device!.id)) this.markDevice(client, { connected: false });
+  }
+
+  // ── Surface API v2 (E96) ─────────────────────────────────────────────────
+
+  /** Resource hub sink: push a delta to the surface's ready v2 sockets. */
+  pushDelta(surfaceId: string, frame: DeltaFrame): void {
+    for (const c of this.clients) {
+      if (c.surface.id === surfaceId && c.ready && c.protocol === SURFACE_PROTOCOL_VERSION) this.raw(c.socket, frame as unknown as Record<string, unknown>);
+    }
+  }
+
+  /** Apply ops to a resource; errors are logged, never thrown (computed resources sync on the next tick). */
+  applyResource(surfaceId: string, resource: ResourceName, ops: ResourceOp[]): void {
+    if (!this.deps.surfaceApi || ops.length === 0) return;
+    try { this.deps.surfaceApi.hub.apply(surfaceId, resource, ops); }
+    catch (err) { this.log(`warn: ${resource} update failed for ${surfaceId}: ${String(err)}`); }
+  }
+
+  private closeClient(client: Client, code: number, reason: string): void {
+    this.detach(client);
+    try { client.socket.close(code, reason); } catch { /* already closing */ }
+  }
+
+  /** Close every socket of a device (revocation). Returns how many were closed. */
+  closeDevice(deviceId: string): number {
+    let n = 0;
+    for (const c of [...this.clients]) if (c.device?.id === deviceId) { this.closeClient(c, 4403, 'revoked'); n++; }
+    return n;
+  }
+
+  /** Update the device's item in the `device` resource (link state, battery, quiet, view). */
+  private markDevice(client: Client, patch: Record<string, unknown>): void {
+    const api = this.deps.surfaceApi;
+    const d = client.device;
+    if (!api || !d) return;
+    const nowIso = new Date(this.now()).toISOString();
+    try { api.devices.touch(d.id); } catch { /* best effort */ }
+    const existing = api.hub.get(client.surface.id, 'device', d.id);
+    const value = existing
+      ? { ...patch, last_seen_at: nowIso }
+      : { id: d.id, name: d.name, profile: d.profile, scope: d.scope, connected: false, last_seen_at: nowIso, battery: null, quiet: false, view: null, ...patch };
+    this.applyResource(client.surface.id, 'device', [{ op: existing ? 'patch' : 'set', id: d.id, value }]);
+  }
+
+  /** `{"type":"view","view":"conversation:<id>"|null}` */
+  setView(client: Client, view: unknown): void {
+    client.view = typeof view === 'string' && view.length <= 200 ? view : null;
+    this.markDevice(client, { view: client.view });
+  }
+
+  /** `{"type":"action",...}` frame and `POST /api/v1/surface/actions`. */
+  async handleAction(surface: Surface, device: Device | undefined, request: unknown): Promise<ActionResult> {
+    const key = typeof (request as { idempotency_key?: unknown })?.idempotency_key === 'string' ? (request as { idempotency_key: string }).idempotency_key : '';
+    const actions = this.deps.surfaceApi?.actions;
+    if (!actions || !device || device.surface_id !== surface.id) return { type: 'action_result', idempotency_key: key, status: 'failed', reason: 'invalid' };
+    return actions.handle(device, request);
+  }
+
+  /** E96 S96.7 — push a transcript line to v2 devices viewing that conversation. */
+  appendConversation(conversationId: string, message: ConversationMessage): void {
+    const view = `conversation:${conversationId}`;
+    for (const c of this.clients) {
+      if (c.ready && c.protocol === SURFACE_PROTOCOL_VERSION && c.view === view) {
+        this.raw(c.socket, { type: 'event', event: 'conversation_append', data: { conversation_id: conversationId, message } });
+      }
+    }
+  }
+
+  /** True when some v2 device is viewing this conversation (cheap check before building a message). */
+  isViewed(conversationId: string): boolean {
+    const view = `conversation:${conversationId}`;
+    for (const c of this.clients) if (c.ready && c.view === view) return true;
+    return false;
+  }
 
   private replay(client: Client): void {
     for (;;) {
@@ -344,11 +517,12 @@ export class IntercomService {
   private lastCalendarPush = 0;
   private calendarDue(): boolean { return this.now() - this.lastCalendarPush >= 5 * 60_000; }
 
-  setSurfaceState(surface: Surface, frame: { quiet?: unknown; battery?: unknown }): void {
+  setSurfaceState(surface: Surface, frame: { quiet?: unknown; battery?: unknown }, client?: Client): void {
     const st = this.state.get(surface.id)!;
     st.quiet = frame.quiet === true;
     st.battery = typeof frame.battery === 'number' ? frame.battery : null;
-    this.log(JSON.stringify({ evt: 'surface_state', surface_id: surface.id, quiet: st.quiet, battery: st.battery }));
+    this.log(JSON.stringify({ evt: 'surface_state', surface_id: surface.id, ...(client?.device ? { device_id: client.device.id } : {}), quiet: st.quiet, battery: st.battery }));
+    if (client) this.markDevice(client, { quiet: st.quiet, battery: st.battery });
   }
 
   // ── Follow matching ──────────────────────────────────────────────────────
