@@ -108,7 +108,17 @@ adapters:
         publishers: [peggy]      # or ["*"] for any agent
 ```
 
-<!-- TODO(lead): name the agent publishing tools (S96.5) and link to their MCP tools reference entries. -->
+Agents use these tools:
+
+| Tool | What it does |
+|---|---|
+| `list_surfaces` | Lists the surfaces the agent may publish to |
+| `surface_publish_event` / `surface_remove_event` | Puts a card on the dial, with up to three buttons, or takes it off |
+| `surface_set_slot` / `surface_clear_slot` | Overrides a slot on a face until a time you choose |
+| `surface_write_widget` / `surface_remove_widget` | Writes the data a widget shows |
+| `clear_answer_needed` | Clears the "needs you" mark on a conversation |
+
+An agent may publish only to a surface whose `publishers` list includes it. When an agent asks you something it needs answered before it can go on, it can mark the reply `answer_needed`; the session then shows as needing you until you tap a button or reply.
 
 ### Buttons that send on your behalf
 

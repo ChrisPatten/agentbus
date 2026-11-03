@@ -196,7 +196,7 @@ Pending coalesced deltas are flushed first, so the snapshot never trails what so
 
 ### `GET /assets/:hash`
 
-Files are content-addressed in `<directory of bus.db_path>/surface-assets/`, named `<sha256>.<ext>` (or just `<sha256>`). `hash` is 64 hex characters (case-insensitive). The file's sha256 is checked against its name on every request; a missing directory, unknown hash or mismatching content answers `404 not_found`. Content types by extension: png, jpg/jpeg, gif, webp, svg, bmp, json, bin (anything else `application/octet-stream`); `X-Content-Type-Options: nosniff`; `Cache-Control: public, max-age=31536000, immutable` on the main port (the TLS listener overrides it, see [Deviations](#deviations-and-not-yet-reconciled)). There is no upload API yet.
+Files are content-addressed in `<directory of bus.db_path>/surface-assets/`, named `<sha256>.<ext>` (or just `<sha256>`). `hash` is 64 hex characters (case-insensitive). The file's sha256 is checked against its name on every request; a missing directory, unknown hash or mismatching content answers `404 not_found`. Content types by extension: png, jpg/jpeg, gif, webp, svg, bmp, json, bin (anything else `application/octet-stream`); `X-Content-Type-Options: nosniff`; `Cache-Control: public, max-age=31536000, immutable` (on the TLS listener too: its `no-store` default applies only to routes that set no `Cache-Control`). There is no upload API yet.
 
 ### `POST /actions`
 
@@ -216,10 +216,12 @@ When `surface_api.enabled`, bus-core starts a second Fastify server on `surface_
 - **No bus auth.** The `X-Bus-Token` hook is not installed; every route carries its own device auth.
 - **Rate limits** (fixed one-minute windows per remote address, not configurable): 600 HTTP requests including upgrades (then `429 rate_limited`, `Retry-After: 60`); 120 new TCP connections (further connections are destroyed).
 - **Limits.** Request bodies at most 64 KB (`413`); a 30-second request timeout (not applied to upgraded WebSockets).
-- **Headers** on every answer: `X-Content-Type-Options: nosniff`, `Strict-Transport-Security: max-age=86400`, `Referrer-Policy: no-referrer`; `Cache-Control: no-store` on `/api/*`.
+- **Headers** on every answer: `X-Content-Type-Options: nosniff`, `Strict-Transport-Security: max-age=86400`, `Referrer-Policy: no-referrer`; `Cache-Control: no-store` on `/api/*` unless the route set its own (assets).
 - **Refused.** Plain HTTP on the TLS port gets no HTTP answer. The listener refuses to start without `tls` or with an unreadable file or a file that is not a PEM certificate, naming the path.
 - **Logging.** Refusals (`404`, `429`) are logged as `[surface] …`, at most 20 a minute, then a count of the suppressed ones. At start it logs the address and the certificate fingerprint.
 - With `surface_api.enabled` but `adapters.intercom` disabled, the listener is not started (a warning is logged).
+- **Start failures are not fatal.** An unreadable certificate or a busy port is logged (`[surface] surface listener not started: …`) and bus-core keeps running on its main port.
+- **Loopback check.** The listener exists so bus-core's own API and MCP stay on loopback. When `surface_api.enabled` and `bus.host` is not `127.0.0.1`, `localhost` or `::1`, bus-core logs a warning at startup that its own routes are reachable from other hosts.
 
 ## Resources
 
@@ -360,9 +362,9 @@ Apply ops only when your rev for that resource equals `base_rev`, then take `rev
 | Frame | Answer |
 |---|---|
 | `{"type":"action","object","action_id","idempotency_key","draft?"}` | `{"type":"action_result","idempotency_key","status","reason?","message_id?"}` (see below) |
-| `{"type":"view","view":"conversation:<id>"}` or `{"view":null}` | None. Records what the device shows (a string up to 200 characters, else null) in its `device` item; drives live conversation appends |
+| `{"type":"view","view":"conversation:<id>"}` or `{"view":null}` | None. Records what the device shows (a string up to 200 characters, else null) in its `device` item; drives live conversation appends. A conversation the surface may not read (the [readable-conversation rule](#get-conversationsidbeforemessage_idlimitn)) is refused with `{"type":"error","code":"not_found"}` and the view is cleared |
 
-**Live conversation appends.** While a v2 device's `view` is `conversation:<id>`, it receives each new message in that conversation as an ephemeral event frame:
+**Live conversation appends.** While a v2 device's `view` is `conversation:<id>` (and the surface may still read it), it receives each new message in that conversation as an ephemeral event frame:
 
 ```json
 {"type":"event","event":"conversation_append","data":{"conversation_id":"…","message":{"id":"…","role":"agent","text":"…","created_at":"…","buttons":[…],"answer_needed":true}}}
@@ -425,7 +427,7 @@ One handler serves `POST /api/v1/surface/actions` and the WS `action` frame.
 
 ## Sessions resource
 
-Computed every 5 s (and at once when an answer-needed flag clears) from E94's desk classification of the cc-pool panes, and identical on every surface.
+Computed every 5 s (and at once when an answer-needed flag is set or cleared, or a subject changes) from E94's desk classification of the cc-pool panes. A surface lists only sessions whose conversation belongs to its followed contact (per the conversation registry) plus panes with no known conversation, because the list also decides which transcripts a device may read.
 
 - **Ids.** The conversation id when the pane has one, else the pane's bare agent id made id-safe.
 - **`needs_you`** is true only while an [answer-needed](#answer-needed) flag is open for the session's conversation. A desk state of `waiting` or `stuck` (pending approval, open choice prompt, watchdog incident) stays in `state` and never sets `needs_you`.
@@ -471,7 +473,7 @@ Each device that has connected has an item in its surface's `device` resource. I
 | Cadence | Work |
 |---|---|
 | Every 5 s (the service's desk tick) | Close sockets of revoked devices (4403); recompute `sessions`; sync approval Events |
-| Every 60 s (surface runtime) | Remove Events past `expires_at` and slots past `until` (through the store, so devices get deltas) and the jobs of removed Events; delete jobs expired more than a day ago; delete idempotency keys older than `action_key_ttl_hours`; delete v2 pairing codes spent or expired more than a day ago |
+| Every 60 s (surface runtime) | Remove Events past `expires_at` and slots past `until` (through the store, so devices get deltas); delete jobs expired more than a day ago (they are kept until then so a late tap answers `expired`, not `not_found`); delete idempotency keys older than `action_key_ttl_hours`; delete v2 pairing codes spent or expired more than a day ago |
 | Every 60 s (notifications) | Expire due notifications, which updates `notices` |
 | Hourly (service) | v1 durable-event retention and v1 pairing codes, as before |
 
@@ -480,12 +482,32 @@ Each device that has connected has an item in its surface's `device` resource. I
 - **Object shapes were defined here.** The epic names `peggy-claude-code/data/intercom/architecture.md` section 3 as the contract for Event, slot, session and conversation shapes and bounds. That document was not available on the machine where E96 was built, so the shapes and bounds in `src/surface/types.ts` (and this document) were written without it. Reconcile any difference in architecture.md first, then here.
 - **Voice frames** are reserved in protocol v2 and not implemented.
 - **Assets have no upload API.** Files are placed in `<db dir>/surface-assets/` by hand, named by their sha256.
-- **Asset caching on the TLS listener.** The listener's `Cache-Control: no-store` for `/api/*` overrides the asset route's `immutable` header, so assets fetched over the listener are not cached.
 - **Conversation buttons are display-only.** The page and live appends carry choice `buttons`, but there is no action object for choice prompts yet; a device cannot tap them through `POST /actions`.
+- **`faces` has no writer** beyond the startup seed; an agent cannot reorder faces yet.
+- **v1 re-pairing creates a device each time.** A phone that loses its stored token and pairs again with a v1 code gets a new device; after `max_devices` of them the code answers `409 device_limit` (which the v1 web app does not explain). Revoke stale devices with `scripts/surface-devices.ts`.
 
 ## Agent publishing tools (S96.5)
 
-<!-- TODO(lead): tools, routes, answer_needed and status subject -->
+Agents publish through MCP tools, registered for cc-pool panes, Claude Code and cc-headless instances. Each tool calls a bus route under `/api/v1/surface-publish/` on the main port, behind the usual `X-Bus-Token`; the agent names itself with `agent_id` (body for `PUT`/`POST`, query for `GET`/`DELETE`). The bus's error message is returned to the agent verbatim.
+
+**Authorisation.** The agent must be listed in the surface's `publishers` (`adapters.intercom.surfaces[].publishers`; `*` allows any agent; empty means nobody). A pool pane such as `peggy-pool-3` counts as `peggy`. Otherwise `403` names the config key; an unknown surface `404` lists the surfaces the agent may publish to.
+
+| Tool | Route | What |
+|---|---|---|
+| `list_surfaces` | `GET surfaces?agent_id=` | Surfaces this agent may publish to, with their follow target |
+| `surface_publish_event` | `PUT :surface/events/:id` | Create or replace an Event (`201` new, `200` replaced; `created_at` kept) |
+| `surface_remove_event` | `DELETE :surface/events/:id` | Remove an Event and its jobs |
+| `surface_set_slot` | `PUT :surface/slots/:slot` | Override a face slot until `until` |
+| `surface_clear_slot` | `DELETE :surface/slots/:slot` | End the override |
+| `surface_write_widget` | `PUT :surface/widgets/:id` | Write a widget's `type` and `data` |
+| `surface_remove_widget` | `DELETE :surface/widgets/:id` | Remove a widget |
+| `clear_answer_needed` | `POST answer-needed/clear` | Clear a conversation's flag (`conversation_id`, or `channel` + `contact` + `topic`; with no arguments cc-headless uses its turn's conversation) |
+
+**Event input.** `{id, title, body?, level?, at?, end?, expires_at?, actions?}`. `expires_at` defaults to 24 hours ahead and must be in the future and at most 14 days ahead. Each action is `{id, label, style?, confirm?: {draft, prompt?}, once? (default true), run: {body, sends_on_behalf?}}`: `run.body` is the message injected into the surface's followed conversation (as the followed contact, like a scheduled fire) when the button is tapped. `sends_on_behalf: true` requires `confirm.draft`. Jobs always target the follow conversation. Editing an Event keeps the fire count of actions whose id survives, so a fired one-shot button is not re-armed. Agents cannot write `kind: approval` or change bus-owned Events. Every bound in [Bounds](#bounds) is checked and an over-limit call answers `400` with a message naming the field and the limit, and nothing is written (the jobs and the Event are written in one transaction).
+
+**`answer_needed`** on `reply` and `send_message` (next to `choices`): stored as `metadata.answer_needed`; when true on agent-sent text, `POST /api/v1/messages` sets the conversation's flag (the reply's conversation, else the bound `metadata.conversation_id`, else the hash of recipient, channel and topic). A message without it never sets the flag. See [Answer needed](#answer-needed).
+
+**`status(subject)`**: an optional line (at most 60 characters, sanitised like the status text) saying what the whole session is about. cc-headless's stream parser and the pool's tool-status hook post it with the status line to `POST /api/v1/adapters/:id/tool-status`, which stores it for the conversation (`conversation_id` when given, else the pool lease with that Claude `session_id`, else the hash of contact, channel and topic). Limitation: cc-headless ignores tool calls after the reply is delivered, so a `subject` set after the reply is lost there; the pool hook still posts it.
 
 ## Migration note: AgentBus to Intercom rename
 

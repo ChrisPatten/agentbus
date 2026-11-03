@@ -688,7 +688,7 @@ export const SurfaceApiConfigSchema = z.object({
   sessions: z.object({
     /** A session with no activity for this long drops out of the sessions resource (unless it needs you). */
     activity_timeout_min: z.number().int().min(1).default(30),
-    /** Include system sessions (scheduled routines, cc-headless) in the sessions resource. */
+    /** Include system sessions (scheduled routines, bus and agent-to-agent conversations) in the sessions resource. */
     include_system: z.boolean().default(false),
   }).prefault({}),
 }).superRefine((cfg, ctx) => {
