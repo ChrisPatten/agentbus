@@ -8,6 +8,8 @@ export const OVERLAP_W = 8;
 export const OVERLAP_R = { in: 179, out: 222 }; // inside the calendar's second lane, and a hair outside the primary
 export const TICK_R0 = 196, TICK_R1 = 228;
 export const HIT_TOL = 18; // design px of slack around any segment or tick (the narrow overlaps especially)
+export const TICK_HIT_TOL = 30; // design px: ticks are thin, so their target is larger and always beats a segment under the finger
+export const TICK_HIT_PAD = 10; // design px added to each side of the tick's rim band for hit purposes
 export const SCRUB_BALL_TOL = 34; // design px around the progress ball that starts a scrub
 export const SNAP_MS = 4000;
 
@@ -95,13 +97,23 @@ const hoursApart = (a, b) => { const d = Math.abs(a - b) % 24; return Math.min(d
 
 /**
  * The segment or tick under a tap, or null. A tap picks the nearest one within `tol` design px, so the narrow overlap
- * segments are easy to hit; ties go to the narrower target. Returns `{ kind: 'seg'|'tick', id }`.
+ * segments are easy to hit; ties go to the narrower target. Ticks take priority: any tick within TICK_HIT_TOL of the
+ * tap (nearest wins, earlier on a tie) beats every segment, which is considered only when no tick is in range. Returns `{ kind: 'seg'|'tick', id }`.
  */
 export function hitTest(x, y, model, tol = HIT_TOL) {
   const r = radiusOf(x, y);
   if (!model || r < 150) return null;
   const h = pointToHours(x, y);
   const pxPerHour = (2 * Math.PI * Math.max(r, 1)) / 24;
+  let bestTick = null;
+  const tickTol = Math.max(TICK_HIT_TOL, tol);
+  for (const t of model.ticks) {
+    const lo = TICK_R0 - TICK_HIT_PAD, hi = TICK_R1 + TICK_HIT_PAD;
+    const dr = r >= lo && r <= hi ? 0 : Math.min(Math.abs(r - lo), Math.abs(r - hi));
+    const cost = Math.hypot(dr, hoursApart(h, t.h) * pxPerHour);
+    if (cost <= tickTol && (!bestTick || cost < bestTick.c)) bestTick = { id: t.id, c: cost }; // strict <: ties keep the earlier tick
+  }
+  if (bestTick) return { kind: 'tick', id: bestTick.id };
   let best = null;
   const consider = (kind, id, cost, narrow) => {
     if (cost > tol) return;
@@ -112,10 +124,6 @@ export function hitTest(x, y, model, tol = HIT_TOL) {
     const dr = Math.max(0, Math.abs(r - sg.r) - sg.w / 2);
     const dh = h >= sg.startH && h <= sg.endH ? 0 : Math.min(hoursApart(h, sg.startH), hoursApart(h, sg.endH));
     consider('seg', sg.id, Math.hypot(dr, dh * pxPerHour), sg.layer === 'overlap');
-  }
-  for (const t of model.ticks) {
-    const dr = r >= TICK_R0 && r <= TICK_R1 ? 0 : Math.min(Math.abs(r - TICK_R0), Math.abs(r - TICK_R1));
-    consider('tick', t.id, Math.hypot(dr, hoursApart(h, t.h) * pxPerHour), true);
   }
   return best ? { kind: best.kind, id: best.id } : null;
 }

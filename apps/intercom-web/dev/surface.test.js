@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { createStore, applyDelta, applyState, revsOf, activeSlot, faceOrder, stepFace, faceLayout, approvalItems } from '../surface.js';
-import { ringModel, hitTest, ballHit, pointToHours, scrubStart, scrubMove, scrubRelease, scrubActive, scrubRemaining, scrubInfo, SNAP_MS, OVERLAP_R, PRIMARY, OVERLAP_W, travelDeparture, pickDeparture, primaryView, nextUp, contextView, widgetView, colorValue, countdownText } from '../dayv2.js';
+import { ringModel, hitTest, ballHit, pointToHours, scrubStart, scrubMove, scrubRelease, scrubActive, scrubRemaining, scrubInfo, SNAP_MS, TICK_HIT_TOL, OVERLAP_R, PRIMARY, OVERLAP_W, travelDeparture, pickDeparture, primaryView, nextUp, contextView, widgetView, colorValue, countdownText } from '../dayv2.js';
 import { polar, RING_R } from '../logic.js';
 import { statusModel, RING_CAP, sessionsFromDesk, mergeOlder, appendMessage } from '../statusv2.js';
 import { interpretResult, needsConfirm, buildRequest, ButtonStates, submitAction, btnKey } from '../actions.js';
@@ -170,6 +170,31 @@ describe('hit testing and scrub', () => {
     expect(hitTest(...at(9.9, 208), m)).toEqual({ kind: 'seg', id: 'p' });
     expect(hitTest(...at(17.5 + 0.2, 212), m)).toEqual({ kind: 'tick', id: 'bill' });
     expect(hitTest(...at(17.5 + 2, 212), m)).toBeNull();
+  });
+  describe('tick priority', () => {
+    const arcH = (px, r) => px / ((2 * Math.PI * r) / 24); // hours spanned by px along the ring at radius r
+    const mt = ringModel([ev('seg', '09:00', '12:00'), ev('tk', '10:00', null), ev('tk2', '10:20', null), ev('ov', '09:30', '10:30', { layer: 'overlap' })], NOW, TZ);
+    it('a tap exactly on a tick that sits over a segment opens the tick', () => {
+      expect(hitTest(...at(10, 212), mt)).toEqual({ kind: 'tick', id: 'tk' });
+    });
+    it('a tap 20 px off the tick, still over the segment, opens the tick', () => {
+      expect(hitTest(...at(10 - arcH(20, 208), 208), mt)).toEqual({ kind: 'tick', id: 'tk' });
+    });
+    it('a tap just outside the rim band still counts as the tick', () => {
+      expect(hitTest(...at(10, 238), mt)).toEqual({ kind: 'tick', id: 'tk' });
+    });
+    it('a tap 45 px from the tick, on the segment, opens the segment', () => {
+      expect(TICK_HIT_TOL).toBeLessThan(45);
+      expect(hitTest(...at(10 - arcH(45, 208), 208), mt)).toEqual({ kind: 'seg', id: 'seg' });
+    });
+    it('with two ticks in range the nearest wins; an exact tie goes to the earlier', () => {
+      expect(hitTest(...at(10.2, 212), mt)).toEqual({ kind: 'tick', id: 'tk2' });
+      const two = ringModel([ev('a', '10:00', null), ev('b', '10:20', null)], NOW, TZ);
+      expect(hitTest(...at(10.1, 212), two)).toEqual({ kind: 'tick', id: 'a' });
+    });
+    it('overlap preference over the primary segment is unchanged when no tick is near', () => {
+      expect(hitTest(...at(10.75, OVERLAP_R.in), m)).toEqual({ kind: 'seg', id: 'o' });
+    });
   });
   it('maps points to hours, midnight at the top, clockwise', () => {
     expect(pointToHours(233, 25)).toBeCloseTo(0, 5);
