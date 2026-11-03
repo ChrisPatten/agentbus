@@ -109,8 +109,15 @@ export interface ResourceHub {
   revs(surfaceId: string): Record<ResourceName, number>;
   /** Frames that bring a device from `revs` to now: per resource, nothing, one coalesced delta, or a reset. */
   resume(surfaceId: string, revs: Partial<Record<ResourceName, number>>): DeltaFrame[];
+  /**
+   * Remove `events` whose `expires_at` and `slots` whose `until` is at or before `now`
+   * (through {@link apply}, so devices get deltas). Returns what was removed so the
+   * caller can drop related jobs.
+   */
+  sweepExpired(now?: number): { surface: string; resource: ResourceName; id: string }[];
   /** Flush pending coalesced deltas immediately (tests, shutdown). */
   flush(): void;
+  /** Clear coalescing timers. Pending frames are dropped: call {@link flush} first to send them. */
   stop(): void;
 }
 
