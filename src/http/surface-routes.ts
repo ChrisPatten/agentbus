@@ -117,7 +117,7 @@ export async function registerSurfaceRoutes(server: FastifyInstance, deps: Surfa
     const id = (req.params as { id: string }).id;
     const q = ConversationQuery.safeParse(req.query);
     if (!q.success || !/^[A-Za-z0-9_:-]{1,128}$/.test(id)) return reply.code(400).send({ ok: false, error: 'invalid_query' });
-    const allowed = deps.canReadConversation ? deps.canReadConversation(a.surface, id) : id === a.surface.conversationId;
+    const allowed = deps.canReadConversation ? deps.canReadConversation(a.surface, id) : service.canReadConversation(a.surface, id);
     if (!allowed || !deps.conversationPage) return reply.code(404).send({ ok: false, error: 'not_found' });
     const page = deps.conversationPage({ conversationId: id, ...(q.data.before ? { before: q.data.before } : {}), ...(q.data.limit ? { limit: q.data.limit } : {}) });
     if (!page) return reply.code(404).send({ ok: false, error: 'not_found' });

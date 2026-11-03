@@ -157,7 +157,7 @@ export async function createSurfaceListener(opts: SurfaceListenerOptions): Promi
     reply.header('X-Content-Type-Options', 'nosniff');
     reply.header('Strict-Transport-Security', 'max-age=86400');
     reply.header('Referrer-Policy', 'no-referrer');
-    if ((req.raw.url ?? '').startsWith('/api/')) reply.header('Cache-Control', 'no-store');
+    if ((req.raw.url ?? '').startsWith('/api/') && !reply.hasHeader('Cache-Control')) reply.header('Cache-Control', 'no-store');
     return payload;
   });
 

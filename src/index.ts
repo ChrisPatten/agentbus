@@ -391,10 +391,6 @@ if (intercom && surfaceRuntime) surfaceRuntime.bind(intercom);
 const surfaceRouteExtras = {
   assetDir: join(dirname(resolve(config.bus.db_path)), 'surface-assets'),
   conversationPage: (input: { conversationId: string; before?: string; limit?: number }) => getConversationPage(db, input),
-  // A device reads the conversation it follows and any listed in its sessions resource.
-  canReadConversation: (surface: { id: string; conversationId: string }, conversationId: string) =>
-    conversationId === surface.conversationId
-    || Object.values(surfaceRuntime?.hub.snapshot(surface.id, 'sessions').items ?? {}).some((s) => s['conversation_id'] === conversationId),
 };
 const httpServer = await createHttpServer({ queue, registry, config, pipeline, db, commandRegistry, pauseSet, siri, app, intercom, surfaceRoutes: surfaceRouteExtras,
   ...(surfaceRuntime ? { surfacePublish: { hub: surfaceRuntime.hub, jobs: surfaceRuntime.jobs, onFlagsChanged: () => surfaceRuntime.refreshSessions() } } : {}), poolManagers, getHeadlessSnapshots, runtimeResolver, advisories, journalEvents, journalGate, journalStatus, memoryRecent, approvalHooks, proposals: proposalService });
@@ -619,11 +615,22 @@ if (config.surface_api.enabled) {
   if (!intercom?.surfaceApi) {
     console.warn('[surface] surface_api.enabled but adapters.intercom is not enabled; the surface listener is not started');
   } else {
-    surfaceListener = await createSurfaceListener({
-      config: config.surface_api,
-      register: (server) => registerSurfaceServer(server, { config, db, intercom, ...surfaceRouteExtras }),
-    });
-    await surfaceListener.listen();
+    // The listener exists so bus-core's own API and MCP stay on loopback; say so when they do not.
+    if (!['127.0.0.1', 'localhost', '::1'].includes(config.bus.host)) {
+      console.warn(`[surface] bus.host is ${config.bus.host}: bus-core's own API and MCP are reachable from other hosts. Set bus.host to 127.0.0.1 and let devices use the surface listener.`);
+    }
+    // A bad certificate or a busy port must not take bus-core down with it.
+    try {
+      surfaceListener = await createSurfaceListener({
+        config: config.surface_api,
+        register: (server) => registerSurfaceServer(server, { config, db, intercom, ...surfaceRouteExtras }),
+      });
+      await surfaceListener.listen();
+    } catch (err) {
+      console.error(`[surface] surface listener not started: ${err instanceof Error ? err.message : String(err)}`);
+      await surfaceListener?.close().catch(() => {});
+      surfaceListener = undefined;
+    }
   }
 }
 

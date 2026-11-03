@@ -165,7 +165,14 @@ export function surfaceSocketHandler(server: FastifyInstance, service: IntercomS
       }
     }, config.ping_interval_ms);
     heartbeat.unref();
-    server.addHook('onClose', async () => { clearInterval(heartbeat); service.stop(); });
+    mounted.set(service, (mounted.get(service) ?? 0) + 1);
+    // The main port and the surface listener share the service: stop it when the last one closes.
+    server.addHook('onClose', async () => {
+      clearInterval(heartbeat);
+      const left = (mounted.get(service) ?? 1) - 1;
+      mounted.set(service, left);
+      if (left <= 0) service.stop();
+    });
     heartbeats.set(server, set);
     return set;
   })();
@@ -220,12 +227,13 @@ export function surfaceSocketHandler(server: FastifyInstance, service: IntercomS
         send(await service.handleAction(client.surface, client.device, request) as unknown as Record<string, unknown>);
         return;
       }
-      if (client.protocol === 2 && frame['type'] === 'view') { service.setView(client, frame['view']); return; }
+      if (client.protocol === 2 && frame['type'] === 'view') { if (!service.setView(client, frame['view'])) send({ type: 'error', code: 'not_found' }); return; }
       send({ type: 'error', code: 'invalid_frame' });
     })().catch(() => send({ type: 'error', code: 'internal_error' })); });
   };
 }
 const heartbeats = new WeakMap<FastifyInstance, Set<Client>>();
+const mounted = new WeakMap<IntercomService, number>();
 
 /** E96 — redeem a pairing code into a new device. Shared by `/api/v1/intercom/pair` and `/api/v1/surface/pair`. */
 export function redeemForDevice(service: IntercomService, code: string, reply: FastifyReply) {

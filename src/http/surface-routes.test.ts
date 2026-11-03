@@ -204,6 +204,37 @@ describe('Surface API v2', () => {
     expect((await fetch(`${base}/api/v1/intercom/health`, { headers: { authorization: `Bearer ${paired.token}` } })).status).toBe(200);
   });
 
+  it('refuses a view of a conversation the surface may not read, and sends it no live appends', async () => {
+    const a = await pair('Kitchen');
+    const c = await connect(a.credential);
+    await until(() => welcomed(c.frames));
+    const other = 'f'.repeat(64);
+    c.ws.send(JSON.stringify({ type: 'view', view: `conversation:${other}` }));
+    await until(() => c.frames.some((f) => f.type === 'error' && f.code === 'not_found'));
+    service.appendConversation(other, { id: 'm', role: 'agent', text: 'secret', created_at: 'now' });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(c.frames.some((f) => f.event === 'conversation_append')).toBe(false);
+    expect((await get(`/api/v1/surface/conversations/${other}`, a.credential)).status).toBe(404);
+  });
+
+  it('a reconnecting device gets every resource frame in order, starting from the revs it sent', async () => {
+    const a = await pair('Kitchen');
+    const c1 = await connect(a.credential);
+    await until(() => welcomed(c1.frames));
+    const revs = (await (await get('/api/v1/surface/state', a.credential)).json() as any).revs;
+    c1.ws.close(); await c1.closed;
+    const c2 = await connect(a.credential, { protocol: 2, revs });
+    await until(() => welcomed(c2.frames) && deltas(c2.frames, 'device').length > 0);
+    // Each resource's frames chain from the rev the device sent: no frame arrives that it must drop.
+    for (const name of ['device', 'faces', 'events']) {
+      let at = revs[name];
+      for (const f of deltas(c2.frames, name)) {
+        if (!f.reset) expect(f.base_rev).toBe(at);
+        at = f.rev;
+      }
+    }
+  });
+
   it('marks the device connected in the device resource and records its view', async () => {
     const a = await pair('Kitchen');
     const c = await connect(a.credential);

@@ -81,6 +81,8 @@ export interface SurfaceApiDeps {
   actions?: ActionHandler;
   /** SHA-256 fingerprint of the surface listener's certificate, for the pairing payload. */
   certFingerprint?: string | null;
+  /** Conversations a surface may read (`GET /conversations/:id`, `view`, live appends). Default: only the one it follows. */
+  canReadConversation?: (surface: Surface, conversationId: string) => boolean;
 }
 
 /** Default faces seeded into an empty `faces` resource. */
@@ -193,11 +195,22 @@ export class IntercomService {
         id: s.id, profile: s.profile, max_devices: s.max_devices, ...(s.token_env ? { token_env: s.token_env } : {}),
         follow: { contact: bareContact(s.follow.contact), channel: s.follow.channel, ...(s.follow.topic ? { topic: s.follow.topic } : {}) },
       })), env);
-      for (const s of this.surfaces.values()) { this.seedFaces(s.id); this.syncNotices(s); }
+      for (const s of this.surfaces.values()) { this.seedFaces(s.id); this.syncNotices(s); this.resetDeviceLinks(s.id); }
     }
   }
 
   get surfaceApi(): SurfaceApiDeps | undefined { return this.deps.surfaceApi; }
+
+  /** At startup no socket is open: a `device` item left `connected` by a crash or a late close is cleared. */
+  private resetDeviceLinks(surfaceId: string): void {
+    const hub = this.deps.surfaceApi!.hub;
+    try {
+      const ops = Object.entries(hub.snapshot(surfaceId, 'device').items)
+        .filter(([, d]) => d['connected'] === true)
+        .map(([id]) => ({ op: 'patch' as const, id, value: { connected: false } }));
+      if (ops.length) hub.apply(surfaceId, 'device', ops);
+    } catch (err) { this.log(`warn: device link reset failed for ${surfaceId}: ${String(err)}`); }
+  }
 
   private seedFaces(surfaceId: string): void {
     const hub = this.deps.surfaceApi!.hub;
@@ -341,7 +354,9 @@ export class IntercomService {
     if (clientName) client.clientName = clientName;
     const api = this.deps.surfaceApi;
     const v2 = client.protocol === SURFACE_PROTOCOL_VERSION && !!api;
-    // Send pending coalesced deltas to the other sockets first, so none is in flight across this resume.
+    // Attach-time writes happen first, then pending coalesced deltas go to the other sockets, so no
+    // frame is in flight across this resume and this socket sees nothing before its resume frames.
+    if (client.device) this.markDevice(client, { connected: true });
     if (v2) api.hub.flush();
     this.clients.add(client);
     this.raw(client.socket, {
@@ -350,14 +365,13 @@ export class IntercomService {
       ...(v2 ? { device_id: client.device?.id ?? null, scope: client.device?.scope ?? 'interactive', revs: api.hub.revs(surface.id) } : {}),
     });
     if (!reset) this.replay(client);
-    client.ready = true;
-    if (client.device) this.markDevice(client, { connected: true });
     // v2: bring each resource up to date (nothing, one coalesced delta, or a reset) before live deltas flow.
     if (v2) {
       client.revs = { ...(revs ?? {}) };
       for (const frame of api.hub.resume(surface.id, revs ?? {})) this.sendDelta(client, frame);
       client.revs = api.hub.revs(surface.id);
     }
+    client.ready = true;
     const st = this.state.get(surface.id)!;
     this.raw(client.socket, { type: 'event', event: 'activity', data: st.activity });
     if (st.interaction) this.raw(client.socket, { type: 'event', event: 'interaction', data: { interaction_id: st.interaction.id, state: 'open' } });
@@ -421,7 +435,12 @@ export class IntercomService {
   private sendDelta(client: Client, frame: DeltaFrame): void {
     const known = client.revs?.[frame.resource];
     if (known !== undefined && frame.rev <= known) return;
-    this.raw(client.socket, frame as unknown as Record<string, unknown>);
+    if (known !== undefined && !('reset' in frame) && frame.base_rev !== known && this.deps.surfaceApi) {
+      // Coalesced across this socket's rev: send what it actually lacks instead.
+      for (const f of this.deps.surfaceApi.hub.resume(client.surface.id, { [frame.resource]: known })) this.raw(client.socket, f as unknown as Record<string, unknown>);
+    } else {
+      this.raw(client.socket, frame as unknown as Record<string, unknown>);
+    }
     (client.revs ??= {})[frame.resource] = frame.rev;
   }
 
@@ -461,10 +480,23 @@ export class IntercomService {
     } catch (err) { this.log(`warn: device state update failed: ${String(err)}`); }
   }
 
-  /** `{"type":"view","view":"conversation:<id>"|null}` */
-  setView(client: Client, view: unknown): void {
-    client.view = typeof view === 'string' && view.length <= 200 ? view : null;
+  /** E96 S96.7 — may this surface read that conversation (transcript page, live appends)? */
+  canReadConversation(surface: Surface, conversationId: string): boolean {
+    const check = this.deps.surfaceApi?.canReadConversation;
+    return check ? check(surface, conversationId) : conversationId === surface.conversationId;
+  }
+
+  /**
+   * `{"type":"view","view":"conversation:<id>"|null}`. A conversation the surface may not read is
+   * refused (the view is cleared), so live appends never reach a device that could not page it.
+   */
+  setView(client: Client, view: unknown): boolean {
+    let next = typeof view === 'string' && view.length <= 200 ? view : null;
+    let ok = true;
+    if (next?.startsWith('conversation:') && !this.canReadConversation(client.surface, next.slice('conversation:'.length))) { next = null; ok = false; }
+    client.view = next;
     this.markDevice(client, { view: client.view });
+    return ok;
   }
 
   /** `{"type":"action",...}` frame and `POST /api/v1/surface/actions`. */
@@ -479,7 +511,7 @@ export class IntercomService {
   appendConversation(conversationId: string, message: ConversationMessage): void {
     const view = `conversation:${conversationId}`;
     for (const c of this.clients) {
-      if (c.ready && c.protocol === SURFACE_PROTOCOL_VERSION && c.view === view) {
+      if (c.ready && c.protocol === SURFACE_PROTOCOL_VERSION && c.view === view && this.canReadConversation(c.surface, conversationId)) {
         this.raw(c.socket, { type: 'event', event: 'conversation_append', data: { conversation_id: conversationId, message } });
       }
     }
@@ -912,7 +944,7 @@ export class IntercomService {
   async noticeAction(device: Device, noticeId: string, actionId: string, idempotencyKey: string): Promise<ActionResult> {
     const base = { type: 'action_result' as const, idempotency_key: idempotencyKey };
     const surface = this.surfaces.get(device.surface_id);
-    const index = /^\d{1,2}$/.test(actionId) ? Number(actionId) : NaN;
+    const index = /^\d{1,3}$/.test(actionId) ? Number(actionId) : NaN;
     if (!surface || !Number.isInteger(index)) return { ...base, status: 'failed', reason: 'invalid' };
     const ack = await this.handleNotificationAction(surface, { client_msg_id: idempotencyKey, id: noticeId, index });
     if (ack['type'] === 'error') return { ...base, status: 'failed', reason: ack['code'] === 'notification_not_found' ? 'not_found' : 'invalid' };

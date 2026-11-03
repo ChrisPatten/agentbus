@@ -39,7 +39,7 @@ export interface SurfaceRuntime {
   bind(service: IntercomService): void;
   /** Rebuild the sessions resource now (after an answer-needed or subject change). */
   refreshSessions(): void;
-  /** Hourly maintenance: expired events/slots (and their jobs), old jobs and keys, spent pairing codes. */
+  /** Maintenance every minute: expired events and slots, old jobs and action keys, spent pairing codes. */
   sweep(): void;
   stop(): void;
 }
@@ -76,22 +76,35 @@ export function createSurfaceRuntime(deps: SurfaceRuntimeDeps): SurfaceRuntime {
 
   const sweep = () => {
     try {
-      for (const item of hub.sweepExpired()) if (item.resource === 'events') jobs.removeForEvent(item.surface, item.id);
+      // Jobs behind swept Events stay: sweepJobs keeps expired ones a day so late taps answer `expired`.
+      hub.sweepExpired();
       sweepJobs(deps.db, Date.now(), cfg.action_key_ttl_hours);
       devices.sweepPairCodes();
     } catch (err) { log(`warn: sweep failed: ${String(err)}`); }
   };
   let sweepTimer: NodeJS.Timeout | null = null;
 
-  /** Sessions are the same on every surface; computed once per tick. */
+  /** The contact of a conversation, from the registry (null when unknown). */
+  const contactOf = (conversationId: string | null): string | null => {
+    if (!conversationId) return null;
+    try {
+      const row = deps.db.prepare(`SELECT contact_id FROM conversation_registry WHERE id = ?`).get(conversationId) as { contact_id: string } | undefined;
+      return row ? row.contact_id.replace(/^contact:/, '') : null;
+    } catch { return null; }
+  };
+
+  /** Sessions are computed once per tick and filtered per surface. */
   const syncSessions = () => {
     if (!service) return;
     const list = buildSurfaceSessions({
       db: deps.db, desk: deps.deskSessions?.() ?? [], now: Date.now(),
       activityTimeoutMin: cfg.sessions.activity_timeout_min, includeSystem: cfg.sessions.include_system,
     });
-    const next = sessionsAsItems(list);
-    for (const s of service.surfaces.values()) service.applyResource(s.id, 'sessions', diffItems(hub.snapshot(s.id, 'sessions').items, next));
+    // A surface lists only its followed contact's sessions (they also decide which transcripts it may read).
+    for (const s of service.surfaces.values()) {
+      const mine = list.filter((x) => contactOf(x.conversation_id) === null || contactOf(x.conversation_id) === s.follow.contact);
+      service.applyResource(s.id, 'sessions', diffItems(hub.snapshot(s.id, 'sessions').items, sessionsAsItems(mine)));
+    }
   };
   const syncApprovals = () => {
     if (!service || !deps.approvals) return;
@@ -102,9 +115,14 @@ export function createSurfaceRuntime(deps: SurfaceRuntimeDeps): SurfaceRuntime {
   };
   const unsubscribe: (() => void)[] = [];
 
+  /** A surface reads the conversation it follows and any listed in its sessions resource. */
+  const canReadConversation = (surface: { id: string; conversationId: string }, conversationId: string): boolean =>
+    conversationId === surface.conversationId
+    || Object.values(hub.snapshot(surface.id, 'sessions').items).some((s) => s['conversation_id'] === conversationId);
+
   return {
     devices, hub, jobs,
-    surfaceApi: { devices, hub, actions, certFingerprint },
+    surfaceApi: { devices, hub, actions, certFingerprint, canReadConversation },
     bind(svc) {
       service = svc;
       svc.onSurfaceTick(syncSessions);
