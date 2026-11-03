@@ -19,11 +19,7 @@ Intercom follows a conversation you already have, usually your Telegram chat wit
 
 ### 1. Configure the bus
 
-Create a token for the screen and add the block to your config:
-
-```sh
-openssl rand -hex 24      # 48 characters; put it in the bus environment as INTERCOM_IPHONE_TOKEN
-```
+Add the block to your config. Each entry under `surfaces` is a **surface**: something your screens show, following one conversation. You pair one or more screens (devices) to it in the next step.
 
 ```yaml
 adapters:
@@ -33,8 +29,8 @@ adapters:
       calendars: ["Home", "Family", "Work"]
     surfaces:
       - id: iphone-proto
-        token_env: INTERCOM_IPHONE_TOKEN
         follow: { contact: me, channel: telegram:peggy }
+        publishers: [peggy]
 ```
 
 | Option | Default | What it does |
@@ -48,8 +44,11 @@ adapters:
 | `desk.plan_file` | `/Users/chrispatten/workspace/peggy-claude-code/memory/project_commute_plan.md` | Office-day plan (fenced `commute-plan` block: office days, AM/PM train, lead time, per-date overrides). Trains show only on office days; re-read when the file changes |
 | `desk.event_travel_min` | `20` | Rough travel time for a calendar event with a location (an estimate; no routing service) |
 | `surfaces[].follow` | | `contact`, `channel`, and optionally `topic` to follow a Telegram forum topic |
+| `surfaces[].publishers` | none | Agents allowed to put cards on this surface's dial (`["*"]` for any). See [Intercom devices](/channels/intercom-devices#what-can-appear-on-the-dial) |
+| `surfaces[].max_devices` | `10` | How many screens can be paired to the surface at once |
+| `surfaces[].token_env` | none | Only for a screen paired before devices existed: the environment variable holding its old shared token, so it keeps working |
 
-Restart the bus after you add the block. Intercom's pages (`/intercom` and `/api/v1/intercom`) are the only ones a screen needs, so if you use Tailscale serve, expose just those two paths. They don't use `bus.auth_token`; each screen has its own token.
+Restart the bus after you add the block. Intercom's pages (`/intercom`, `/api/v1/intercom` and `/api/v1/surface`) are the only ones a screen needs, so if you use Tailscale serve, expose just those paths. They don't use `bus.auth_token`; each screen has its own credential. To reach screens on your home network directly, use the [surface listener](/channels/intercom-devices#reach-devices-on-your-network) instead.
 
 ### 2. Pair a screen
 
@@ -60,6 +59,8 @@ npx tsx scripts/intercom-pair.ts iphone-proto --base https://your-machine.your-t
 ```
 
 It prints a one-time link ending in `/intercom/#pair=CODE`. Open it on the phone. The code works once and expires after 12 hours (change it with `--ttl`). Tap Share, then Add to Home Screen, to keep it as a full-screen app.
+
+Each paired screen is a separate device with its own credential. To name devices, pair several, make one read-only or revoke one, see [Intercom devices](/channels/intercom-devices).
 
 ### 3. Tell your agent how to answer
 
@@ -74,7 +75,8 @@ Notifications put a short "needs you soon" item on the screen: a leaving time, a
 | Problem | What to try |
 |---|---|
 | The pairing link says the code is used or expired | Run the pair command again for a fresh link |
-| "Surface unavailable" when pairing | The surface's token variable isn't set in the bus environment, or is shorter than 32 characters. Set it and restart the bus |
+| "Device limit" when pairing | The surface already has its maximum number of screens. [Revoke one](/channels/intercom-devices#see-and-revoke-devices) and use the same code again |
+| "Surface unavailable" when pairing | The code's surface was removed from the config. Pair again for a surface that exists |
 | The ring is empty | The calendars in `calendar.calendars` don't match any name. Run `calctl calendars` and copy the names |
 | Replies don't show | Replies appear only for messages you sent from Intercom, and for a couple of minutes after your agent finishes. A message you typed in Telegram doesn't open the window |
 

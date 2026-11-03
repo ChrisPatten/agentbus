@@ -292,6 +292,23 @@ Short "needs you soon" items on Intercom screens. Off unless `enabled: true`; ne
 | `context_to_followed` | `true` | Tell the agent, for its next turn in the followed conversation, what the screen showed |
 | `rate_limit_per_min` | `30` | Posts per source per minute |
 
+## surface_api
+
+The encrypted listener that lets Intercom devices on your network reach the bus, and limits for those devices. Off unless `enabled: true`; needs the `intercom` block. See [Intercom devices](/channels/intercom-devices#reach-devices-on-your-network).
+
+| Option | Default | What it does |
+|---|---|---|
+| `enabled` | `false` | Start the listener |
+| `host` | `0.0.0.0` | Which network it listens on |
+| `port` | `3443` | Its port |
+| `tls.cert`, `tls.key` | none | Certificate (chain) and key files. Required when `enabled`; make them with `scripts/surface-cert.ts` |
+| `log_retention_revs` | `500` | How many recent changes a reconnecting device can catch up on before it reloads everything |
+| `delta_coalesce_ms` | `250` | Rapid changes within this many milliseconds reach devices as one update |
+| `action_key_ttl_hours` | `48` | How long a button tap is remembered, so a retried tap never fires twice |
+| `action_rate_limit_per_min` | `30` | Button taps per device per minute |
+| `sessions.activity_timeout_min` | `30` | How long an idle agent session stays on the status face |
+| `sessions.include_system` | `false` | Also show scheduled routines and agent-to-agent sessions |
+
 ## topics
 
 ```yaml

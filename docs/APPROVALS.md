@@ -68,7 +68,7 @@ A second kind of request, raised in-process rather than through `POST /api/v1/ap
 
 ### Denials are feedback (E68)
 
-Every request answered **Deny** (through a Telegram tap or `POST /api/v1/approvals/:id/resolve`) is recorded as a `denied-approval` feedback event for the agent (a pool pane maps to its pool), in the request's conversation. The conversation's next journal run sees it and may run below `min_human_messages` because of it. The hook is `ResolveApprovalDeps.onResolved`. See [AGENT_LEARNING.md](AGENT_LEARNING.md#feedback-events).
+Every request answered **Deny** (through a Telegram tap, an Intercom device or `POST /api/v1/approvals/:id/resolve`) is recorded as a `denied-approval` feedback event for the agent (a pool pane maps to its pool), in the request's conversation. The conversation's next journal run sees it and may run below `min_human_messages` because of it. The hook is `ResolveApprovalDeps.onResolved`. See [AGENT_LEARNING.md](AGENT_LEARNING.md#feedback-events).
 
 ## Telegram behavior
 
@@ -76,6 +76,12 @@ Every request answered **Deny** (through a Telegram tap or `POST /api/v1/approva
 - Only the contact the request is addressed to can answer. A tap from any other sender, including another allow-listed contact, is refused and the request stays pending.
 - After an answer, the message is edited to show the outcome and the buttons are removed.
 - The message is plain text. Tool summaries can contain shell commands and paths, so they're never parsed as Markdown.
+
+## Approving from a surface (E96)
+
+Pending approvals also appear on Intercom devices (Surface API v2). Every `pending`, unexpired request addressed to a surface's followed contact is published into that surface's `events` resource as an Approval object: `kind: "approval"`, id `approval-<request id>`, with **Approve** (primary) and **Deny** (destructive) one-shot actions and `approval.detail` set to exactly what is being approved (`raw_context.details` when present, else the full shell command from `raw_context.tool_input.command`, else the summary; cut to 2,000 characters). The set is re-synced every 5 seconds and right after a device answers, so a request answered on Telegram or at the terminal disappears from the device.
+
+A tap (`POST /api/v1/surface/actions` or the WS `action` frame, object `events:approval-<id>`, action `approve` or `deny`) calls the same `resolveApproval()` as a Telegram tap, restricted to the surface's followed contact, so staleness checks, the pane keystroke, self-edit backends and the `onResolved` hooks (including denial feedback) behave identically. The row's `resolved_by` is `device:<device id>`. The Telegram message's buttons are removed by the regular sweep, as for any non-Telegram resolution. The device gets `done`, `already_done` (answered elsewhere), `expired`, or `failed` with `not_found` (unknown, or addressed to another contact) or `stale: <reason>`. See [SURFACE_API.md](SURFACE_API.md#approvals).
 
 ## Setup
 

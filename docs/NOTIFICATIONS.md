@@ -63,6 +63,14 @@ Surface to server:
 
 Quiet hours are the client's business: the server stores only the last `state` frame and sends nothing to Telegram. Escalation of urgent items to Telegram is not built.
 
+## Surface API v2 (E96)
+
+Notifications also reach protocol-v2 devices as a resource, and their actions go through the shared action handler. See [SURFACE_API.md](SURFACE_API.md).
+
+- **`notices` resource.** Each surface's `notices` resource mirrors its open notifications (`active` and `acknowledged`, targeted at the surface or `*`), keyed by notification id, in the same public shape as the `notification` event. It is synced at startup and on every create, update, state change and expiry, so a v2 device gets `delta` frames and finds the open set in `GET /api/v1/surface/state`. Resolved and expired items are removed from it. With `enabled: false` the resource is empty. The v1 `notification` and `attention` events are still sent to every client.
+- **Notice actions.** `POST /api/v1/surface/actions` or the WS `action` frame with `{"object":"notices:<id>","action_id":"<index>","idempotency_key":"…"}` (index `"0"`, `"1"`, ... into the item's `actions`) runs the same path as `notification_action`: acknowledge, then `[tapped] <label>` into the followed conversation, with the idempotency key as `client_msg_id`. The answer is an `action_result`: `done` (with `message_id`) when the tap was queued or handled as a command; `failed` with `not_found` for an unknown, terminal or untargeted item, `invalid` for a bad index, or the send's rejection reason. Read-only devices are refused (`read_only`), and actions count toward `surface_api.action_rate_limit_per_min`.
+- `notification_ack` and `notification_action` frames keep working on both protocol versions; `notification_action` is refused for `read_only` devices with `{"type":"error","code":"read_only"}`. `acked_by` remains the surface id, not the device id.
+
 ## Expiry and retention
 
 The Intercom service's 60-second tick expires `active` and `acknowledged` rows past `expires_at` (state `expired`, surfaces told with `notification` + `attention`) and deletes `resolved` / `expired` rows older than `retention_days`.
