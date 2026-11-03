@@ -3,6 +3,8 @@
 // Pair with code "demo-code". Typing "long: ..." returns a long reply; "/revoke" closes with 4401.
 // Notifications (E89): a sample one appears ~2.5 s after connect. Type `notify: Title` (attention, 2 actions),
 // `notify!: Title` (urgent, 3 actions), `note: Title` (info) to raise more; `clear:` resolves them all.
+// Surface API v2: /api/v1/surface/* (state, conversations, assets, actions) and ws protocol 2; see surface-mock.mjs for the typed
+// commands (event: dentist, overlap, tick: bill, travel, slot: primary, slot: context lines, widgets, sessions, needs, approval, convo, calendar, clear).
 // Desk mode (E94): GET /api/v1/intercom/desk and `desk` events. Type `desk: needs` (a session waiting on you),
 // `desk: stuck`, `desk: delay N` (train delayed N min), `desk: leave N` (leave in N min; negative = late), `desk: clear`.
 import http from 'node:http';
@@ -10,6 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
+import { createSurfaceMock } from './surface-mock.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = Number(process.env.PORT || 3098);
@@ -74,6 +77,8 @@ const server = http.createServer((req, res) => {
       try { const { code } = JSON.parse(b); return code === 'demo-code' ? json(200, { surface_id: 'mock-surface', token: TOKEN }) : json(404, { error: 'not_found' }); } catch { return json(400, { error: 'bad_request' }); }
     }); return;
   }
+  if (surface.http(req, res, u, json, () => new Promise((r) => { let b = ''; req.on('data', (c) => (b += c)); req.on('end', () => r(b)); }))) return;
+  if (u.pathname === '/api/v1/surface/pair' && req.method === 'POST') { req.url = '/api/v1/intercom/pair'; return server.emit('request', req, res); }
   if (u.pathname === '/api/v1/intercom/today') return authed ? json(200, calendar()) : json(401, {});
   if (u.pathname === '/api/v1/intercom/desk') return authed ? json(200, deskPayload()) : json(401, {});
   if (u.pathname === '/api/v1/intercom/health') return authed ? json(200, { surface_id: 'mock-surface', follow: { contact: 'chris', channel: 'telegram:peggy' }, version: 'mock', connected_clients: wss.clients.size }) : json(401, {});
@@ -89,9 +94,13 @@ const server = http.createServer((req, res) => {
 });
 
 const wss = new WebSocketServer({ noServer: true });
+const notesRef = { notes: null };
+const surface = createSurfaceMock({ token: TOKEN, wssClients: () => wss.clients, noticeAction: (id, idx) => noticeTap(id, idx) });
 server.on('upgrade', (req, sock, head) => {
-  if (new URL(req.url, 'http://x').pathname !== '/api/v1/intercom/ws') return sock.destroy();
-  wss.handleUpgrade(req, sock, head, (ws) => wss.emit('connection', ws));
+  const wp = new URL(req.url, 'http://x').pathname;
+  if (wp !== '/api/v1/intercom/ws' && wp !== '/api/v1/surface/ws') return sock.destroy();
+  if (process.env.MOCK_NO_V2 && wp === '/api/v1/surface/ws') return sock.destroy(); // simulate a bus without v2
+  wss.handleUpgrade(req, sock, head, (ws) => wss.emit('connection', ws, req));
 });
 
 let seq = 0; const durable = []; const seen = new Map();
@@ -126,6 +135,15 @@ function typedNotify(body) {
   return true;
 }
 
+/** A notice button tapped through POST /actions (notices:<id>, action id = index): same as the v1 notification_action. */
+function noticeTap(id, idx) {
+  const n = notes.get(id); const a = n && n.actions[idx];
+  if (!n || !a) return { status: 'failed', reason: 'not_found' };
+  if (n.state === 'active') setState(n, 'acknowledged');
+  handleSend(`[tapped] ${a.label}`);
+  return { status: 'done', message_id: `in-${Date.now()}` };
+}
+
 async function handleSend(body, iid = `int-${Date.now()}`) {
   bcast('interaction', { interaction_id: iid, state: 'open' });
   bcast('activity', { state: 'running', status_text: null, interaction_id: iid });
@@ -141,7 +159,8 @@ async function handleSend(body, iid = `int-${Date.now()}`) {
   await wait(GRACE_MS); bcast('interaction', { interaction_id: iid, state: 'closed' });
 }
 
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
+  ws.surfacePath = req && req.url && req.url.startsWith('/api/v1/surface/');
   const t = setTimeout(() => ws.close(4401), 5000);
   const ping = setInterval(() => out(ws, { type: 'ping' }), 30000);
   ws.on('close', () => { clearTimeout(t); clearInterval(ping); });
@@ -151,8 +170,11 @@ wss.on('connection', (ws) => {
       if (f.token !== TOKEN) return ws.close(4401);
       clearTimeout(t); ws.authed = true;
       const reset = f.cursor > seq;
-      out(ws, { type: 'welcome', version: 1, surface_id: 'mock-surface', follow: { contact: 'chris', channel: 'telegram:peggy' }, latest_seq: seq, reset, server_time: new Date().toISOString() });
+      const v2 = f.protocol === 2 && ws.surfacePath;
+      if (v2) surface.welcome(ws, f);
+      else out(ws, { type: 'welcome', version: 1, surface_id: 'mock-surface', follow: { contact: 'chris', channel: 'telegram:peggy' }, latest_seq: seq, reset, server_time: new Date().toISOString() });
       if (!reset) durable.filter((e) => e.seq > f.cursor).forEach((e) => out(ws, e));
+      if (v2) surface.resume(ws, f.revs || {});
       out(ws, { type: 'event', event: 'activity', data: { state: 'idle', status_text: null, interaction_id: null } });
       out(ws, { type: 'event', event: 'calendar', data: calendar() });
       out(ws, { type: 'event', event: 'desk', data: deskPayload() });
@@ -160,6 +182,7 @@ wss.on('connection', (ws) => {
       sendAttention(ws);
       setTimeout(() => { if (![...notes.values()].length) raise('Leave for the dentist', { body: 'Dr. Alvarez at 9:00, 18 min drive', actions: [{ label: 'Leaving now', style: 'success' }, { label: 'Snooze 10' }] }); }, 2500);
     } else if (!ws.authed) { out(ws, { type: 'error', code: 'unauthorized' }); }
+    else if (surface.frame(ws, f)) { /* view */ }
     else if (f.type === 'notification_ack') {
       const n = notes.get(f.id);
       if (!n || n.state === 'resolved') return out(ws, { type: 'error', code: 'notification_not_found' });
@@ -175,6 +198,7 @@ wss.on('connection', (ws) => {
       handleSend(`[tapped] ${a.label}`, iid);
     } else if (f.type === 'send') {
       if (f.body === '/revoke') return ws.close(4401);
+      if (surface.typed(f.body)) { if (/^clear\b/i.test(f.body)) for (const n of [...notes.values()]) setState(n, 'resolved'); out(ws, { type: 'ack', client_msg_id: f.client_msg_id, status: 'queued', message_id: `in-${Date.now()}`, interaction_id: 'x' }); bcast('activity', { state: 'running', status_text: null, interaction_id: 'x' }); bcast('activity', { state: 'idle', status_text: null, interaction_id: null }); return; }
       if (/^clear:/i.test(f.body || '')) { out(ws, { type: 'ack', client_msg_id: f.client_msg_id, status: 'queued', message_id: `in-${Date.now()}`, interaction_id: 'x' }); for (const n of [...notes.values()]) setState(n, 'resolved'); return; }
       if (typedDesk(f.body || '')) return out(ws, { type: 'ack', client_msg_id: f.client_msg_id, status: 'queued', message_id: `in-${Date.now()}`, interaction_id: 'x' });
       if (typedNotify(f.body || '')) return out(ws, { type: 'ack', client_msg_id: f.client_msg_id, status: 'queued', message_id: `in-${Date.now()}`, interaction_id: 'x' });
