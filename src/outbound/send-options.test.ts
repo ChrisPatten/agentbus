@@ -9,3 +9,11 @@ describe('applySendOptions glance (E90 I3)', () => {
     expect(String(applySendOptions({}, { glance: 'x '.repeat(100) })['glance']).length).toBeLessThanOrEqual(100);
   });
 });
+
+describe('applySendOptions answer_needed (E96)', () => {
+  it('adds answer_needed only when true', () => {
+    expect(applySendOptions({}, { answer_needed: true })).toEqual({ answer_needed: true });
+    expect(applySendOptions({}, { answer_needed: false })).toEqual({});
+    expect(applySendOptions({}, {})).toEqual({});
+  });
+});

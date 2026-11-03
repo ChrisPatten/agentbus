@@ -182,26 +182,46 @@ print(json.dumps(out))
         ;;
     esac
 
-    # Already delivered this turn — everything from here on is post-reply
-    # work (memory writes, follow-up cleanup, etc.) that should stay silent.
-    [[ -f "$DELIVERED_FLAG" ]] && exit 0
+    # Agent-authored status: same rules as sanitizeStatusText in
+    # src/adapters/tool-status.ts. Invalid text (the tool call itself
+    # errored) posts nothing and does not make the status sticky.
+    # E96: the optional `subject` (what this session is about; same rules as
+    # sanitizeSubject: same characters, at most 60) rides along as `subject`
+    # with this hook's `session_id`, so the bus can find the conversation from
+    # the pane's lease. A subject is posted even after delivery (with no line).
+    STATUS_TOOL_TEXT=""
+    SUBJECT_TEXT=""
+    if [[ "$TOOL_NAME" == "$STATUS_TOOL" ]]; then
+      STATUS_TOOL_TEXT="$(jq -r '
+        (.tool_input.text // "")
+        | if type == "string" then . else "" end
+        | gsub("[^\\p{L}\\p{N} \u0027\u2019,.&/-]"; " ")
+        | gsub("\\s+"; " ")
+        | sub("^ +"; "") | sub(" +$"; "")
+        | if (length > 0 and length <= 40 and (split(" ") | length) <= 5) then . else "" end
+      ' <<<"$INPUT")"
+      [[ -n "$STATUS_TOOL_TEXT" ]] || exit 0
+      SUBJECT_TEXT="$(jq -r '
+        (.tool_input.subject // "")
+        | if type == "string" then . else "" end
+        | gsub("[^\\p{L}\\p{N} \u0027\u2019,.&/-]"; " ")
+        | gsub("\\s+"; " ")
+        | sub("^ +"; "") | sub(" +$"; "")
+        | if length <= 60 then . else "" end
+      ' <<<"$INPUT")"
+    fi
 
     PLACEHOLDER=false
-    if [[ "$MODE" != raw ]]; then
+    STATUS_TEXT=""
+    if [[ -f "$DELIVERED_FLAG" ]]; then
+      # Already delivered this turn — everything from here on is post-reply
+      # work (memory writes, follow-up cleanup, etc.) that should stay silent.
+      # Only a status subject still goes through, without a line.
+      [[ -n "$SUBJECT_TEXT" ]] || exit 0
+    elif [[ "$MODE" != raw ]]; then
       PLACEHOLDER=true
       if [[ "$TOOL_NAME" == "$STATUS_TOOL" ]]; then
-        # Agent-authored status: same rules as sanitizeStatusText in
-        # src/adapters/tool-status.ts. Invalid text (the tool call itself
-        # errored) posts nothing and does not make the status sticky.
-        STATUS_TEXT="$(jq -r '
-          (.tool_input.text // "")
-          | if type == "string" then . else "" end
-          | gsub("[^\\p{L}\\p{N} \u0027\u2019,.&/-]"; " ")
-          | gsub("\\s+"; " ")
-          | sub("^ +"; "") | sub(" +$"; "")
-          | if (length > 0 and length <= 40 and (split(" ") | length) <= 5) then . else "" end
-        ' <<<"$INPUT")"
-        [[ -n "$STATUS_TEXT" ]] || exit 0
+        STATUS_TEXT="$STATUS_TOOL_TEXT"
         touch "$AGENT_STATUS_FLAG"
       else
         # An agent-authored status holds for the rest of the turn.
@@ -232,8 +252,10 @@ print(json.dumps(out))
         [[ -n "$STATUS_TEXT" ]] || STATUS_TEXT="Working on it"
       fi
     else
-      # The status tool has no raw form; it stays silent in raw mode.
-      [[ "$TOOL_NAME" == "$STATUS_TOOL" ]] && exit 0
+      # The status tool has no raw line; in raw mode it only carries a subject.
+      if [[ "$TOOL_NAME" == "$STATUS_TOOL" ]]; then
+        [[ -n "$SUBJECT_TEXT" ]] || exit 0
+      else
       TOOL_INPUT_JSON="$(jq -c '.tool_input // {}' <<<"$INPUT")"
       STATUS_TEXT="$(python3 -c '
 import json, sys
@@ -278,6 +300,7 @@ else:
 
 print(trunc(text, 200))
 ' "$TOOL_NAME" "$TOOL_INPUT_JSON")"
+      fi
     fi
 
     jq -c '.[]' "$STATE_FILE" | while read -r pair; do
@@ -285,7 +308,7 @@ print(trunc(text, 200))
       contact_id="$(jq -r '.contact_id' <<<"$pair")"
       topic="$(jq -r '.topic // "general"' <<<"$pair")"
       is_email_channel "$channel" && continue
-      body="$(jq -nc --arg cid "$contact_id" --arg text "$STATUS_TEXT" --arg topic "$topic" --argjson ph "$PLACEHOLDER" '{contact_id: $cid, text: $text, topic: $topic} + (if $ph then {placeholder: true} else {} end)')"
+      body="$(jq -nc --arg cid "$contact_id" --arg text "$STATUS_TEXT" --arg topic "$topic" --argjson ph "$PLACEHOLDER" --arg subject "$SUBJECT_TEXT" --arg sid "$SESSION_ID" '{contact_id: $cid, text: $text, topic: $topic} + (if $ph then {placeholder: true} else {} end) + (if $subject != "" then {subject: $subject, session_id: $sid} else {} end)')"
       post_async "$AGENTBUS_BASE/api/v1/adapters/$channel/tool-status" "$body"
     done
     ;;

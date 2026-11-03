@@ -44,4 +44,15 @@ describe('status tool', () => {
     expect((await call(undefined)).isError).toBe(true);
     expect((await call(12)).isError).toBe(true);
   });
+
+  it('accepts an optional subject (E96), sanitised, at most 60 characters', async () => {
+    const client = await makeClient();
+    const ok = await client.callTool({ name: 'status', arguments: { text: 'Comparing quotes', subject: ' Kitchen *quote* comparison ' } });
+    expect(ok.isError).toBeFalsy();
+    expect(JSON.parse(((ok.content as Array<{ text: string }>)[0]!).text)).toEqual({ success: true, status: 'Comparing quotes', subject: 'Kitchen quote comparison' });
+    const long = await client.callTool({ name: 'status', arguments: { text: 'Comparing quotes', subject: 'x'.repeat(61) } });
+    expect(long.isError).toBe(true);
+    const tools = (await client.listTools()).tools;
+    expect(Object.keys((tools[0]!.inputSchema as { properties: object }).properties)).toEqual(['text', 'subject']);
+  });
 });

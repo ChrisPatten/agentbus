@@ -970,6 +970,37 @@ describe('turn cost persistence (E39)', () => {
     expect(JSON.stringify(outbound[0]![1])).toContain('I could not use the reply tool.');
   });
 
+  it('carries status(subject) to the tool-status route with the conversation id (E96)', async () => {
+    setupOneMessagePoll();
+    const child = makeFakeChild();
+    spawnMock.mockImplementation(() => child as unknown as import('node:child_process').ChildProcess);
+
+    const { startHeadless } = await import('./cc-headless.js');
+    startHeadless(realDb as unknown as Database.Database);
+    await new Promise((r) => setTimeout(r, 30));
+
+    writeEvent(child.stdout, {
+      type: 'assistant',
+      message: { content: [
+        { type: 'tool_use', id: 't1', name: 'mcp__agentbus__status', input: { text: 'Comparing quotes', subject: 'Kitchen *quote* comparison' } },
+        // Same line again: suppressed as a duplicate, but its new subject still goes out alone.
+        { type: 'tool_use', id: 't2', name: 'mcp__agentbus__status', input: { text: 'Comparing quotes', subject: 'Kitchen remodel' } },
+      ] },
+    });
+    writeEvent(child.stdout, { type: 'result', result: 'done' });
+    child.emit('close', 0);
+    await new Promise((r) => setTimeout(r, 30));
+
+    const posts = fetchMock.mock.calls
+      .filter(([url]) => String(url).endsWith('/tool-status'))
+      .map(([, init]) => JSON.parse(String((init as RequestInit).body)) as Record<string, unknown>);
+    expect(posts).toHaveLength(2);
+    expect(posts[0]).toMatchObject({ text: 'Comparing quotes', placeholder: true, subject: 'Kitchen quote comparison', conversation_id: expect.any(String) });
+    expect(posts[1]).not.toHaveProperty('text');
+    expect(posts[1]).not.toHaveProperty('placeholder');
+    expect(posts[1]).toMatchObject({ subject: 'Kitchen remodel', conversation_id: posts[0]!['conversation_id'] });
+  });
+
   it('reports failed tool calls of a normal turn through onToolError (E68 S68.2)', async () => {
     setupOneMessagePoll();
     const child = makeFakeChild();

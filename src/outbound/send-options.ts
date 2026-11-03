@@ -19,12 +19,17 @@ export const GLANCE_DESCRIPTION =
   `Optional one-line summary of this message for small glance displays (Intercom), a plain line of at most ${GLANCE_MAX} characters, no markdown. ` +
   'Longer text is truncated. When omitted the bus derives one from the first sentence. Other channels ignore it.';
 
+export const ANSWER_NEEDED_DESCRIPTION =
+  "Set when you need the user's answer before you can continue; shows as needs-you on Intercom until they answer " +
+  '(or tap a button, or you call clear_answer_needed). Leave it unset for anything that does not block you.';
+
 /** Zod fields to spread into a tool's inputSchema. */
 export const sendOptionFields = {
   silent: z.boolean().optional().describe(SILENT_DESCRIPTION),
   no_preview: z.boolean().optional().describe(NO_PREVIEW_DESCRIPTION),
   pin: z.boolean().optional().describe(PIN_DESCRIPTION),
   glance: z.string().max(2000).optional().describe(GLANCE_DESCRIPTION),
+  answer_needed: z.boolean().optional().describe(ANSWER_NEEDED_DESCRIPTION),
 };
 
 export interface SendOptions {
@@ -33,6 +38,8 @@ export interface SendOptions {
   pin?: boolean;
   /** E90 (I3): glance line for Intercom surfaces; truncated to 100 characters. */
   glance?: string | undefined;
+  /** E96 (S96.6): the sender needs the user's answer; stored as `metadata.answer_needed`. */
+  answer_needed?: boolean | undefined;
 }
 
 /** Copies the options the caller set (true only) into `metadata`; unset or false options add nothing. */
@@ -43,6 +50,7 @@ export function applySendOptions(metadata: Record<string, unknown>, opts: SendOp
   if (opts.pin) out['pin'] = true;
   const glance = clampGlance(opts.glance);
   if (glance) out['glance'] = glance;
+  if (opts.answer_needed) out['answer_needed'] = true;
   return out;
 }
 
