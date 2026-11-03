@@ -18,6 +18,9 @@ import { buildSurfaceSessions, diffItems, sessionsAsItems } from './sessions.js'
 import { resolveApprovalFromSurface, syncApprovalEvents } from './approvals.js';
 import { clearAnswerNeededOnInbound, onAnswerNeededCleared } from './answer-needed.js';
 import { onInboundAccepted } from './inbound-hook.js';
+import { createConversationAction } from './conversation-actions.js';
+import { ChoiceStore } from '../choices/store.js';
+import type { AdapterRegistry } from '../core/registry.js';
 
 export interface SurfaceRuntimeDeps {
   config: AppConfig;
@@ -27,6 +30,8 @@ export interface SurfaceRuntimeDeps {
   deskSessions?: () => DeskSessionDetail[];
   /** S96.7 — the approvals resolution path (store, pools, hooks), read when a device answers. */
   approvals?: () => ResolveApprovalDeps;
+  /** Adapter registry, to clear the Telegram keyboard of a prompt answered from a surface (optional). */
+  registry?: Pick<AdapterRegistry, 'lookupPrimaryByChannel'>;
   log?: (line: string) => void;
 }
 
@@ -56,12 +61,25 @@ export function createSurfaceRuntime(deps: SurfaceRuntimeDeps): SurfaceRuntime {
     sink: (surfaceId, frame) => service?.pushDelta(surfaceId, frame),
   });
   const jobs = createJobStore(deps.db);
+  const conversationAction = createConversationAction({
+    db: deps.db, choices: new ChoiceStore(deps.db), submitInbound: deps.submitInbound, log,
+    surfaceOf: (device) => {
+      const surface = service?.surfaces.get(device.surface_id);
+      if (!surface || !service) return null;
+      return { contact: surface.follow.contact, canRead: (conversationId) => service!.canReadConversation(surface, conversationId) };
+    },
+    clearKeyboard: async (prompt) => {
+      const adapter = deps.registry?.lookupPrimaryByChannel(prompt.channel);
+      await adapter?.finalizeChoicePrompt?.(prompt);
+    },
+  });
   const actions = createActionHandler({
     db: deps.db, hub, jobs, submitInbound: deps.submitInbound, log,
     rateLimitPerMin: cfg.action_rate_limit_per_min, keyTtlHours: cfg.action_key_ttl_hours,
     noticeAction: async (device, id, actionId, key) => service
       ? service.noticeAction(device, id, actionId, key)
       : { type: 'action_result', idempotency_key: key, status: 'failed', reason: 'internal_error' },
+    conversationAction,
     approvalAction: async (device, approvalId, decision, key) => {
       const base = { type: 'action_result' as const, idempotency_key: key };
       const surface = service?.surfaces.get(device.surface_id);

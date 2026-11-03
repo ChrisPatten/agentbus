@@ -342,3 +342,29 @@ describe('ActionHandler: delegation', () => {
     expect((await s.handler.handle(device(), r)).status).toBe('done');
   });
 });
+
+describe('JobStore: slot buttons', () => {
+  it('stores jobs under slots:<slot>:<action>, separate from events of the same name', () => {
+    const db = makeDb();
+    const store = createJobStore(db, () => T0);
+    const [j] = store.replaceForSlot(S, 'primary', [job({ action_id: 'go' })], 'agent:peggy');
+    store.replaceForEvent(S, 'primary', [job({ action_id: 'go', payload_body: 'event' })], 'agent:peggy');
+    expect(j!.object_ref).toBe('slots:primary:go');
+    expect(store.get(S, 'slots:primary:go')!.payload_body).toBe("I'm here");
+    expect(store.get(S, 'events:primary:go')!.payload_body).toBe('event');
+    expect(store.removeForSlot(S, 'primary')).toBe(1);
+    expect(store.get(S, 'slots:primary:go')).toBeNull();
+    expect(store.get(S, 'events:primary:go')).not.toBeNull();
+  });
+
+  it('keeps fire_count when a slot is replaced and validates like events', () => {
+    const db = makeDb();
+    const store = createJobStore(db, () => T0);
+    const [a] = store.replaceForSlot(S, 'primary', [job({ action_id: 'go' })], 'a');
+    db.prepare('UPDATE surface_jobs SET fire_count = 1 WHERE id = ?').run(a!.id);
+    const [b] = store.replaceForSlot(S, 'primary', [job({ action_id: 'go', payload_body: 'edited' })], 'a');
+    expect(b).toMatchObject({ id: a!.id, fire_count: 1, payload_body: 'edited' });
+    expect(() => store.replaceForSlot(S, 'Bad Slot', [job()], 'a')).toThrow(/invalid slot id/);
+    expect(() => store.replaceForSlot(S, 'primary', [job({ sends_on_behalf: true })], 'a')).toThrow(BoundsError);
+  });
+});

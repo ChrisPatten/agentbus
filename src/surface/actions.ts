@@ -41,8 +41,15 @@ export function jobObjectRef(eventId: string, actionId: string): string {
   return `events:${eventId}:${actionId}`;
 }
 
-function validateJobs(eventId: string, jobs: NewJob[]): void {
-  if (!ID_RE.test(eventId)) throw new BoundsError(`invalid event id "${eventId}"`);
+/** The object ref of the button on a slot override (`slots:<slot id>:<action id>`). */
+export function slotJobObjectRef(slotId: string, actionId: string): string {
+  return `slots:${slotId}:${actionId}`;
+}
+
+type ObjectKind = 'events' | 'slots';
+
+function validateJobs(kind: ObjectKind, objectId: string, jobs: NewJob[]): void {
+  if (!ID_RE.test(objectId)) throw new BoundsError(`invalid ${kind === 'events' ? 'event' : 'slot'} id "${objectId}"`);
   const seen = new Set<string>();
   for (const j of jobs) {
     if (!ACTION_ID_RE.test(j.action_id)) throw new BoundsError(`invalid action id "${j.action_id}" (use [a-z0-9_-], at most 32 characters)`);
@@ -73,14 +80,14 @@ export function createJobStore(db: Database.Database, now: () => number = Date.n
   );
   const selectOne = db.prepare(`SELECT * FROM surface_jobs WHERE surface_id = ? AND object_ref = ?`);
 
-  const replace = db.transaction((surfaceId: string, eventId: string, jobs: NewJob[], createdBy: string): SurfaceJob[] => {
-    const prefix = `events:${eventId}:`;
+  const replace = db.transaction((kind: ObjectKind, surfaceId: string, eventId: string, jobs: NewJob[], createdBy: string): SurfaceJob[] => {
+    const prefix = `${kind}:${eventId}:`;
     const previous = new Map((selectForEvent.all(surfaceId, prefix.length, prefix) as JobRow[]).map((r) => [r.object_ref, r]));
     deleteForEvent.run(surfaceId, prefix.length, prefix);
     const at = new Date(now()).toISOString();
     const out: SurfaceJob[] = [];
     for (const j of jobs) {
-      const objectRef = jobObjectRef(eventId, j.action_id);
+      const objectRef = `${kind}:${eventId}:${j.action_id}`;
       const prev = previous.get(objectRef);
       const row: JobRow = {
         id: prev?.id ?? randomUUID(), surface_id: surfaceId, object_ref: objectRef, trigger: 'action',
@@ -97,11 +104,19 @@ export function createJobStore(db: Database.Database, now: () => number = Date.n
 
   return {
     replaceForEvent(surfaceId, eventId, jobs, createdBy) {
-      validateJobs(eventId, jobs);
-      return replace(surfaceId, eventId, jobs, createdBy);
+      validateJobs('events', eventId, jobs);
+      return replace('events', surfaceId, eventId, jobs, createdBy);
     },
     removeForEvent(surfaceId, eventId) {
       const prefix = `events:${eventId}:`;
+      return deleteForEvent.run(surfaceId, prefix.length, prefix).changes;
+    },
+    replaceForSlot(surfaceId, slotId, jobs, createdBy) {
+      validateJobs('slots', slotId, jobs);
+      return replace('slots', surfaceId, slotId, jobs, createdBy);
+    },
+    removeForSlot(surfaceId, slotId) {
+      const prefix = `slots:${slotId}:`;
       return deleteForEvent.run(surfaceId, prefix.length, prefix).changes;
     },
     get(surfaceId, objectRef) {
@@ -138,18 +153,24 @@ export interface ActionHandlerDeps {
   log?: (msg: string) => void;
   /** E89 notification action (`notices:<id>`, action ids `"0"`, `"1"`, ... index into its actions). */
   noticeAction?: (device: Device, noticeId: string, actionId: string, idempotencyKey: string) => Promise<ActionResult>;
+  /**
+   * `conversations:<conversation id>`: tap choice button `index` (`action_id`) of an open prompt in that
+   * conversation (the one on `messageId`, else the newest). Behaves like a Telegram tap.
+   */
+  conversationAction?: (device: Device, conversationId: string, index: number, messageId: string | undefined, idempotencyKey: string) => Promise<ActionResult>;
   /** Approve/Deny on an `approval` Event whose id is `approval-<approvalId>`. */
   approvalAction?: (device: Device, approvalId: string, decision: 'approve' | 'deny', idempotencyKey: string) => Promise<ActionResult>;
 }
 
 const ActionRequestSchema = z.object({
-  object: z.string().regex(/^(events|notices):[^:\s]{1,128}$/),
+  object: z.string().regex(/^((events|notices|slots):[^:\s]{1,128}|conversations:[A-Za-z0-9_:-]{1,128})$/),
   action_id: z.string().regex(ACTION_ID_RE),
   idempotency_key: z.string().min(1).max(BOUNDS.idemKey),
   draft: z.string().max(BOUNDS.draft).optional(),
+  message_id: z.string().min(1).max(128).optional(),
 });
 
-const NOTICE_ACTION_RE = /^(0|[1-9]\d{0,2})$/;
+const INDEX_ACTION_RE = /^(0|[1-9]\d{0,2})$/;
 const APPROVAL_PREFIX = 'approval-';
 
 function result(key: string, status: ActionStatus, extra: { reason?: string; message_id?: string } = {}): ActionResult {
@@ -237,21 +258,24 @@ export function createActionHandler(deps: ActionHandlerDeps): ActionHandler {
     return store(device, key, res);
   }
 
-  async function fire(device: Device, key: string, req: z.infer<typeof ActionRequestSchema>, eventId: string): Promise<ActionResult> {
+  async function fire(device: Device, key: string, req: z.infer<typeof ActionRequestSchema>, kind: ObjectKind, eventId: string): Promise<ActionResult> {
     const t = now();
-    const ref = jobObjectRef(eventId, req.action_id);
-    const event = deps.hub.get(device.surface_id, 'events', eventId);
+    const ref = `${kind}:${eventId}:${req.action_id}`;
+    const event = deps.hub.get(device.surface_id, kind, eventId);
     const job = deps.jobs.get(device.surface_id, ref);
 
     if (!event) {
       return store(device, key, job && isPast(job.expires_at, t) ? result(key, 'expired') : failed(key, 'not_found'));
     }
-    const actions = Array.isArray(event['actions']) ? (event['actions'] as SurfaceAction[]) : [];
+    // An Event has up to three buttons; a slot override has at most one (`action`).
+    const actions = kind === 'events'
+      ? (Array.isArray(event['actions']) ? (event['actions'] as SurfaceAction[]) : [])
+      : (event['action'] && typeof event['action'] === 'object' ? [event['action'] as SurfaceAction] : []);
     const action = actions.find((a) => a && a.id === req.action_id);
     if (!job || !action) {
       return store(device, key, job && isPast(job.expires_at, t) ? result(key, 'expired') : failed(key, 'not_found'));
     }
-    if (isPast(job.expires_at, t) || isPast(event['expires_at'], t)) return store(device, key, result(key, 'expired'));
+    if (isPast(job.expires_at, t) || isPast(event[kind === 'events' ? 'expires_at' : 'until'], t)) return store(device, key, result(key, 'expired'));
     if (job.once && job.fire_count > 0) return store(device, key, result(key, 'already_done'));
 
     // confirm.draft: the job's stored draft and the one the device shows must agree, and the device must echo it.
@@ -311,14 +335,21 @@ export function createActionHandler(deps: ActionHandlerDeps): ActionHandler {
     const kind = req.object.slice(0, sep);
     const id = req.object.slice(sep + 1);
 
+    if (kind === 'conversations') {
+      if (!INDEX_ACTION_RE.test(req.action_id)) return store(device, key, failed(key, 'invalid'));
+      const convo = deps.conversationAction;
+      if (!convo) return store(device, key, failed(key, 'not_found'));
+      return delegated(device, key, () => convo(device, id, Number(req.action_id), req.message_id, key));
+    }
+
     if (kind === 'notices') {
-      if (!NOTICE_ACTION_RE.test(req.action_id)) return store(device, key, failed(key, 'invalid'));
+      if (!INDEX_ACTION_RE.test(req.action_id)) return store(device, key, failed(key, 'invalid'));
       const notice = deps.noticeAction;
       if (!notice) return store(device, key, failed(key, 'not_found'));
       return delegated(device, key, () => notice(device, id, req.action_id, key));
     }
 
-    if (id.startsWith(APPROVAL_PREFIX) && (req.action_id === 'approve' || req.action_id === 'deny')) {
+    if (kind === 'events' && id.startsWith(APPROVAL_PREFIX) && (req.action_id === 'approve' || req.action_id === 'deny')) {
       const event = deps.hub.get(device.surface_id, 'events', id);
       if (event && event['kind'] === 'approval') {
         const approval = deps.approvalAction;
@@ -329,7 +360,7 @@ export function createActionHandler(deps: ActionHandlerDeps): ActionHandler {
       }
     }
 
-    return fire(device, key, req, id);
+    return fire(device, key, req, kind === 'slots' ? 'slots' : 'events', id);
   }
 
   return {

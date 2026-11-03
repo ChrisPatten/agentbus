@@ -147,6 +147,17 @@ export interface SurfaceAction {
   once?: boolean;
 }
 
+export type EventLayer = 'primary' | 'overlap';
+export type EventOpens = 'focus' | 'conversation';
+export type TravelMode = 'walk' | 'drive' | 'transit' | 'bike' | 'train';
+export interface EventTravel { minutes: number; mode?: TravelMode }
+export interface EventDetail {
+  description?: string;
+  location?: string;
+  /** Asset hash (64 hex, sha256) of an uploaded image; fetch it with `GET /assets/:hash`. */
+  image?: string;
+}
+
 /** `events` item. Agent-created cards on the dial ("I'm here", "Train in 10 min", ...). */
 export interface SurfaceEvent {
   id: string;
@@ -154,9 +165,24 @@ export interface SurfaceEvent {
   title: string;
   body?: string;
   level: Level;
-  /** Optional time the event is about (ISO), e.g. a meeting start, for placement on the day dial. */
+  /**
+   * Ring placement (ISO). Only a `kind: 'event'` with BOTH `at` and `end` draws a segment on the
+   * Day Dial ring; an event with only `at` is a card, and approvals never draw on the ring.
+   */
   at?: string;
   end?: string;
+  /** Ring layer for a ring event: the one `primary` segment or a narrower `overlap` one. Absent means `primary`. */
+  layer?: EventLayer;
+  /** Segment colour: `#rgb`, `#rrggbb` or a name from {@link COLOR_PALETTE}. */
+  color?: string;
+  /** Travel time before the event; drives the travel wedge and a leave-by complication. */
+  travel?: EventTravel;
+  /** What the focus view shows when the segment is tapped. */
+  detail?: EventDetail;
+  /** What a tap opens: the focus view (default) or the Conversation view of `conversation_id`. */
+  opens?: EventOpens;
+  /** Required when `opens` is `conversation`. */
+  conversation_id?: string;
   /** After this (ISO) the event is removed and its actions answer `expired`. */
   expires_at?: string;
   actions: SurfaceAction[];
@@ -168,12 +194,25 @@ export interface SurfaceEvent {
   updated_at: string;
 }
 
-/** `slots` item: a temporary override of a named face slot. id = slot name. */
+/**
+ * `slots` item: a temporary override of a named face slot. id = slot name (`primary`, `context`
+ * or any other name a face defines).
+ *
+ * - `primary`: `text` plus an optional `action` button (a job sits behind it on the bus).
+ * - `context`: either `lines` (at most 2) or `widgets` (at most 3 ids of existing widgets).
+ * - other names: `text` only.
+ */
 export interface SurfaceSlot {
   id: string;
-  text: string;
+  text?: string;
   icon?: string;
   color?: string;
+  /** `context` only: up to {@link BOUNDS.contextLines} short lines. */
+  lines?: string[];
+  /** `context` only: up to {@link BOUNDS.contextWidgets} widget ids; each must exist when the slot is set. */
+  widgets?: string[];
+  /** `primary` only: one button, same shape as an Event action. Its object is `slots:<slot id>`. */
+  action?: SurfaceAction;
   /** The override ends at this time (ISO); the bus removes it then. */
   until: string;
   source: string;
@@ -214,7 +253,16 @@ export interface SurfaceSession {
 export type SurfaceNotice = Record<string, unknown> & { id: string };
 
 /** `faces` item: one face the device can show. id = face name (`day`, `status`, `desk`, `conversation`, ...). */
-export interface SurfaceFace { id: string; order: number; enabled: boolean }
+export interface SurfaceFace { id: string; order: number; enabled: boolean; layout?: FaceLayout }
+
+/**
+ * Optional slot bindings of a face. Absent: the device's built-in layout for that face applies.
+ * `event_ring` draws ring events; `primary` shows the primary slot (default: the next Event);
+ * `context` binds the context slot to its `lines` or its `widgets`.
+ */
+export interface FaceLayout {
+  slots: { event_ring?: boolean; primary?: boolean; context?: 'lines' | 'widgets' };
+}
 
 /** `device` item: per-device link state. id = device id. */
 export interface SurfaceDeviceState {
@@ -261,7 +309,7 @@ export interface ConversationPage {
 export interface SurfaceJob {
   id: string;
   surface_id: string;
-  /** `events:<event id>:<action id>` — the object and button this job sits behind. */
+  /** `events:<event id>:<action id>` or `slots:<slot id>:<action id>` — the object and button this job sits behind. */
   object_ref: string;
   trigger: 'action';
   channel: string;
@@ -281,13 +329,18 @@ export interface SurfaceJob {
 
 /** `POST /api/v1/surface/actions` body and WS `{"type":"action", ...}` frame. */
 export interface ActionRequest {
-  /** `events:<id>` or `notices:<id>`. */
+  /**
+   * `events:<id>`, `notices:<id>`, `slots:<slot id>` (the primary slot's button) or
+   * `conversations:<conversation id>` (a choice button of a conversation; `action_id` is the button index).
+   */
   object: string;
   action_id: string;
   /** Client-generated, unique per tap (a retry of the same tap reuses it). */
   idempotency_key: string;
   /** Required (and must match exactly) when the action has `confirm.draft`. */
   draft?: string;
+  /** `conversations:` only: the bus message id the buttons belong to; default is the newest open prompt in the conversation. */
+  message_id?: string;
 }
 
 export type ActionStatus = 'done' | 'failed' | 'expired' | 'already_done';
@@ -313,6 +366,19 @@ export const BOUNDS = {
   /** Live (non-expired) events per surface. */
   eventsPerSurface: 50,
   slotText: 60,
+  /** Context slot `lines`: how many, and characters per line. */
+  contextLines: 2,
+  contextLineText: 40,
+  /** Context slot `widgets`. */
+  contextWidgets: 3,
+  /** Event `detail.description` and `detail.location`. */
+  description: 600,
+  location: 120,
+  /** Event `travel.minutes`. */
+  travelMinutes: 720,
+  /** Ring layers: at any moment at most this many ring events of the layer may overlap. */
+  ringPrimary: 1,
+  ringOverlap: 2,
   slotsPerSurface: 12,
   /** Max slot override length. */
   slotMaxHours: 24,
@@ -325,6 +391,10 @@ export const BOUNDS = {
   jobPayload: 4000,
   idemKey: 100,
 } as const;
+
+/** Named colours accepted next to `#rgb` / `#rrggbb` on Events. */
+export const COLOR_PALETTE = ['orange', 'red', 'green', 'blue', 'purple', 'yellow', 'teal', 'pink', 'gray', 'white'] as const;
+export const TRAVEL_MODES: readonly TravelMode[] = ['walk', 'drive', 'transit', 'bike', 'train'];
 
 export const ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 export const ACTION_ID_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
@@ -375,6 +445,9 @@ export interface JobStore {
   /** Replace every job behind `events:<eventId>:*` with `jobs` (in one transaction). */
   replaceForEvent(surfaceId: string, eventId: string, jobs: NewJob[], createdBy: string): SurfaceJob[];
   removeForEvent(surfaceId: string, eventId: string): number;
+  /** Same for a slot's button: jobs behind `slots:<slotId>:*`. */
+  replaceForSlot(surfaceId: string, slotId: string, jobs: NewJob[], createdBy: string): SurfaceJob[];
+  removeForSlot(surfaceId: string, slotId: string): number;
   get(surfaceId: string, objectRef: string): SurfaceJob | null;
 }
 

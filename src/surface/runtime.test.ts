@@ -15,6 +15,7 @@ import { registerSurfaceServer } from '../http/surface-routes.js';
 import { registerSurfacePublishRoutes } from '../http/surface-publish-routes.js';
 import { createSurfaceRuntime, type SurfaceRuntime } from './runtime.js';
 import { setAnswerNeeded } from './flags.js';
+import { ChoiceStore } from '../choices/store.js';
 import { notifyInboundAccepted } from './inbound-hook.js';
 import type { PairResult } from './types.js';
 import type { MessageEnvelope } from '../types/envelope.js';
@@ -26,6 +27,7 @@ describe('surface runtime', () => {
   let config: AppConfig; let base: string; let wsBase: string;
   const injected: InboundMessage[] = [];
   const sockets: WebSocket[] = [];
+  const finalized: string[] = [];
 
   beforeEach(async () => {
     db = new Database(':memory:'); runMigrations(db);
@@ -36,8 +38,10 @@ describe('surface runtime', () => {
       surface_api: { delta_coalesce_ms: 0 },
       memory: {}, pipeline: { routes: [] },
     });
+    finalized.length = 0;
     runtime = createSurfaceRuntime({
       config, db, log: () => {},
+      registry: { lookupPrimaryByChannel: () => ({ finalizeChoicePrompt: async (p: { id: string }) => { finalized.push(p.id); } }) as never },
       submitInbound: async (m) => { injected.push(m); return { ok: true, id: 'q', queued: true, enqueued_count: 1 }; },
     });
     service = new IntercomService({
@@ -118,5 +122,24 @@ describe('surface runtime', () => {
     notifyInboundAccepted(reply, conversationId, false);
     const after = Object.values(runtime.hub.snapshot('desk', 'sessions').items).find((s) => s['conversation_id'] === conversationId);
     expect(after?.['needs_you'] ?? false).toBe(false);
+  });
+  it('a conversation button tapped on a device answers the prompt, injects the pick, clears needs_you and the keyboard', async () => {
+    const a = await pairAndConnect('Kitchen');
+    const conversationId = service.surfaces.get('desk')!.conversationId;
+    db.prepare(`INSERT INTO conversation_registry(id,contact_id,channel,topic,first_seen,last_seen) VALUES (?,?,?,?,?,?)`).run(conversationId, 'chris', 'telegram:peggy', 'general', 'x', 'x');
+    db.prepare(`INSERT INTO sessions(id,conversation_id,channel,contact_id,started_at,last_activity,message_count) VALUES ('s1',?,?,?,?,?,0)`).run(conversationId, 'telegram:peggy', 'chris', 'x', 'x');
+    db.prepare(`INSERT INTO transcripts(id,message_id,conversation_id,session_id,created_at,channel,contact_id,direction,body,metadata)
+      VALUES ('t1','q1',?,'s1',?,'telegram:peggy','chris','outbound','Book the 3pm?','{}')`).run(conversationId, new Date().toISOString());
+    new ChoiceStore(db).create({ id: 'p1', channel: 'telegram:peggy', topic: 'general', contactId: 'chris', labels: ['Book it', 'Skip'], platformMessageId: '5:6', busMessageId: 'q1' }, 3600_000);
+    setAnswerNeeded(db, { conversationId, messageId: 'q1', agentId: 'peggy' });
+    runtime.refreshSessions();
+    expect(Object.values(runtime.hub.snapshot('desk', 'sessions').items).some((x) => x['needs_you'] === true)).toBe(true);
+
+    const res = await (await send('POST', '/api/v1/surface/actions', { object: `conversations:${conversationId}`, action_id: '0', idempotency_key: 'c1' }, a.paired.credential)).json();
+    expect(res).toMatchObject({ status: 'done' });
+    expect(injected.at(-1)).toMatchObject({ sender: 'contact:chris', reply_to: 'q1', payload: { type: 'text', body: '[tapped] Book it' } });
+    expect(finalized).toEqual(['p1']);
+    expect(Object.values(runtime.hub.snapshot('desk', 'sessions').items).some((x) => x['needs_you'] === true)).toBe(false);
+    expect(await (await send('POST', '/api/v1/surface/actions', { object: `conversations:${conversationId}`, action_id: '1', idempotency_key: 'c2' }, a.paired.credential)).json()).toMatchObject({ status: 'already_done' });
   });
 });
