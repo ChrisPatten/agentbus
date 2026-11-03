@@ -141,7 +141,7 @@ describe('layout and frames', () => {
     class FakeWS { constructor() { FakeWS.last = this; this.readyState = 1; this.sent = []; } send(s) { this.sent.push(JSON.parse(s)); } close() {} }
     const timers = { setInterval: () => 0, clearInterval() {}, setTimeout: () => 0, clearTimeout() {} };
     const ev = [];
-    const s = new IntercomSocket({ token: 't', url: 'ws://x', WS: FakeWS, timers, handlers: { onEvent: (nm, d) => ev.push(nm) } });
+    const s = new IntercomSocket({ token: 't', url: 'ws://x', v2: false, WS: FakeWS, timers, handlers: { onEvent: (nm, d) => ev.push(nm) } });
     s.outbox.items = [{ client_msg_id: 'q1', kind: 'action', id: 'n9', index: 0, at: Date.now() }];
     s.connect(); const ws = FakeWS.last; ws.onopen();
     ws.onmessage({ data: JSON.stringify({ type: 'welcome', latest_seq: 0 }) });

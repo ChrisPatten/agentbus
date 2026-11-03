@@ -1,5 +1,7 @@
 // Scripted, server-free walkthrough of the nine mockup screens (?demo).
 import { departureView } from './logic.js';
+import { createStore } from './surface.js';
+import { sessionsFromDesk } from './statusv2.js';
 const TZ = 'America/New_York';
 export const DEMO_NOW = new Date('2026-11-02T07:52:00-05:00');
 const ev = (id, title, s, e, calendar, color) => ({
@@ -26,6 +28,23 @@ export const DEMO_DESK = {
   ],
   counts: { working: 3, needs_you: 1 },
 };
+// Surface v2 demo data: what an agent would publish for the same day.
+const sev = (id, title, s, e, extra = {}) => ({ id, kind: 'event', title, level: 'info', at: s ? `2026-11-02T${s}:00-05:00` : undefined, end: e ? `2026-11-02T${e}:00-05:00` : undefined, actions: [], ...extra });
+export const DEMO_SURFACE_EVENTS = [
+  sev('busy', 'Busy', '07:00', '11:00', { color: 'gray' }),
+  sev('ent', 'ENT', '16:10', '17:00', { color: 'orange', travel: { minutes: 25, mode: 'drive' }, body: 'Bring the CPAP card.', detail: { location: 'ENT Specialists, Plainville', description: 'Follow-up on the CPAP fitting.' }, actions: [{ id: 'here', label: 'I am here', style: 'primary', confirm: { draft: 'Arrived at the ENT. Back by 5:30.' } }] }),
+  sev('kate', 'Kate dr', '16:30', '17:30', { layer: 'overlap', color: 'pink' }),
+  sev('jprac', 'J practice', '16:20', '17:10', { layer: 'overlap', color: 'green' }),
+  sev('bill', 'Water bill due', '12:00', null, { level: 'attention', color: 'red', detail: { description: '$166.00 due today.' } }),
+];
+export const demoStore = (slots = {}) => { const st = createStore(); for (const e of DEMO_SURFACE_EVENTS) st.items.events[e.id] = e; Object.assign(st.items.slots, slots); return st; };
+const demoUntil = '2026-11-02T20:00:00-05:00';
+const DEMO_CONVO = [
+  { id: 'm1', role: 'user', text: 'Which train gets me in by 9?', created_at: '2026-11-02T07:30:00-05:00' },
+  { id: 'm2', role: 'agent', text: 'The 6008 gets you in at 6:48. The 7:01 gets you in at 7:52, which is a little late for your 8:30.', created_at: '2026-11-02T07:31:00-05:00' },
+  { id: 'm3', role: 'agent', text: 'Shall I put the 6008 in the plan for Thursday?', created_at: '2026-11-02T07:44:00-05:00', answer_needed: true, buttons: [{ index: 0, label: 'Yes, 6008' }, { index: 1, label: 'Keep 7:01' }] },
+];
+
 const dep = (leave, delay = 0) => ({ label: '8:37 train', kind: 'train', leave_at: `2026-11-02T${leave}:00-05:00`, delay_min: delay, train: { number: '824', departs: '2026-11-02T08:37:00-05:00' } });
 
 const PHRASE = 'Look into 1Password for agents';
@@ -51,10 +70,20 @@ export const STEPS = [
     props: () => ({ tone: { color: '#5fc0b3', alpha: 0.1 } }) },
   { name: 'quiet', title: 'Night, needs you', desc: 'The same face, amber and a little brighter, when something waits on you.',
     props: () => ({ tone: { color: '#ffb347', alpha: 0.2 } }) },
-  { name: 'status', title: 'Agent status ring', desc: 'One segment per session: teal working, amber waiting on you, red stuck, brass just finished, grey idle. The rim breathes amber while anything needs you.',
-    props: () => ({ desk: DEMO_DESK, now: DEMO_NOW }) },
-  { name: 'status', title: 'Status list', desc: 'Tap the ring for up to five sessions: title, state and age. Titles only, never message text.',
-    props: () => ({ desk: DEMO_DESK, now: DEMO_NOW, list: true }) },
+  { name: 'status', title: 'Agent status', desc: 'Four sessions in view, scroll for more. One rim segment per session (eight, then +N). The subject if the agent set one, else the title. Amber means it needs you; the rim breathes. Tap a row for the conversation.',
+    props: () => ({ sessions: sessionsFromDesk(DEMO_DESK).map((x, i) => ({ ...x, subject: i === 1 ? 'Choosing a Highlander' : null, needs_you: x.state === 'waiting', conversation_id: `c${i}` })), now: DEMO_NOW, tz: TZ }) },
+  { name: 'idle', title: 'Day Dial v2', desc: 'The agent chooses what the ring shows. Orange is the ENT with a dashed travel wedge before it; the narrow pink and green arcs are overlaps; the red tick at noon is a deadline. Drag the gold ball to scrub the day.',
+    props: () => ({ events: [], v2: true, surfaceEvents: DEMO_SURFACE_EVENTS, store: demoStore({ context: { id: 'context', lines: ['Water bill due today', 'Rain after 3'], until: demoUntil } }), now: DEMO_NOW, tz: TZ }) },
+  { name: 'idle', title: 'Scrubbing', desc: 'While you drag the ball the centre shows what is at that time, or Free. Let go and it snaps back to now after about four seconds.',
+    props: () => ({ events: [], v2: true, surfaceEvents: DEMO_SURFACE_EVENTS, store: demoStore(), now: DEMO_NOW, tz: TZ, scrub: { hours: 16.5 } }) },
+  { name: 'idle', title: 'Primary slot with a button', desc: 'An agent override replaces the next-event line and can carry a button. A button that sends something first shows the exact text.',
+    props: () => ({ events: [], v2: true, surfaceEvents: DEMO_SURFACE_EVENTS, store: demoStore({ primary: { id: 'primary', text: 'Kate lands at 9:10', until: demoUntil, action: { id: 'ping', label: 'Text Kate', confirm: { draft: 'Running ten minutes late.' } } } }), now: DEMO_NOW, tz: TZ }) },
+  { name: 'event', title: 'Event focus', desc: 'Tap a segment or tick: title, time, place, picture and the Event’s buttons.',
+    props: () => ({ ev: DEMO_SURFACE_EVENTS[1], tz: TZ }) },
+  { name: 'approval', title: 'Approval', desc: 'A bus approval shows exactly what is being approved; Deny is red.',
+    props: () => ({ ev: { id: 'approval-1', kind: 'approval', title: 'Bash: git push', approval: { detail: 'git push origin feat/surface-web-v2' }, actions: [{ id: 'approve', label: 'Approve', style: 'primary' }, { id: 'deny', label: 'Deny', style: 'destructive' }] } }) },
+  { name: 'convo', title: 'Conversation', desc: 'Tapped from a session row. Older messages load as you scroll up; the agent’s buttons are tappable and show Sent or Failed.',
+    props: () => ({ title: 'Commute plan', messages: DEMO_CONVO, convId: 'c1' }) },
   { name: 'idle', title: 'Day ring with leave-by', desc: 'The date line becomes “Leave in N min”; the rim goes green, amber under 30 minutes, red under 10, pulsing under 5. The train sits under the next event.',
     props: () => ({ events: DEMO_EVENTS, now: DEMO_NOW, tz: TZ, departure: departureView(dep('08:06'), DEMO_NOW.getTime(), TZ) }) },
   { name: 'idle', title: 'Train delayed', desc: 'A delay turns the train line amber and moves it to the new time.',

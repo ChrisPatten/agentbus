@@ -1,28 +1,81 @@
 // HTML for each dial screen. All inner content is laid out in the 466 design square.
 // Readability: text >= 26px, primary >= 34px, clock >= 110px, buttons >= 72px, <= 4 buttons,
 // nothing inside the outer 30px.
-import { escapeHtml as e, daySpans, nextEvent, clockText, dateText, shortTime, allDayLine, glanceOf, needsLayout, isAckLabel, needsMore, deskCounts, statusLines, listRows } from './logic.js';
+import { escapeHtml as e, clockText, dateText, shortTime, allDayLine, glanceOf, needsLayout, isAckLabel, needsMore, tzParts } from './logic.js';
 import { dayRingSvg, workingRingSvg, waveRingSvg, statusRingSvg } from './dial.js';
+import { ringModel, nextUp, primaryView, contextView, scrubInfo, colorValue, calendarLanes } from './dayv2.js';
+import { createStore } from './surface.js';
+import { statusModel, bubbleSide } from './statusv2.js';
 
-export const SCREENS = ['idle', 'listening', 'working', 'reply', 'choice', 'needs', 'draft', 'done', 'quiet', 'status'];
+export const SCREENS = ['idle', 'listening', 'working', 'reply', 'choice', 'needs', 'draft', 'done', 'quiet', 'status', 'event', 'approval', 'convo'];
 
 const btn = (label, cls = '') => `<div class="btn ${cls}">${e(label)}</div>`;
 
-export function idle({ events, now, tz, calendarKnown = true, notes = 0, halo = false, departure = null }) {
-  const { timed, allDay } = daySpans(events, now, tz);
-  const next = nextEvent(timed, now, tz);
+const NO_BTN = () => ({ state: 'idle', label: null, disabled: false });
+const BTN_STYLE = { primary: 'ok', destructive: 'danger', success: 'ok', danger: 'danger' };
+
+/** A tappable action button; `bs` is its local state (Sending, Sent, Failed, Expired). `data` are data-* attributes. */
+function actionBtn(action, bs, data, extra = '') {
+  const st = bs || NO_BTN();
+  const cls = `${BTN_STYLE[action.style] ?? ''} ${st.state !== 'idle' ? `st-${st.state}` : ''} ${st.disabled ? 'off' : ''}`.trim();
+  return `<div class="btn ${cls}" ${data}${extra}>${e(st.label || action.label)}</div>`;
+}
+
+function widgetCell(w) {
+  const col = w.color ? ` style="color:${e(w.color)}"` : '';
+  if (w.kind === 'gauge') {
+    const c = 2 * Math.PI * 15;
+    const ring = `<svg class="wg" viewBox="0 0 40 40"><circle cx="20" cy="20" r="15" fill="none" stroke="#2c2924" stroke-width="5"/><circle cx="20" cy="20" r="15" fill="none" stroke="${e(w.color || '#ffb347')}" stroke-width="5" stroke-dasharray="${(c * w.frac).toFixed(1)} ${c.toFixed(1)}" transform="rotate(-90 20 20)"/></svg>`;
+    return `<div class="wcell">${ring}<div class="wv">${e(w.text)}</div>${w.label ? `<div class="wl">${e(w.label)}</div>` : ''}</div>`;
+  }
+  if (w.kind === 'icon') return `<div class="wcell"><div class="wi"${col}>${e(w.icon)}</div><div class="wv">${e(w.text || w.label)}</div></div>`;
+  if (w.kind === 'countdown') return `<div class="wcell"><div class="wi"${col}>${e(w.text)}</div><div class="wv">${e(w.label)}</div></div>`;
+  if (w.kind === 'spark') {
+    const pts = w.points.map((p, i) => `${((i * 80) / (w.points.length - 1)).toFixed(1)},${(26 - p * 24).toFixed(1)}`).join(' ');
+    return `<div class="wcell"><svg class="ws" viewBox="0 0 80 28"><polyline points="${pts}" fill="none" stroke="${e(w.color || '#5fc0b3')}" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/></svg><div class="wv">${e(w.label || w.text)}</div></div>`;
+  }
+  return `<div class="wcell"><div class="wi"${col}>${e(w.text)}</div>${w.label ? `<div class="wv">${e(w.label)}</div>` : ''}</div>`;
+}
+
+function contextHtml(items, now, tz) {
+  return items.map((it) => {
+    if (it.kind === 'leave') {
+      const d = it.departure;
+      return `<div class="sec datey leavey ${d.dim ? 'dim' : d.pressure}">${e(d.text)}</div>`;
+    }
+    if (it.kind === 'line') return `<div class="sec ctxline">${e(it.text)}</div>`;
+    if (it.kind === 'widgets') return `<div class="wrow">${it.list.map(widgetCell).join('')}</div>`;
+    return `<div class="sec datey">${e(dateText(now, tz))}</div>`;
+  }).join('');
+}
+
+/**
+ * Day Dial v2. Calendar events are the base layer; `surfaceEvents` (and the primary and context slots in `store`) overlay them.
+ * `scrub` ({hours}) puts the centre on that time of day. `btn(object, actionId)` gives a button's local state.
+ */
+export function idle({ events, now, tz, calendarKnown = true, notes = 0, halo = false, departure = null, surfaceEvents = [], store = createStore(), layout = {}, scrub = null, btn = NO_BTN, v2 = false }) {
+  const lay = { ring: layout.ring !== false, primary: layout.primary !== false, context: layout.context || null };
+  const { timed, allDay } = calendarLanes(events, now, tz);
+  const model = lay.ring ? ringModel(surfaceEvents, now, tz) : { segs: [], ticks: [], nowH: tzParts(now, tz).hours };
+  const nowH = model.nowH;
+  const nowMs = now.getTime();
   const ad = allDayLine(allDay);
-  let nextHtml;
-  if (next) nextHtml = `<div class="next">${e(shortTime(next.startH))} · ${e(next.title)}</div>`;
-  else nextHtml = `<div class="sec dim-line">${calendarKnown ? 'Clear for today' : 'Diary unavailable'}</div>`;
+  const ring = dayRingSvg(events, now, tz, halo, departure ? departure.pressure : null, { model, scrub });
+  if (scrub) {
+    const info = scrubInfo(scrub.hours, model, timed);
+    return `${ring}<div class="clock">${e(info.time)}</div><div class="scrubt"${info.color ? ` style="color:${e(info.color)}"` : ''}>${e(info.title)}</div>`;
+  }
+  const ctx = contextHtml(contextView(store, { departure, layout: lay, nowMs }), now, tz);
   const noteHtml = notes ? `<div class="sec notey" data-act="note"><span class="ndot"></span>${notes} ${notes === 1 ? 'note' : 'notes'}</div>` : '';
-  // Desk face 2: the leave line replaces the date while a departure is pending; the train line sits under the next event.
-  const dateHtml = departure
-    ? `<div class="sec datey leavey ${departure.dim ? 'dim' : departure.pressure}">${e(departure.text)}</div>`
-    : `<div class="sec datey">${e(dateText(now, tz))}</div>`;
+  const pv = lay.primary ? primaryView(store, nextUp(timed, model, nowH), nowMs) : null;
+  let nextHtml = '';
+  if (pv) {
+    const col = pv.color ? ` style="color:${e(pv.color)}"` : '';
+    nextHtml = `<div class="next"${col}>${e(pv.text)}</div>`;
+    if (pv.action) nextHtml += actionBtn(pv.action, btn('slots:primary', pv.action.id), 'data-act="slotaction"', ` data-aid="${e(pv.action.id)}"`).replace('class="btn ', 'class="btn pbtn ');
+  } else if (lay.primary && !v2) nextHtml = `<div class="sec dim-line">${calendarKnown ? 'Clear for today' : 'Diary unavailable'}</div>`;
   const trainHtml = departure && departure.train ? `<div class="trainline${departure.train.delayed ? ' delayed' : ''}">${e(departure.train.text)}</div>` : '';
-  return `${dayRingSvg(events, now, tz, halo, departure ? departure.pressure : null)}
-    ${dateHtml}${noteHtml}
+  return `${ring}${ctx}${noteHtml}
     ${ad ? `<div class="sec allday">${e(ad)}</div>` : ''}
     <div class="clock">${e(clockText(now, tz))}</div>${nextHtml}${trainHtml}`;
 }
@@ -87,12 +140,6 @@ export function needs({ item, index = 0, total = 1, expanded = false }) {
   return `${glow}${label}${text}${btns}${count}`;
 }
 
-export function draft({ to, text, send = 'Send it', hold = 'Hold' }) {
-  return `<div class="label">${e(to)}</div>
-    <div style="font-size:36px;font-weight:600;line-height:1.25;margin:16px 0 20px;max-width:330px">“${e(text)}”</div>
-    <div class="btn ok" style="width:260px">${e(send)}</div><div class="btn" style="width:260px">${e(hold)}</div>`;
-}
-
 export function done({ word = 'Noted, and filed.', detail = '' }) {
   return `<div style="font-size:140px;line-height:1">✅</div>
     <div class="peggy" style="font-size:42px;margin-top:20px">${e(word)}</div>${detail ? `<div class="sec" style="margin-top:10px">${e(detail)}</div>` : ''}`;
@@ -103,21 +150,75 @@ export function quiet({ tone = { color: '#5fc0b3', alpha: 0.1 } }) {
   return `<div class="qface" style="--qc:${tone.color};--qa:${tone.alpha}"><i class="q1"></i><i class="q2"></i></div>`;
 }
 
-/** Desk face 1: agent status ring. Tap flips to a list of up to five sessions. `noticeFor(session)` says whether a row opens a card. */
-export function status({ desk, now, list = false, noticeFor = () => false }) {
-  const sessions = (desk && desk.sessions) || [];
-  const counts = deskCounts(desk);
-  const needs = counts.needs_you > 0;
-  if (list) {
-    const rows = listRows(sessions, now.getTime ? now.getTime() : now);
-    const body = rows.length
-      ? rows.map((r, i) => `<div class="srow${r.needs ? ' needs' : ''}"${r.needs && noticeFor(sessions[i]) ? ` data-act="session" data-id="${e(r.id)}"` : ''}>` +
-        `<span class="sdot" style="background:${r.color}"></span><div class="st"><div class="stitle">${e(r.title)}</div><div class="ssub">${e(r.sub)}</div></div></div>`).join('')
-      : '<div class="sec">No sessions</div>';
-    return `${statusRingSvg(sessions, needs)}<div class="slist">${body}</div>`;
-  }
-  const lines = statusLines(counts).map((l) => `<div class="scount ${l.kind}">${e(l.text)}</div>`).join('');
-  return `${statusRingSvg(sessions, needs)}${lines}`;
+/**
+ * Agent Status v2. A small clock at the top, a scrollable list of sessions (four rows in view), one rim segment per
+ * session (eight, then "+N"). A row is the subject (else the title), a state-coloured dot and the age; a session that
+ * needs you is amber. Tapping a row with a conversation opens it. No message text on the face.
+ */
+export function status({ sessions = [], now, tz, noticeFor = () => false }) {
+  const model = statusModel(sessions, now.getTime ? now.getTime() : now);
+  const rows = model.rows.length
+    ? model.rows.map((r) => { const tap = r.conversationId || (r.needs && noticeFor(r.id)); return `<div class="srow2${r.needs ? ' needs' : ''}${tap ? ' tap' : ''}"${tap ? ` data-act="session" data-cid="${e(r.conversationId || '')}" data-id="${e(r.id)}"` : ''}>` +
+      `<span class="sdot" style="background:${r.color}"></span><span class="sname">${e(r.name)}</span><span class="sage">${e(r.age)}</span></div>`; }).join('')
+    : '<div class="sec sempty">All quiet</div>';
+  return `${statusRingSvg(model)}<div class="stclock">${e(clockText(now, tz))}</div><div class="slist2" data-scroller>${rows}</div>`;
+}
+
+/* ---------- views (take over the centre) ---------- */
+
+const fmtRange = (ev, tz) => {
+  const t = (iso) => { const d = new Date(iso); return isNaN(d) ? '' : shortTime(tzParts(d, tz).hours); };
+  if (ev.at && ev.end) return `${t(ev.at)} – ${t(ev.end)}`;
+  if (ev.at) return `Due ${t(ev.at)}`;
+  return '';
+};
+
+/** Event focus: title, time, place, picture, description and the Event's buttons. */
+export function event({ ev, tz, btn = NO_BTN, image = null }) {
+  const d = ev.detail || {};
+  const acts = (ev.actions || []).slice(0, 3).map((a) => actionBtn(a, btn(`events:${ev.id}`, a.id), 'data-act="efire"', ` data-aid="${e(a.id)}"`)).join('');
+  const col = ev.color ? colorValue(ev.color, null) : null;
+  return `<div class="scroller" data-scroller>` +
+    `<div class="label"${col ? ` style="color:${e(col)}"` : ''}>${e(fmtRange(ev, tz))}</div>` +
+    `<div class="ftitle">${e(ev.title)}</div>` +
+    `${d.location ? `<div class="floc">${e(d.location)}</div>` : ''}` +
+    `${image ? `<img class="fimg" src="${e(image)}" alt="">` : ''}` +
+    `${ev.body ? `<div class="fbody">${e(ev.body).replace(/\n/g, '<br>')}</div>` : ''}` +
+    `${d.description ? `<div class="fbody dim">${e(d.description).replace(/\n/g, '<br>')}</div>` : ''}` +
+    `${acts}<div class="btn back" data-act="back">Back</div></div>`;
+}
+
+/** Approval view for a bus approval Event: exactly what is being approved, with its approve and deny buttons. */
+export function approval({ ev, btn = NO_BTN }) {
+  const detail = (ev.approval && ev.approval.detail) || ev.body || '';
+  const acts = (ev.actions || []).slice(0, 3).map((a) => actionBtn(a, btn(`events:${ev.id}`, a.id), 'data-act="efire"', ` data-aid="${e(a.id)}"`)).join('');
+  return `<div class="scroller" data-scroller>` +
+    `<div class="label">Approval</div><div class="ftitle">${e(ev.title)}</div>` +
+    `<div class="fcode">${e(detail)}</div>${acts}<div class="btn back" data-act="back">Back</div></div>`;
+}
+
+/** The draft step: the exact text that will go out, then Send or Hold. Sending echoes the draft back to the bus. */
+export function draft({ to, text, send = 'Send', hold = 'Hold', btn = NO_BTN }) {
+  const bs = btn();
+  return `<div class="scroller" data-scroller><div class="label">${e(to || 'Send this?')}</div>` +
+    `<div class="fdraft">“${e(text)}”</div>` +
+    `<div class="btn ok ${bs.state !== 'idle' ? `st-${bs.state}` : ''} ${bs.disabled ? 'off' : ''}" data-act="dsend">${e(bs.label || send)}</div>` +
+    `<div class="btn" data-act="dhold">${e(hold)}</div></div>`;
+}
+
+/** Conversation view: transcript bubbles (older ones load on scroll up), live appends, tappable choice buttons. */
+export function convo({ title = 'Conversation', messages = [], loading = false, hasMore = false, error = '', btn = NO_BTN, convId = '' }) {
+  const msgs = messages.map((m) => {
+    const side = bubbleSide(m);
+    const btns = (m.buttons || []).map((b) => {
+      const bs = btn(`conversations:${convId}`, String(b.index), m.id);
+      return `<div class="cbtn ${bs.state !== 'idle' ? `st-${bs.state}` : ''} ${bs.disabled ? 'off' : ''}" data-act="cbtn" data-mid="${e(m.id)}" data-i="${b.index}">${e(bs.label || b.label)}</div>`;
+    }).join('');
+    return `<div class="msg ${side}"><div class="mtext">${e(m.text).replace(/\n/g, '<br>')}</div>` +
+      `${m.answer_needed ? '<div class="mneed">Needs your answer</div>' : ''}${btns ? `<div class="mbtns">${btns}</div>` : ''}</div>`;
+  }).join('');
+  const top = loading ? '<div class="sec cnote">Loading…</div>' : error ? `<div class="sec cnote">${e(error)}</div>` : hasMore ? '<div class="sec cnote">Scroll for earlier</div>' : '';
+  return `<div class="chead">${e(title)}</div><div class="cscroll" data-scroller>${top}${msgs || (loading ? '' : '<div class="sec cnote">No messages</div>')}</div><div class="cvback" data-act="back">Back</div>`;
 }
 
 export function pairing({ error = '' }) {
@@ -131,7 +232,7 @@ export function offline({ connecting }) {
     <div class="big" style="font-size:40px;margin-top:14px">${connecting ? 'One moment' : 'Reconnecting'}</div>`;
 }
 
-const R = { idle, listening, working, reply, choice, needs, draft, done, quiet, status, pairing, offline };
+const R = { idle, listening, working, reply, choice, needs, draft, done, quiet, status, pairing, offline, event, approval, convo };
 export function render(name, props = {}) {
   return R[name](props);
 }

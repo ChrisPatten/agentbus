@@ -137,25 +137,26 @@ describe('face choice and quiet gating', () => {
 });
 
 describe('rendering', () => {
-  const desk = { sessions: [ses('a', 'waiting', { title: 'Intercom Build' }), ses('b', 'working'), ses('c', 'idle')], counts: { working: 1, needs_you: 1 } };
-  it('status face shows the counts and a segment per session, with no message text', () => {
-    const h = render('status', { desk, now: new Date(NOW) });
-    expect(h).toContain('1 working');
-    expect(h).toContain('1 needs you');
+  const sessions = [ses('a', 'waiting', { title: 'Intercom Build', needs_you: true, conversation_id: 'c-a' }), ses('b', 'working'), ses('c', 'idle')];
+  it('status face has a clock, a row and a rim segment per session, and no message text', () => {
+    const h = render('status', { sessions, now: new Date(NOW), tz: TZ });
+    expect(h).toContain('class="stclock"');
+    expect((h.match(/class="srow2/g) || []).length).toBe(3);
     expect((h.match(/<path /g) || []).length).toBe(3);
     expect(h).toContain('class="breathe"');
+    expect(h).toContain('Intercom Build');
   });
   it('status face says All quiet and does not breathe when idle', () => {
-    const h = render('status', { desk: { sessions: [], counts: { working: 0, needs_you: 0 } }, now: new Date(NOW) });
+    const h = render('status', { sessions: [], now: new Date(NOW), tz: TZ });
     expect(h).toContain('All quiet');
     expect(h).not.toContain('breathe');
   });
-  it('status list shows titles and opens a notice only for rows that have one', () => {
-    const h = render('status', { desk, now: new Date(NOW), list: true, noticeFor: (s) => s.id === 'a' });
-    expect(h).toContain('Intercom Build');
-    expect(h).toContain('waiting · 4m');
-    expect(h).toContain('data-act="session" data-id="a"');
-    expect(render('status', { desk, now: new Date(NOW), list: true })).not.toContain('data-act');
+  it('a row opens its conversation, or a notice in the legacy fallback, and is otherwise inert', () => {
+    const h = render('status', { sessions, now: new Date(NOW), tz: TZ });
+    expect(h).toContain('data-act="session" data-cid="c-a" data-id="a"');
+    expect(h.match(/data-act=/g).length).toBe(1);
+    const legacy = render('status', { sessions: [ses('x', 'waiting', { needs_you: true })], now: new Date(NOW), tz: TZ, noticeFor: (id) => id === 'x' });
+    expect(legacy).toContain('data-act="session" data-cid="" data-id="x"');
   });
   it('quiet face has no text at all', () => {
     const h = render('quiet', { tone: quietTone({ counts: { working: 0, needs_you: 1 } }) });

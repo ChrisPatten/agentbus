@@ -266,6 +266,7 @@ export function waitingCount(attention, items, hidden = new Map()) {
 export function pickScreen(c) {
   if (!c.paired) return 'pairing';
   if (c.offline) return 'offline';
+  if (c.view) return 'view';
   if (c.listening) return 'listening';
   if (c.reply) return 'reply';
   if (c.ownWorking) return 'working';

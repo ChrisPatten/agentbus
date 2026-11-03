@@ -1,7 +1,11 @@
 // Intercom web app: wires the socket, state and dial screens together.
 import { render } from './screens.js';
 import { IntercomSocket, store, apiUrl } from './socket.js';
-import { parsePairInput, replyIsFresh, applyNotification, activeItems, needsList, infoList, attentionLevel, cycleId, isQuietHours, pickScreen, deskCounts, departureView, chooseDeskFace, nextFace, quietTone, matchNotice, LANDSCAPE_QUERY, physicalDialSize, clampPpi, DIAL_INCHES, DEFAULT_PPI } from './logic.js';
+import { parsePairInput, replyIsFresh, applyNotification, activeItems, needsList, infoList, attentionLevel, cycleId, isQuietHours, pickScreen, deskCounts, departureView, chooseDeskFace, quietTone, matchNotice, LANDSCAPE_QUERY, physicalDialSize, clampPpi, DIAL_INCHES, DEFAULT_PPI, LEVEL_RANK, tzParts } from './logic.js';
+import { createStore, applyDelta, applyState, revsOf, itemsOf, activeSlot, faceOrder, stepFace, faceLayout, approvalItems } from './surface.js';
+import { ringModel, hitTest, ballHit, pointToHours, scrubStart, scrubMove, scrubRelease, scrubActive, scrubRemaining, SNAP_MS, pickDeparture, travelDeparture } from './dayv2.js';
+import { ButtonStates, submitAction, needsConfirm, btnKey } from './actions.js';
+import { sessionsFromDesk, sessionsFromStore, mergeOlder, appendMessage } from './statusv2.js';
 import { runDemo, STEPS } from './demo.js';
 import { createWakeKeeper } from './wake.js';
 
@@ -18,6 +22,9 @@ const S = {
   reply: null, expanded: false, doneUntil: 0, doneWord: DONE_WORDS[0], calendar: null, sentAt: 0, pairError: '', lastReplyId: null,
   notes: new Map(), hidden: new Map(), attention: null, nSel: null, nOpen: null, noteOpen: false, ownIids: new Set(), swipedAt: 0,
   desk: null, face: loadFace(), statusList: false,
+  // Surface v2
+  store: createStore(), v2: false, surfaceHttp: true, btns: new ButtonStates(), images: new Map(),
+  view: null, viewStack: [], convo: null, draftCtx: null, scrub: null, scrubbedAt: 0, sentView: null,
 };
 const forceQuiet = params.has('quiet') ? params.get('quiet') !== '0' : null; // dev: ?quiet previews the Quiet screen, ?quiet=0 shows the day screens at any hour
 let sock = null;
@@ -34,10 +41,121 @@ function loadFace() {
     return localStorage.getItem('intercom.face') === 'status' ? 'status' : 'day';
   } catch { return 'day'; }
 }
+function moveFace(step) {
+  const order = S.v2 ? faceOrder(S.store) : ['day', 'status'];
+  setFace(stepFace(order, S.face, step));
+}
+/** A pointer position in the 466 design square. */
+function designPoint(ev) {
+  const r = $('dial').getBoundingClientRect();
+  return { x: ((ev.clientX - r.left) / r.width) * 466, y: ((ev.clientY - r.top) / r.height) * 466 };
+}
 function setFace(face) {
   S.face = face; S.statusList = false; S.swipedAt = Date.now();
   store.set('intercom.face', face);
   update();
+}
+
+const VIEW_IDLE_MS = 120000;
+let viewTimer = null;
+const btnFn = (object, actionId, mid) => S.btns.get(btnKey(object, actionId, mid));
+const tzNow = () => (S.calendar && S.calendar.tz) || TZ_FALLBACK;
+const surfaceUrl = (path) => apiUrl(`api/v1/surface/${path}`);
+const authHeaders = () => ({ Authorization: `Bearer ${S.pair.token}` });
+
+/* ---------- views (Event focus, Approval, draft, Conversation) ---------- */
+function armViewTimer() {
+  clearTimeout(viewTimer);
+  if (S.view) viewTimer = setTimeout(closeAllViews, VIEW_IDLE_MS);
+}
+function syncViewFrame() {
+  const want = S.view && S.view.type === 'convo' ? `conversation:${S.view.id}` : null;
+  if (want === S.sentView) return;
+  if (!sock || sock.state !== 'online' || sock.mode !== 'v2') { return; }
+  sock.sendView(want);
+  S.sentView = want;
+}
+function openView(v) {
+  if (S.view) S.viewStack.push(S.view);
+  S.view = v; armViewTimer(); syncViewFrame(); update();
+}
+function closeView() {
+  S.view = S.viewStack.pop() || null;
+  if (!S.view || S.view.type !== 'convo') { /* convo state is dropped when no convo view is left */ if (!S.viewStack.some((x) => x.type === 'convo') && !(S.view && S.view.type === 'convo')) S.convo = null; }
+  armViewTimer(); syncViewFrame(); update();
+}
+function closeAllViews() {
+  S.view = null; S.viewStack = []; S.convo = null; S.draftCtx = null;
+  clearTimeout(viewTimer); syncViewFrame(); update();
+}
+
+function ensureImage(hash) {
+  if (!hash || S.images.has(hash) || !S.pair) return;
+  S.images.set(hash, null);
+  fetch(surfaceUrl(`assets/${encodeURIComponent(hash)}`), { headers: authHeaders() })
+    .then((r) => (r.ok ? r.blob() : Promise.reject(new Error(String(r.status)))))
+    .then((b) => { S.images.set(hash, URL.createObjectURL(b)); update(); })
+    .catch(() => { S.images.delete(hash); });
+}
+
+function openEvent(id) {
+  const ev = S.store.items.events[id];
+  if (!ev) return;
+  if (ev.kind === 'approval') { openView({ type: 'approval', id }); return; }
+  if (ev.opens === 'conversation' && ev.conversation_id) { openConvo(ev.conversation_id, ev.title); return; }
+  const img = ev.detail && ev.detail.image;
+  if (img) ensureImage(img);
+  openView({ type: 'event', id });
+}
+
+async function openConvo(id, title = 'Conversation') {
+  S.convo = { id, title, messages: [], nextBefore: null, loading: true, error: '', stick: true, prepend: false };
+  openView({ type: 'convo', id });
+  await loadConvoPage(null);
+}
+async function loadConvoPage(before) {
+  const c = S.convo;
+  if (!c || !S.pair) return;
+  const id = c.id;
+  try {
+    const q = `limit=30${before ? `&before=${encodeURIComponent(before)}` : ''}`;
+    const r = await fetch(surfaceUrl(`conversations/${encodeURIComponent(id)}?${q}`), { headers: authHeaders() });
+    if (!S.convo || S.convo.id !== id) return;
+    if (!r.ok) { S.convo.error = r.status === 404 ? 'Not available' : `Could not load (${r.status})`; S.convo.loading = false; update(); return; }
+    const j = await r.json();
+    if (!S.convo || S.convo.id !== id) return;
+    S.convo.messages = mergeOlder(S.convo.messages, j.messages || []);
+    S.convo.nextBefore = j.next_before || null;
+    if (j.title) S.convo.title = j.title;
+    S.convo.error = '';
+  } catch { if (S.convo && S.convo.id === id) S.convo.error = 'Could not load'; }
+  if (S.convo && S.convo.id === id) { S.convo.loading = false; update(); }
+}
+function loadOlder() {
+  const c = S.convo;
+  if (!c || c.loading || !c.nextBefore) return;
+  c.loading = true; c.prepend = true; update();
+  loadConvoPage(c.nextBefore);
+}
+
+/* ---------- actions: every button goes through here ---------- */
+async function fire({ object, actionId, action = null, draft, messageId }) {
+  if (!S.pair) return null;
+  const p = submitAction({ url: surfaceUrl('actions'), token: S.pair.token, object, actionId, action, draft, messageId, states: S.btns });
+  update();
+  const r = await p;
+  update();
+  if (r.interp && r.interp.state === 'failed' && !r.interp.disabled) later(4100);
+  return r;
+}
+/** Start an action: one with a confirm draft opens the draft view first; the Send there echoes the text back. */
+function startAction({ object, actionId, action, messageId }) {
+  if (needsConfirm(action)) {
+    S.draftCtx = { object, actionId, action, messageId, draft: action.confirm.draft, prompt: action.confirm.prompt || action.label };
+    openView({ type: 'draft' });
+    return null;
+  }
+  return fire({ object, actionId, action, messageId });
 }
 
 function loadPair() {
@@ -80,12 +198,24 @@ function applySize() {
 
 /* ---------- rendering ---------- */
 function show(name, props) {
+  const prev = lastName;
   lastName = name;
   const html = render(name, props);
+  $('dial').dataset.screen = name;
   if (html === lastHtml) return;
   lastHtml = html;
   const face = $('face');
+  const sc = face.querySelector('[data-scroller]');
+  const rec = sc && prev === name ? { top: sc.scrollTop, h: sc.scrollHeight, bottom: sc.scrollHeight - sc.scrollTop - sc.clientHeight < 60 } : null;
   face.innerHTML = html;
+  const nsc = face.querySelector('[data-scroller]');
+  if (nsc) {
+    const c = S.convo;
+    if (name === 'convo' && c && (c.stick || (rec && rec.bottom)) && !c.prepend) { nsc.scrollTop = nsc.scrollHeight; if (c.stick && !c.loading) c.stick = false; }
+    else if (name === 'convo' && c && c.prepend && rec) { nsc.scrollTop = rec.top + (nsc.scrollHeight - rec.h); if (!c.loading) c.prepend = false; }
+    else if (rec) nsc.scrollTop = rec.top;
+  }
+  if (prev === name && (name === 'convo' || name === 'event' || name === 'approval' || name === 'draft' || S.scrub)) return;
   face.classList.remove('fade');
   void face.offsetWidth;
   face.classList.add('fade');
@@ -95,7 +225,7 @@ function computeView(now = new Date()) {
   const cal = S.calendar;
   const tz = (cal && cal.tz) || TZ_FALLBACK;
   const quiet = forceQuiet === null ? isQuietHours(now) : forceQuiet;
-  const items = activeItems(S.notes, now.getTime(), S.hidden);
+  const items = allItems(now.getTime());
   const attn = needsList(items);
   const list = attn.length ? attn : S.noteOpen ? infoList(items) : [];
   if (!attn.length && !list.length) S.noteOpen = false;
@@ -107,9 +237,10 @@ function computeView(now = new Date()) {
   let name = pickScreen({
     paired: !!S.pair,
     offline: S.conn !== 'online' && !S.reply && Date.now() - S.offlineSince > 1500,
-    reply: !!S.reply, ownWorking: own || (sent && !running), done: Date.now() < S.doneUntil,
+    view: !!S.view, reply: !!S.reply, ownWorking: own || (sent && !running), done: Date.now() < S.doneUntil,
     needs: list.length > 0, quiet, otherWorking: running,
   });
+  if (name === 'view') name = S.view.type === 'convo' ? 'convo' : S.view.type;
   if (name === 'idle' || name === 'quiet') {
     const f = chooseDeskFace({ quiet: name === 'quiet', preferred: S.face });
     name = f === 'quiet' ? 'quiet' : f === 'status' ? 'status' : 'idle';
@@ -122,12 +253,54 @@ function computeView(now = new Date()) {
     case 'done': return [name, { word: S.doneWord }];
     case 'needs': return [name, { item: list.find((n) => n.id === S.nSel), index: list.findIndex((n) => n.id === S.nSel), total: list.length, expanded: S.nOpen === S.nSel }];
     case 'quiet': {
-      const sessions = (S.desk && S.desk.sessions) || [];
-      return [name, { tone: quietTone({ counts: deskCounts(S.desk), stuck: sessions.some((x) => x.state === 'stuck'), attention: attn.length, notes: infoList(items).length }) }];
+      const sessions = statusSessions();
+      const counts = S.v2 ? { working: sessions.filter((x) => x.state === 'working').length, needs_you: sessions.filter((x) => x.needs_you).length } : deskCounts(S.desk);
+      return [name, { tone: quietTone({ counts, stuck: sessions.some((x) => x.state === 'stuck'), attention: attn.length, notes: infoList(items).length }) }];
     }
-    case 'status': return [name, { desk: S.desk, now, list: S.statusList, noticeFor: (sess) => !!matchNotice(sess, items) }];
-    default: return [name, { events: cal ? cal.events : [], now, tz, calendarKnown: !!cal, notes: infoList(items).length, halo: attentionLevel(attn) !== 'none', departure: departureView(S.desk && S.desk.departure, now.getTime(), tz) }];
+    case 'status': return [name, { sessions: statusSessions(), now, tz, noticeFor: (id) => { const x = statusSessions().find((q) => q.id === id); return !!matchNotice(x, items); } }];
+    case 'event': {
+      const ev = S.store.items.events[S.view.id];
+      if (!ev) { queueMicrotask(closeView); return ['offline', { connecting: true }]; }
+      return [name, { ev, tz, btn: btnFn, image: ev.detail && ev.detail.image ? S.images.get(ev.detail.image) || null : null }];
+    }
+    case 'approval': {
+      const ev = S.store.items.events[S.view.id];
+      if (!ev) { queueMicrotask(closeView); return ['offline', { connecting: true }]; }
+      return [name, { ev, btn: btnFn }];
+    }
+    case 'draft': {
+      const d = S.draftCtx;
+      if (!d) { queueMicrotask(closeView); return ['offline', { connecting: true }]; }
+      return [name, { to: d.prompt, text: d.draft, btn: () => btnFn(d.object, d.actionId, d.messageId) }];
+    }
+    case 'convo': {
+      const c = S.convo;
+      if (!c) { queueMicrotask(closeView); return ['offline', { connecting: true }]; }
+      return [name, { title: c.title, messages: c.messages, loading: c.loading, hasMore: !!c.nextBefore, error: c.error, btn: btnFn, convId: c.id }];
+    }
+    default: {
+      const surfaceEvents = S.v2 ? itemsOf(S.store, 'events') : [];
+      const departure = S.v2 ? pickDeparture(S.desk && S.desk.departure, surfaceEvents, now.getTime(), tz) : departureView(S.desk && S.desk.departure, now.getTime(), tz);
+      if (S.scrub && !scrubActive(S.scrub, now.getTime())) S.scrub = null;
+      return [name, {
+        // Surface v2: the ring and the default primary line come only from surface Events and slots. The calendar draws only on the legacy path.
+        events: S.v2 ? [] : (cal ? cal.events : []), now, tz, calendarKnown: !!cal, v2: S.v2,
+        notes: infoList(items).length, halo: attentionLevel(attn) !== 'none', departure,
+        surfaceEvents, store: S.store, layout: S.v2 ? faceLayout(S.store, 'day') : {}, scrub: S.scrub, btn: btnFn,
+      }];
+    }
   }
+}
+
+function statusSessions() { return S.v2 ? sessionsFromStore(S.store) : sessionsFromDesk(S.desk); }
+/** Active notices plus pending bus approvals (as Needs-you items), most urgent first. */
+function allItems(nowMs) {
+  const items = activeItems(S.notes, nowMs, S.hidden);
+  if (!S.v2) return items;
+  const ap = approvalItems(S.store, nowMs).filter((n) => !S.hidden.has(n.id));
+  if (!ap.length) return items;
+  const t = (n) => Date.parse(n.updated_at || n.created_at || '') || 0;
+  return [...items, ...ap].sort((a, b) => (LEVEL_RANK[b.level] || 2) - (LEVEL_RANK[a.level] || 2) || t(b) - t(a));
 }
 
 function update() {
@@ -193,6 +366,9 @@ function onEvent(name, d) {
       break;
     case 'calendar': S.calendar = d; break;
     case 'desk': S.desk = d; break;
+    case 'conversation_append':
+      if (S.convo && d.conversation_id === S.convo.id && appendMessage(S.convo.messages, d.message)) armViewTimer();
+      break;
     default: break;
   }
   update();
@@ -202,10 +378,17 @@ function startSocket() {
   if (!S.pair) return;
   sock = new IntercomSocket({
     token: S.pair.token,
+    getRevs: () => revsOf(S.store),
     handlers: {
+      onDelta(f) { if (applyDelta(S.store, f) === 'gap') resync(); update(); },
+      onMode(m) { if (m === 'v1') { S.v2 = false; S.store = createStore(); S.sentView = null; } },
+      onWelcome(f) {
+        S.v2 = f.version === 2; S.sentView = null; syncViewFrame();
+        for (const id of S.hidden.keys()) sock.ackNotification(id);
+        if (S.v2) resync();
+      },
       onState(st) { if (S.conn === 'online' && st !== 'online') S.offlineSince = Date.now(); S.conn = st; update(); if (st !== 'online') later(1600); },
       onEvent,
-      onWelcome() { for (const id of S.hidden.keys()) sock.ackNotification(id); },
       onReset() { S.notes.clear(); S.hidden.clear(); S.attention = null; S.reply = null; S.calendar = null; S.desk = null; S.activity = { state: 'idle', status_text: null }; },
       onAck(f) { if (f.interaction_id && f.status === 'queued') S.ownIids.add(f.interaction_id); if (f.status === 'rejected') { S.sentAt = 0; note(`Not sent: ${f.reason || 'rejected'}`); } },
       onUnauthorized() { unpair('Pairing was rejected. Open a new pairing link.'); },
@@ -222,6 +405,19 @@ async function fetchToday() {
   try {
     const r = await fetch(apiUrl('api/v1/intercom/today'), { headers: { Authorization: `Bearer ${S.pair.token}` } });
     if (r.ok) { const c = await r.json(); if (!S.calendar || (c.generated_at || '') >= (S.calendar.generated_at || '')) S.calendar = c; update(); }
+  } catch { /* offline: fine */ }
+}
+
+// Snapshot of every surface resource: after a delta gap, after welcome, and as the 60 s poll fallback.
+let resyncAt = 0;
+async function resync(force = false) {
+  if (!S.pair || !S.surfaceHttp || (!S.v2 && !force)) return;
+  if (Date.now() - resyncAt < 2000) return;
+  resyncAt = Date.now();
+  try {
+    const r = await fetch(surfaceUrl('state'), { headers: authHeaders() });
+    if (r.status === 401 || r.status === 403 || r.status === 404) { S.surfaceHttp = false; return; }
+    if (r.ok) { applyState(S.store, await r.json()); update(); }
   } catch { /* offline: fine */ }
 }
 
@@ -257,13 +453,13 @@ async function pair(code) {
 function unpair(msg = '') {
   sock?.stop(); sock = null;
   ['intercom.pair', 'intercom.cursor', 'intercom.outbox'].forEach(store.del);
-  Object.assign(S, { pair: null, conn: 'offline', reply: null, calendar: null, desk: null, statusList: false, activity: { state: 'idle', status_text: null }, pairError: msg, sentAt: 0, doneUntil: 0, notes: new Map(), hidden: new Map(), attention: null, noteOpen: false });
+  Object.assign(S, { pair: null, conn: 'offline', reply: null, calendar: null, desk: null, statusList: false, activity: { state: 'idle', status_text: null }, pairError: msg, sentAt: 0, doneUntil: 0, notes: new Map(), hidden: new Map(), attention: null, noteOpen: false, store: createStore(), v2: false, surfaceHttp: true, btns: new ButtonStates(), view: null, viewStack: [], convo: null, draftCtx: null, scrub: null, sentView: null });
   update();
 }
 
 /* ---------- notification taps ---------- */
 function currentList() {
-  const items = activeItems(S.notes, Date.now(), S.hidden);
+  const items = allItems(Date.now());
   const attn = needsList(items);
   return attn.length ? attn : infoList(items);
 }
@@ -273,23 +469,65 @@ function cycle(delta) {
   update();
 }
 function hide(item) { S.hidden.set(item.id, item.updated_at || ''); }
-function onAct({ act, i, id }) {
+function onAct(d) {
+  const { act, i, id } = d;
+  const now = Date.now();
+  armViewTimer();
   if (act === 'session') {
-    const sess = ((S.desk && S.desk.sessions) || []).find((x) => x.id === id);
-    const notice = matchNotice(sess, activeItems(S.notes, Date.now(), S.hidden));
-    if (notice) { S.noteOpen = true; S.nSel = notice.id; S.statusList = false; update(); }
+    if (d.cid) { const sess = statusSessions().find((x) => x.id === id); openConvo(d.cid, (sess && (sess.subject || sess.title)) || 'Conversation'); return; }
+    const sess = statusSessions().find((x) => x.id === id);
+    const notice = matchNotice(sess, allItems(now));
+    if (notice) { S.noteOpen = true; S.nSel = notice.id; update(); }
     return;
   }
-  if (act === 'note') { const info = infoList(activeItems(S.notes, Date.now(), S.hidden)); if (info.length) { S.noteOpen = true; S.nSel = info[0].id; update(); } return; }
+  if (act === 'note') { const info = infoList(allItems(now)); if (info.length) { S.noteOpen = true; S.nSel = info[0].id; update(); } return; }
   if (act === 'cycle') { cycle(1); return; }
   if (act === 'expand') { S.nOpen = S.nSel; update(); return; }
   if (act === 'collapse') { S.nOpen = null; update(); return; }
-  const item = S.notes.get(S.nSel);
-  if (!item || !sock) return;
+  if (act === 'back') { closeView(); return; }
+  if (act === 'dhold') { closeView(); return; }
+  if (act === 'slotaction') {
+    const slot = activeSlot(S.store, 'primary', now);
+    if (slot && slot.action) startAction({ object: 'slots:primary', actionId: slot.action.id, action: slot.action });
+    return;
+  }
+  if (act === 'efire') {
+    const ev = S.view && S.store.items.events[S.view.id];
+    const action = ev && (ev.actions || []).find((a) => a.id === d.aid);
+    if (action) startAction({ object: `events:${ev.id}`, actionId: action.id, action });
+    return;
+  }
+  if (act === 'dsend') {
+    const c = S.draftCtx;
+    if (!c) return;
+    fire({ object: c.object, actionId: c.actionId, action: c.action, draft: c.draft, messageId: c.messageId }).then((r) => {
+      if (r && r.interp && r.interp.state === 'sent') setTimeout(() => { if (S.view && S.view.type === 'draft') { S.draftCtx = null; closeView(); } }, 1100);
+    });
+    return;
+  }
+  if (act === 'cbtn') {
+    const c = S.convo;
+    if (c) fire({ object: `conversations:${c.id}`, actionId: d.i, messageId: d.mid });
+    return;
+  }
+  const item = currentList().find((n) => n.id === S.nSel);
+  if (!item) return;
   S.nOpen = null;
+  if (item.approval) {
+    // A bus approval riding the Needs-you screen: Review opens the Approval view, Got it just hides it locally.
+    if (act === 'ack') hide(item); else if (act === 'action') openEvent(item.event_id);
+    update(); return;
+  }
+  if (!sock) return;
   if (act === 'ack') { hide(item); sock.ackNotification(item.id); }
   else if (act === 'action') {
-    hide(item); sock.sendAction(item.id, Number(i));
+    hide(item);
+    if (S.v2) {
+      fire({ object: `notices:${item.id}`, actionId: String(i) }).then((r) => {
+        if (r && r.interp && r.interp.state === 'failed') { S.hidden.delete(item.id); note('Not sent'); }
+        update();
+      });
+    } else sock.sendAction(item.id, Number(i));
     S.sentAt = Date.now(); S.doneUntil = 0; later(6100);
   }
   update();
@@ -330,7 +568,8 @@ function wireUi() {
   let lastTap = 0;
   $('dial').addEventListener('click', (ev) => {
     if (demoMode) return;
-    if (Date.now() - S.swipedAt < 400) return;
+    if (Date.now() - S.swipedAt < 400 || Date.now() - S.scrubbedAt < 400) return;
+    armViewTimer();
     const act = ev.target.closest && ev.target.closest('[data-act]');
     if (act && !S.reply) { onAct(act.dataset); return; }
     const t = Date.now();
@@ -339,22 +578,63 @@ function wireUi() {
       if (dbl) { dismissReply(); return; }
       if (!S.expanded) { S.expanded = true; armReplyTimer(); update(); }
     } else if (Date.now() < S.doneUntil) { S.doneUntil = 0; update(); }
-    else if (lastName === 'status') { S.statusList = !S.statusList; update(); }
+    else if (lastName === 'idle' && S.v2) {
+      const p = designPoint(ev);
+      const now = new Date();
+      const hit = hitTest(p.x, p.y, ringModel(itemsOf(S.store, 'events'), now, tzNow()));
+      if (hit) openEvent(hit.id);
+    }
   });
-  // Swipe left or right through several notifications.
+  // Swipe left or right through several notifications, or between faces. A press on the progress ball scrubs instead.
   let sx = null;
-  $('dial').addEventListener('pointerdown', (ev) => { sx = ev.clientX; });
-  $('dial').addEventListener('pointerup', (ev) => {
+  const dial = $('dial');
+  dial.addEventListener('pointerdown', (ev) => {
+    armViewTimer();
+    sx = ev.clientX;
+    if (lastName === 'idle' && S.v2 && !S.reply) {
+      const p = designPoint(ev);
+      const nowH = tzParts(new Date(), tzNow()).hours;
+      if (ballHit(p.x, p.y, nowH)) {
+        sx = null;
+        S.scrub = scrubStart(pointToHours(p.x, p.y));
+        try { dial.setPointerCapture(ev.pointerId); } catch { /* ignore */ }
+        update();
+      }
+    }
+  });
+  dial.addEventListener('pointermove', (ev) => {
+    if (!S.scrub || !S.scrub.dragging) return;
+    const p = designPoint(ev);
+    S.scrub = scrubMove(S.scrub, pointToHours(p.x, p.y));
+    update();
+  });
+  const endScrub = () => {
+    if (!S.scrub || !S.scrub.dragging) return false;
+    S.scrub = scrubRelease(S.scrub, Date.now());
+    S.scrubbedAt = Date.now();
+    later(SNAP_MS + 60); // snap back to now about four seconds after letting go
+    update();
+    return true;
+  };
+  dial.addEventListener('pointercancel', endScrub);
+  dial.addEventListener('pointerup', (ev) => {
+    if (endScrub()) { sx = null; return; }
     if (sx === null) return;
     const dx = ev.clientX - sx; sx = null;
     if (Math.abs(dx) > 40 && lastName === 'needs') { S.swipedAt = Date.now(); cycle(dx < 0 ? 1 : -1); }
-    else if (Math.abs(dx) > 40 && (lastName === 'idle' || lastName === 'status')) setFace(nextFace(S.face));
+    else if (Math.abs(dx) > 40 && (lastName === 'idle' || lastName === 'status')) moveFace(dx < 0 ? 1 : -1);
   });
   document.addEventListener('keydown', (ev) => {
     if (ev.target && ev.target.tagName === 'INPUT') return;
-    if ((ev.key === 'ArrowLeft' || ev.key === 'ArrowRight') && (lastName === 'idle' || lastName === 'status')) setFace(nextFace(S.face));
+    if ((ev.key === 'ArrowLeft' || ev.key === 'ArrowRight') && (lastName === 'idle' || lastName === 'status')) moveFace(ev.key === 'ArrowRight' ? 1 : -1);
+    if (ev.key === 'Escape' && S.view) closeView();
   });
-  $('dial').addEventListener('scroll', () => { if (S.reply) armReplyTimer(); }, true);
+  $('dial').addEventListener('scroll', (ev) => {
+    if (S.reply) armReplyTimer();
+    armViewTimer();
+    const t = ev.target;
+    if (S.convo && t && t.classList && t.classList.contains('cscroll') && t.scrollTop < 30) loadOlder();
+  }, true);
 }
 
 /* ---------- boot ---------- */
@@ -371,7 +651,7 @@ function boot() {
   wireCalibrate();
   wireUi();
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') { wake.evaluate(); sock?.nudge(); fetchToday(); fetchDesk(); update(); }
+    if (document.visibilityState === 'visible') { wake.evaluate(); sock?.nudge(); fetchToday(); fetchDesk(); resync(); update(); }
   });
   window.addEventListener('online', () => sock?.nudge());
   wake.evaluate();
@@ -403,6 +683,7 @@ function boot() {
   setInterval(update, 15000);
   setInterval(() => { if (S.pair) fetchToday(); }, 300000);
   setInterval(() => { if (S.pair) fetchDesk(); }, 60000);
+  setInterval(() => { if (S.pair) resync(); }, 60000); // 60 s poll fallback for the surface resources
 }
 
 boot();

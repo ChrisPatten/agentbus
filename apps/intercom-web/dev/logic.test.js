@@ -86,7 +86,7 @@ describe('socket', () => {
   const timers = { setInterval: () => 0, clearInterval() {}, setTimeout: () => 0, clearTimeout() {} };
   it('says hello, resends the outbox after welcome, tracks cursor and answers ping', () => {
     const events = []; const states = [];
-    const s = new IntercomSocket({ token: 'tok', url: 'ws://x', WS: FakeWS, timers, handlers: { onState: (x) => states.push(x), onEvent: (n, d, q) => events.push([n, q]) } });
+    const s = new IntercomSocket({ token: 'tok', url: 'ws://x', v2: false, WS: FakeWS, timers, handlers: { onState: (x) => states.push(x), onEvent: (n, d, q) => events.push([n, q]) } });
     s.cursor = 0; s.outbox.items = [{ client_msg_id: 'm1', body: 'hi' }];
     s.connect(); const ws = FakeWS.last; ws.onopen();
     expect(ws.sent[0]).toMatchObject({ type: 'hello', token: 'tok', cursor: 0 });
@@ -102,7 +102,7 @@ describe('socket', () => {
   });
   it('flags 4401 as unauthorized without retrying', () => {
     let unauth = 0;
-    const s = new IntercomSocket({ token: 't', url: 'ws://x', WS: FakeWS, timers, handlers: { onUnauthorized: () => unauth++ } });
+    const s = new IntercomSocket({ token: 't', url: 'ws://x', v2: false, WS: FakeWS, timers, handlers: { onUnauthorized: () => unauth++ } });
     s.connect(); FakeWS.last.onclose({ code: 4401 });
     expect(unauth).toBe(1); expect(s.stopped).toBe(true);
   });

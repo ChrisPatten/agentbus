@@ -1,8 +1,10 @@
-// WebSocket client for /api/v1/intercom/ws (protocol v1).
+// WebSocket client. Prefers /api/v1/surface/ws with protocol v2 (resource deltas); falls back to the legacy
+// /api/v1/intercom/ws with protocol v1 when the bus refuses the credential there or does not answer on the v2 path.
 import { backoffDelay, Outbox, frameOf } from './logic.js';
 
-export const CLIENT = 'intercom-web/0.1';
+export const CLIENT = 'intercom-web/0.2';
 export const WS_PATH = 'api/v1/intercom/ws';
+export const WS_PATH_V2 = 'api/v1/surface/ws';
 
 const store = {
   get(k) { try { return localStorage.getItem(k); } catch { return null; } },
@@ -16,22 +18,31 @@ export function apiUrl(path, loc = location) {
   return new URL(`/${path}`, loc.origin).href;
 }
 
-export function wsUrl(loc = location) {
-  const u = new URL(`/${WS_PATH}`, loc.origin);
+export function wsUrl(loc = location, path = WS_PATH) {
+  const u = new URL(`/${path}`, loc.origin);
   u.protocol = loc.protocol === 'https:' ? 'wss:' : 'ws:';
   return u.href;
 }
 
 export class IntercomSocket {
   /**
-   * handlers: onState(state), onEvent(name, data, seq), onAck(frame), onUnauthorized(), onReset()
+   * handlers: onState(state), onEvent(name, data, seq), onAck(frame), onUnauthorized(), onReset(), onWelcome(frame),
+   *   onDelta(frame), onActionResult(frame), onMode('v1'|'v2')
    * state: 'connecting' | 'online' | 'offline'
+   * v2: try protocol v2 first. getRevs() gives the per-resource revs sent in the hello for resume.
+   * urls: { v1, v2 } override the socket addresses (tests).
    */
-  constructor({ token, handlers, WS = globalThis.WebSocket, url = wsUrl(), timers = globalThis }) {
+  constructor({ token, handlers, WS = globalThis.WebSocket, urls = null, url = null, v2 = true, getRevs = () => ({}), timers = globalThis }) {
     this.token = token;
     this.h = handlers;
     this.WS = WS;
-    this.url = url;
+    this.urls = urls || (url ? { v1: url, v2: url } : { v1: wsUrl(location, WS_PATH), v2: wsUrl(location, WS_PATH_V2) });
+    this.enabled = { v1: true, v2: !!v2 };
+    this.mode = v2 ? 'v2' : 'v1';
+    this.denied = { v1: false, v2: false };
+    this.fails = 0;
+    this.welcomed = false;
+    this.getRevs = getRevs;
     this.timers = timers;
     this.attempt = 0;
     this.ws = null;
@@ -82,11 +93,14 @@ export class IntercomSocket {
     if (this.stopped) return;
     this.setState('connecting');
     let ws;
-    try { ws = new this.WS(this.url); } catch { this.scheduleRetry(); return; }
+    this.welcomed = false;
+    try { ws = new this.WS(this.urls[this.mode]); } catch { this.scheduleRetry(); return; }
     this.ws = ws;
     ws.onopen = () => {
       this.lastFrameAt = Date.now();
-      this.sendRaw({ type: 'hello', token: this.token, cursor: this.cursor, client: CLIENT });
+      const hello = { type: 'hello', token: this.token, cursor: this.cursor, client: CLIENT };
+      if (this.mode === 'v2') { hello.protocol = 2; hello.revs = this.getRevs(); }
+      this.sendRaw(hello);
     };
     ws.onmessage = (m) => {
       this.lastFrameAt = Date.now();
@@ -97,12 +111,28 @@ export class IntercomSocket {
     ws.onclose = (ev) => {
       if (this.ws !== ws) return;
       this.ws = null;
-      if (ev.code === 4401) { this.stopped = true; this.timers.clearInterval(this.watchdog); this.setState('offline'); this.h.onUnauthorized?.(); return; }
+      if (ev.code === 4401) {
+        // Refused on this path. Try the other protocol once before treating the credential as bad.
+        this.denied[this.mode] = true;
+        const other = this.mode === 'v2' ? 'v1' : 'v2';
+        if (this.enabled[other] && !this.denied[other]) { this.switchMode(other); this.connect(); return; }
+        this.stopped = true; this.timers.clearInterval(this.watchdog); this.setState('offline'); this.h.onUnauthorized?.(); return;
+      }
       this.setState('offline');
+      // Two attempts in a row that never reached a welcome: probe the other path (a bus without v2 answers nothing there).
+      if (!this.welcomed && this.enabled.v2 && ++this.fails >= 2) { this.switchMode(this.mode === 'v2' ? 'v1' : 'v2'); }
       this.scheduleRetry();
     };
     ws.onerror = () => { /* close follows */ };
   }
+
+  switchMode(mode) {
+    this.mode = mode; this.fails = 0;
+    this.h.onMode?.(mode);
+  }
+
+  /** Tell the bus which view is open (v2 only): `conversation:<id>`, or null. */
+  sendView(view) { return this.mode === 'v2' && this.state === 'online' ? this.sendRaw({ type: 'view', view }) : false; }
 
   scheduleRetry() {
     if (this.stopped) return;
@@ -114,6 +144,10 @@ export class IntercomSocket {
     switch (f.type) {
       case 'welcome':
         this.attempt = 0;
+        this.fails = 0;
+        this.welcomed = true;
+        this.denied = { v1: false, v2: false };
+        if (this.mode === 'v2' && f.version !== 2) this.switchMode('v1'); // an older bus answered a v2 hello with a v1 welcome
         if (f.reset) {
           this.cursor = f.latest_seq || 0;
           store.set('intercom.cursor', String(this.cursor));
@@ -136,6 +170,8 @@ export class IntercomSocket {
         if (f.status === 'queued' || f.status === 'rejected') { this.outbox.ack(f.client_msg_id); this.saveOutbox(); }
         this.h.onAck?.(f);
         break;
+      case 'delta': this.h.onDelta?.(f); break;
+      case 'action_result': this.h.onActionResult?.(f); break;
       case 'ping': this.sendRaw({ type: 'pong' }); break;
       case 'error':
         if (f.code === 'notification_not_found') { this.outbox.dropActions(); this.saveOutbox(); }
