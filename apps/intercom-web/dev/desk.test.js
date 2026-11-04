@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   deskStateColor, sessionNeedsYou, deskCounts, statusLines, ringSegments, ageText, listRows, matchNotice, departureView,
-  chooseDeskFace, nextFace, quietTone, pickScreen, DESK_COLORS,
+  quietEscapeActive, chooseDeskFace, nextFace, quietTone, pickScreen, DESK_COLORS,
 } from '../logic.js';
 import { render } from '../screens.js';
 import { STEPS } from '../demo.js';
@@ -178,5 +178,17 @@ describe('rendering', () => {
   });
   it('renders every demo step', () => {
     for (const s of STEPS) expect(render(s.name, s.props(0))).toBeTruthy();
+  });
+});
+
+describe('quiet escape', () => {
+  const t = 1_000_000_000_000;
+  it('holds while quiet hours continue and ends with them', () => {
+    expect(quietEscapeActive({ realQuiet: true, escapedAt: t, now: t + 3600e3 })).toBe(true);
+    expect(quietEscapeActive({ realQuiet: false, escapedAt: t, now: t + 3600e3 })).toBe(false);
+  });
+  it('is off when never set, and expires after 12 h', () => {
+    expect(quietEscapeActive({ realQuiet: true, escapedAt: 0, now: t })).toBe(false);
+    expect(quietEscapeActive({ realQuiet: true, escapedAt: t, now: t + 13 * 3600e3 })).toBe(false);
   });
 });

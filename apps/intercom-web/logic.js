@@ -243,7 +243,7 @@ export function isQuietHours(now, tz, startMin = 22 * 60, endMin = 6 * 60 + 30) 
 
 /**
  * Should the screen wake lock be held right now? Only while the page is visible and outside quiet hours
- * (the same 22:00 to 06:30 window as the Quiet screen). \`forceQuiet\` mirrors the dev \`?quiet\` override.
+ * (the same 22:00 to 06:30 window as the Quiet screen). `forceQuiet` mirrors the dev `?quiet` override.
  */
 export function shouldHoldWakeLock({ now, tz, visible = true, forceQuiet = null, startMin, endMin } = {}) {
   if (!visible) return false;
@@ -420,6 +420,13 @@ export function departureView(dep, nowMs, tz) {
 export function chooseDeskFace({ quiet = false, preferred = 'day' } = {}) {
   if (quiet) return 'quiet';
   return preferred === 'status' ? 'status' : 'day';
+}
+/**
+ * Quiet escape: a left swipe on the quiet face sets an override (`escapedAt`, ms). It holds only while quiet hours
+ * continue and for at most `maxMs` (12 h), so it ends with the quiet window and the next night shows quiet again.
+ */
+export function quietEscapeActive({ realQuiet, escapedAt = 0, now, maxMs = 12 * 3600 * 1000 } = {}) {
+  return !!realQuiet && !!escapedAt && now - escapedAt <= maxMs;
 }
 export const nextFace = (face) => (face === 'status' ? 'day' : 'status');
 

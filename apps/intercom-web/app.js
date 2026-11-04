@@ -1,7 +1,7 @@
 // Intercom web app: wires the socket, state and dial screens together.
 import { render } from './screens.js';
 import { IntercomSocket, store, apiUrl } from './socket.js';
-import { parsePairInput, replyIsFresh, applyNotification, activeItems, needsList, infoList, attentionLevel, cycleId, isQuietHours, pickScreen, deskCounts, departureView, chooseDeskFace, quietTone, matchNotice, LANDSCAPE_QUERY, physicalDialSize, clampPpi, DIAL_INCHES, DEFAULT_PPI, LEVEL_RANK, tzParts } from './logic.js';
+import { quietEscapeActive, parsePairInput, replyIsFresh, applyNotification, activeItems, needsList, infoList, attentionLevel, cycleId, isQuietHours, pickScreen, deskCounts, departureView, chooseDeskFace, quietTone, matchNotice, LANDSCAPE_QUERY, physicalDialSize, clampPpi, DIAL_INCHES, DEFAULT_PPI, LEVEL_RANK, tzParts } from './logic.js';
 import { createStore, applyDelta, applyState, revsOf, itemsOf, activeSlot, faceOrder, stepFace, faceLayout, approvalItems } from './surface.js';
 import { ringModel, carouselOrder, nearestRingEvent, inRingBand, ballHit, pointToHours, scrubStart, scrubMove, scrubRelease, scrubActive, scrubRemaining, SNAP_MS, pickDeparture, travelDeparture } from './dayv2.js';
 import { ButtonStates, submitAction, needsConfirm, btnKey } from './actions.js';
@@ -20,7 +20,7 @@ const DONE_WORDS = ['Noted, and filed.', 'Very good.', 'Consider it handled.', '
 const S = {
   pair: loadPair(), conn: 'offline', offlineSince: Date.now(), activity: { state: 'idle', status_text: null },
   reply: null, expanded: false, doneUntil: 0, doneWord: DONE_WORDS[0], calendar: null, sentAt: 0, pairError: '', lastReplyId: null,
-  notes: new Map(), hidden: new Map(), attention: null, nSel: null, nOpen: null, noteOpen: false, ownIids: new Set(), swipedAt: 0,
+  notes: new Map(), hidden: new Map(), attention: null, nSel: null, nOpen: null, noteOpen: false, ownIids: new Set(), swipedAt: 0, quietEscape: 0,
   desk: null, face: loadFace(), statusList: false,
   // Surface v2
   store: createStore(), v2: false, surfaceHttp: true, btns: new ButtonStates(), images: new Map(),
@@ -49,6 +49,11 @@ function moveFace(step) {
 function designPoint(ev) {
   const r = $('dial').getBoundingClientRect();
   return { x: ((ev.clientX - r.left) / r.width) * 466, y: ((ev.clientY - r.top) / r.height) * 466 };
+}
+/** Leave the quiet face for the main face (Day Dial); normal face navigation works from there until quiet hours end. */
+function escapeQuiet() {
+  S.quietEscape = Date.now(); S.face = 'day'; S.statusList = false; S.swipedAt = Date.now();
+  update();
 }
 function setFace(face) {
   S.face = face; S.statusList = false; S.swipedAt = Date.now();
@@ -249,7 +254,10 @@ function show(name, props) {
 function computeView(now = new Date()) {
   const cal = S.calendar;
   const tz = (cal && cal.tz) || TZ_FALLBACK;
-  const quiet = forceQuiet === null ? isQuietHours(now) : forceQuiet;
+  const realQuiet = forceQuiet === null ? isQuietHours(now) : forceQuiet;
+  // Quiet escape: a left swipe on the quiet face is an override that lasts until the quiet window ends (or 12 h at most).
+  if (!quietEscapeActive({ realQuiet, escapedAt: S.quietEscape, now: now.getTime() })) S.quietEscape = 0;
+  const quiet = realQuiet && !S.quietEscape;
   const items = allItems(now.getTime());
   const attn = needsList(items);
   const list = attn.length ? attn : S.noteOpen ? infoList(items) : [];
@@ -672,12 +680,14 @@ function wireUi() {
       if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.3) { S.swipedAt = Date.now(); stepCarousel(dx < 0 ? 1 : -1); }
       return;
     }
+    if (lastName === 'quiet') { if (dx < -40 && Math.abs(dx) > Math.abs(dy)) escapeQuiet(); return; }
     if (Math.abs(dx) > 40 && lastName === 'needs') { S.swipedAt = Date.now(); cycle(dx < 0 ? 1 : -1); }
     else if (Math.abs(dx) > 40 && (lastName === 'idle' || lastName === 'status')) moveFace(dx < 0 ? 1 : -1);
   });
   document.addEventListener('keydown', (ev) => {
     if (ev.target && ev.target.tagName === 'INPUT') return;
     if ((ev.key === 'ArrowLeft' || ev.key === 'ArrowRight') && (lastName === 'idle' || lastName === 'status')) moveFace(ev.key === 'ArrowRight' ? 1 : -1);
+    if (ev.key === 'ArrowRight' && lastName === 'quiet') escapeQuiet();
     if ((ev.key === 'ArrowLeft' || ev.key === 'ArrowRight') && lastName === 'carousel') stepCarousel(ev.key === 'ArrowRight' ? 1 : -1);
     if (ev.key === 'Escape' && S.view) closeView();
   });

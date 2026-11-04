@@ -173,6 +173,18 @@ check('live append while open', (await faceText()).includes('Which restaurant'))
 await tapSel('.cvback'); await sleep(400);
 check('Back returns to the face', await faceHas('.slist2'));
 
+// Quiet escape: on the forced quiet face a left swipe goes to the Day Dial; a right swipe does not.
+await call('Page.navigate', { url: `${BASE}?quiet` }); await sleep(2500);
+check('forced quiet shows the quiet face', (await ev(`document.getElementById('dial').dataset.screen`)) === 'quiet');
+await swipe(120);
+check('a right swipe on the quiet face stays put', (await ev(`document.getElementById('dial').dataset.screen`)) === 'quiet');
+await swipe(-120);
+{ const sc = await ev(`document.getElementById('dial').dataset.screen`); check('a left swipe on the quiet face leaves it (Day Dial, or a waiting Needs-you card)', sc === 'idle' || sc === 'needs', sc); }
+if ((await ev(`document.getElementById('dial').dataset.screen`)) === 'needs') { await tapSel('[data-act="ack"]'); await sleep(500); }
+await swipe(-120);
+{ const sc = await ev(`document.getElementById('dial').dataset.screen`); check('normal face navigation then works (status)', sc === 'status', sc); }
+await ev(`localStorage.setItem('intercom.face','day')`);
+
 // Layout sizes: portrait 466 equivalent and landscape
 await ev(`localStorage.setItem('intercom.face','day');location.reload()`); await sleep(2200);
 await call('Emulation.setDeviceMetricsOverride', { width: 932, height: 430, deviceScaleFactor: 2, mobile: true }); await sleep(800);
