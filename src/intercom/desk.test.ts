@@ -61,7 +61,7 @@ const PLAN: CommutePlan = { office_days: [2, 4], am_train: '6008', pm_train: nul
 const at = (hhmm: string, day = '2026-11-03') => new Date(`${day}T${hhmm}:00-05:00`);
 const ev = (over: Partial<CalendarEvent>): CalendarEvent => ({ id: 'e', title: 'Dentist', start: '2026-11-03T16:00:00-05:00', end: '2026-11-03T17:00:00-05:00', all_day: false, calendar: 'Home', color: '#fff', ...over });
 const dep = (now: Date, events: CalendarEvent[] = [], plan: CommutePlan | null = PLAN, commute: CommuteConfig | null = COMMUTE) =>
-  buildDeparture({ now, commute, plan, events, eventTravelMin: 20, tz: 'America/New_York' });
+  buildDeparture({ now, commute, plan });
 const withPlan = (o: Partial<CommutePlan>): CommutePlan => ({ ...PLAN, ...o });
 
 describe('train selection', () => {
@@ -113,10 +113,10 @@ describe('train selection', () => {
     expect(isOfficeDay(COMMUTE, PLAN, at('06:00', '2026-11-03'))).toBe(true);
     expect(isOfficeDay(COMMUTE, PLAN, at('06:00', '2026-11-02'))).toBe(false);
   });
-  it('located events still produce a leave-by on a non-office day or with no plan', () => {
+  it('calendar entries with a location never produce a leave-by, with or without a plan', () => {
     const e = ev({ start: '2026-11-02T17:00:00-05:00', location: 'Walpole, MA' });
-    expect(dep(at('16:24', '2026-11-02'), [e])!.kind).toBe('event');
-    expect(dep(at('16:24', '2026-11-02'), [e], null, null)!.kind).toBe('event');
+    expect(dep(at('16:24', '2026-11-02'), [e])).toBeNull();
+    expect(dep(at('16:24', '2026-11-02'), [e], null, null)).toBeNull();
   });
 });
 
@@ -165,24 +165,11 @@ overrides: [{date: "2026-11-05", mode: "wfh"}, {date: "2026-11-06", mode: "offic
 });
 
 describe('event departure', () => {
-  it('subtracts default travel and buffer from a located event', () => {
-    const d = dep(at('10:00', '2026-11-07'), [ev({ start: '2026-11-07T16:00:00-05:00', location: 'ENT Specialists, Plainville, MA' })])!;
-    expect(d.kind).toBe('event');
-    expect(d.label).toBe('Dentist');
-    expect(d.leave_at).toBe('2026-11-07T15:35:00-05:00');
-  });
-  it('ignores events with no location, virtual locations, all-day and started events', () => {
-    const now = at('10:00', '2026-11-07');
-    const mk = (o: Partial<CalendarEvent>) => dep(now, [ev({ start: '2026-11-07T16:00:00-05:00', ...o })]);
-    expect(mk({})).toBeNull();
-    expect(mk({ location: 'https://zoom.us/j/1' })).toBeNull();
-    expect(mk({ location: 'Microsoft Teams Meeting' })).toBeNull();
-    expect(mk({ location: 'Home', all_day: true })).toBeNull();
-    expect(mk({ location: 'Somewhere', start: '2026-11-07T09:00:00-05:00' })).toBeNull();
-  });
-  it('picks the earliest leave time between a train and an event', () => {
-    const d = dep(at('06:00'), [ev({ start: '2026-11-03T07:00:00-05:00', location: 'Walpole, MA' })])!;
-    expect(d.kind).toBe('event'); // 06:35 beats the 06:46 train
+  it('ignores located calendar events entirely; only the train remains on an office day', () => {
+    const e = ev({ start: '2026-11-03T07:00:00-05:00', location: 'Walpole, MA' });
+    const d = dep(at('06:00'), [e])!;
+    expect(d.kind).toBe('train'); // the 06:35 event leave-by no longer wins
+    expect(dep(at('10:00', '2026-11-07'), [ev({ start: '2026-11-07T16:00:00-05:00', location: 'ENT Specialists, Plainville, MA' })])).toBeNull();
   });
 });
 

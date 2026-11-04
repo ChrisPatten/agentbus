@@ -635,7 +635,7 @@ export const IntercomAdapterSchema = z.object({
     commute_file: z.string().min(1).optional(),
     /** Office-day plan (Markdown with a fenced `commute-plan` block: office_days, am_train, pm_train, leave_before_min, overrides). Re-read when its mtime changes. */
     plan_file: z.string().min(1).default('/Users/chrispatten/workspace/peggy-claude-code/memory/project_commute_plan.md'),
-    /** Rough travel time for a calendar event that has a location. An estimate: no routing service is used. */
+    /** Deprecated and ignored: calendar events no longer produce a leave-by (only trains and surface Events with `travel` do). Still accepted so existing configs load. */
     event_travel_min: z.number().int().min(0).max(240).default(20),
   }).prefault({}),
   surfaces: z.array(IntercomSurfaceSchema).default([]),
