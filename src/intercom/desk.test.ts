@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { LivePrediction, LiveSource, StopQuery } from './mbta.js';
+import { NotifyInput } from './notifications-store.js';
 import Database from 'better-sqlite3';
 import { mkdtempSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -7,7 +9,7 @@ import { runMigrations } from '../db/schema.js';
 import { IntercomAdapterSchema } from '../config/schema.js';
 import type { CalendarEvent, CalendarFeed } from './calendar.js';
 import {
-  buildDeparture, buildDeskPayload, classifyPane, collectDeskSessions, DEFAULT_COMMUTE_FILE, deskCounts, createPlanSource, deskSignature, isOfficeDay,
+  buildDeparture, buildDeskPayload, liveState, liveTargets, type LiveView, classifyPane, collectDeskSessions, DEFAULT_COMMUTE_FILE, deskCounts, createPlanSource, deskSignature, isOfficeDay,
   loadCommute, parseCommute, parseCommutePlan, sortSessions, type CommutePlan, type CommuteConfig, type DeskSession, type PaneFacts,
 } from './desk.js';
 import { IntercomService, type Client } from './service.js';
@@ -276,5 +278,108 @@ describe('IntercomService desk feed', () => {
       expect(frames.filter((f) => f.event === 'desk').length).toBe(first + 1);
       service.stop();
     } finally { vi.useRealTimers(); }
+  });
+});
+
+describe('live train departure (on my way)', () => {
+  // 6008 departs 07:01 ET on Tue 2026-11-03; leave 06:46.
+  const at = (hm: string) => new Date(`2026-11-03T${hm}:00-05:00`);
+  const pred = (hm: string): LivePrediction => ({ departsMs: at(hm).getTime(), scheduledMs: at('07:01').getTime(), status: null });
+  const build = (now: string, live: LiveView | null, omw: string[] = []) =>
+    buildDeparture({ now: at(now), commute: COMMUTE, plan: PLAN, live, onMyWay: new Set(omw) });
+
+  it('adds delay_min for a late train and shifts its leave time', () => {
+    const d = build('06:40', new Map([['6008', pred('07:09')]]))!;
+    expect(d.delay_min).toBe(8);
+    expect(d.on_my_way).toBeUndefined();
+    expect(build('06:55', new Map([['6008', pred('07:09')]]))).not.toBeNull();          // 06:46 + 8 = 06:54, inside the grace
+    expect(build('07:03', new Map([['6008', pred('07:09')]]))).not.toBeNull();          // still within 10 min grace of 06:54
+    expect(build('07:03', null)).toBeNull();                                             // 06:46 + 10 grace = 06:56 passed
+    expect(build('07:05', new Map([['6008', pred('07:09')]]))).toBeNull();
+  });
+  it('keeps an on-my-way train with its live time past the grace, until the API shows it gone', () => {
+    const live: LiveView = new Map([['6008', pred('07:09')]]);
+    const d = build('07:08', live, ['6008'])!;
+    expect(d).toMatchObject({ kind: 'train', on_my_way: true, delay_min: 8, live: { departs: at('07:09').toISOString() } });
+    expect(build('07:08', live)).toBeNull();                                             // not flagged: clears as before
+    expect(build('07:11', live, ['6008'])).toBeNull();                                   // prediction passed: departed
+    expect(build('07:08', new Map([['6008', null]]), ['6008'])).toBeNull();              // prediction vanished after the scheduled time
+  });
+  it('falls back to the schedule when the API is unavailable, flagged or not', () => {
+    expect(build('07:08', new Map(), ['6008'])).toBeNull();
+    expect(build('06:50', new Map(), ['6008'])).toMatchObject({ kind: 'train' });
+    expect(build('06:50', new Map(), ['6008'])!.on_my_way).toBeUndefined();
+    expect(build('06:50', new Map([['6008', null]]), ['6008'])!.on_my_way).toBeUndefined(); // no prediction yet
+  });
+  it('liveState and liveTargets', () => {
+    const sched = at('07:01').getTime();
+    expect(liveState(sched, undefined, sched + 3_600_000)).toBe('unknown');
+    expect(liveState(sched, null, sched - 60_000)).toBe('unknown');
+    expect(liveState(sched, null, sched + 61_000)).toBe('departed');
+    expect(liveState(sched, pred('07:09'), at('07:09').getTime() + 30_000)).toBe('live');
+    expect(liveState(sched, pred('07:09'), at('07:09').getTime() + 61_000)).toBe('departed');
+    const t = (now: string, omw: string[] = []) => liveTargets({ now: at(now), commute: COMMUTE, plan: PLAN, onMyWay: new Set(omw) });
+    expect(t('05:00')).toEqual([]);
+    expect(t('05:45')).toEqual([{ number: '6008', side: 'am', schedMs: sched }]);
+    expect(t('05:00', ['6008'])).toHaveLength(1);
+    expect(t('07:40')).toEqual([]);
+  });
+});
+
+describe('on-my-way tap and live ETA through the service', () => {
+  const calendar = { today: async () => ({ date: '2026-11-03', tz: 'America/New_York', generated_at: 'x', events: [] }) } as unknown as CalendarFeed;
+  const at = (hm: string) => new Date(`2026-11-03T${hm}:00-05:00`);
+  function build(nowRef: { t: number }, mbta: LiveSource | null, calls: StopQuery[] = []) {
+    const db = new Database(':memory:'); runMigrations(db);
+    const config = IntercomAdapterSchema.parse({ surfaces: [{ id: 's', token_env: 'T', follow: { contact: 'chris', channel: 'telegram:peggy' } }] });
+    const src: LiveSource | null = mbta && { get: async (q) => { calls.push(q); return mbta.get(q); } };
+    const service = new IntercomService({
+      config, db, calendar, env: { T: 'a'.repeat(40) }, log: () => {}, now: () => nowRef.t, commute: COMMUTE, plan: { get: () => PLAN },
+      notifications: { enabled: true, api_tokens_env: [] } as never, mbta: src, submitInbound: async () => { throw new Error('unused'); },
+    });
+    return { service, db };
+  }
+  const feed = (hm: string): LiveSource => ({ get: async () => new Map([['6008', { departsMs: at(hm).getTime(), scheduledMs: at('07:01').getTime(), status: null }]]) });
+
+  it('flags the train on the Commute "On my way" tap, shows the live ETA past the leave time, and clears once departed', async () => {
+    const clock = { t: at('06:50').getTime() };
+    let predicted = '07:09';
+    const calls: StopQuery[] = [];
+    const { service } = build(clock, { get: (q) => feed(predicted).get(q) }, calls);
+    const n = service.raise(NotifyInput.parse({ key: 'commute-am', title: 'Leave in 10 min', body: '6008 at 7:01', source: 'Commute', actions: [{ label: 'On my way' }] })).notification;
+    expect((await service.desk(at('06:50'))).departure?.on_my_way).toBeUndefined();
+    await service.handleNotificationAction(service.surfaces.get('s')!, { client_msg_id: 'c1', id: n.id, index: 0 });
+    let dep = (await service.desk(at('07:05'))).departure!;
+    expect(dep).toMatchObject({ kind: 'train', delay_min: 8, on_my_way: true, live: { departs: at('07:09').toISOString() } });
+    expect(calls[0]).toEqual({ stop: 'place-NEC-2040', direction: 1 });
+    predicted = '07:10';                                                        // the API moves it again
+    dep = (await service.desk(at('07:08'))).departure!;
+    expect(dep.live?.departs).toBe(at('07:10').toISOString());
+    clock.t = at('07:12').getTime();                                            // past the prediction: departed
+    expect((await service.desk(at('07:12'))).departure).toBeNull();
+    expect((await service.desk(at('07:09'))).departure?.on_my_way).toBeUndefined(); // the flag was cleared, not just hidden
+  });
+  it('ignores other notifications and labels, and an unavailable API leaves the scheduled behaviour', async () => {
+    const clock = { t: at('06:50').getTime() };
+    const { service } = build(clock, { get: async () => null });
+    const act = async (key: string, source: string, label: string, cid: string) => {
+      const n = service.raise(NotifyInput.parse({ key, title: 'x', body: 'y', source, actions: [{ label }] })).notification;
+      await service.handleNotificationAction(service.surfaces.get('s')!, { client_msg_id: cid, id: n.id, index: 0 });
+    };
+    await act('commute-am', 'Commute', 'Later train', 'a');
+    await act('dentist', 'Commute', 'On my way', 'b');
+    await act('commute-am', 'Mail Watcher', 'On my way', 'c');
+    expect((await service.desk(at('06:50'))).departure?.on_my_way).toBeUndefined();
+    await act('commute-am', 'Commute', 'On my way', 'd');
+    const dep = (await service.desk(at('06:50'))).departure!;                   // flagged, but the API is down
+    expect(dep.on_my_way).toBeUndefined();
+    expect(dep.delay_min).toBeUndefined();
+    expect((await service.desk(at('07:05'))).departure).toBeNull();             // as before: gone after the grace
+  });
+  it('a PM "Taking it" tap flags the train named in the key', async () => {
+    const { service, db } = build({ t: at('16:00').getTime() }, null);
+    const n = service.raise(NotifyInput.parse({ key: 'commute-pm-6029', title: 'x', body: 'y', source: 'Commute', actions: [{ label: 'Taking it' }] })).notification;
+    await service.handleNotificationAction(service.surfaces.get('s')!, { client_msg_id: 'p', id: n.id, index: 0 });
+    expect(db.prepare('SELECT date, train FROM intercom_on_my_way').all()).toEqual([{ date: '2026-11-03', train: '6029' }]);
   });
 });

@@ -389,6 +389,8 @@ export function matchNotice(session, items) {
 /**
  * What the day face shows for a departure: `Leave in N min` within an hour, `Leave 7:20` beyond (dim),
  * `Late` for up to ten minutes after, then nothing. `delay_min` shifts leave time and train time.
+ * On my way (`dep.on_my_way` with `dep.live.departs`, set by the bus while the API still shows the train at the station):
+ * `Departs 7:09` in green, from the tap, in place of the countdown and `Late`, until the live time has passed by a minute.
  */
 export function departureView(dep, nowMs, tz) {
   if (!dep || !dep.leave_at) return null;
@@ -397,9 +399,12 @@ export function departureView(dep, nowMs, tz) {
   const delay = Math.max(0, Number(dep.delay_min) || 0);
   const leaveMs = leave + delay * 60000;
   const mins = (leaveMs - nowMs) / 60000;
-  if (mins < -LATE_MIN) return null;
+  const live = dep.on_my_way && dep.live ? Date.parse(dep.live.departs) : NaN;
+  const eta = !isNaN(live) && live + 60000 > nowMs;
+  if (mins < -LATE_MIN && !eta) return null;
   let kind, text, pressure;
-  if (mins <= 0) { kind = 'late'; text = 'Late'; pressure = 'late'; }
+  if (eta) { kind = 'eta'; text = `Departs ${shortTime(tzParts(new Date(live), tz).hours)}`; pressure = 'calm'; }
+  else if (mins <= 0) { kind = 'late'; text = 'Late'; pressure = 'late'; }
   else {
     pressure = mins > 30 ? 'calm' : mins >= 10 ? 'amber' : mins >= 5 ? 'red' : 'pulse';
     if (mins <= 60) { kind = 'in'; text = `Leave in ${Math.ceil(mins)} min`; }
