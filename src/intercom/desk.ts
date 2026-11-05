@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import type Database from 'better-sqlite3';
 import { toBareAgentId, type PoolLeaseRow } from '../pool/types.js';
 import { getUnhandledSince } from '../pool/unhandled-work.js';
-import { isoInTz, type CalendarEvent } from './calendar.js';
+import { isoInTz } from './calendar.js';
 
 export type DeskState = 'working' | 'waiting' | 'stuck' | 'idle' | 'finished';
 export interface DeskSession { id: string; title: string; state: DeskState; channel: string; since: string }
@@ -21,6 +21,7 @@ export interface DeskDeparture {
   label: string;
   /** Scheduled leave time (ISO). Clients add `delay_min` themselves. */
   leave_at: string;
+  /** Only `train` is produced today; `event` stays in the type so older clients and the wire shape remain valid. */
   kind: 'train' | 'event';
   train?: { number: string; departs: string };
   delay_min?: number;
@@ -211,8 +212,6 @@ export function localDay(now: Date, tz: string): { date: string; weekday: number
 
 // ── Office-day plan ─────────────────────────────────────────────────────────
 
-/** Fixed lead for a located calendar event: start minus `event_travel_min` minus this many minutes. */
-export const EVENT_BUFFER_MIN = 5;
 export const DEFAULT_PLAN_FILE = '/Users/chrispatten/workspace/peggy-claude-code/memory/project_commute_plan.md';
 
 export interface PlanOverride { date: string; mode: 'office' | 'wfh'; am_train?: string | null; pm_train?: string | null }
@@ -325,31 +324,17 @@ const trainCandidates = (c: CommuteConfig, plan: CommutePlan | null, now: Date):
   return out;
 };
 
-const VIRTUAL = /https?:|zoom|teams|meet\.google|webex|virtual|microsoft|phone|call/i;
-
-const eventCandidates = (events: CalendarEvent[], now: Date, travelMin: number, tz: string): Candidate[] => {
-  const out: Candidate[] = [];
-  for (const e of events) {
-    if (e.all_day || !e.location || VIRTUAL.test(e.location)) continue;
-    const start = Date.parse(e.start);
-    if (Number.isNaN(start) || start <= now.getTime()) continue;
-    const leaveMs = start - (travelMin + EVENT_BUFFER_MIN) * 60_000;
-    out.push({ leaveMs, dep: { label: e.title.slice(0, 40), leave_at: isoInTz(new Date(leaveMs), tz), kind: 'event' } });
-  }
-  return out;
-};
-
 /**
- * The departure the desk face should show: the earliest train or located event whose leave time has not passed
- * by more than the late grace. Trains appear only on office days per the plan; null otherwise with no located events. Estimates only: no routing service.
+ * The departure the desk face should show: the earliest train whose leave time has not passed by more than the
+ * late grace. Trains appear only on office days per the plan; null otherwise. Calendar entries never produce a
+ * departure on their own: the agent curates what reaches the surface, and a surface Event that carries `travel`
+ * draws its own "Leave in N min" client side. Estimates only: no routing service.
  */
-export function buildDeparture(opts: { now: Date; commute: CommuteConfig | null; plan?: CommutePlan | null; events: CalendarEvent[]; eventTravelMin: number; tz: string }): DeskDeparture | null {
-  const { now, commute, plan = null, events, eventTravelMin, tz } = opts;
+export function buildDeparture(opts: { now: Date; commute: CommuteConfig | null; plan?: CommutePlan | null }): DeskDeparture | null {
+  const { now, commute, plan = null } = opts;
   const floor = now.getTime() - LATE_GRACE_MS;
-  const all = [
-    ...(commute ? trainCandidates(commute, plan, now) : []),
-    ...eventCandidates(events, now, eventTravelMin, tz),
-  ].filter((c) => c.leaveMs >= floor).sort((a, b) => a.leaveMs - b.leaveMs);
+  const all = (commute ? trainCandidates(commute, plan, now) : [])
+    .filter((c) => c.leaveMs >= floor).sort((a, b) => a.leaveMs - b.leaveMs);
   return all[0]?.dep ?? null;
 }
 

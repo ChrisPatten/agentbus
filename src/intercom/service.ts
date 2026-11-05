@@ -396,11 +396,9 @@ export class IntercomService {
 
   /** E94 — the desk summary (agent sessions, counts, next departure). Read-only; no message text. */
   async desk(now: Date = new Date(this.now())): Promise<DeskPayload> {
-    let events: Awaited<ReturnType<CalendarFeed['today']>>['events'] = [];
-    try { events = (await this.calendar.today()).events; } catch { /* trains still work without the diary */ }
     return buildDeskPayload({
       now, sessions: this.deps.deskSessions?.() ?? [],
-      departure: buildDeparture({ now, commute: this.commute, plan: this.plan.get(), events, eventTravelMin: this.deps.config.desk.event_travel_min, tz: this.deps.config.calendar.timezone }),
+      departure: buildDeparture({ now, commute: this.commute, plan: this.plan.get() }),
     });
   }
 
