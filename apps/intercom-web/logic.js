@@ -241,16 +241,6 @@ export function isQuietHours(now, tz, startMin = 22 * 60, endMin = 6 * 60 + 30) 
   return startMin <= endMin ? m >= startMin && m < endMin : m >= startMin || m < endMin;
 }
 
-/**
- * Should the screen wake lock be held right now? Only while the page is visible and outside quiet hours
- * (the same 22:00 to 06:30 window as the Quiet screen). \`forceQuiet\` mirrors the dev \`?quiet\` override.
- */
-export function shouldHoldWakeLock({ now, tz, visible = true, forceQuiet = null, startMin, endMin } = {}) {
-  if (!visible) return false;
-  const quiet = forceQuiet === null || forceQuiet === undefined ? isQuietHours(now ?? new Date(), tz, startMin, endMin) : forceQuiet;
-  return !quiet;
-}
-
 /** "n waiting": the server's active count, less items the user has just acknowledged locally. */
 export function waitingCount(attention, items, hidden = new Map()) {
   if (!attention || typeof attention.count !== 'number') return items.length;
