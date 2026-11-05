@@ -220,7 +220,10 @@ export interface CommutePlan {
   office_days: number[];
   am_train: string | null;
   pm_train: string | null;
-  leave_before_min: number;
+  /** Minutes before departure to leave, mornings (inbound to Boston). */
+  am_travel_min: number;
+  /** Minutes before departure to leave, afternoons (outbound from Boston). */
+  pm_travel_min: number;
   overrides: PlanOverride[];
 }
 
@@ -247,7 +250,10 @@ export function parseCommutePlan(text: string): CommutePlan {
   const days = (Array.isArray(r['office_days']) ? r['office_days'] : [])
     .map((d) => (typeof d === 'string' ? DAYS[d.trim().toLowerCase().slice(0, 3)] : undefined))
     .filter((d): d is number => d !== undefined);
-  const lead = typeof r['leave_before_min'] === 'number' && Number.isFinite(r['leave_before_min']) && r['leave_before_min'] >= 0 ? r['leave_before_min'] : 15;
+  const mins = (k: string): number | undefined => { const v = r[k]; return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : undefined; };
+  // Legacy aliases: leave_before_min (AM) and walk_min (PM). An old file with only leave_before_min keeps it for PM too.
+  const am = mins('am_travel_min') ?? mins('leave_before_min') ?? 15;
+  const pm = mins('pm_travel_min') ?? mins('walk_min') ?? mins('leave_before_min') ?? 30;
   const overrides: PlanOverride[] = [];
   for (const o of Array.isArray(r['overrides']) ? r['overrides'] : []) {
     if (!o || typeof o !== 'object') continue;
@@ -261,7 +267,7 @@ export function parseCommutePlan(text: string): CommutePlan {
       ...('pm_train' in x ? { pm_train: trainNo(x['pm_train']) } : {}),
     });
   }
-  return { office_days: [...new Set(days)], am_train: trainNo(r['am_train']), pm_train: trainNo(r['pm_train']), leave_before_min: lead, overrides };
+  return { office_days: [...new Set(days)], am_train: trainNo(r['am_train']), pm_train: trainNo(r['pm_train']), am_travel_min: am, pm_travel_min: pm, overrides };
 }
 
 /** Re-reads the plan file when its mtime changes (one stat per call). Never throws; a bad file logs once and yields null. */
@@ -310,17 +316,17 @@ const trainCandidates = (c: CommuteConfig, plan: CommutePlan | null, now: Date):
   const day = officeDay(c, plan, now);
   if (!day || !plan) return [];
   const { date, offset } = localDay(now, c.timezone);
-  const mk = (t: Train): Candidate => {
+  const mk = (t: Train, leadMin: number): Candidate => {
     const departs = `${date}T${t.departs}:00${offset}`;
-    const leaveMs = Date.parse(departs) - plan.leave_before_min * 60_000;
+    const leaveMs = Date.parse(departs) - leadMin * 60_000;
     const h = Number(t.departs.slice(0, 2));
     return { leaveMs, dep: { label: `${h % 12 || 12}:${t.departs.slice(3)} train`, leave_at: isoInTz(new Date(leaveMs), c.timezone), kind: 'train', train: { number: t.number, departs } } };
   };
   const out: Candidate[] = [];
   const am = day.am ? c.am.find((t) => t.number === day.am) : undefined;
   const pm = day.pm ? c.pm.find((t) => t.number === day.pm) : undefined;
-  if (am) out.push(mk(am));
-  if (pm) out.push(mk(pm));
+  if (am) out.push(mk(am, plan.am_travel_min));
+  if (pm) out.push(mk(pm, plan.pm_travel_min));
   return out;
 };
 
