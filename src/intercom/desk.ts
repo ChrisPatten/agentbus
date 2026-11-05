@@ -14,6 +14,7 @@ import type Database from 'better-sqlite3';
 import { toBareAgentId, type PoolLeaseRow } from '../pool/types.js';
 import { getUnhandledSince } from '../pool/unhandled-work.js';
 import { isoInTz, type CalendarEvent } from './calendar.js';
+import type { LivePrediction } from './mbta.js';
 
 export type DeskState = 'working' | 'waiting' | 'stuck' | 'idle' | 'finished';
 export interface DeskSession { id: string; title: string; state: DeskState; channel: string; since: string }
@@ -23,7 +24,12 @@ export interface DeskDeparture {
   leave_at: string;
   kind: 'train' | 'event';
   train?: { number: string; departs: string };
+  /** Minutes the train is running late per the live API; clients add it to `leave_at` and `train.departs`. */
   delay_min?: number;
+  /** The user tapped "On my way" for this train and the API still shows it at the station. */
+  on_my_way?: true;
+  /** Live predicted departure (ISO), set with `on_my_way`. Clients show it instead of "Late". */
+  live?: { departs: string };
 }
 export interface DeskPayload {
   generated_at: string;
@@ -305,7 +311,26 @@ export function officeDay(c: CommuteConfig, plan: CommutePlan | null, now: Date)
 
 export const isOfficeDay = (c: CommuteConfig, plan: CommutePlan | null, now: Date): boolean => officeDay(c, plan, now) !== null;
 
-interface Candidate { leaveMs: number; dep: DeskDeparture }
+interface Candidate { leaveMs: number; dep: DeskDeparture; side?: 'am' | 'pm'; keep?: boolean }
+
+/** A prediction this far past its time still counts as "at the station" (feed jitter between polls). */
+export const LIVE_DEPARTED_GRACE_MS = 60_000;
+/** Poll the API for a train from this long before it departs until `LIVE_AFTER_MS` after (a flagged train is polled regardless). */
+export const LIVE_BEFORE_MS = 90 * 60_000;
+export const LIVE_AFTER_MS = 30 * 60_000;
+
+/**
+ * Per-train live view: a prediction by train number. A key present means the API answered for that train's stop
+ * (null = no prediction for it); an absent key means unknown (API unavailable or not queried).
+ */
+export type LiveView = ReadonlyMap<string, LivePrediction | null>;
+
+/** 'live' (prediction at/after now), 'departed' (prediction passed, or none after the scheduled time), 'unknown' (use the schedule). */
+export function liveState(schedMs: number, pred: LivePrediction | null | undefined, nowMs: number): 'live' | 'departed' | 'unknown' {
+  if (pred === undefined) return 'unknown';
+  if (pred) return pred.departsMs + LIVE_DEPARTED_GRACE_MS > nowMs ? 'live' : 'departed';
+  return nowMs >= schedMs + LIVE_DEPARTED_GRACE_MS ? 'departed' : 'unknown';
+}
 
 const trainCandidates = (c: CommuteConfig, plan: CommutePlan | null, now: Date): Candidate[] => {
   const day = officeDay(c, plan, now);
@@ -317,11 +342,12 @@ const trainCandidates = (c: CommuteConfig, plan: CommutePlan | null, now: Date):
     const h = Number(t.departs.slice(0, 2));
     return { leaveMs, dep: { label: `${h % 12 || 12}:${t.departs.slice(3)} train`, leave_at: isoInTz(new Date(leaveMs), c.timezone), kind: 'train', train: { number: t.number, departs } } };
   };
+  const side = (cand: Candidate, sd: 'am' | 'pm'): Candidate => ({ ...cand, side: sd });
   const out: Candidate[] = [];
   const am = day.am ? c.am.find((t) => t.number === day.am) : undefined;
   const pm = day.pm ? c.pm.find((t) => t.number === day.pm) : undefined;
-  if (am) out.push(mk(am));
-  if (pm) out.push(mk(pm));
+  if (am) out.push(side(mk(am), 'am'));
+  if (pm) out.push(side(mk(pm), 'pm'));
   return out;
 };
 
@@ -339,17 +365,46 @@ const eventCandidates = (events: CalendarEvent[], now: Date, travelMin: number, 
   return out;
 };
 
+/** Today's trains worth asking the API about: within the polling window of their departure, or flagged "on my way". */
+export function liveTargets(opts: { now: Date; commute: CommuteConfig | null; plan: CommutePlan | null; onMyWay?: ReadonlySet<string> }): { number: string; side: 'am' | 'pm'; schedMs: number }[] {
+  const { now, commute, plan, onMyWay } = opts;
+  if (!commute) return [];
+  const nowMs = now.getTime();
+  const out: { number: string; side: 'am' | 'pm'; schedMs: number }[] = [];
+  for (const c of trainCandidates(commute, plan, now)) {
+    const number = c.dep.train!.number;
+    const schedMs = Date.parse(c.dep.train!.departs);
+    if (onMyWay?.has(number) || (nowMs >= schedMs - LIVE_BEFORE_MS && nowMs <= schedMs + LIVE_AFTER_MS)) out.push({ number, side: c.side!, schedMs });
+  }
+  return out;
+}
+
 /**
  * The departure the desk face should show: the earliest train or located event whose leave time has not passed
  * by more than the late grace. Trains appear only on office days per the plan; null otherwise with no located events. Estimates only: no routing service.
+ *
+ * With `live`, a train running late carries `delay_min` (its leave time and grace shift with it). A train in `onMyWay`
+ * that the API still shows at the station stays on the face past its leave time with `on_my_way` and `live.departs`,
+ * until the API reports it gone; without live data (API down) nothing changes from the scheduled behaviour.
  */
-export function buildDeparture(opts: { now: Date; commute: CommuteConfig | null; plan?: CommutePlan | null; events: CalendarEvent[]; eventTravelMin: number; tz: string }): DeskDeparture | null {
-  const { now, commute, plan = null, events, eventTravelMin, tz } = opts;
-  const floor = now.getTime() - LATE_GRACE_MS;
+export function buildDeparture(opts: { now: Date; commute: CommuteConfig | null; plan?: CommutePlan | null; events: CalendarEvent[]; eventTravelMin: number; tz: string; live?: LiveView | null; onMyWay?: ReadonlySet<string> }): DeskDeparture | null {
+  const { now, commute, plan = null, events, eventTravelMin, tz, live = null, onMyWay } = opts;
+  const nowMs = now.getTime();
+  const floor = nowMs - LATE_GRACE_MS;
+  const trains = (commute ? trainCandidates(commute, plan, now) : []).map((c) => {
+    const tr = c.dep.train!;
+    const pred = live?.get(tr.number);
+    if (liveState(Date.parse(tr.departs), pred, nowMs) !== 'live' || !pred) return c;
+    const delay = Math.max(0, Math.round((pred.departsMs - Date.parse(tr.departs)) / 60_000));
+    const dep: DeskDeparture = { ...c.dep, ...(delay > 0 ? { delay_min: delay } : {}) };
+    const keep = !!onMyWay?.has(tr.number);
+    if (keep) { dep.on_my_way = true; dep.live = { departs: new Date(pred.departsMs).toISOString() }; }
+    return { ...c, dep, leaveMs: c.leaveMs + delay * 60_000, keep };
+  });
   const all = [
-    ...(commute ? trainCandidates(commute, plan, now) : []),
+    ...trains,
     ...eventCandidates(events, now, eventTravelMin, tz),
-  ].filter((c) => c.leaveMs >= floor).sort((a, b) => a.leaveMs - b.leaveMs);
+  ].filter((c) => c.keep || c.leaveMs >= floor).sort((a, b) => a.leaveMs - b.leaveMs);
   return all[0]?.dep ?? null;
 }
 

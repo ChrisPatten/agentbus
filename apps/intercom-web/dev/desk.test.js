@@ -93,6 +93,15 @@ describe('departure and pressure', () => {
     expect(v(train(-9.5)).kind).toBe('late');
     expect(v(train(-10.5))).toBeNull();
   });
+  it('on my way: shows the live departure instead of Late, until it passes', () => {
+    const omw = (leaveIn, liveIn, extra = {}) => train(leaveIn, { on_my_way: true, live: { departs: mins(liveIn) }, delay_min: 8, ...extra });
+    expect(v(omw(-20, 4))).toMatchObject({ kind: 'eta', text: 'Departs 7:04', pressure: 'calm', dim: false });
+    expect(v(omw(-20, 4)).train).toEqual({ text: '7:03 train', delayed: true });
+    expect(v(omw(10, 22))).toMatchObject({ kind: 'eta', text: 'Departs 7:22' });   // from the tap onward
+    expect(v(omw(-20, -0.5)).kind).toBe('eta');                                      // a minute of feed jitter
+    expect(v(omw(-20, -1.5))).toBeNull();
+    expect(v(train(-1, { on_my_way: true }))).toMatchObject({ kind: 'late' });       // no live time (API down): as before
+  });
   it('formats the train line and applies a delay', () => {
     expect(v(train(45)).train).toEqual({ text: '8:00 train', delayed: false });
     const d = v(train(45, { delay_min: 6 }));

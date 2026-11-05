@@ -637,6 +637,19 @@ export const IntercomAdapterSchema = z.object({
     plan_file: z.string().min(1).default('/Users/chrispatten/workspace/peggy-claude-code/memory/project_commute_plan.md'),
     /** Rough travel time for a calendar event that has a location. An estimate: no routing service is used. */
     event_travel_min: z.number().int().min(0).max(240).default(20),
+    /** Live MBTA V3 predictions: the "on my way" ETA and `delay_min` on the train departure. Off or unavailable: the scheduled behaviour. */
+    mbta: z.object({
+      enabled: z.boolean().default(true),
+      /** Env var holding the MBTA API key (optional; without it the public 20 requests/min limit applies). */
+      api_key_env: z.string().min(1).default('MBTA_API_KEY'),
+      route: z.string().min(1).default('CR-Providence'),
+      /** Boarding stop and direction (1 = inbound) for the morning train, and for the evening train (0 = outbound). */
+      am_stop: z.string().min(1).default('place-NEC-2040'),
+      pm_stop: z.string().min(1).default('place-sstat'),
+      cache_s: z.number().int().min(5).max(300).default(30),
+      /** An "on my way" flag expires after this many minutes even if the API never reports the departure. */
+      on_my_way_timeout_min: z.number().int().min(10).max(720).default(180),
+    }).prefault({}),
   }).prefault({}),
   surfaces: z.array(IntercomSurfaceSchema).default([]),
 }).superRefine((cfg, ctx) => {

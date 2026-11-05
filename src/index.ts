@@ -50,6 +50,7 @@ import { RuntimeResolver } from './core/runtime-resolver.js';
 import { createPoolRouteResolve } from './pipeline/stages/pool-route-resolve.js';
 import { DeliveryWorker } from './core/delivery.js';
 import { IntercomService } from './intercom/service.js';
+import { MbtaLive } from './intercom/mbta.js';
 import { createSurfaceRuntime } from './surface/runtime.js';
 import { getConversationPage } from './surface/conversations.js';
 import { createSurfaceListener, type SurfaceListener } from './http/surface-listener.js';
@@ -383,6 +384,9 @@ const intercom = config.adapters.intercom?.enabled
   ? new IntercomService({
     config: config.adapters.intercom, db, registry, notifications: config.notifications, appConfig: config,
     deskSessions: () => collectDeskSessions(db, poolManagers.values()),
+    mbta: config.adapters.intercom.desk.mbta.enabled
+      ? new MbtaLive({ route: config.adapters.intercom.desk.mbta.route, apiKey: process.env[config.adapters.intercom.desk.mbta.api_key_env], cacheMs: config.adapters.intercom.desk.mbta.cache_s * 1000, log: (l) => console.warn(`[intercom] ${l}`) })
+      : null,
     submitInbound: submitToPipeline,
     ...(surfaceRuntime ? { surfaceApi: surfaceRuntime.surfaceApi } : {}),
   }) : undefined;

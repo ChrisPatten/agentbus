@@ -30,7 +30,9 @@ import { computeConversationId } from '../pipeline/conversation-id.js';
 import { renderSystemBlock } from '../core/system-block.js';
 import { VERSION } from '../version.js';
 import { CalendarFeed, type CalendarPayload } from './calendar.js';
-import { buildDeparture, buildDeskPayload, createPlanSource, deskSignature, loadCommute, type CommuteConfig, type CommutePlan, type DeskPayload, type DeskSession } from './desk.js';
+import { buildDeparture, buildDeskPayload, createPlanSource, deskSignature, liveState, liveTargets, loadCommute, localDay, officeDay, type LiveView, type CommuteConfig, type CommutePlan, type DeskPayload, type DeskSession } from './desk.js';
+import { OnMyWayStore } from './on-my-way.js';
+import type { LiveSource, LivePrediction } from './mbta.js';
 import { resolveGlance, surfaceBody } from './glance.js';
 import {
   acknowledgeNotification, attentionFor, expireDue, getNotification, isTerminal, openForSurface, publicNotification,
@@ -119,6 +121,8 @@ export interface IntercomDeps {
   commute?: CommuteConfig | null;
   /** E94 — office-day plan source; built from `adapters.intercom.desk.plan_file` when absent. */
   plan?: { get(): CommutePlan | null };
+  /** Live MBTA predictions for the on-my-way ETA. Absent or null: the scheduled behaviour only. */
+  mbta?: LiveSource | null;
   env?: NodeJS.ProcessEnv;
   now?: () => number;
   log?: (line: string) => void;
@@ -162,6 +166,7 @@ export class IntercomService {
   private lastDeskSig = '';
   private readonly commute: CommuteConfig | null;
   private readonly plan: { get(): CommutePlan | null };
+  private readonly onMyWay: OnMyWayStore;
   private lastCalendarDate = '';
   private readonly writeHits = new Map<string, number[]>();
 
@@ -170,6 +175,7 @@ export class IntercomService {
     this.calendar = deps.calendar ?? new CalendarFeed(deps.config.calendar);
     this.commute = deps.commute !== undefined ? deps.commute : loadCommute(deps.config.desk.commute_file, (l) => this.log(l));
     this.plan = deps.plan ?? createPlanSource(deps.config.desk.plan_file, (l) => this.log(l));
+    this.onMyWay = new OnMyWayStore(deps.db);
     for (const s of deps.config.surfaces) {
       const token = s.token_env ? env[s.token_env] : undefined;
       const tokenOk = !!token && token.length >= 32;
@@ -398,10 +404,50 @@ export class IntercomService {
   async desk(now: Date = new Date(this.now())): Promise<DeskPayload> {
     let events: Awaited<ReturnType<CalendarFeed['today']>>['events'] = [];
     try { events = (await this.calendar.today()).events; } catch { /* trains still work without the diary */ }
+    const plan = this.plan.get();
+    const tz = this.deps.config.calendar.timezone;
+    const date = localDay(now, tz).date;
+    const cfg = this.deps.config.desk.mbta;
+    const flagged = this.onMyWay.active(date, now.getTime(), cfg.on_my_way_timeout_min);
+    const live = await this.liveView(now, plan, flagged);
+    for (const t of liveTargets({ now, commute: this.commute, plan, onMyWay: flagged })) {
+      if (flagged.has(t.number) && liveState(t.schedMs, live?.get(t.number), now.getTime()) === 'departed') { this.onMyWay.clear(date, t.number); flagged.delete(t.number); }
+    }
     return buildDeskPayload({
       now, sessions: this.deps.deskSessions?.() ?? [],
-      departure: buildDeparture({ now, commute: this.commute, plan: this.plan.get(), events, eventTravelMin: this.deps.config.desk.event_travel_min, tz: this.deps.config.calendar.timezone }),
+      departure: buildDeparture({ now, commute: this.commute, plan, events, eventTravelMin: this.deps.config.desk.event_travel_min, tz, live, onMyWay: flagged }),
     });
+  }
+
+  /** Live predictions for the trains near their departure (or flagged). Null when disabled; an unreachable stop leaves its trains out (unknown). */
+  private async liveView(now: Date, plan: CommutePlan | null, flagged: ReadonlySet<string>): Promise<LiveView | null> {
+    const src = this.deps.mbta;
+    if (!src) return null;
+    const targets = liveTargets({ now, commute: this.commute, plan, onMyWay: flagged });
+    if (!targets.length) return null;
+    const cfg = this.deps.config.desk.mbta;
+    const out = new Map<string, LivePrediction | null>();
+    for (const side of ['am', 'pm'] as const) {
+      const mine = targets.filter((t) => t.side === side);
+      if (!mine.length) continue;
+      const got = await src.get({ stop: side === 'am' ? cfg.am_stop : cfg.pm_stop, direction: side === 'am' ? 1 : 0 });
+      if (got) for (const t of mine) out.set(t.number, got.get(t.number) ?? null);
+    }
+    return out;
+  }
+
+  /** The Commute alert's "On my way" / "Taking it" tap: flag that train so the face shows its live ETA. */
+  private noteOnMyWay(n: { key: string | null; source: string }, label: string): void {
+    if (!/^(on my way|taking it)$/i.test(label.trim()) || n.source.toLowerCase() !== 'commute') return;
+    const m = /^commute-(?:am|pm-(\d+))$/.exec(n.key ?? '');
+    if (!m) return;
+    const now = new Date(this.now());
+    const tz = this.deps.config.calendar.timezone;
+    const train = m[1] ?? (this.commute ? officeDay(this.commute, this.plan.get(), now)?.am : null);
+    if (!train) return;
+    this.onMyWay.set(localDay(now, tz).date, train, now.getTime());
+    this.log(`intercom: on my way flagged for train ${train}`);
+    void this.pushDesk();
   }
 
   private async pushDesk(): Promise<void> {
@@ -920,6 +966,7 @@ export class IntercomService {
     if (!action) return { type: 'error', code: 'invalid_frame' };
     const acked = acknowledgeNotification(this.deps.db, n.id, surface.id, this.now());
     if (acked?.changed) this.publish(acked.notification, false);
+    this.noteOnMyWay(n, action.label);
     return this.handleSend(surface, { client_msg_id: clientMsgId, body: `[tapped] ${action.label}` }, {
       noteLine: `On the Intercom notification "${n.title}" (${n.source}, raised ${this.clock(n.created_at)})`.replace(/\s+/g, ' '),
       metadata: { notification_id: n.id },

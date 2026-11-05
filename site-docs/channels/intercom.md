@@ -43,6 +43,9 @@ adapters:
 | `desk.commute_file` | `integrations/intercom/commute.json` | Train timetable and holidays behind the "Leave in N min" line |
 | `desk.plan_file` | `/Users/chrispatten/workspace/peggy-claude-code/memory/project_commute_plan.md` | Office-day plan (fenced `commute-plan` block: office days, AM/PM train, lead time, per-date overrides). Trains show only on office days; re-read when the file changes |
 | `desk.event_travel_min` | `20` | Rough travel time for a calendar event with a location (an estimate; no routing service) |
+| `desk.mbta.enabled` | `true` | Use live MBTA predictions: tapping "On my way" on the train alert shows the train's estimated departure ("Departs 7:09") instead of "Late" until it leaves, and a late train moves the leave time. If the MBTA service can't be reached the screen falls back to the timetable |
+| `desk.mbta.api_key_env` | `MBTA_API_KEY` | Environment variable holding your MBTA API key (optional; without one the public rate limit applies) |
+| `desk.mbta.on_my_way_timeout_min` | `180` | An "On my way" tap is forgotten after this many minutes even if the MBTA never reports the departure |
 | `surfaces[].follow` | | `contact`, `channel`, and optionally `topic` to follow a Telegram forum topic |
 | `surfaces[].publishers` | none | Agents allowed to put cards on this surface's dial (`["*"]` for any). See [Intercom devices](/channels/intercom-devices#what-can-appear-on-the-dial) |
 | `surfaces[].max_devices` | `10` | How many screens can be paired to the surface at once |
