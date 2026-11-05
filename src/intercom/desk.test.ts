@@ -57,7 +57,7 @@ const COMMUTE: CommuteConfig = {
   am: [{ number: '6008', departs: '07:01' }, { number: '6010', departs: '07:42' }],
   pm: [{ number: '6027', departs: '16:52' }, { number: '6029', departs: '17:37' }],
 };
-const PLAN: CommutePlan = { office_days: [2, 4], am_train: '6008', pm_train: null, leave_before_min: 15, overrides: [] };
+const PLAN: CommutePlan = { office_days: [2, 4], am_train: '6008', pm_train: null, am_travel_min: 15, pm_travel_min: 30, overrides: [] };
 const at = (hhmm: string, day = '2026-11-03') => new Date(`${day}T${hhmm}:00-05:00`);
 const ev = (over: Partial<CalendarEvent>): CalendarEvent => ({ id: 'e', title: 'Dentist', start: '2026-11-03T16:00:00-05:00', end: '2026-11-03T17:00:00-05:00', all_day: false, calendar: 'Home', color: '#fff', ...over });
 const dep = (now: Date, events: CalendarEvent[] = [], plan: CommutePlan | null = PLAN, commute: CommuteConfig | null = COMMUTE) =>
@@ -65,7 +65,7 @@ const dep = (now: Date, events: CalendarEvent[] = [], plan: CommutePlan | null =
 const withPlan = (o: Partial<CommutePlan>): CommutePlan => ({ ...PLAN, ...o });
 
 describe('train selection', () => {
-  it('Tuesday: leave_at is departure minus leave_before_min', () => {
+  it('Tuesday: leave_at is departure minus am_travel_min', () => {
     const d = dep(at('06:00'))!;
     expect(d.kind).toBe('train');
     expect(d.label).toBe('7:01 train');
@@ -88,7 +88,7 @@ describe('train selection', () => {
     expect(dep(at('12:00'))).toBeNull();
     const d = dep(at('12:00'), [], withPlan({ pm_train: '6027' }))!;
     expect(d.train!.number).toBe('6027');
-    expect(d.leave_at).toBe('2026-11-03T16:37:00-05:00');
+    expect(d.leave_at).toBe('2026-11-03T16:22:00-05:00'); // 16:52 minus pm_travel_min 30
   });
   it('a wfh override cancels an office day', () => {
     expect(dep(at('06:00'), [], withPlan({ overrides: [{ date: '2026-11-03', mode: 'wfh' }] }))).toBeNull();
@@ -125,18 +125,28 @@ describe('commute plan', () => {
   const VALID = `office_days: [tue, thu]
 am_train: "6008"
 pm_train: null          # unknown
+am_travel_min: 15
+pm_travel_min: 30
 leave_before_min: 15
+walk_min: 30
 overrides: [{date: "2026-11-05", mode: "wfh"}, {date: "2026-11-06", mode: "office", am_train: "6010", pm_train: "6029"}]`;
   it('parses a valid block', () => {
     expect(parseCommutePlan(doc(VALID))).toEqual({
-      office_days: [2, 4], am_train: '6008', pm_train: null, leave_before_min: 15,
+      office_days: [2, 4], am_train: '6008', pm_train: null, am_travel_min: 15, pm_travel_min: 30,
       overrides: [{ date: '2026-11-05', mode: 'wfh' }, { date: '2026-11-06', mode: 'office', am_train: '6010', pm_train: '6029' }],
     });
   });
   it('is tolerant: numeric trains, unquoted dates, bad entries dropped, defaults applied', () => {
     const p = parseCommutePlan(doc('office_days: [Tuesday, bogus, THU]\nam_train: 6008\noverrides:\n  - {date: 2026-11-05, mode: wfh}\n  - {date: nope, mode: wfh}\n  - {date: "2026-11-06", mode: maybe}\n  - 7'));
-    expect(p).toMatchObject({ office_days: [2, 4], am_train: '6008', pm_train: null, leave_before_min: 15 });
+    expect(p).toMatchObject({ office_days: [2, 4], am_train: '6008', pm_train: null, am_travel_min: 15, pm_travel_min: 30 });
     expect(p.overrides).toEqual([{ date: '2026-11-05', mode: 'wfh' }]);
+  });
+  it('travel-minute fallbacks: legacy aliases, old files keep one lead for both directions', () => {
+    const base = 'office_days: [tue]\n';
+    expect(parseCommutePlan(doc(base + 'leave_before_min: 15\nwalk_min: 30'))).toMatchObject({ am_travel_min: 15, pm_travel_min: 30 });
+    expect(parseCommutePlan(doc(base + 'leave_before_min: 20'))).toMatchObject({ am_travel_min: 20, pm_travel_min: 20 });
+    expect(parseCommutePlan(doc(base + 'am_travel_min: 10\npm_travel_min: 25\nleave_before_min: 15'))).toMatchObject({ am_travel_min: 10, pm_travel_min: 25 });
+    expect(parseCommutePlan(doc(base))).toMatchObject({ am_travel_min: 15, pm_travel_min: 30 });
   });
   it('throws on a missing block or a malformed one', () => {
     expect(() => parseCommutePlan('no block here')).toThrow();

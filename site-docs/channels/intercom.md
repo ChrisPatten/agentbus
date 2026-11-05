@@ -41,7 +41,7 @@ adapters:
 | `calendar.calendars` | all | Calendars to draw on the ring, by the names Calendar uses. Case, emoji and punctuation don't matter |
 | `calendar.cache_s` | `300` | How long the calendar is reused |
 | `desk.commute_file` | `integrations/intercom/commute.json` | Train timetable and holidays behind the "Leave in N min" line |
-| `desk.plan_file` | `/Users/chrispatten/workspace/peggy-claude-code/memory/project_commute_plan.md` | Office-day plan (fenced `commute-plan` block: office days, AM/PM train, lead time, per-date overrides). Trains show only on office days; re-read when the file changes |
+| `desk.plan_file` | `/Users/chrispatten/workspace/peggy-claude-code/memory/project_commute_plan.md` | Office-day plan (fenced `commute-plan` block: office days, AM/PM train, separate morning and evening lead times (`am_travel_min`, `pm_travel_min`), per-date overrides). Trains show only on office days; re-read when the file changes |
 | `desk.event_travel_min` | `20` | Rough travel time for a calendar event with a location (an estimate; no routing service) |
 | `surfaces[].follow` | | `contact`, `channel`, and optionally `topic` to follow a Telegram forum topic |
 | `surfaces[].publishers` | none | Agents allowed to put cards on this surface's dial (`["*"]` for any). See [Intercom devices](/channels/intercom-devices#what-can-appear-on-the-dial) |
