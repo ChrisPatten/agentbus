@@ -7,9 +7,8 @@
 | File | Purpose |
 |---|---|
 | `index.html`, `styles.css`, `manifest.webmanifest`, `icons/` | Page shell, look, Home Screen manifest and icons (180, 192, 512 px) |
-| `app.js` | State, view selection, pairing, send form, wake lock |
+| `app.js` | State, view selection, pairing, send form |
 | `socket.js` | WebSocket client: protocol 2 hello with revs and cursor, v1 fallback, backoff, outbox, ping, `view` frame, 4401 |
-| `wake.js` | Keeps the screen on: Screen Wake Lock with a hidden-video fallback (see Home Screen install) |
 | `logic.js` | Pure helpers: 24 h geometry, calendar selection, backoff, glance, outbox, notification map, screen priority, quiet hours (unit-tested) |
 | `surface.js` | Surface v2 resource store (`createStore`, `applyDelta`, `applyState`, `revsOf`), slot, face and approval selectors |
 | `dayv2.js` | Day Dial v2 logic: ring model and layer stacking, tick placement, ring-tap nearest-Event and carousel order, hit testing, scrub, travel and leave-by, primary and context slot decisions, widget registry |
@@ -17,13 +16,13 @@
 | `actions.js` | The one action path: request body, result interpretation, button states, confirm-draft gating |
 | `dial.js`, `screens.js` | SVG rims and the HTML of each dial screen |
 | `demo.js` | Scripted `?demo` walkthrough: the nine mockup screens plus three notification steps |
-| `dev/` | `mock-server.mjs` and `surface-mock.mjs` (the mock bus, v1 and v2), `publish-demo.mjs` (demo content for a live bus), `cdp-surface.mjs`, `cdp-legacy.mjs`, `cdp-flow.mjs`, `cdp-notify.mjs` (headless Chrome drivers), tests (`surface.test.js`, `desk.test.js`, `logic.test.js`, `notifications.test.js`, `wake.test.js`, `publish-demo.test.js`, `legacy-token.test.js`), `screens/` and `screenshots/` (a few small PNGs) |
+| `dev/` | `mock-server.mjs` and `surface-mock.mjs` (the mock bus, v1 and v2), `publish-demo.mjs` (demo content for a live bus), `cdp-surface.mjs`, `cdp-legacy.mjs`, `cdp-flow.mjs`, `cdp-notify.mjs` (headless Chrome drivers), tests (`surface.test.js`, `desk.test.js`, `logic.test.js`, `notifications.test.js`, `publish-demo.test.js`, `legacy-token.test.js`), `screens/` and `screenshots/` (a few small PNGs) |
 
 ## The dial
 
 The dial is a 466 x 466 design square scaled with CSS. Default size is **true size**, 268 CSS px (1.75 in on an iPhone 16 Pro Max). The "Large" toggle fills the page width minus 32 px (limited by the available height); the choice is kept in `localStorage`. Everything outside the dial is plain: connection dot, size toggle, a text field and Send button.
 
-**Landscape.** Turn the phone on its side and only the dial shows: the text field, Send button, caption and size toggle are hidden (CSS `@media (orientation: landscape) and (max-height: 600px)`; they return in portrait) and the connection dot floats at the top left (press and hold still unpairs). The dial is centred and respects the notch (safe-area insets). It is drawn at the real physical size of the Compact: `DIAL_INCHES` (1.75 in, the figure the project documents; override with `?diam=1.48` if the active area measures smaller) times CSS px per inch, default 160, so 280 CSS px at the default (the bezel adds about 8% around it). iPhones are 153 to 163 CSS px per inch, so calibrate once: open the app with `?calibrate=1`, hold a ruler to the brass bar and press + or - until it is exactly 1 inch; the value is stored in `localStorage` (`intercom.ppi`), or set it directly with `?ppi=153`. The size comes from `physicalDialSize` in `logic.js` and is clamped to fit the height only if dial plus bezel would exceed it, which does not happen on iPhones at normal ppi. The Large toggle is ignored in landscape. The manifest `orientation` is `any`, so the Home Screen app rotates. The wake lock is unaffected.
+**Landscape.** Turn the phone on its side and only the dial shows: the text field, Send button, caption and size toggle are hidden (CSS `@media (orientation: landscape) and (max-height: 600px)`; they return in portrait) and the connection dot floats at the top left (press and hold still unpairs). The dial is centred and respects the notch (safe-area insets). It is drawn at the real physical size of the Compact: `DIAL_INCHES` (1.75 in, the figure the project documents; override with `?diam=1.48` if the active area measures smaller) times CSS px per inch, default 160, so 280 CSS px at the default (the bezel adds about 8% around it). iPhones are 153 to 163 CSS px per inch, so calibrate once: open the app with `?calibrate=1`, hold a ruler to the brass bar and press + or - until it is exactly 1 inch; the value is stored in `localStorage` (`intercom.ppi`), or set it directly with `?ppi=153`. The size comes from `physicalDialSize` in `logic.js` and is clamped to fit the height only if dial plus bezel would exceed it, which does not happen on iPhones at normal ppi. The Large toggle is ignored in landscape. The manifest `orientation` is `any`, so the Home Screen app rotates.
 
 Readability rules, in design units: text at least 26 px, primary text 34 px or more, clock 110 px or more (130 in the idle view), nothing important within 30 px of the rim, buttons at least 72 px tall and at most 4, secondary grey no darker than `#b3aa9a`.
 
@@ -47,7 +46,7 @@ When nothing outranks them (pairing, offline, views, reply, working, done and no
 
 - **Quiet face (22:00 to 06:30).** Colour only, no text or numbers: two soft blurred lights drifting slowly at no more than 12 percent brightness, 20 percent when something needs you. Teal calm, amber needs you (a session, or an attention notice held back by quiet hours), red a stuck session, brass an info notice waiting. It replaces both faces. Attention and urgent cards do not interrupt quiet hours (see Notifications); the colour carries it instead.
 
-  **Quiet escape.** Quiet hours never lock you out: a **left swipe** on the quiet face (more than 40 design px, mostly sideways; the right arrow key does the same) takes you to the main face, the Day Dial, and normal face navigation (swipe or arrow keys between day and status) works from there. A right swipe on the quiet face does nothing. The escape is an in-memory override (`S.quietEscape`, decided by `quietEscapeActive` in `logic.js`): it lasts until the quiet window ends (the first update after 06:30 clears it, so the next 22:00 shows the quiet face again) and in any case for at most 12 h. While it holds, the screen priority treats quiet as off, so a waiting Needs-you card shows as it does by day. A page reload also returns to the quiet face (swipe again). The screen wake lock still follows the real clock and stays released in quiet hours. Swipe handling on other faces and the ring carousel is unchanged. Checked by `dev/desk.test.js` and the quiet-escape steps in `dev/cdp-surface.mjs` (`?quiet` forces the quiet face).
+  **Quiet escape.** Quiet hours never lock you out: a **left swipe** on the quiet face (more than 40 design px, mostly sideways; the right arrow key does the same) takes you to the main face, the Day Dial, and normal face navigation (swipe or arrow keys between day and status) works from there. A right swipe on the quiet face does nothing. The escape is an in-memory override (`S.quietEscape`, decided by `quietEscapeActive` in `logic.js`): it lasts until the quiet window ends (the first update after 06:30 clears it, so the next 22:00 shows the quiet face again) and in any case for at most 12 h. While it holds, the screen priority treats quiet as off, so a waiting Needs-you card shows as it does by day. A page reload also returns to the quiet face (swipe again). Swipe handling on other faces and the ring carousel is unchanged. Checked by `dev/desk.test.js` and the quiet-escape steps in `dev/cdp-surface.mjs` (`?quiet` forces the quiet face).
 - **Face down** turning the screen off is a device-only behaviour (the Compact's motion sensor) and is not part of the web build.
 
 ## Surface v2 (E97)
@@ -121,12 +120,6 @@ Run `npx tsx scripts/intercom-pair.ts <surface_id>` on the bus host; it prints a
 ## Home Screen install
 
 iOS gives a Home Screen app its own storage, separate from Safari, and the launch URL drops the `#pair=` fragment. So install first, then pair inside the installed app: in Safari open `/intercom/` (no code), Share, **Add to Home Screen**; launch it from the icon; paste the pairing link (or just the code) into the text field and tap **Pair**. Codes are single use, so generate a fresh one for this. It opens full screen (no browser chrome, black status bar, safe-area aware). 
-
-### Keeping the screen on
-
-While the app is open the display is kept awake (`wake.js`). It requests `navigator.wakeLock.request('screen')` on load and again on the first touch, key or pointer (some browsers insist on a gesture), whenever the page becomes visible again, and whenever a held lock is released while the page is visible. During quiet hours (22:00 to 06:30 on the phone's clock, same rule as the Quiet screen; `?quiet` and `?quiet=0` apply here too) it holds no lock and releases any it has; a 60 s timer re-checks, so it takes the lock at 06:30 and drops it at 22:00. The decision is the pure `shouldHoldWakeLock` in `logic.js`. Where `navigator.wakeLock` is missing it falls back to a 1 px, muted, looping inline video (about 1.6 KB, NoSleep style) started on the first touch and paused in quiet hours. Every step is wrapped so a failure never affects the UI.
-
-Limits: iOS only supports the Wake Lock API in Home Screen web apps from iOS 18.4; before that the video fallback is best effort and may not work. Low Power Mode, or the phone being locked manually, still turns the screen off. At night the phone then sleeps normally.
 
 ## Demo and mock server
 

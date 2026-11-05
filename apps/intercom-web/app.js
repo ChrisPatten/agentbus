@@ -7,7 +7,6 @@ import { ringModel, carouselOrder, nearestRingEvent, inRingBand, ballHit, pointT
 import { ButtonStates, submitAction, needsConfirm, btnKey } from './actions.js';
 import { sessionsFromDesk, sessionsFromStore, mergeOlder, appendMessage } from './statusv2.js';
 import { runDemo, STEPS } from './demo.js';
-import { createWakeKeeper } from './wake.js';
 
 const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
@@ -31,7 +30,6 @@ let sock = null;
 let lastHtml = '';
 let lastName = '';
 let replyTimer = null;
-const wake = createWakeKeeper({ tz: TZ_FALLBACK, forceQuiet });
 
 // Desk faces (E94): the user swipes to a face and it stays. ?face=status|day sets it too (dev, and for the mock server).
 function loadFace() {
@@ -713,12 +711,9 @@ function boot() {
   wireCalibrate();
   wireUi();
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') { wake.evaluate(); sock?.nudge(); fetchToday(); fetchDesk(); resync(); update(); }
+    if (document.visibilityState === 'visible') { sock?.nudge(); fetchToday(); fetchDesk(); resync(); update(); }
   });
   window.addEventListener('online', () => sock?.nudge());
-  wake.evaluate();
-  for (const ev of ['pointerdown', 'touchend', 'keydown']) document.addEventListener(ev, () => wake.gesture(), { once: true, passive: true });
-  setInterval(() => wake.evaluate(), 60000);
 
   if (demoMode) {
     $('form').hidden = true;
