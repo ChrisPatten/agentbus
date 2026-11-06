@@ -199,7 +199,8 @@ function vmNow(now) {
 
 function faceVm(now) {
   if (quietActive(now)) return nightVm(now);
-  const stale = S.conn === 'online' && S.lastFrame && now - S.lastFrame > 30000;
+  const heard = Math.max(S.lastFrame || 0, sock?.lastFrameAt || 0); // any frame counts, pongs included
+  const stale = S.conn === 'online' && S.lastFrame && now - heard > 30000;
   if ((S.conn !== 'online' && now - S.offlineSince > 1500) || stale) return nowVm(now, { offline: true, stale });
   if (S.face === 'day') return dayVm(now);
   if (S.face === 'agents') return agentsVm(now);
