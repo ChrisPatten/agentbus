@@ -12,6 +12,7 @@ import { buildState, STATES, STATE_IDS } from './states.js';
 import { sunTimes, crescentLeft, FALLBACK } from './sun.js';
 import { zparts, hm, hmA, mss, timer, lengthText, shortHour, agoText, monthDay, zonedMs, DEFAULT_TZ } from './time.js';
 import { createEarlier } from './earlier.js';
+import { createKeepAwake } from './wake.js';
 import { clockPoint, moonDeg, walkAt, sliderHit, clockDeg, drainLit } from './geom.js';
 
 const $ = (id) => document.getElementById(id);
@@ -56,6 +57,7 @@ const S = {
   pairedAt: Number(safe.get('phase.pairedAt')) || 0, lastFrame: 0, frozen: !!STATE_ID, demoId: null, demoT0: 0,
 };
 const earlier = createEarlier(storage);
+const awake = createKeepAwake({ storage });
 let sock = null;
 const saveAside = () => safe.set('phase.aside', JSON.stringify(Object.fromEntries(S.aside)));
 function loadPair() { try { const p = JSON.parse(ls.get('intercom.pair') || 'null'); return p && p.token ? p : null; } catch { return null; } }
@@ -1032,6 +1034,14 @@ function wireChrome() {
   window.addEventListener('orientationchange', () => setTimeout(applySize, 200));
   $('reduced').checked = !!SET.reduced;
   $('reduced').addEventListener('change', () => { SET.reduced = $('reduced').checked; saveSettings(); document.documentElement.classList.toggle('rm', !!reduced()); paint(); });
+  if (awake.supported) {
+    $('keepawake-row').hidden = false;
+    $('keepawake').checked = awake.enabled();
+    $('keepawake').addEventListener('change', () => { awake.set($('keepawake').checked); });
+    document.addEventListener('visibilitychange', () => { awake.visible(); });
+    document.addEventListener('pointerdown', () => { awake.gesture(); }, { passive: true });
+    awake.visible(); // restore a saved "on" at load (iOS may wait for the first gesture)
+  }
   $('input').addEventListener('input', () => { if (!S.pair) paint(); });
   $('form').addEventListener('submit', (e) => {
     e.preventDefault();
