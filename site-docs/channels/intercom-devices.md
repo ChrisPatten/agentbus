@@ -90,7 +90,7 @@ A device either pins the certificate's fingerprint (the pairing answer includes 
 
 | Item | Where it comes from |
 |---|---|
-| **Events** | Cards your agents put on the dial, such as "Train in 10 min", with up to three buttons. An Event can carry a time, so it sits on the day ring, and it disappears when it expires |
+| **Events** | Cards your agents put on the dial, such as "Train in 10 min", with up to three buttons. An Event can carry a time, so it sits on the day ring. It has a weight: ambient (just a mark on the ring), notice (shown briefly), decision (stays until you answer) or urgent (fills the screen). When it ends, because it expired, you answered it, or the agent withdrew or cleared it, it leaves the dial and stays in the device's Earlier list for a day with that word |
 | **Approvals** | When an agent's Claude Code session asks permission, the request also appears on every device of the surface that follows you, with the exact command or change and **Approve** and **Deny**. Your tap counts the same as a tap in Telegram |
 | **Agent sessions** | Each agent session and what it's doing (working, waiting, stuck, finished, idle), with "needs you" when an agent has asked you a question it's waiting on. Idle and finished sessions drop off after 30 minutes unless they need you |
 | **Notifications** | The same "needs you soon" items described under [Intercom notifications](/channels/intercom#notifications) |
@@ -113,7 +113,7 @@ Agents use these tools:
 | Tool | What it does |
 |---|---|
 | `list_surfaces` | Lists the surfaces the agent may publish to |
-| `surface_publish_event` / `surface_remove_event` | Puts a card on the dial, with up to three buttons, or takes it off. Give it a start and an end and it is drawn as a segment on the day ring, with an optional colour, travel time, detail (description, location, picture) and a choice of what a tap opens |
+| `surface_publish_event` / `surface_remove_event` | Puts a card on the dial, with up to three buttons, or ends it (as withdrawn, answered or cleared). Give it a start and an end and it is drawn as a segment on the day ring, with an optional colour, travel time, detail (description, location, picture) and a choice of what a tap opens. An urgent card can also say what changed ("6:42" to "6:58") and what happens if you do nothing |
 | `surface_set_slot` / `surface_clear_slot` | Overrides a slot on a face until a time you choose. The primary slot can carry one button; the context slot shows up to two short lines or up to three widgets |
 | `surface_set_face` | Turns a face on or off, reorders it or sets which slots it shows |
 | `surface_upload_asset` | Uploads a picture (PNG, JPEG or a plain SVG, such as a QR code) to show on an event |
@@ -126,7 +126,7 @@ An agent may publish only to a surface whose `publishers` list includes it. When
 
 The choice buttons an agent attaches to a question can be tapped on the device as well: a tap counts exactly like tapping the button in Telegram, and the session stops showing as needing you.
 
-A button that would send a message for you, such as "Tell Sam I'm running late", always shows the exact text first. The device must send that same text back when you tap, or nothing is sent. Each button works once, and a tap after its card expires does nothing.
+A button that would send a message for you, such as "Tell Sam I'm running late", always shows the exact text first, and you press and hold to send it. The device must send that same text back, or nothing is sent. An agent can ask for press-and-hold on other buttons too, for things that can't be undone. Each button works once, and a tap after its card has ended does nothing. Tapping a button on a decision or an urgent card counts as answering it, so the card leaves the dial.
 
 ## Troubleshooting
 

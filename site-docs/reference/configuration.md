@@ -305,6 +305,7 @@ The encrypted listener that lets Intercom devices on your network reach the bus,
 | `log_retention_revs` | `500` | How many recent changes a reconnecting device can catch up on before it reloads everything |
 | `delta_coalesce_ms` | `250` | Rapid changes within this many milliseconds reach devices as one update |
 | `action_key_ttl_hours` | `48` | How long a button tap is remembered, so a retried tap never fires twice |
+| `event_tombstone_hours` | `24` | How long an ended Event (answered, expired, withdrawn or cleared) stays available for a device's Earlier list |
 | `action_rate_limit_per_min` | `30` | Button taps per device per minute |
 | `sessions.activity_timeout_min` | `30` | How long an idle agent session stays on the status face |
 | `sessions.include_system` | `false` | Also show scheduled routines and agent-to-agent sessions |

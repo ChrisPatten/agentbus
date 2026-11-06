@@ -2,7 +2,7 @@
 
 The Surface API is the contract between bus-core and the devices that show what agents publish: the iPhone web app today, the Compact (a round 466x466 device) and its phone relay next. It adds per-device credentials, a revisioned resource model with delta push, an action path back into the bus, and a separate TLS listener for the LAN. Protocol v1 ([INTERCOM.md](INTERCOM.md)) keeps working unchanged.
 
-Source: `src/surface/` (types, devices, resources, actions, sessions, conversations, approvals, answer-needed, flags, cert, cert-gen, runtime, inbound-hook), `src/http/surface-routes.ts`, `src/http/surface-listener.ts`, the shared WebSocket handler in `src/http/intercom-routes.ts`, the v2 parts of `src/intercom/service.ts`, migration `046_surface_api.sql`, and the CLIs `scripts/surface-pair.ts`, `scripts/surface-devices.ts`, `scripts/surface-cert.ts`. Epic: `_bmad-output/epics/E96-surface-api-v2.md`.
+Source: `src/surface/` (types, devices, resources, actions, lifecycle, sessions, conversations, approvals, answer-needed, flags, cert, cert-gen, runtime, inbound-hook), `src/http/surface-routes.ts`, `src/http/surface-listener.ts`, the shared WebSocket handler in `src/http/intercom-routes.ts`, the v2 parts of `src/intercom/service.ts`, migration `046_surface_api.sql`, and the CLIs `scripts/surface-pair.ts`, `scripts/surface-devices.ts`, `scripts/surface-cert.ts`. Epic: `_bmad-output/epics/E96-surface-api-v2.md`.
 
 ## Terminology
 
@@ -38,6 +38,7 @@ The top-level `surface_api` block configures the LAN listener and the v2 runtime
 | `log_retention_revs` | `500` | Revisions of ops kept per (surface, resource) for resume (10-10,000). Older revs get a `reset` |
 | `delta_coalesce_ms` | `250` | At most one delta per (surface, resource) per this window (0-5,000; 0 sends every change at once) |
 | `action_key_ttl_hours` | `48` | How long an action's idempotency key and its answer are remembered |
+| `event_tombstone_hours` | `24` | How long an ended Event (answered, expired, withdrawn, cleared) stays in `events` as a tombstone after its `ended_at` (0-168 hours, more than 0). See [Moment lifecycle](#moment-lifecycle-e100) |
 | `action_rate_limit_per_min` | `30` | Actions (HTTP and WS) per device per sliding minute |
 | `asset_max_bytes` | `1048576` | Largest file the asset upload route accepts (1 KiB to 16 MiB) |
 | `sessions.activity_timeout_min` | `30` | An `idle` or `finished` session with no activity for this long drops out of the `sessions` resource (unless it needs you) |
@@ -231,7 +232,7 @@ Each surface has seven resources. Every resource is a keyed collection (`id` to 
 | Resource | Holds | Written by |
 |---|---|---|
 | `faces` | Which faces the device can show, in order | Default seed at startup (see [Faces](#faces)) |
-| `events` | Agent-published Events and bus Approval objects | Agent publishing tools ([S96.5](#agent-publishing-tools-s965)); approval sync |
+| `events` | Agent-published Events and bus Approval objects, open and (for a while) ended ones ([Moment lifecycle](#moment-lifecycle-e100)) | Agent publishing tools ([S96.5](#agent-publishing-tools-s965)); approval sync |
 | `slots` | Temporary overrides of named face slots | Agent publishing tools |
 | `widgets` | Data for widgets the client renders | Agent publishing tools |
 | `sessions` | Agent sessions with `needs_you` | Computed by the bus every 5 s |
@@ -264,7 +265,12 @@ These are the item shapes inside resources (`src/surface/types.ts`).
 | `kind` | `event` \| `approval` | |
 | `title` | string | At most 80 characters |
 | `body` | string? | At most 500 |
-| `level` | `info` \| `attention` \| `urgent` | |
+| `level` | `info` \| `attention` \| `urgent` | Always present. Derived from `weight` when the agent gave only a weight |
+| `weight` | `ambient` \| `notice` \| `decision` \| `urgent`? | E100 Moment weight. Stored only when the agent gave one; clients map `level` otherwise (info → ambient, attention → decision, urgent → urgent). Approvals carry `decision` |
+| `consequence` | string? | E100, urgent only (weight or level `urgent`): what happens if nothing is done, e.g. `Misses your 7:15 transfer`. At most 60 characters, one line |
+| `changed` | `{field, old, new}`? | E100, urgent only: what changed. `field` is `start`, `end`, `place`, `title` or `other`; `old` and `new` at most 24 characters each (`6:42` → `6:58`) |
+| `state` | `open` \| `answered` \| `expired` \| `withdrawn` \| `cleared` | E100, bus-owned. `open` on every publish; the others are terminal (a tombstone, see [Moment lifecycle](#moment-lifecycle-e100)). Absent on items stored before E100: read it as `open` |
+| `ended_at` | ISO? | E100: when a terminal Event ended (the expiry time for `expired`, the resolution time for an approval, else the moment it ended). Absent while open |
 | `at`, `end` | ISO? | The time the event is about. **Ring placement:** only a `kind: event` with both `at` and `end` draws a segment on the Day Dial ring; with only `at` it is a card. Approvals never draw (the bus does not give them `at`/`end`) |
 | `layer` | `primary` \| `overlap`? | Ring layer (needs `at` and `end`); absent means `primary`. At any moment at most 1 `primary` and 2 `overlap` ring events may overlap in time; a publish that would break that is refused naming the clash |
 | `color` | string? | Ring segment colour (needs `at` and `end`): `#rgb`, `#rrggbb` or `orange`, `red`, `green`, `blue`, `purple`, `yellow`, `teal`, `pink`, `gray`, `white`. Stored lowercase |
@@ -272,13 +278,15 @@ These are the item shapes inside resources (`src/surface/types.ts`).
 | `detail` | `{description?, location?, image?}`? | The focus view's content. `description` at most 600 characters, `location` at most 120, `image` an asset hash (64 hex; `asset:<hash>` is accepted and stored as the bare hash). On publish the image must already be in the asset store |
 | `opens` | `focus` \| `conversation`? | What a tap opens; absent means `focus` |
 | `conversation_id` | string? | Required when `opens` is `conversation`, and only allowed then |
-| `expires_at` | ISO? | At most 14 days ahead. The bus removes the event after it; its actions answer `expired` |
+| `expires_at` | ISO? | At most 14 days ahead. After it the event becomes an `expired` tombstone; its actions answer `expired` |
 | `actions` | Action[] | At most 3 |
 | `approval` | `{approval_id?, tool?, detail}`? | For `kind: approval`: exactly what is being approved |
 | `source` | string | `agent:<id>` or `bus` |
 | `created_at`, `updated_at` | ISO | |
 
-**Action** (a button on an Event or Approval): `id` (`[a-z0-9][a-z0-9_-]{0,31}`, unique within the object), `label` (at most 24 characters), `style?` (`default` \| `primary` \| `destructive`), `confirm?` (`{draft, prompt?}`; `draft` at most 2,000 characters, present when tapping sends something on Chris's behalf), `once?` (default true). The job behind a button stays on the bus; the device sees only this.
+**Action** (a button on an Event or Approval): `id` (`[a-z0-9][a-z0-9_-]{0,31}`, unique within the object), `label` (at most 24 characters), `style?` (`default` \| `primary` \| `destructive`), `confirm?` (`{draft, prompt?}`; `draft` at most 2,000 characters, present when tapping sends something on Chris's behalf), `once?` (default true), `kind` (E100: `tap` or `hold`). The job behind a button stays on the bus; the device sees only this.
+
+`kind` is resolved by the bus and always stored on buttons published after E100 (Event buttons, the primary slot's button, approvals): the default is `hold` when the button has `confirm` or `run.sends_on_behalf`, else `tap`. An explicit `tap` on a button that sends is refused (anything that sends must be held to confirm); an explicit `hold` on a plain button is allowed, for irreversible things. Approve and Deny are `hold`. Items stored before E100 have no `kind`; clients treat a `confirm.draft` as `hold`.
 
 **Slot** (`slots`, id = slot name): `id`, `text?` (at most 60), `icon?`, `color?`, `until` (ISO, at most 24 hours ahead; the bus removes it then), `source`, `updated_at`. Two slot names have a meaning:
 
@@ -308,13 +316,15 @@ From `BOUNDS` in `src/surface/types.ts`. Errors are `BoundsError`s whose message
 | `actionLabel` | 24 characters | Publishing tools |
 | `actionsPerObject` | 3 | Publishing tools |
 | `draft` | 2,000 characters | Job store, action requests; also the transcript text cut and approval `detail` |
-| `eventsPerSurface` | 50 live (non-expired) events | Resource store (a change may not raise the count above it) |
+| `eventsPerSurface` | 50 live events (open and not past `expires_at`; tombstones do not count) | Resource store (a change may not raise the count above it); the publish route also counts reviving a tombstone as a new event |
+| `consequence` | 60 characters | Publishing tools (urgent events only) |
+| `changedValue` | 24 characters each for `changed.old` and `changed.new` | Publishing tools (urgent events only) |
 | `slotText` | 60 characters | Publishing tools |
 | `contextLines` / `contextLineText` | 2 lines / 40 characters each | Publishing tools |
 | `contextWidgets` | 3 widget ids | Publishing tools |
 | `description` / `location` | 600 / 120 characters (`detail`) | Publishing tools |
 | `travelMinutes` | 720 | Publishing tools |
-| `ringPrimary` / `ringOverlap` | 1 / 2 overlapping ring events per layer | Publishing tools (checked against live events) |
+| `ringPrimary` / `ringOverlap` | 1 / 2 overlapping ring events per layer | Publishing tools (checked against live events: tombstones and expired events never block) |
 | `slotsPerSurface` | 12 | Resource store |
 | `slotMaxHours` | 24 | Publishing tools |
 | `widgetsPerSurface` | 24 | Resource store |
@@ -418,6 +428,8 @@ One handler serves `POST /api/v1/surface/actions` and the WS `action` frame.
 
 - **One-shot.** `once` jobs (the default) fire at most once across all keys; later taps answer `already_done`. Replacing an Event's jobs keeps the fire count of an action id that survives, so editing an Event cannot re-arm a button that already fired.
 - **Expiry.** A tap after the job's or the Event's `expires_at` answers `expired`.
+- **Ended Events (E100).** A tap on a tombstone answers `expired` with `reason` set to its state (`expired`, `withdrawn`, `answered` or `cleared`), whatever the job says; nothing fires. `expired` was chosen over a new status so clients that predate E100 show it as Expired and disable the button.
+- **Auto-answer (E100).** When a button on a **decision or urgent** Event (by `weight`, or without one by `level` `attention` or `urgent`) fires with result `done`, the Event becomes an `answered` tombstone. Only the version that was tapped is ended (same `updated_at`, still open), so a re-publish in between survives. Ambient and notice Events stay open when their buttons are tapped. Slot buttons have no lifecycle.
 - **`confirm.draft`.** A job that sends on Chris's behalf must store a draft (the job store refuses one without). It fires only when the Event's button shows the same `confirm.draft` and the device echoes it in `draft`. A sends-on-behalf job whose button has no draft, or whose stored and shown drafts differ, never fires (`confirm_required`). For any action with a draft: no `draft` in the request answers `confirm_required`, a different one `draft_mismatch`.
 - **Result.** Queued for an agent: `done` with `message_id`. Accepted but routed nowhere: `failed` / `no_route`. A slash command the bus handled: `done`. A pipeline abort: `failed` with its reason. A thrown pipeline error: `internal_error`, and the job is un-claimed so the same key can retry.
 
@@ -436,6 +448,7 @@ One handler serves `POST /api/v1/surface/actions` and the WS `action` frame.
 | `done` | | Fired (or approval answered by this tap); `message_id` when a message was injected |
 | `already_done` | | A `once` action already fired, the key was already answered `done`, or the approval was answered elsewhere |
 | `expired` | | The job, Event or approval expired |
+| `expired` | `expired` \| `withdrawn` \| `answered` \| `cleared` | E100: the Event has ended (a tombstone); the reason is its state |
 | `failed` | `invalid` | Malformed request (HTTP 400) |
 | `failed` | `read_only` | Read-only device (HTTP 403) |
 | `failed` | `rate_limited` | Over `action_rate_limit_per_min` (HTTP 429) |
@@ -464,12 +477,31 @@ Computed every 5 s (and at once when an answer-needed flag is set or cleared, or
 
 Every `pending`, unexpired bus approval (E51 `approval_requests`, including E68 self-edit proposals) addressed to a surface's followed contact appears in that surface's `events` resource as a `kind: approval` Event:
 
-- id `approval-<approval id>`, `level: attention`, `expires_at` = the approval's expiry, `source: bus`;
+- id `approval-<approval id>`, `level: attention`, `weight: decision`, `state: open`, `expires_at` = the approval's expiry, `source: bus`;
 - title `<tool>: <summary>` (self-edit: `Proposed change`), body `Agent <id> · <conversation title> asks to use <tool>.`;
-- actions `approve` (primary) and `deny` (destructive), both one-shot;
+- actions `approve` (primary) and `deny` (destructive), both one-shot and `kind: hold`;
 - `approval.detail` = exactly what is being approved: `raw_context.details` when a backend supplied one, else the full shell command (`tool_input.command`), else the summary. Cut to 2,000 characters with `… [N more characters]`.
 
-The set is synced on the 5-second tick and right after a device answers; agent-published Events are never touched. Approve or Deny resolves through `resolveApproval()`, the same path the Telegram buttons and `POST /api/v1/approvals/:id/resolve` use, so staleness, expiry, the in-flight guard, the pane keystroke and the `onResolved` hooks are identical. `resolved_by` is `device:<device id>`. Another contact's approval answers `not_found`. The Telegram message's buttons are removed by the approvals sweep. See [APPROVALS.md](APPROVALS.md#approving-from-a-surface-e96).
+The set is synced on the 5-second tick and right after a device answers; agent-published Events are never touched. An approval that is no longer pending becomes a tombstone (E100): `answered` when approved or denied (`ended_at` = `resolved_at`), `expired` when it expired, `withdrawn` when it went stale or is gone from the table. Later syncs leave tombstones alone; the sweep purges them. Approve or Deny resolves through `resolveApproval()`, the same path the Telegram buttons and `POST /api/v1/approvals/:id/resolve` use, so staleness, expiry, the in-flight guard, the pane keystroke and the `onResolved` hooks are identical. `resolved_by` is `device:<device id>`. Another contact's approval answers `not_found`. The Telegram message's buttons are removed by the approvals sweep. See [APPROVALS.md](APPROVALS.md#approving-from-a-surface-e96).
+
+## Moment lifecycle (E100)
+
+Every `events` item is a Moment with a bus-owned `state` (`src/surface/lifecycle.ts`):
+
+| Transition | How | `ended_at` |
+|---|---|---|
+| → `open` | Every publish (create or replace). Re-publishing an id that has ended starts a new life: `201`, `created: true`, `revived: true`, a new `created_at`, no `ended_at`, and fresh jobs (fire counts reset, so a one-shot button that fired in the old life is armed again) | removed |
+| `open` → `withdrawn`, `answered`, `cleared` | `DELETE :surface/events/:id?reason=` (`surface_remove_event`), default `withdrawn` | now |
+| `open` → `expired` | The 60 s sweep, once `expires_at` has passed | `expires_at` |
+| `open` → `answered` | A button on a decision or urgent Event fired with `done` (see [Actions and jobs](#actions-and-jobs)); an approval answered anywhere | now; for an approval its `resolved_at` |
+| `open` → `withdrawn` (approval) | The approval went stale or vanished | resolution time or now |
+| tombstone → gone | The sweep, `event_tombstone_hours` (default 24) after `ended_at` | |
+
+**Tombstones** are terminal Events kept in `events` with their content, `state` and `ended_at` (and `updated_at` = the change time), so a device can show them in an Earlier tray with the right word. They do not count toward `eventsPerSurface`, never block the ring-overlap check, are never re-expired, and their buttons answer `expired` with the state as `reason`. An agent may not change a tombstone except by publishing the id again.
+
+**Deltas.** Every transition is a `set` op carrying the whole item with its new state (open → expired is a `set`, not a `remove`), logged like any change, so resume replays it and `GET /state` equals what a connected device holds. Only the purge is a `remove`.
+
+**Clients.** A client that predates E100 should treat any Event whose `state` is present and not `open` as gone (the main web app drops them from its store). Items stored before E100 carry no `state` and read as `open`; nothing is migrated: the sweep turns them into tombstones when they expire.
 
 ## Answer needed
 
@@ -508,7 +540,7 @@ Each device that has connected has an item in its surface's `device` resource. I
 | Cadence | Work |
 |---|---|
 | Every 5 s (the service's desk tick) | Close sockets of revoked devices (4403); recompute `sessions`; sync approval Events |
-| Every 60 s (surface runtime) | Remove Events past `expires_at` and slots past `until` (through the store, so devices get deltas); delete jobs expired more than a day ago (they are kept until then so a late tap answers `expired`, not `not_found`); delete idempotency keys older than `action_key_ttl_hours`; delete v2 pairing codes spent or expired more than a day ago |
+| Every 60 s (surface runtime) | Turn open Events past `expires_at` into `expired` tombstones (`ended_at` = `expires_at`; one already older than `event_tombstone_hours` is removed outright), remove tombstones whose `ended_at` is more than `event_tombstone_hours` ago, and remove slots past `until` (all through the store, so devices get deltas); delete jobs expired more than a day ago (they are kept until then so a late tap answers `expired`, not `not_found`); delete idempotency keys older than `action_key_ttl_hours`; delete v2 pairing codes spent or expired more than a day ago |
 | Every 60 s (notifications) | Expire due notifications, which updates `notices` |
 | Hourly (service) | v1 durable-event retention and v1 pairing codes, as before |
 
@@ -529,8 +561,8 @@ Agents publish through MCP tools, registered for cc-pool panes, Claude Code and 
 | Tool | Route | What |
 |---|---|---|
 | `list_surfaces` | `GET surfaces?agent_id=` | Surfaces this agent may publish to, with their follow target |
-| `surface_publish_event` | `PUT :surface/events/:id` | Create or replace an Event (`201` new, `200` replaced; `created_at` kept) |
-| `surface_remove_event` | `DELETE :surface/events/:id` | Remove an Event and its jobs |
+| `surface_publish_event` | `PUT :surface/events/:id` | Create or replace an Event (`201` new or revived from a tombstone, `200` replaced with `created_at` kept). Answer: `{surface, id, created, revived?, state: "open", rev, expires_at, actions, kinds}` (`kinds`: action id → resolved `tap`/`hold`) |
+| `surface_remove_event` | `DELETE :surface/events/:id?reason=` | End an Event (E100): it becomes a tombstone with `state` = `reason` (`withdrawn` default, `answered`, `cleared`) and its jobs are removed. Answer: `{surface, id, removed, state?, jobs_removed, rev?}`; `removed` is false for an unknown id or one already ended (left as it is; `state` is its current state). Another reason answers `400` |
 | `surface_set_slot` | `PUT :surface/slots/:slot` | Override a face slot until `until`; `primary` may carry an `action`, `context` takes `lines` or `widgets` |
 | `surface_clear_slot` | `DELETE :surface/slots/:slot` | End the override (and remove the job behind its button) |
 | `surface_set_face` | `PUT :surface/faces/:id` | Enable, reorder or give an existing face a `layout` |
@@ -539,7 +571,7 @@ Agents publish through MCP tools, registered for cc-pool panes, Claude Code and 
 | `surface_remove_widget` | `DELETE :surface/widgets/:id` | Remove a widget |
 | `clear_answer_needed` | `POST answer-needed/clear` | Clear a conversation's flag (`conversation_id`, or `channel` + `contact` + `topic`; with no arguments cc-headless uses its turn's conversation) |
 
-**Event input.** `{id, title, body?, level?, at?, end?, layer?, color?, travel?, detail?, opens?, conversation_id?, expires_at?, actions?}` (the ring fields are described under [Object shapes](#object-shapes)). `expires_at` defaults to 24 hours ahead and must be in the future and at most 14 days ahead. Each action is `{id, label, style?, confirm?: {draft, prompt?}, once? (default true), run: {body, sends_on_behalf?}}`: `run.body` is the message injected into the surface's followed conversation (as the followed contact, like a scheduled fire) when the button is tapped. `sends_on_behalf: true` requires `confirm.draft`. Jobs always target the follow conversation. Editing an Event keeps the fire count of actions whose id survives, so a fired one-shot button is not re-armed. Agents cannot write `kind: approval` or change bus-owned Events. Every bound in [Bounds](#bounds) is checked and an over-limit call answers `400` with a message naming the field and the limit, and nothing is written (the jobs and the Event are written in one transaction).
+**Event input.** `{id, title, body?, weight?, level?, consequence?, changed?, at?, end?, layer?, color?, travel?, detail?, opens?, conversation_id?, expires_at?, actions?}` (the ring and Moment fields are described under [Object shapes](#object-shapes)). Give `weight` or `level`: with only `weight` the level is derived (ambient/notice → info, decision → attention, urgent → urgent); with only `level` no weight is stored; with both they must agree under that mapping or the call answers `400` naming both values. `consequence` and `changed` are refused (`400`) unless the event is urgent. `state` and `ended_at` are bus-owned and refused. Each action may carry `kind` (`tap` or `hold`, rules under [Object shapes](#object-shapes)). `expires_at` defaults to 24 hours ahead and must be in the future and at most 14 days ahead. Each action is `{id, label, style?, confirm?: {draft, prompt?}, once? (default true), run: {body, sends_on_behalf?}}`: `run.body` is the message injected into the surface's followed conversation (as the followed contact, like a scheduled fire) when the button is tapped. `sends_on_behalf: true` requires `confirm.draft`. Jobs always target the follow conversation. Editing an Event keeps the fire count of actions whose id survives, so a fired one-shot button is not re-armed. Agents cannot write `kind: approval` or change bus-owned Events. Every bound in [Bounds](#bounds) is checked and an over-limit call answers `400` with a message naming the field and the limit, and nothing is written (the jobs and the Event are written in one transaction).
 
 **`answer_needed`** on `reply` and `send_message` (next to `choices`): stored as `metadata.answer_needed`; when true on agent-sent text, `POST /api/v1/messages` sets the conversation's flag (the reply's conversation, else the bound `metadata.conversation_id`, else the hash of recipient, channel and topic). A message without it never sets the flag. See [Answer needed](#answer-needed).
 

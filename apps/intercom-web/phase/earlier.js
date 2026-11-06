@@ -1,5 +1,6 @@
 // The Earlier tray (spec 7.3): cleared, expired, withdrawn and set-aside items seen by this client.
-// Local only (no bus support yet): kept in localStorage. Pure apart from the injected storage, unit-tested under vitest.
+// Kept in localStorage per device; the app fills it from the bus's ended Events (E100 tombstones, with their word and end
+// time) and from local set-asides. Pure apart from the injected storage, unit-tested under vitest.
 
 export const EARLIER_KEY = 'phase.earlier';
 export const EARLIER_CAP = 30;
