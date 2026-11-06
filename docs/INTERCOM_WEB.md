@@ -131,7 +131,7 @@ iOS gives a Home Screen app its own storage, separate from Safari, and the launc
 - `PORT=3098 node apps/intercom-web/dev/cdp-surface.mjs [outDir]` drives headless Chrome through the v2 flows against the mock (pairing, segments, taps, draft, scrub, slots, widgets, approval, status, conversation, landscape, a 466 px dial), prints PASS or FAIL per check and any console errors, and saves dial screenshots; `MOCK_NO_V2=1` on the mock plus `cdp-legacy.mjs` checks the fallback. `cdp-flow.mjs` and `cdp-notify.mjs` are the older drivers (the notification one needs `?quiet=0` at night).
 - Tests: `npx vitest run apps/intercom-web`.
 
-## Phase (Plum Dusk, E99)
+## Phase (Plum Dusk, E101)
 
 A second, separate client for usability testing the Compact's "Phase" design on an iPhone, served at `/intercom/phase/` (note the trailing slash) next to the existing client, which is unchanged. The design source is `peggy-claude-code/data/intercom/design/plum-dusk/` (`spec.md` wins over the boards; where the spec is silent the board is matched; the remaining choices are listed below). Static HTML, CSS and ES modules, no build step, no framework, no CDN; the only fonts are Lexend Exa and Hanken Grotesk (and its italic), shipped in `phase/fonts/` with their OFL licences.
 

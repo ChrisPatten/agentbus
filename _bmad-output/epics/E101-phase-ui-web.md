@@ -1,12 +1,12 @@
-# E99 — Phase (Plum Dusk) web client for the Compact
+# E101 — Phase (Plum Dusk) web client for the Compact
 
 | Field | Value |
 |---|---|
-| Epic ID | E99 |
+| Epic ID | E101 |
 | Dependencies | E89 (notifications), E93 (web prototype), E96 (Surface API v2), E97 (web client v2: `socket.js`, `surface.js`, `actions.js`) |
 | Story Count | 7 |
 | Estimated Complexity | L |
-| Status | Built on `feat/e99-phase-ui` (Nov 5, 2026); not merged or deployed |
+| Status | Complete. Built on `feat/e99-phase-ui` (Nov 5, 2026; branch keeps its original name); renumbered from E99 |
 
 Design source: `peggy-claude-code/data/intercom/design/plum-dusk/` (`spec.md`, `README.md`, the eight boards and 28 reference PNGs). Requested by Chris, Nov 5, 2026, for usability testing of the Phase design on an iPhone before the Compact firmware.
 
@@ -20,13 +20,13 @@ Build the Phase design as a second web client at `/intercom/phase/`, next to the
 
 ## Stories
 
-- **S99.1 Shell and pairing.** `index.html`, manifest ("Compact Phase", scope `/intercom/phase/`, shared icons), local fonts, `intercom.pair` pairing (`#pair=`, pasted link or code), true size, Large, physical size in landscape (`?ppi=`, `?calibrate=1`), text field and Send, Side and Power stand-ins.
-- **S99.2 Rendering primitives.** Spec tokens only; clip to r 233; crescent from NOAA sunrise and sunset (default Mansfield 42.0334, -71.2190); 60-dot rim, Moments with lanes, now dot and moon on the real second; progress arcs (Now only); curved captions cut by measured arc length; capsule with Hold to confirm (0.8 s wipe, early release cancels); pills, rows, glyphs, icons; motion, reduced motion, burn-in walk.
-- **S99.3 Faces from live data.** Day · Now · Agents · Thread; Events → Moments (weight from `weight`, else level); sessions → agent states; the waiting question from `/conversations/{id}`; Thread with live appends; count ring of working sessions.
-- **S99.4 Alerts and actions.** Notices (info → Inform 20 s → Earlier; attention → Decision; urgent → flood with rim drain to `expires_at`), approvals as a Decision through Confirm, Sent only on `done`, WAITING after 3 s, TRY AGAIN on failure or timeout; Offline screen when the socket is down.
-- **S99.5 Local-only screens.** Earlier tray (localStorage, HOLD TO CLEAR), Settings (brightness overlay, volume stored, quiet hours, Daylight city with "Use phone location", Agent row), dim and rest, quiet-hours night layout with END QUIET HOURS, push-to-talk (Web Speech or placeholder), Capture timer and Saved, power menu, Pairing layout.
-- **S99.6 Dev hooks.** `?demo` picker over the 28 states and `?state=<board>/<id>` frozen render.
-- **S99.7 Verification and docs.** Unit tests, board screenshot comparison report, live mock driver, `docs/INTERCOM_WEB.md`, site docs, CHANGELOG.
+- **S101.1 Shell and pairing.** `index.html`, manifest ("Compact Phase", scope `/intercom/phase/`, shared icons), local fonts, `intercom.pair` pairing (`#pair=`, pasted link or code), true size, Large, physical size in landscape (`?ppi=`, `?calibrate=1`), text field and Send, Side and Power stand-ins.
+- **S101.2 Rendering primitives.** Spec tokens only; clip to r 233; crescent from NOAA sunrise and sunset (default Mansfield 42.0334, -71.2190); 60-dot rim, Moments with lanes, now dot and moon on the real second; progress arcs (Now only); curved captions cut by measured arc length; capsule with Hold to confirm (0.8 s wipe, early release cancels); pills, rows, glyphs, icons; motion, reduced motion, burn-in walk.
+- **S101.3 Faces from live data.** Day · Now · Agents · Thread; Events → Moments (weight from `weight`, else level); sessions → agent states; the waiting question from `/conversations/{id}`; Thread with live appends; count ring of working sessions.
+- **S101.4 Alerts and actions.** Notices (info → Inform 20 s → Earlier; attention → Decision; urgent → flood with rim drain to `expires_at`), approvals as a Decision through Confirm, Sent only on `done`, WAITING after 3 s, TRY AGAIN on failure or timeout; Offline screen when the socket is down.
+- **S101.5 Local-only screens.** Earlier tray (localStorage, HOLD TO CLEAR), Settings (brightness overlay, volume stored, quiet hours, Daylight city with "Use phone location", Agent row), dim and rest, quiet-hours night layout with END QUIET HOURS, push-to-talk (Web Speech or placeholder), Capture timer and Saved, power menu, Pairing layout.
+- **S101.6 Dev hooks.** `?demo` picker over the 28 states and `?state=<board>/<id>` frozen render.
+- **S101.7 Verification and docs.** Unit tests, board screenshot comparison report, live mock driver, `docs/INTERCOM_WEB.md`, site docs, CHANGELOG.
 
 ## Acceptance Criteria
 
