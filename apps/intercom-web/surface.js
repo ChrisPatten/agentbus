@@ -72,6 +72,26 @@ export function applyState(store, snap) {
 
 export const itemsOf = (store, r) => Object.values((store && store.items[r]) || {});
 
+/**
+ * E100: an Event whose bus-owned `state` is present and not `open` has ended (answered, expired, withdrawn, cleared)
+ * and stays in `events` as a tombstone for the Phase client's Earlier tray. Items without `state` (older buses) are live.
+ */
+export const isEnded = (e) => !!e && typeof e.state === 'string' && e.state !== 'open';
+
+/**
+ * Drop ended Events from the store's `events` in place, so a client that predates the lifecycle (the main web app)
+ * sees them as gone, exactly as it did when the bus removed them. The rev is kept: the bus re-sends an Event with a
+ * `set` when it opens again, and a delta that patches a dropped id makes `applyDelta` answer 'gap' (re-sync).
+ * Returns the ids dropped.
+ */
+export function dropEnded(store) {
+  const ev = store && store.items && store.items.events;
+  if (!ev) return [];
+  const gone = Object.keys(ev).filter((id) => isEnded(ev[id]));
+  if (gone.length) { const next = { ...ev }; for (const id of gone) delete next[id]; store.items.events = next; }
+  return gone;
+}
+
 /** A slot is live until its `until` (no `until` means live). */
 export function activeSlot(store, name, nowMs) {
   const s = store && store.items.slots[name];

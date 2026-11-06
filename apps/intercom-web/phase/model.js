@@ -7,7 +7,7 @@ import { zparts, hm, hmA, sameDay, dayLabel, minuteOfDay, startOfDay, zonedMs, s
 
 export const WEIGHTS = ['ambient', 'notice', 'decision', 'urgent'];
 export const WEIGHT_RANK = { ambient: 0, notice: 1, decision: 2, urgent: 3 };
-/** Surface Event `level` to Moment weight, used when the Event carries no `weight` (the bus has none yet). */
+/** Surface Event `level` to Moment weight, used when the Event carries no `weight` (the agent gave only a level, or an older bus). */
 export const LEVEL_WEIGHT = { info: 'ambient', attention: 'decision', urgent: 'urgent' };
 /** E89 notice `level` to weight: info is a Notice (Inform for 20 s), attention a Decision, urgent the rose flood. */
 export const NOTICE_WEIGHT = { info: 'notice', attention: 'decision', urgent: 'urgent' };
@@ -17,6 +17,11 @@ export function weightOf(item, map = LEVEL_WEIGHT) {
 }
 
 const ms = (iso) => { const t = Date.parse(iso || ''); return Number.isFinite(t) ? t : null; };
+
+/** E100 lifecycle: the bus-owned states. Anything but `open` is terminal (a tombstone, shown only in Earlier). */
+export const MOMENT_STATES = ['open', 'answered', 'expired', 'withdrawn', 'cleared'];
+export const stateOfEvent = (e) => (e && MOMENT_STATES.includes(e.state) ? e.state : 'open');
+export const isOpen = (m) => !m || !m.state || m.state === 'open';
 const str = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null);
 
 /** Action labels: at most 10 characters, cut without an ellipsis (spec 10); the cut is reported to `log`. */
@@ -31,7 +36,7 @@ const cutLogged = new Set();
 /** Report a cut label once (spec 10: "truncate without an ellipsis and log it"). */
 export const logCut = (msg) => { if (!cutLogged.has(msg)) { cutLogged.add(msg); if (globalThis.console) console.info(`[phase] ${msg}`); } };
 
-/** Bus Action -> Moment action. `hold` for anything that sends (a confirm draft) or that says so itself. */
+/** Bus Action -> Moment action. The bus's resolved `kind` (E100) wins; without one (older bus), `hold` for anything with a confirm draft. */
 export function mapAction(a, i) {
   const draft = a && a.confirm && typeof a.confirm.draft === 'string' && a.confirm.draft ? a.confirm.draft : null;
   return { id: String(a.id ?? i), label: capLabel(a.label, logCut), kind: a.kind === 'hold' || a.kind === 'tap' ? a.kind : draft ? 'hold' : 'tap', primary: i === 0, draft, destructive: a.style === 'destructive' || a.style === 'danger', raw: a };
@@ -54,7 +59,7 @@ export function momentFromEvent(e) {
     place: str(e.detail && e.detail.location), note: str(e.detail && e.detail.description) || str(e.body), travel, actions,
     preview: approval ? { to: null, channel: null, text: (e.approval && e.approval.detail) || e.body || '' } : draftAct ? { to: (draftAct.raw.confirm && draftAct.raw.confirm.prompt) || null, channel: null, text: draftAct.draft } : (e.preview && typeof e.preview.text === 'string' ? e.preview : null),
     expires: ms(e.expires_at), consequence: str(e.consequence), changed: e.changed && e.changed.new !== undefined ? e.changed : null,
-    state: e.state || 'open', arrival: ms(e.created_at) ?? ms(e.updated_at), updated: e.updated_at || e.created_at || '',
+    state: stateOfEvent(e), ended: ms(e.ended_at), arrival: ms(e.created_at) ?? ms(e.updated_at), updated: e.updated_at || e.created_at || '',
     source: e.source || '', conversationId: e.conversation_id || null, raw: e,
   };
 }
@@ -122,8 +127,8 @@ export function questionOf(session, messages) {
 
 const H12 = 12 * 3600 * 1000;
 const degOf = (t, tz) => { const p = zparts(t, tz); return clockDeg(p.h, p.m, p.s); };
-/** Moments with a start that the rim and the day list use, sorted by start. */
-export const timedMoments = (moments) => (moments || []).filter((m) => m.start !== null && m.src === 'event').sort((a, b) => a.start - b.start || (a.end === null) - (b.end === null) || String(a.id).localeCompare(String(b.id)));
+/** Open Moments with a start that the rim and the day list use, sorted by start. A terminal Moment never takes the face. */
+export const timedMoments = (moments) => (moments || []).filter((m) => m.start !== null && m.src === 'event' && isOpen(m)).sort((a, b) => a.start - b.start || (a.end === null) - (b.end === null) || String(a.id).localeCompare(String(b.id)));
 
 /**
  * Rim marks for the next 12 hours. Points are dots on r 214; spans are arcs on lane r 197; the later of two overlapping spans
@@ -336,3 +341,12 @@ export function fitText(text, maxWidth, measure) {
 /** Earlier-tray row detail: "2:14 PM · cleared" or, for an open one, "open · tap to act". */
 export const earlierDetail = (e, tz) => (e.state === 'open' ? 'open · tap to act' : `${hmA(e.at, tz)} · ${e.state}`);
 export { agoText };
+
+/**
+ * The Earlier entry for a terminal Moment (E100 tombstone): its word and when it ended. Ambient Moments are not
+ * alerts and get none (they clear "when past", spec 6.2); open ones get none either.
+ */
+export function earlierEntryOf(m, iconName = 'agent') {
+  if (!m || isOpen(m) || WEIGHT_RANK[m.weight] < 1) return null;
+  return { id: m.id, title: m.title, kind: m.weight === 'notice' ? 'notice' : m.weight, icon: iconName, state: m.state, at: m.ended ?? (Date.parse(m.updated) || Date.now()), object: m.object };
+}

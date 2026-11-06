@@ -304,3 +304,44 @@ describe('time formats', () => {
     expect(zparts(M.quietEndsAt(at(23, 42), TZ), TZ).d).toBe(6);
   });
 });
+
+describe('E100 Moment fields from the bus', () => {
+  it('weight wins over level; level alone still maps', () => {
+    expect(M.momentFromEvent({ id: 'e', kind: 'event', title: 't', level: 'info', weight: 'notice' }).weight).toBe('notice');
+    expect(M.momentFromEvent({ id: 'e', kind: 'event', title: 't', level: 'attention', weight: 'decision' }).weight).toBe('decision');
+    expect(M.momentFromEvent({ id: 'e', kind: 'event', title: 't', level: 'attention' }).weight).toBe('decision');
+  });
+  it('the bus-resolved action kind drives tap versus hold', () => {
+    const m = M.momentFromEvent({ id: 'e', kind: 'event', title: 't', level: 'urgent', actions: [
+      { id: 'a', label: 'Dismiss', kind: 'tap' }, { id: 'b', label: 'Cancel', kind: 'hold' }, { id: 'c', label: 'Tell Kate', kind: 'hold', confirm: { draft: 'Late' } },
+    ] });
+    expect(m.actions.map((a) => [a.id, a.kind, a.draft])).toEqual([['a', 'tap', null], ['b', 'hold', null], ['c', 'hold', 'Late']]);
+  });
+  it('reads the bus state and ended_at; a terminal Moment never takes the face, the rim, the day list or the glass', () => {
+    const now = at(14, 0);
+    const open = ev('open', 15, 0, [16, 0], { state: 'open' });
+    const gone = ev('gone', 14, 30, [15, 0], { state: 'withdrawn', ended_at: iso(13, 50), weight: 'urgent' });
+    expect(gone).toMatchObject({ state: 'withdrawn', ended: at(13, 50) });
+    expect(M.timedMoments([open, gone]).map((m) => m.id)).toEqual(['open']);
+    expect(M.nowModel([open, gone], now, TZ).focusId).toBe('open');
+    expect(M.nowModel([gone], now, TZ).nothing).toBe(true);
+    expect(M.rimMarks([gone], now, TZ).marks).toEqual([]);
+    expect(M.dayModel([gone], now, TZ).empty).toBe(true);
+    expect(M.alertList([gone], new Map(), now)).toEqual([]);
+    expect(M.momentFromEvent({ id: 'x', kind: 'event', title: 't', state: 'bogus' }).state).toBe('open');
+  });
+  it('files terminal alerts in Earlier with their word and end time; ambient and open ones are not filed', () => {
+    const e = (state, weight, extra = {}) => M.momentFromEvent({ id: `e-${state}`, kind: 'event', title: 'Train delayed', weight, level: 'info', state, ended_at: iso(18, 42), ...extra });
+    expect(M.earlierEntryOf(e('expired', 'urgent', { level: 'urgent' }), 'urgent')).toMatchObject({ id: 'e-expired', kind: 'urgent', icon: 'urgent', state: 'expired', at: at(18, 42) });
+    expect(M.earlierEntryOf(e('cleared', 'notice'))).toMatchObject({ kind: 'notice', state: 'cleared' });
+    expect(M.earlierEntryOf(e('withdrawn', 'decision', { level: 'attention' }))).toMatchObject({ kind: 'decision', state: 'withdrawn' });
+    expect(M.earlierEntryOf(e('answered', 'decision', { level: 'attention' }))).toMatchObject({ state: 'answered' });
+    expect(M.earlierEntryOf(e('cleared', 'ambient'))).toBeNull();
+    expect(M.earlierEntryOf(e('open', 'urgent', { level: 'urgent' }))).toBeNull();
+    const words = ['cleared', 'expired', 'withdrawn', 'answered'].map((st) => M.earlierDetail({ state: st, at: at(14, 14) }, TZ));
+    expect(words).toEqual(['2:14 PM · cleared', '2:14 PM · expired', '2:14 PM · withdrawn', '2:14 PM · answered']);
+    const mem = {}; const tray = createEarlier({ getItem: (k) => mem[k] ?? null, setItem: (k, v) => { mem[k] = v; } });
+    tray.add(M.earlierEntryOf(e('expired', 'urgent', { level: 'urgent' })));
+    expect(tray.list()[0]).toMatchObject({ state: 'expired', at: at(18, 42) });
+  });
+});

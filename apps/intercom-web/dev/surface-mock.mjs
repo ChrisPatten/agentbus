@@ -12,6 +12,9 @@
 //   widgets                                   gauge, countdown and icon widgets in the context slot
 //   sessions | needs                          six sessions / one that needs you (with a question and buttons)
 //   approval                                  a bus approval Event (approve / deny)
+//   urgent | decide                           E100 Moments: an urgent train delay (weight, consequence, changed) / a decision with a hold button
+//   end: <id> [withdrawn|answered|cleared]    end an Event as the bus does (tombstone with state and ended_at; default withdrawn)
+//   expire: <id>                              the expiry sweep: the Event becomes an `expired` tombstone
 //   convo                                     a new agent message with buttons in conv-main (live append)
 //   calendar                                  reseed the calendar-style appointments    clear   remove everything
 import crypto from 'node:crypto';
@@ -26,6 +29,18 @@ export function isoLocal(d) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:00${off >= 0 ? '+' : '-'}${pad(Math.floor(a / 60))}:${pad(a % 60)}`;
 }
 const round5 = (ms) => Math.round(ms / 300000) * 300000;
+
+/* E100, as the bus does it (docs/SURFACE_API.md, "Moment lifecycle"). */
+const LEVEL_FOR_WEIGHT = { ambient: 'info', notice: 'info', decision: 'attention', urgent: 'urgent' };
+/** Resolve a button's kind: hold when it sends (confirm draft), else tap; an explicit kind is kept. */
+export const withKind = (a) => (a ? { ...a, kind: a.kind === 'tap' || a.kind === 'hold' ? a.kind : a.confirm ? 'hold' : 'tap' } : a);
+/** An Event as the bus stores it: state open, level derived from weight, resolved action kinds. */
+export function moment(v) {
+  const level = v.weight && !v.level ? LEVEL_FOR_WEIGHT[v.weight] : v.level || 'info';
+  return { ...v, level, state: 'open', actions: (v.actions || []).map(withKind) };
+}
+export const isEnded = (e) => !!e && typeof e.state === 'string' && e.state !== 'open';
+const decisionOrUrgent = (e) => (e.weight ? e.weight === 'decision' || e.weight === 'urgent' : e.level === 'attention' || e.level === 'urgent');
 
 export function createSurfaceMock({ token, noticeAction = () => ({ status: 'failed', reason: 'not_found' }), wssClients }) {
   const revs = {}; const items = {}; const logs = {};
@@ -49,6 +64,8 @@ export function createSurfaceMock({ token, noticeAction = () => ({ status: 'fail
     for (const c of v2clients()) send(c, { type: 'delta', resource, base_rev: base, rev, ops });
   }
   const setItem = (r, id, value) => mutate(r, [{ op: 'set', id, value }]);
+  /** End an Event the way the bus does: a tombstone (set, so devices see the state change), kept until `clear`. */
+  const endEvent = (id, state, endedAt = nowIso()) => { const e = items.events[id]; if (e && !isEnded(e)) setItem('events', id, { ...e, state, ended_at: endedAt, updated_at: nowIso() }); return !!e; };
   const removeAll = (r) => mutate(r, Object.keys(items[r]).map((id) => ({ op: 'remove', id })));
 
   /* ---------- seed ---------- */
@@ -56,7 +73,7 @@ export function createSurfaceMock({ token, noticeAction = () => ({ status: 'fail
   function seedCalendar() {
     const day = new Date(); day.setHours(0, 0, 0, 0);
     const at = (h) => isoLocal(new Date(day.getTime() + h * 3600e3));
-    const mk = (id, title, s, e, color, extra = {}) => ({ id, kind: 'event', title, level: 'info', at: at(s), end: at(e), color, source: 'agent:peggy', created_at: nowIso(), updated_at: nowIso(), expires_at: at(24), actions: [], ...extra });
+    const mk = (id, title, s, e, color, extra = {}) => moment({ id, kind: 'event', title, level: 'info', at: at(s), end: at(e), color, source: 'agent:peggy', created_at: nowIso(), updated_at: nowIso(), expires_at: at(24), actions: [], ...extra });
     mutate('events', [
       mk('cal-busy-am', 'Busy', 9, 11, 'gray'),
       mk('cal-lunch', 'Lunch with Kate', 12, 13, 'pink', { detail: { location: 'Sorelle, Mansfield', description: 'Booked under Patten.' } }),
@@ -110,12 +127,12 @@ export function createSurfaceMock({ token, noticeAction = () => ({ status: 'fail
     }
   }
   function typed(body) {
-    const m = String(body || '').trim().match(/^(event|overlap|tick|travel|slot|widgets|sessions|needs|approval|convo|calendar|clear)\b\s*:?\s*(.*)$/i);
+    const m = String(body || '').trim().match(/^(event|overlap|tick|travel|slot|widgets|sessions|needs|approval|convo|calendar|clear|urgent|decide|end|expire)\b\s*:?\s*(.*)$/i);
     if (!m) return false;
     const cmd = m[1].toLowerCase(); const arg = m[2].trim().toLowerCase();
     const base = round5(Date.now() + 90 * 60000);
     const iso = (ms) => isoLocal(new Date(ms));
-    const ev = (id, v) => setItem('events', id, { id, kind: 'event', level: 'info', source: 'agent:peggy', created_at: nowIso(), updated_at: nowIso(), expires_at: until(10), actions: [], ...v });
+    const ev = (id, v) => setItem('events', id, moment({ id, kind: 'event', source: 'agent:peggy', created_at: nowIso(), updated_at: nowIso(), expires_at: until(10), actions: [], ...v }));
     if (cmd === 'event') {
       if (arg === 'fail') ev('failing', { title: 'Button that fails', at: iso(base), end: iso(base + 3600e3), color: 'red', actions: [{ id: 'x', label: 'Try it' }] });
       else if (arg === 'expired') ev('stale', { title: 'Button that expired', at: iso(base), end: iso(base + 3600e3), color: 'purple', actions: [{ id: 'x', label: 'Too late' }] });
@@ -140,7 +157,16 @@ export function createSurfaceMock({ token, noticeAction = () => ({ status: 'fail
     } else if (cmd === 'sessions') sessionsSet(false);
     else if (cmd === 'needs') sessionsSet(true);
     else if (cmd === 'approval') {
-      ev('approval-7', { kind: 'approval', title: 'Bash: git push', level: 'attention', source: 'bus', body: 'Agent peggy asks to use Bash.', approval: { approval_id: 7, tool: 'Bash', detail: 'git push origin feat/surface-web-v2\n\nPushes 6 commits to origin.' }, actions: [{ id: 'approve', label: 'Approve', style: 'primary' }, { id: 'deny', label: 'Deny', style: 'destructive' }] });
+      ev('approval-7', { kind: 'approval', title: 'Bash: git push', weight: 'decision', source: 'bus', body: 'Agent peggy asks to use Bash.', approval: { approval_id: 7, tool: 'Bash', detail: 'git push origin feat/surface-web-v2\n\nPushes 6 commits to origin.' }, actions: [{ id: 'approve', label: 'Approve', style: 'primary', kind: 'hold' }, { id: 'deny', label: 'Deny', style: 'destructive', kind: 'hold' }] });
+    } else if (cmd === 'urgent') {
+      ev('train-delay', { title: 'Train delayed', weight: 'urgent', body: '16 min late · Providence line', consequence: 'Misses your 7:15 transfer', changed: { field: 'start', old: '6:42', new: '6:58' }, expires_at: until(1), actions: [{ id: 'route', label: 'New route', style: 'primary' }, { id: 'dismiss', label: 'Dismiss' }] });
+    } else if (cmd === 'decide') {
+      ev('cancel-dinner', { title: 'Cancel the 7:30 table?', weight: 'decision', body: 'Sorelle holds it until 6.', expires_at: until(2), actions: [{ id: 'cancel', label: 'Cancel it', kind: 'hold', style: 'destructive' }, { id: 'keep', label: 'Keep' }] });
+    } else if (cmd === 'end') {
+      const [id, reason] = arg.split(/\s+/);
+      endEvent(id, ['withdrawn', 'answered', 'cleared'].includes(reason) ? reason : 'withdrawn');
+    } else if (cmd === 'expire') {
+      const e = items.events[arg]; if (e) endEvent(arg, 'expired', e.expires_at && Date.parse(e.expires_at) < Date.now() ? e.expires_at : nowIso());
     } else if (cmd === 'convo') {
       appendConv(conv('conv-main', 'Main'), { role: 'agent', text: 'Which restaurant for Saturday?', answer_needed: true, buttons: [{ label: 'Sorelle' }, { label: 'Taverna' }] });
     } else if (cmd === 'calendar') seedCalendar();
@@ -158,13 +184,18 @@ export function createSurfaceMock({ token, noticeAction = () => ({ status: 'fail
     if (kind === 'events' || kind === 'slots') {
       const holder = kind === 'events' ? items.events[id] : items.slots[id];
       const action = holder && (kind === 'events' ? holder.actions : [holder.action]).find((a) => a && a.id === b.action_id);
-      if (!action) res = fail('not_found');
+      if (kind === 'events' && isEnded(holder)) res = { status: 'expired', reason: holder.state };
+      else if (!action) res = fail('not_found');
       else if (action.confirm && !b.draft) res = fail('confirm_required');
       else if (action.confirm && b.draft !== action.confirm.draft) res = fail('draft_mismatch');
       else if (id === 'stale') res = { status: 'expired' };
       else if (id === 'failing') res = fail('no_route');
       else if (action.once !== false && fired.has(`${b.object}:${b.action_id}`)) res = { status: 'already_done' };
-      else { fired.add(`${b.object}:${b.action_id}`); res = { status: 'done', message_id: `in-${++n}` }; if (kind === 'events' && id.startsWith('approval-')) mutate('events', [{ op: 'remove', id }]); }
+      else {
+        fired.add(`${b.object}:${b.action_id}`); res = { status: 'done', message_id: `in-${++n}` };
+        // E100: a fired button answers a decision or urgent Event (approvals too); ambient and notice ones stay open.
+        if (kind === 'events' && decisionOrUrgent(holder)) endEvent(id, 'answered');
+      }
     } else if (kind === 'notices') res = noticeAction(id, Number(b.action_id));
     else if (kind === 'conversations') {
       const c = convs.get(id); const idx = Number(b.action_id);
