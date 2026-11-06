@@ -18,7 +18,7 @@
  */
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { toolError, toolSuccess } from './helpers.js';
+import { recipientError, toolError, toolSuccess } from './helpers.js';
 import { getTelegramInstances, type AppConfig } from '../../config/schema.js';
 import { toPrefixedAgentId } from '../../pool/types.js';
 import { applyChoices, choicesSchema, CHOICES_DESCRIPTION, isTelegramChannel } from '../../choices/validate.js';
@@ -100,6 +100,8 @@ export function registerTelegramSendTools(
     native: TelegramSend | undefined,
     base: Record<string, unknown> = {},
   ) {
+    const badTo = recipientError(a.to);
+    if (badTo) return toolError(badTo);
     const bad = await channelExists(a.channel);
     if (bad) return toolError(bad);
     const metadata = applySendOptions(base, { silent: a.silent, pin: a.pin });

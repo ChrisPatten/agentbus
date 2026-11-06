@@ -10,6 +10,9 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 
 ## [Unreleased]
 
+### Fixed
+- **`send_message` and the Telegram send tools reject a recipient that is not a `contact:` or `agent:` id.** A channel string such as `telegram:peggy:group:-100...` in `to` was queued but never picked up by the delivery worker (which dequeues `contact:` recipients only), so the row stayed `pending` while the tool reported success. The tool now returns an error naming the fix.
+
 ### Changed
 - **Phase client: the rim is a 24-hour dial (E99).** Midnight is at the top (6:00 at 3 o'clock, noon at 6, 18:00 at 9) and the rim shows the rest of the local day: the now dot, Moment arcs and dots, and the decision window use the 24-hour angle; Moments that start tomorrow are not drawn and a span crossing midnight is clipped at the top.  The daylight crescent is unchanged: the single sliding shade circle driven by sunrise, solar noon and sunset (spec 5.3). New `?state=extra/24h-morning-game` fixture. The spec (`plum-dusk/spec.md`) now wins over the boards, which still show the 12-hour dial.
 

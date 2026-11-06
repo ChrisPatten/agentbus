@@ -5,7 +5,7 @@
  */
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { toolError, toolSuccess } from './helpers.js';
+import { recipientError, toolError, toolSuccess } from './helpers.js';
 import { getEmailInstances, type AppConfig } from '../../config/schema.js';
 import { toPrefixedAgentId } from '../../pool/types.js';
 import { applyChoices, choicesSchema, CHOICES_DESCRIPTION } from '../../choices/validate.js';
@@ -71,6 +71,9 @@ export function registerMessagingTools(server: McpServer, busBaseUrl: string, ag
       },
     },
     async ({ to, channel, body, topic, reply_to, priority, metadata, source, choices, silent, no_preview, pin, glance, answer_needed }) => {
+      const badTo = recipientError(to);
+      if (badTo) return toolError(badTo);
+
       // Validate channel exists — resolved the same way real delivery is
       // (registry.lookupPrimaryByChannel), so a dynamically-derived channel
       // (e.g. a Telegram group, E28) validates correctly too.

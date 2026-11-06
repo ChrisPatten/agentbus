@@ -53,7 +53,7 @@ Sends to any contact on any channel. Validates the channel through `GET /api/v1/
 
 | Field | Required | Notes |
 |---|---|---|
-| `to` | yes | `contact:<id>` |
+| `to` | yes | `contact:<id>` (or `agent:<id>`). Anything else, such as a channel string, is rejected: the delivery worker only dequeues `contact:` recipients, so such a row would sit `pending` forever. The same check applies to the Telegram send tools (`send_document`, `send_rich`, ...). |
 | `channel` | yes | For example `telegram:peggy` or `telegram:peggy:group:-100123` |
 | `body` | yes | |
 | `topic` | no | Default `general`. To target a Telegram forum topic, pass the `thread:<hash>` value from `create_telegram_topic` or from the session's `topic` field. A thread topic with no stored thread record fails at delivery |

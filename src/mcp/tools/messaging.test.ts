@@ -57,6 +57,18 @@ describe('send_message tool', () => {
     await client.close();
   });
 
+  it('rejects a channel string as recipient (would stay pending forever)', async () => {
+    const client = await makeClient();
+    const result = await client.callTool({
+      name: 'send_message',
+      arguments: { to: 'telegram:peggy:group:-1003977797157', channel: 'telegram:peggy', body: 'Hello!' },
+    });
+    expect(result.isError).toBe(true);
+    expect(((result.content as Array<{ text: string }>)[0]!).text).toContain('Invalid recipient');
+    expect(fetchMock).not.toHaveBeenCalled();
+    await client.close();
+  });
+
   it('returns error for unknown channel', async () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,
