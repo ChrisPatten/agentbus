@@ -138,7 +138,7 @@ describe('Surface API follow-on (event shape, slots, conversation buttons, asset
       expect(res.status).toBe(200);
       expect(await res.json()).toMatchObject({ slot: 'primary', action: 'go' });
       expect(jobs.get('desk', 'slots:primary:go')).toMatchObject({ payload_body: 'Chris tapped On my way', once: true, expires_at: iso(3600_000) });
-      expect((await state(d.credential)).resources.slots.primary.action).toEqual({ id: 'go', label: 'On my way', once: true });
+      expect((await state(d.credential)).resources.slots.primary.action).toEqual({ id: 'go', label: 'On my way', once: true, kind: 'tap' });
 
       const t1 = await (await tap(d.credential, { object: 'slots:primary', action_id: 'go', idempotency_key: 's1' })).json();
       expect(t1).toMatchObject({ status: 'done' });

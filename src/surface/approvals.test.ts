@@ -56,7 +56,7 @@ describe('approval events', () => {
     expect(approvalEventsFor(db, new Date(NOW.getTime() + 30 * MIN))).toHaveLength(0);
   });
 
-  it('syncApprovalEvents sets new ones, removes resolved ones and leaves agent events alone', () => {
+  it('syncApprovalEvents sets new ones, tombstones resolved ones (E100) and leaves agent events alone', () => {
     const items: ResourceSnapshot['items'] = { 'train-1': { id: 'train-1', kind: 'event' } };
     let rev = 0;
     const applied: ResourceOp[][] = [];
@@ -72,10 +72,28 @@ describe('approval events', () => {
     expect(syncApprovalEvents(hub, 's', db, { now: NOW })).toBe(1);
     expect(Object.keys(items).sort()).toEqual([`approval-${r.id}`, 'train-1']);
     expect(syncApprovalEvents(hub, 's', db, { now: NOW })).toBeNull();
+    expect(items[`approval-${r.id}`]).toMatchObject({ weight: 'decision', state: 'open', actions: [{ id: 'approve', kind: 'hold' }, { id: 'deny', kind: 'hold' }] });
     store.resolve(r.id, 'denied', 'contact:chris');
     expect(syncApprovalEvents(hub, 's', db, { now: NOW })).toBe(2);
-    expect(Object.keys(items)).toEqual(['train-1']);
-    expect(applied[1]).toEqual([{ op: 'remove', id: `approval-${r.id}` }]);
+    expect(Object.keys(items).sort()).toEqual([`approval-${r.id}`, 'train-1']);
+    expect(applied[1]).toEqual([{ op: 'set', id: `approval-${r.id}`, value: expect.objectContaining({ state: 'answered', ended_at: store.getById(r.id)!.resolved_at }) }]);
+    // A tombstone is left alone by later syncs (the hub's sweep purges it).
+    expect(syncApprovalEvents(hub, 's', db, { now: NOW })).toBeNull();
+  });
+
+  it('an approval that expired or vanished ends as expired or withdrawn', () => {
+    const items: ResourceSnapshot['items'] = {};
+    const hub = {
+      snapshot: () => ({ rev: 0, items: { ...items } }),
+      apply: (_s: string, _r: string, ops: ResourceOp[]) => { for (const op of ops) if (op.op === 'set') items[op.id] = op.value; return 1; },
+    };
+    const late = raise({ summary: 'late' });
+    const gone = raise({ summary: 'gone' });
+    syncApprovalEvents(hub, 's', db, { now: NOW });
+    db.prepare('DELETE FROM approval_requests WHERE id = ?').run(gone.id);
+    syncApprovalEvents(hub, 's', db, { now: new Date(NOW.getTime() + 30 * MIN) });
+    expect(items[`approval-${late.id}`]).toMatchObject({ state: 'expired', ended_at: late.expires_at });
+    expect(items[`approval-${gone.id}`]).toMatchObject({ state: 'withdrawn' });
   });
 });
 

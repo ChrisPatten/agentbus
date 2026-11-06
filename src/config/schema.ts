@@ -696,6 +696,8 @@ export const SurfaceApiConfigSchema = z.object({
   delta_coalesce_ms: z.number().int().min(0).max(5000).default(250),
   /** Idempotency keys for actions are remembered this long. */
   action_key_ttl_hours: z.number().positive().default(48),
+  /** E100: a terminal Event (answered, expired, withdrawn, cleared) stays in `events` as a tombstone this long after it ended. */
+  event_tombstone_hours: z.number().positive().max(168).default(24),
   /** Largest asset the publishing upload accepts, in bytes (images for Event details, QR codes). */
   asset_max_bytes: z.number().int().min(1024).max(16_777_216).default(1_048_576),
   /** `POST /actions` and WS `action` frames per device per minute. */

@@ -4,7 +4,7 @@
  *
  *   GET    /api/v1/surface-publish/surfaces?agent_id=...   surfaces this agent may publish to
  *   PUT    /api/v1/surface-publish/:surface/events/:id     create or replace an Event (and its action jobs)
- *   DELETE /api/v1/surface-publish/:surface/events/:id     remove an Event and its jobs
+ *   DELETE /api/v1/surface-publish/:surface/events/:id     end an Event (?reason=withdrawn|answered|cleared; it stays as a tombstone) and remove its jobs
  *   PUT    /api/v1/surface-publish/:surface/slots/:slot    set a slot override (primary: optional action; context: lines or widgets)
  *   DELETE /api/v1/surface-publish/:surface/slots/:slot    clear a slot override (and the job behind its button)
  *   PUT    /api/v1/surface-publish/:surface/faces/:id      change an existing face: enabled, order, layout
@@ -28,6 +28,7 @@ import { BoundsError, BOUNDS, ID_RE, type JobStore, type ResourceHub, type Resou
 import { checkRingCapacity, SLOT_CONTEXT, validateEvent, validateFaceLayout, validateSlot, validateWidget, type FollowTarget } from '../surface/validate.js';
 import { ASSET_TYPES, assetContentType, assetExists, storeAsset } from '../surface/assets.js';
 import { clearAnswerNeeded } from '../surface/flags.js';
+import { isLiveEvent, isTerminal, REMOVE_REASONS, stateOf, tombstone, type RemoveReason } from '../surface/lifecycle.js';
 import { computeConversationId } from '../pipeline/conversation-id.js';
 
 export const SURFACE_PUBLISH_PREFIX = '/api/v1/surface-publish';
@@ -108,9 +109,13 @@ export function registerSurfacePublishRoutes(server: FastifyInstance, deps: Surf
     if (!ID_RE.test(value)) throw new BoundsError(`${what} "${value}" is invalid: use 1-64 lowercase letters, digits, - or _, starting with a letter or digit`);
   };
 
-  /** Rejects a new item when the surface already holds `limit` of them (live ones only, for events). */
+  /**
+   * Rejects a new item when the surface already holds `limit` of them (live ones only, for events). With `live`, an
+   * existing item that is not live (an Event tombstone) counts as new: reviving it adds one.
+   */
   const checkCapacity = (surfaceId: string, resource: ResourceName, itemId: string, limit: number, what: string, live?: (item: Record<string, unknown>) => boolean) => {
-    if (deps.hub.get(surfaceId, resource, itemId)) return;
+    const current = deps.hub.get(surfaceId, resource, itemId);
+    if (current && (!live || live(current))) return;
     const items = Object.values(deps.hub.snapshot(surfaceId, resource).items);
     const count = live ? items.filter(live).length : items.length;
     if (count >= limit) throw new BoundsError(`surface "${surfaceId}" already has ${count} ${what}; the limit is ${limit}. Remove one first.`);
@@ -144,20 +149,26 @@ export function registerSurfacePublishRoutes(server: FastifyInstance, deps: Surf
         const t = now();
         const { agent_id: _a, ...input } = body;
         const { event, jobs } = validateEvent({ ...input, id: req.params.id }, { follow: surface.follow, source: `agent:${bare(agentId)}`, now: t });
-        const existing = notBusOwned(surface.id, event.id);
+        const stored = notBusOwned(surface.id, event.id);
+        // E100: re-publishing an ended event (a tombstone) starts a new open life: new created_at, fresh jobs.
+        const existing = stored && !isTerminal(stored) ? stored : null;
         checkRingCapacity(Object.values(deps.hub.snapshot(surface.id, 'events').items), event, t);
         const image = event.detail?.image;
         if (image && deps.assetDir && !assetExists(deps.assetDir, image)) {
           throw new BoundsError(`detail.image ${image} is not in the asset store; upload the file first (surface_upload_asset) and use the hash it returns`);
         }
-        checkCapacity(surface.id, 'events', event.id, BOUNDS.eventsPerSurface, 'live events',
-          (item) => typeof item['expires_at'] !== 'string' || Date.parse(item['expires_at']) > t);
+        checkCapacity(surface.id, 'events', event.id, BOUNDS.eventsPerSurface, 'live events', (item) => isLiveEvent(item, t));
         if (existing && typeof existing['created_at'] === 'string') event.created_at = existing['created_at'];
         const rev = deps.db.transaction(() => {
+          // A new life must not inherit fire counts: a one-shot button that fired before is armed again.
+          if (stored && !existing) deps.jobs.removeForEvent(surface.id, event.id);
           deps.jobs.replaceForEvent(surface.id, event.id, jobs, `agent:${bare(agentId)}`);
           return deps.hub.apply(surface.id, 'events', [{ op: 'set', id: event.id, value: event as unknown as Record<string, unknown> }]);
         })();
-        return reply.code(existing ? 200 : 201).send({ ok: true, surface: surface.id, id: event.id, created: !existing, rev, expires_at: event.expires_at, actions: event.actions.map((a) => a.id) });
+        return reply.code(existing ? 200 : 201).send({
+          ok: true, surface: surface.id, id: event.id, created: !existing, ...(stored && !existing ? { revived: true } : {}), state: 'open', rev,
+          expires_at: event.expires_at, actions: event.actions.map((a) => a.id), kinds: Object.fromEntries(event.actions.map((a) => [a.id, a.kind])),
+        });
       });
     },
   );
@@ -165,17 +176,29 @@ export function registerSurfacePublishRoutes(server: FastifyInstance, deps: Surf
   server.delete<{ Params: { surface: string; id: string }; Querystring: Record<string, string> }>(
     `${P}/:surface/events/:id`,
     async (req, reply) => {
-      const surface = authorize(reply, req.params.surface, agentOf(asBody(req.body), req.query));
+      const body = asBody(req.body);
+      const surface = authorize(reply, req.params.surface, agentOf(body, req.query));
       if (!surface) return reply;
       return guarded(reply, () => {
         checkId(req.params.id, 'id');
-        const existing = notBusOwned(surface.id, req.params.id);
+        const rawReason = req.query['reason'] ?? body['reason'];
+        if (rawReason !== undefined && rawReason !== '' && !(REMOVE_REASONS as readonly unknown[]).includes(rawReason)) {
+          throw new BoundsError(`reason must be one of ${REMOVE_REASONS.join(', ')} (default withdrawn): withdrawn = no longer needed, answered = Chris answered it elsewhere, cleared = done or acknowledged`);
+        }
+        const reason: RemoveReason = rawReason ? (rawReason as RemoveReason) : 'withdrawn';
+        const stored = notBusOwned(surface.id, req.params.id);
+        // E100: the event stays as a tombstone with the reason as its state; an already-ended one is left as it is.
+        const ending = stored && !isTerminal(stored) ? stored : null;
         const result = deps.db.transaction(() => {
           const jobsRemoved = deps.jobs.removeForEvent(surface.id, req.params.id);
-          const rev = existing ? deps.hub.apply(surface.id, 'events', [{ op: 'remove', id: req.params.id }]) : null;
+          const at = new Date(now()).toISOString();
+          const rev = ending ? deps.hub.apply(surface.id, 'events', [{ op: 'set', id: req.params.id, value: tombstone(ending, reason, at) }]) : null;
           return { jobsRemoved, rev };
         })();
-        return { ok: true, surface: surface.id, id: req.params.id, removed: !!existing, jobs_removed: result.jobsRemoved, ...(result.rev !== null ? { rev: result.rev } : {}) };
+        return {
+          ok: true, surface: surface.id, id: req.params.id, removed: !!ending, ...(stored ? { state: ending ? reason : stateOf(stored) } : {}),
+          jobs_removed: result.jobsRemoved, ...(result.rev !== null ? { rev: result.rev } : {}),
+        };
       });
     },
   );

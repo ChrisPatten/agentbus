@@ -2,7 +2,7 @@
 import { render } from './screens.js';
 import { IntercomSocket, store, apiUrl } from './socket.js';
 import { quietEscapeActive, parsePairInput, replyIsFresh, applyNotification, activeItems, needsList, infoList, attentionLevel, cycleId, isQuietHours, pickScreen, deskCounts, departureView, chooseDeskFace, quietTone, matchNotice, LANDSCAPE_QUERY, physicalDialSize, clampPpi, DIAL_INCHES, DEFAULT_PPI, LEVEL_RANK, tzParts } from './logic.js';
-import { createStore, applyDelta, applyState, revsOf, itemsOf, activeSlot, faceOrder, stepFace, faceLayout, approvalItems } from './surface.js';
+import { createStore, applyDelta, applyState, revsOf, itemsOf, activeSlot, faceOrder, stepFace, faceLayout, approvalItems, dropEnded } from './surface.js';
 import { ringModel, carouselOrder, nearestRingEvent, inRingBand, ballHit, pointToHours, scrubStart, scrubMove, scrubRelease, scrubActive, scrubRemaining, SNAP_MS, pickDeparture, travelDeparture } from './dayv2.js';
 import { ButtonStates, submitAction, needsConfirm, btnKey } from './actions.js';
 import { sessionsFromDesk, sessionsFromStore, mergeOlder, appendMessage } from './statusv2.js';
@@ -423,7 +423,8 @@ function startSocket() {
     token: S.pair.token,
     getRevs: () => revsOf(S.store),
     handlers: {
-      onDelta(f) { if (applyDelta(S.store, f) === 'gap') resync(); update(); },
+      // E100: ended Events (tombstones) are dropped, so this client behaves as when the bus removed them.
+      onDelta(f) { if (applyDelta(S.store, f) === 'gap') resync(); dropEnded(S.store); update(); },
       onMode(m) { if (m === 'v1') { S.v2 = false; S.store = createStore(); S.sentView = null; } },
       onWelcome(f) {
         S.v2 = f.version === 2; S.sentView = null; syncViewFrame();
@@ -460,7 +461,7 @@ async function resync(force = false) {
   try {
     const r = await fetch(surfaceUrl('state'), { headers: authHeaders() });
     if (r.status === 401 || r.status === 403 || r.status === 404) { S.surfaceHttp = false; return; }
-    if (r.ok) { applyState(S.store, await r.json()); update(); }
+    if (r.ok) { applyState(S.store, await r.json()); dropEnded(S.store); update(); }
   } catch { /* offline: fine */ }
 }
 

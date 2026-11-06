@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { createStore, applyDelta, applyState, revsOf, activeSlot, faceOrder, stepFace, faceLayout, approvalItems } from '../surface.js';
+import { createStore, applyDelta, applyState, revsOf, activeSlot, faceOrder, stepFace, faceLayout, approvalItems, dropEnded, isEnded } from '../surface.js';
 import { ringModel, hitTest, nearestRingEvent, carouselOrder, inRingBand, RING_TAP, ballHit, pointToHours, scrubStart, scrubMove, scrubRelease, scrubActive, scrubRemaining, scrubInfo, SNAP_MS, TICK_HIT_TOL, OVERLAP_R, PRIMARY, OVERLAP_W, travelDeparture, pickDeparture, primaryView, nextUp, contextView, widgetView, colorValue, countdownText } from '../dayv2.js';
 import { polar, RING_R } from '../logic.js';
 import { statusModel, RING_CAP, sessionsFromDesk, mergeOlder, appendMessage } from '../statusv2.js';
@@ -58,6 +58,36 @@ describe('delta apply', () => {
     const changed = applyState(st, { revs: { slots: 2, events: 4 }, resources: { slots: {}, events: { e: { id: 'e' } } } });
     expect(changed).toEqual(['events']);
     expect(st.items.slots.primary).toBeTruthy();
+  });
+});
+
+describe('E100: ended Events are gone for this client', () => {
+  const delta = (o) => ({ type: 'delta', resource: 'events', ...o });
+  it('drops tombstones after a delta or a snapshot, keeps open and state-less events, and takes a re-opened one back', () => {
+    const st = createStore();
+    applyDelta(st, delta({ base_rev: 0, rev: 1, ops: [
+      { op: 'set', id: 'old', value: ev('old', '10:00', '11:00') },
+      { op: 'set', id: 'open', value: ev('open', '12:00', '13:00', { state: 'open' }) },
+      { op: 'set', id: 'gone', value: ev('gone', '14:00', '15:00', { state: 'open' }) },
+    ] }));
+    expect(dropEnded(st)).toEqual([]);
+    applyDelta(st, delta({ base_rev: 1, rev: 2, ops: [{ op: 'set', id: 'gone', value: ev('gone', '14:00', '15:00', { state: 'withdrawn', ended_at: t('09:00') }) }] }));
+    expect(dropEnded(st)).toEqual(['gone']);
+    expect(Object.keys(st.items.events).sort()).toEqual(['old', 'open']);
+    expect(st.revs.events).toBe(2);
+    expect(ringModel(Object.values(st.items.events), NOW, TZ).segs.map((x) => x.id)).not.toContain('gone');
+    // The next delta still applies on top (rev kept); a re-publish brings it back.
+    expect(applyDelta(st, delta({ base_rev: 2, rev: 3, ops: [{ op: 'set', id: 'gone', value: ev('gone', '14:00', '15:00', { state: 'open' }) }] }))).toBe('applied');
+    dropEnded(st);
+    expect(st.items.events.gone).toBeTruthy();
+    // A /state snapshot with tombstones in it.
+    applyState(st, { revs: { events: 4 }, resources: { events: { open: ev('open', '12:00', '13:00', { state: 'open' }), x: ev('x', '16:00', '17:00', { state: 'expired' }), y: { ...ev('y'), kind: 'approval', state: 'answered' } } } });
+    dropEnded(st);
+    expect(Object.keys(st.items.events)).toEqual(['open']);
+    expect(approvalItems(st, NOW.getTime())).toEqual([]);
+    expect(isEnded({ state: 'cleared' })).toBe(true);
+    expect(isEnded({ state: 'open' })).toBe(false);
+    expect(isEnded({})).toBe(false);
   });
 });
 

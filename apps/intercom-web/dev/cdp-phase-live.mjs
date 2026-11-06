@@ -130,6 +130,30 @@ check('releasing the hold before 0.8 s sends nothing', (await actionsPosted()) =
 await tapSel('.holdtarget', 1100); await sleep(700);
 check('a full hold sends once and shows Sent', (await actionsPosted()) === p1 + 1 && (await screen()) === 'sent', await screen());
 await sleep(5400);
+// 6b. E100 Moments from the bus: an urgent Event with a changed time and a consequence; withdrawn by the agent it leaves the glass
+// for Earlier with that word; a decision's plain hold button fires only on a completed hold, and the answered Moment never returns.
+await cmd('urgent'); await sleep(800);
+const ut = await faceText();
+check('an urgent Event shows the struck-through old time, the new time and the consequence', (await screen()) === 'urgent' && /6:42/.test(ut) && /6:58/.test(ut) && /MISSES YOUR 7:15 TRANSFER/.test(ut), ut.replace(/\n/g, ' '));
+check('the old time is struck through', await ev(`[...document.querySelectorAll('#face .ph:last-child .t')].some((e)=>e.textContent==='6:42'&&/line-through/.test(e.style.textDecoration||e.style.textDecorationLine))`));
+await shot('07b-urgent-changed.png');
+await send('end: train-delay withdrawn'); await sleep(900);
+if ((await screen()) === 'understood') { await hw('power'); await sleep(250); }
+check('withdrawn by the agent, the urgent Moment leaves the glass', !['urgent', 'alert'].includes(await screen()), await screen());
+await swipe(0, -160);
+check('Earlier shows it marked withdrawn', (await screen()) === 'earlier' && /TRAIN DELAYED[\s\S]*withdrawn/i.test(await faceText()), (await faceText()).replace(/\n/g, ' '));
+await shot('07c-earlier-withdrawn.png');
+await swipe(0, 160);
+await cmd('decide'); await sleep(800);
+check('a decision Moment takes the face', (await screen()) === 'decision', await screen());
+check('its irreversible button is a hold', await ev(`!!document.querySelector('#face .ph:last-child [data-aid="cancel"][data-hold]')`));
+const p2 = await actionsPosted();
+await tapSel('[data-aid="cancel"]', 120);
+check('a short tap on a hold button sends nothing', (await actionsPosted()) === p2 && (await screen()) === 'decision', await screen());
+await tapSel('[data-aid="cancel"]', 1100); await sleep(700);
+check('a full hold sends once', (await actionsPosted()) === p2 + 1, `${p2} -> ${await actionsPosted()}`);
+await sleep(5600);
+check('the answered decision does not come back', (await screen()) !== 'decision', await screen());
 // 7. Event detail through the Day list, with a confirm-draft action.
 await cmd('event: dentist'); await sleep(500);
 await swipe(160, 0);

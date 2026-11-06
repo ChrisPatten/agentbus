@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { runMigrations } from '../db/schema.js';
 import { createActionHandler, createJobStore, sweepJobs, type ActionHandlerDeps } from './actions.js';
-import { BoundsError, type ActionResult, type Device, type JobStore, type NewJob, type ResourceHub } from './types.js';
+import { BoundsError, type ActionResult, type Device, type JobStore, type NewJob, type ResourceHub, type ResourceOp } from './types.js';
 import type { InboundAbort, InboundMessage, InboundResult } from '../http/api.js';
 
 const T0 = Date.parse('2026-11-03T12:00:00.000Z');
@@ -21,12 +21,23 @@ function device(over: Partial<Device> = {}): Device {
   };
 }
 
-/** Minimal fake of ResourceHub.get over a map. */
+/** Minimal fake of ResourceHub.get (and apply, for the E100 auto-answer) over a map. */
 function fakeHub() {
   const items = new Map<string, Record<string, unknown>>();
-  const hub: Pick<ResourceHub, 'get'> = { get: (surfaceId, resource, id) => items.get(`${surfaceId}/${resource}/${id}`) ?? null };
+  const applied: { resource: string; ops: ResourceOp[] }[] = [];
+  const hub: Pick<ResourceHub, 'get' | 'apply'> = {
+    get: (surfaceId, resource, id) => items.get(`${surfaceId}/${resource}/${id}`) ?? null,
+    apply: (surfaceId, resource, ops) => {
+      applied.push({ resource, ops });
+      for (const op of ops) {
+        if (op.op === 'remove') items.delete(`${surfaceId}/${resource}/${op.id}`);
+        else items.set(`${surfaceId}/${resource}/${op.id}`, op.value);
+      }
+      return applied.length;
+    },
+  };
   return {
-    hub,
+    hub, applied,
     setEvent(ev: Record<string, unknown>, surfaceId = S) { items.set(`${surfaceId}/events/${String(ev['id'])}`, ev); },
     removeEvent(id: string, surfaceId = S) { items.delete(`${surfaceId}/events/${id}`); },
   };
@@ -366,5 +377,76 @@ describe('JobStore: slot buttons', () => {
     expect(b).toMatchObject({ id: a!.id, fire_count: 1, payload_body: 'edited' });
     expect(() => store.replaceForSlot(S, 'Bad Slot', [job()], 'a')).toThrow(/invalid slot id/);
     expect(() => store.replaceForSlot(S, 'primary', [job({ sends_on_behalf: true })], 'a')).toThrow(BoundsError);
+  });
+});
+
+describe('ActionHandler: E100 lifecycle', () => {
+  const tapOn = async (extra: Record<string, unknown>, over: Partial<NewJob> = {}) => {
+    const s = setup();
+    s.hub.setEvent(event('pickup', [{ id: 'here', label: "I'm here" }], extra));
+    s.jobs.replaceForEvent(S, 'pickup', [job(over)], 'agent:peggy');
+    const res = await s.handler.handle(device(), req('k1'));
+    return { s, res, after: s.hub.hub.get(S, 'events', 'pickup')! };
+  };
+
+  it('a done fire on a decision or urgent event ends it as answered (by weight or by level)', async () => {
+    for (const extra of [{ weight: 'decision', level: 'attention' }, { weight: 'urgent', level: 'urgent' }, { level: 'attention' }, { level: 'urgent' }]) {
+      const { res, after, s } = await tapOn({ ...extra, state: 'open' });
+      expect(res.status).toBe('done');
+      expect(after).toMatchObject({ state: 'answered', ended_at: new Date(T0).toISOString() });
+      expect(s.hub.applied).toEqual([{ resource: 'events', ops: [{ op: 'set', id: 'pickup', value: expect.objectContaining({ state: 'answered' }) }] }]);
+    }
+  });
+
+  it('ambient and notice events stay open when a button is tapped', async () => {
+    for (const extra of [{ weight: 'ambient', level: 'info' }, { weight: 'notice', level: 'info' }, { level: 'info' }]) {
+      const { res, after, s } = await tapOn({ ...extra, state: 'open' });
+      expect(res.status).toBe('done');
+      expect(after['state']).toBe('open');
+      expect(s.hub.applied).toEqual([]);
+    }
+  });
+
+  it('a failed fire does not answer the event', async () => {
+    const s = setup({}, async () => ({ ok: true, queued: true, id: 'x', enqueued_count: 0 }));
+    s.hub.setEvent(event('pickup', [{ id: 'here', label: "I'm here" }], { weight: 'decision', level: 'attention', state: 'open' }));
+    s.jobs.replaceForEvent(S, 'pickup', [job()], 'agent:peggy');
+    expect(await s.handler.handle(device(), req('k1'))).toMatchObject({ status: 'failed', reason: 'no_route' });
+    expect(s.hub.hub.get(S, 'events', 'pickup')!['state']).toBe('open');
+  });
+
+  it('taps on a tombstone answer expired with the state as reason, and fire nothing', async () => {
+    for (const state of ['expired', 'withdrawn', 'answered', 'cleared']) {
+      const { res, s } = await tapOn({ state, ended_at: new Date(T0).toISOString() });
+      expect(res).toMatchObject({ status: 'expired', reason: state });
+      expect(s.submit).not.toHaveBeenCalled();
+    }
+  });
+
+  it('after the auto-answer a second key answers expired/answered; the same key replays already_done', async () => {
+    const { s } = await tapOn({ weight: 'urgent', level: 'urgent', state: 'open' }, { once: false });
+    expect(await s.handler.handle(device(), req('k2'))).toMatchObject({ status: 'expired', reason: 'answered' });
+    expect((await s.handler.handle(device(), req('k1'))).status).toBe('already_done');
+    expect(s.submit).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not answer a version re-published while the tap was in flight', async () => {
+    let s!: Setup;
+    s = setup({}, async (m) => {
+      s.hub.setEvent(event('pickup', [{ id: 'here', label: "I'm here" }], { weight: 'decision', level: 'attention', state: 'open', updated_at: new Date(T0 + 5).toISOString() }));
+      return { ok: true, queued: true, id: m.id!, enqueued_count: 1 };
+    });
+    s.hub.setEvent(event('pickup', [{ id: 'here', label: "I'm here" }], { weight: 'decision', level: 'attention', state: 'open' }));
+    s.jobs.replaceForEvent(S, 'pickup', [job()], 'agent:peggy');
+    expect((await s.handler.handle(device(), req('k1'))).status).toBe('done');
+    expect(s.hub.hub.get(S, 'events', 'pickup')!['state']).toBe('open');
+  });
+
+  it('an approval tombstone answers expired with its state', async () => {
+    const approvalAction = vi.fn();
+    const s = setup({ approvalAction });
+    s.hub.setEvent(event('approval-ab12', [{ id: 'approve', label: 'Approve' }], { kind: 'approval', state: 'answered', approval: { detail: 'x' } }));
+    expect(await s.handler.handle(device(), { object: 'events:approval-ab12', action_id: 'approve', idempotency_key: 'k1' })).toMatchObject({ status: 'expired', reason: 'answered' });
+    expect(approvalAction).not.toHaveBeenCalled();
   });
 });

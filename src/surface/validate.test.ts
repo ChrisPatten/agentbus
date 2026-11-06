@@ -16,8 +16,8 @@ describe('validateEvent', () => {
       id: 'train', title: '  Train in 10 min ', actions: [{ id: 'here', label: "I'm here", run: { body: 'Chris tapped I am here' } }],
     }, ctx);
     expect(event).toEqual({
-      id: 'train', kind: 'event', title: 'Train in 10 min', level: 'info', expires_at: iso(NOW + DEFAULT_EVENT_TTL_MS),
-      actions: [{ id: 'here', label: "I'm here", once: true }], source: 'agent:peggy', created_at: iso(NOW), updated_at: iso(NOW),
+      id: 'train', kind: 'event', title: 'Train in 10 min', level: 'info', state: 'open', expires_at: iso(NOW + DEFAULT_EVENT_TTL_MS),
+      actions: [{ id: 'here', label: "I'm here", once: true, kind: 'tap' }], source: 'agent:peggy', created_at: iso(NOW), updated_at: iso(NOW),
     });
     expect(jobs).toEqual([{
       action_id: 'here', channel: 'telegram:peggy', sender: 'contact:chris', topic: 'general', payload_body: 'Chris tapped I am here',
@@ -32,7 +32,7 @@ describe('validateEvent', () => {
       actions: [{ id: 'send', label: 'Tell Sam', style: 'primary', once: false, confirm: { draft: 'Running 10 min late', prompt: 'Send to Sam?' }, run: { body: 'send it', sends_on_behalf: true } }],
     }, { ...ctx, follow: { contact: 'contact:chris', channel: 'telegram:group', topic: 'thread:abc' } });
     expect(event.expires_at).toBe(exp);
-    expect(event.actions[0]).toEqual({ id: 'send', label: 'Tell Sam', style: 'primary', confirm: { draft: 'Running 10 min late', prompt: 'Send to Sam?' }, once: false });
+    expect(event.actions[0]).toEqual({ id: 'send', label: 'Tell Sam', style: 'primary', confirm: { draft: 'Running 10 min late', prompt: 'Send to Sam?' }, once: false, kind: 'hold' });
     expect(jobs[0]).toMatchObject({ sender: 'contact:chris', topic: 'thread:abc', sends_on_behalf: true, confirm_draft: 'Running 10 min late', once: false, expires_at: exp });
   });
 
@@ -202,7 +202,7 @@ describe('validateSlot: primary action, context lines and widgets', () => {
 
   it('primary carries an action and yields one job expiring with the slot', () => {
     const { slot, jobs } = validateSlot({ id: 'primary', text: 'Leave now', until, action: { id: 'go', label: 'On my way', run: { body: 'tapped go' } } }, sctx, true);
-    expect(slot.action).toEqual({ id: 'go', label: 'On my way', once: true });
+    expect(slot.action).toEqual({ id: 'go', label: 'On my way', once: true, kind: 'tap' });
     expect(jobs).toEqual([expect.objectContaining({ action_id: 'go', payload_body: 'tapped go', expires_at: until, sender: 'contact:chris' })]);
   });
 
@@ -259,5 +259,99 @@ describe('validateFaceLayout', () => {
 describe('validateAction (exported)', () => {
   it('names the field path in errors', () => {
     expect(err(() => validateAction({ id: 'BAD', label: 'x', run: { body: 'b' } }, 'action', ctx, iso(NOW + 1000)))).toMatch(/action\.id/);
+  });
+});
+
+// ── E100: Moment fields ─────────────────────────────────────────────────────
+
+describe('validateEvent: weight and level (E100)', () => {
+  const ev = (extra: Record<string, unknown>) => validateEvent({ id: 'm', title: 't', ...extra }, ctx).event;
+
+  it('derives level from weight and stores the weight', () => {
+    expect(ev({ weight: 'ambient' })).toMatchObject({ weight: 'ambient', level: 'info' });
+    expect(ev({ weight: 'notice' })).toMatchObject({ weight: 'notice', level: 'info' });
+    expect(ev({ weight: 'decision' })).toMatchObject({ weight: 'decision', level: 'attention' });
+    expect(ev({ weight: 'urgent' })).toMatchObject({ weight: 'urgent', level: 'urgent' });
+  });
+
+  it('stores no weight when only level is given (and level defaults to info)', () => {
+    expect(ev({ level: 'attention' })).not.toHaveProperty('weight');
+    expect(ev({ level: 'attention' }).level).toBe('attention');
+    expect(ev({})).toMatchObject({ level: 'info', state: 'open' });
+    expect(ev({})).not.toHaveProperty('weight');
+  });
+
+  it('accepts agreeing weight and level, refuses disagreeing ones naming both', () => {
+    expect(ev({ weight: 'notice', level: 'info' })).toMatchObject({ weight: 'notice', level: 'info' });
+    expect(ev({ weight: 'urgent', level: 'urgent' })).toMatchObject({ weight: 'urgent', level: 'urgent' });
+    const msg = err(() => ev({ weight: 'notice', level: 'attention' }));
+    expect(msg).toMatch(/weight "notice" and level "attention" disagree: weight notice means level info/);
+    expect(msg).toMatch(/Send only weight/);
+    expect(err(() => ev({ weight: 'decision', level: 'urgent' }))).toMatch(/weight "decision" and level "urgent"/);
+    expect(err(() => ev({ weight: 'loud' }))).toBe('weight must be one of ambient, notice, decision, urgent');
+  });
+
+  it('refuses state and ended_at from the agent', () => {
+    expect(err(() => ev({ state: 'open' }))).toMatch(/state is set by the bus.*surface_remove_event with reason/);
+    expect(err(() => ev({ ended_at: iso(NOW) }))).toMatch(/ended_at is set by the bus/);
+  });
+});
+
+describe('validateEvent: consequence and changed (E100)', () => {
+  const ev = (extra: Record<string, unknown>) => validateEvent({ id: 'm', title: 'Train delayed', ...extra }, ctx).event;
+  const changed = { field: 'start', old: '6:42', new: '6:58' };
+
+  it('keeps consequence and changed on an urgent event (by weight or by level)', () => {
+    expect(ev({ weight: 'urgent', consequence: ' Misses your 7:15 transfer ', changed }))
+      .toMatchObject({ consequence: 'Misses your 7:15 transfer', changed: { field: 'start', old: '6:42', new: '6:58' } });
+    expect(ev({ level: 'urgent', consequence: 'x', changed: { ...changed, field: 'other', extra: 1 } }))
+      .toMatchObject({ consequence: 'x', changed: { field: 'other', old: '6:42', new: '6:58' } });
+    expect(ev({ level: 'urgent', changed }).changed).not.toHaveProperty('extra');
+  });
+
+  it('refuses them on non-urgent events with a message saying what to change', () => {
+    expect(err(() => ev({ weight: 'decision', consequence: 'x' }))).toBe('consequence is only for urgent events: set weight "urgent" (or level "urgent"), or leave consequence out');
+    expect(err(() => ev({ level: 'attention', changed }))).toBe('changed is only for urgent events: set weight "urgent" (or level "urgent"), or leave changed out');
+    expect(err(() => ev({ changed }))).toMatch(/changed is only for urgent events/);
+  });
+
+  it('checks the bounds and shape', () => {
+    expect(err(() => ev({ weight: 'urgent', consequence: 'c'.repeat(BOUNDS.consequence + 1) }))).toBe(`consequence is ${BOUNDS.consequence + 1} characters; the limit is ${BOUNDS.consequence}`);
+    expect(ev({ weight: 'urgent', consequence: 'c'.repeat(BOUNDS.consequence) }).consequence).toHaveLength(60);
+    expect(err(() => ev({ weight: 'urgent', changed: { ...changed, old: '1'.repeat(25) } }))).toBe('changed.old is 25 characters; the limit is 24');
+    expect(err(() => ev({ weight: 'urgent', changed: { ...changed, new: '1'.repeat(25) } }))).toBe('changed.new is 25 characters; the limit is 24');
+    expect(err(() => ev({ weight: 'urgent', changed: { ...changed, field: 'when' } }))).toBe('changed.field must be one of start, end, place, title, other');
+    expect(err(() => ev({ weight: 'urgent', changed: { field: 'start', new: '6:58' } }))).toBe('changed.old is required');
+    expect(err(() => ev({ weight: 'urgent', changed: '6:58' }))).toMatch(/changed must be an object/);
+  });
+});
+
+describe('validateAction: kind (E100)', () => {
+  const act = (a: Record<string, unknown>) => validateEvent({ id: 'm', title: 't', actions: [{ id: 'a', label: 'Go', run: { body: 'b' }, ...a }] }, ctx).event.actions[0]!;
+  const draft = { confirm: { draft: 'On my way' } };
+
+  it('defaults: hold for confirm or sends_on_behalf, else tap', () => {
+    expect(act({}).kind).toBe('tap');
+    expect(act(draft).kind).toBe('hold');
+    expect(act({ ...draft, run: { body: 'b', sends_on_behalf: true } }).kind).toBe('hold');
+  });
+
+  it('allows an explicit hold on a plain button and an explicit tap on a plain one', () => {
+    expect(act({ kind: 'hold' }).kind).toBe('hold');
+    expect(act({ kind: 'tap' }).kind).toBe('tap');
+    expect(act({ ...draft, kind: 'hold' }).kind).toBe('hold');
+  });
+
+  it('refuses tap on anything that sends, and unknown kinds', () => {
+    expect(err(() => act({ ...draft, kind: 'tap' }))).toBe('actions[0].kind "tap" is not allowed on a button that sends (it has confirm.draft); use kind "hold" or leave kind out');
+    expect(err(() => act({ ...draft, kind: 'tap', run: { body: 'b', sends_on_behalf: true } }))).toMatch(/kind "tap" is not allowed/);
+    expect(err(() => act({ kind: 'press' }))).toMatch(/actions\[0\]\.kind must be "tap" or "hold"/);
+  });
+
+  it('applies to the primary slot button too', () => {
+    const until = iso(NOW + 3600_000);
+    const sctx = { source: 'agent:peggy', now: NOW, follow: ctx.follow };
+    expect(validateSlot({ id: 'primary', text: 't', until, action: { id: 'go', label: 'Go', kind: 'hold', run: { body: 'b' } } }, sctx).action).toMatchObject({ kind: 'hold' });
+    expect(err(() => validateSlot({ id: 'primary', text: 't', until, action: { id: 'go', label: 'Go', kind: 'tap', ...draft, run: { body: 'b' } } }, sctx))).toMatch(/^action\.kind "tap" is not allowed/);
   });
 });

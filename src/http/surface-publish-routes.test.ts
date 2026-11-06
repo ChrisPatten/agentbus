@@ -124,15 +124,20 @@ describe('surface publish routes', () => {
     expect(jobs.get('compact/train')).toEqual([]);
   });
 
-  it('removes an event and its jobs', async () => {
-    const { s, hub, jobs } = await setup();
+  it('ends an event as a withdrawn tombstone and removes its jobs', async () => {
+    const { s, hub, jobs, applied } = await setup();
     await s.inject({ method: 'PUT', url: '/api/v1/surface-publish/compact/events/train', payload: event() });
     const res = await s.inject({ method: 'DELETE', url: '/api/v1/surface-publish/compact/events/train?agent_id=peggy' });
-    expect(res.json()).toMatchObject({ ok: true, removed: true, jobs_removed: 1 });
-    expect(hub.get('compact', 'events', 'train')).toBeNull();
+    expect(res.json()).toMatchObject({ ok: true, removed: true, state: 'withdrawn', jobs_removed: 1 });
+    expect(hub.get('compact', 'events', 'train')).toMatchObject({ title: 'Train in 10 min', state: 'withdrawn', ended_at: iso(NOW), updated_at: iso(NOW) });
+    expect(applied.at(-1)!.ops).toEqual([{ op: 'set', id: 'train', value: expect.objectContaining({ state: 'withdrawn' }) }]);
     expect(jobs.has('compact/train')).toBe(false);
-    const again = await s.inject({ method: 'DELETE', url: '/api/v1/surface-publish/compact/events/train?agent_id=peggy' });
-    expect(again.json()).toMatchObject({ ok: true, removed: false });
+    // Already ended: left as it is.
+    const again = await s.inject({ method: 'DELETE', url: '/api/v1/surface-publish/compact/events/train?agent_id=peggy&reason=cleared' });
+    expect(again.json()).toMatchObject({ ok: true, removed: false, state: 'withdrawn' });
+    const none = await s.inject({ method: 'DELETE', url: '/api/v1/surface-publish/compact/events/nothing?agent_id=peggy' });
+    expect(none.json()).toMatchObject({ ok: true, removed: false });
+    expect(none.json()).not.toHaveProperty('state');
   });
 
   it('403 for an agent that is not a publisher, naming the config key; 404 for an unknown surface', async () => {
@@ -215,5 +220,91 @@ describe('surface publish routes', () => {
     expect(b.json()).toEqual({ ok: true, conversation_id: conv, cleared: true });
     expect(cleared).toEqual(['conv-1', conv]);
     expect((await s.inject({ method: 'POST', url: '/api/v1/surface-publish/answer-needed/clear', payload: {} })).statusCode).toBe(400);
+  });
+});
+
+describe('E100 Moment fields and lifecycle on the publish routes', () => {
+  const put = (s: FastifyInstance, id: string, payload: Record<string, unknown>, surface = 'compact') =>
+    s.inject({ method: 'PUT', url: `/api/v1/surface-publish/${surface}/events/${id}`, payload });
+
+  it('stores weight, derived level, consequence, changed, state open and resolved action kinds', async () => {
+    const { s, hub } = await setup();
+    const res = await put(s, 'train', event({
+      weight: 'urgent', consequence: 'Misses your 7:15 transfer', changed: { field: 'start', old: '6:42', new: '6:58' },
+      actions: [
+        { id: 'route', label: 'New route', run: { body: 'new route' } },
+        { id: 'tell', label: 'Tell Kate', confirm: { draft: 'Running late' }, run: { body: 'tell', sends_on_behalf: true } },
+        { id: 'cancel', label: 'Cancel trip', kind: 'hold', run: { body: 'cancel' } },
+      ],
+    }));
+    expect(res.statusCode).toBe(201);
+    expect(res.json()).toMatchObject({ state: 'open', kinds: { route: 'tap', tell: 'hold', cancel: 'hold' } });
+    expect(hub.get('compact', 'events', 'train')).toMatchObject({
+      weight: 'urgent', level: 'urgent', consequence: 'Misses your 7:15 transfer', changed: { field: 'start', old: '6:42', new: '6:58' }, state: 'open',
+      actions: [{ id: 'route', kind: 'tap' }, { id: 'tell', kind: 'hold' }, { id: 'cancel', kind: 'hold' }],
+    });
+  });
+
+  it('400s with the validator messages for the new rules', async () => {
+    const { s, applied } = await setup();
+    const both = await put(s, 'x', event({ weight: 'decision', level: 'info' }));
+    expect(both.statusCode).toBe(400);
+    expect(both.json().error).toMatch(/weight "decision" and level "info" disagree/);
+    expect((await put(s, 'x', event({ consequence: 'x' }))).json().error).toMatch(/consequence is only for urgent events/);
+    expect((await put(s, 'x', event({ level: 'attention', changed: { field: 'start', old: 'a', new: 'b' } }))).json().error).toMatch(/changed is only for urgent events/);
+    const tap = await put(s, 'x', event({ actions: [{ id: 'a', label: 'Send', kind: 'tap', confirm: { draft: 'hi' }, run: { body: 'b', sends_on_behalf: true } }] }));
+    expect(tap.json().error).toMatch(/kind "tap" is not allowed on a button that sends/);
+    expect((await put(s, 'x', event({ state: 'answered' }))).json().error).toMatch(/state is set by the bus/);
+    expect(applied).toEqual([]);
+  });
+
+  it('ends with each reason; refuses an unknown reason', async () => {
+    const { s, hub } = await setup();
+    for (const reason of ['withdrawn', 'answered', 'cleared']) {
+      await put(s, `e-${reason}`, event());
+      const res = await s.inject({ method: 'DELETE', url: `/api/v1/surface-publish/compact/events/e-${reason}?agent_id=peggy&reason=${reason}` });
+      expect(res.json()).toMatchObject({ removed: true, state: reason });
+      expect(hub.get('compact', 'events', `e-${reason}`)).toMatchObject({ state: reason, ended_at: iso(NOW) });
+    }
+    await put(s, 'e-x', event());
+    const bad = await s.inject({ method: 'DELETE', url: '/api/v1/surface-publish/compact/events/e-x?agent_id=peggy&reason=deleted' });
+    expect(bad.statusCode).toBe(400);
+    expect(bad.json().error).toMatch(/^reason must be one of withdrawn, answered, cleared/);
+    expect(hub.get('compact', 'events', 'e-x')).toMatchObject({ state: 'open' });
+  });
+
+  it('re-publishing a tombstone starts a new open life (201, new created_at, fresh jobs)', async () => {
+    const { s, hub, jobs } = await setup();
+    await put(s, 'train', event());
+    hub.apply('compact', 'events', [{ op: 'set', id: 'train', value: { ...hub.get('compact', 'events', 'train')!, created_at: '2026-11-01T00:00:00.000Z' } }]);
+    await s.inject({ method: 'DELETE', url: '/api/v1/surface-publish/compact/events/train?agent_id=peggy' });
+    expect(jobs.has('compact/train')).toBe(false);
+    const res = await put(s, 'train', event({ title: 'Train again' }));
+    expect(res.statusCode).toBe(201);
+    expect(res.json()).toMatchObject({ created: true, revived: true, state: 'open' });
+    const ev = hub.get('compact', 'events', 'train')!;
+    expect(ev).toMatchObject({ title: 'Train again', state: 'open', created_at: iso(NOW) });
+    expect(ev).not.toHaveProperty('ended_at');
+    expect(jobs.get('compact/train')).toHaveLength(1);
+  });
+
+  it('tombstones do not count toward the live cap nor block the ring', async () => {
+    const { s, hub } = await setup();
+    const at = iso(NOW + 3600_000), end = iso(NOW + 7200_000);
+    hub.apply('compact', 'events', [{ op: 'set', id: 'old-ring', value: { id: 'old-ring', kind: 'event', at, end, state: 'withdrawn', ended_at: iso(NOW), source: 'agent:peggy' } }]);
+    expect((await put(s, 'ring', event({ at, end }))).statusCode).toBe(201);
+    // A second live primary over the same hour is refused, naming the live one only.
+    const clash = await put(s, 'ring2', event({ at, end }));
+    expect(clash.statusCode).toBe(400);
+    expect(clash.json().error).toMatch(/overlaps "ring"\./);
+
+    for (let i = 0; i < 49; i++) hub.apply('open', 'events', [{ op: 'set', id: `live${i}`, value: { id: `live${i}`, kind: 'event', state: 'open', expires_at: iso(NOW + 3600_000) } }]);
+    for (let i = 0; i < 10; i++) hub.apply('open', 'events', [{ op: 'set', id: `dead${i}`, value: { id: `dead${i}`, kind: 'event', state: 'cleared', ended_at: iso(NOW) } }]);
+    expect((await put(s, 'fiftieth', event(), 'open')).statusCode).toBe(201);
+    const full = await put(s, 'fifty-first', event(), 'open');
+    expect(full.statusCode).toBe(400);
+    expect(full.json().error).toMatch(/already has 50 live events; the limit is 50/);
+    // Reviving a tombstone is a new live event, so it is refused too.
+    expect((await put(s, 'dead0', event(), 'open')).json().error).toMatch(/already has 50 live events/);
   });
 });

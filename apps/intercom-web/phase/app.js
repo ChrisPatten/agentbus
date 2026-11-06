@@ -100,9 +100,10 @@ function jobMoment(s) {
   return { id: `job:${s.id}`, src: 'session', weight: 'decision', title: s.subject || s.title || 'Agent', start: null, end: null, state: 'open', updated: `${s.needs_you_message_id || ''}`,
     arrival: Date.parse(s.last_activity_at || s.since || '') || null, expires: null, actions: [], session: s, question: q || null, object: s.conversation_id ? `conversations:${s.conversation_id}` : null };
 }
+/** Open Moments: what the faces, the rim and the alerts draw. Terminal Events (E100 tombstones) are left out. */
 function moments() {
   const out = [];
-  if (S.v2) for (const e of itemsOf(S.store, 'events')) if (e.kind === 'event' || e.kind === 'approval') out.push(M.momentFromEvent(e));
+  if (S.v2) for (const e of itemsOf(S.store, 'events')) if ((e.kind === 'event' || e.kind === 'approval') && M.stateOfEvent(e) === 'open') out.push(M.momentFromEvent(e));
   for (const n of noticeItems()) out.push(M.momentFromNotice(n));
   for (const s of sessions()) if (s.needs_you) out.push(jobMoment(s));
   return out;
@@ -115,8 +116,27 @@ function learnAgent() {
 const agentName = () => S.agentName || (S.pair && S.pair.surface_id) || 'Agent';
 const quietActive = (now) => isQuietNow(now) && now >= S.quietEndedUntil;
 
-/** First-seen times, auto-clear of notices after 20 s, and withdrawn / expired detection for the Earlier tray. */
+/** Terminal Events the bus keeps as tombstones (E100), as Moments. */
+const endedMoments = () => (S.v2 ? itemsOf(S.store, 'events').filter((e) => (e.kind === 'event' || e.kind === 'approval') && M.stateOfEvent(e) !== 'open').map(M.momentFromEvent) : []);
+/** Tombstones already put in Earlier (`id|ended_at`), kept so a cleared tray does not fill up again from the same tombstones. */
+const endedSeen = new Set(safe.json('phase.endedSeen', []));
+const saveEndedSeen = () => safe.set('phase.endedSeen', JSON.stringify([...endedSeen].slice(-200)));
+
+/** First-seen times, auto-clear of notices after 20 s, and withdrawn / expired / answered for the Earlier tray. */
 function sweep(now) {
+  // The bus says how an Event ended (E100): file it in Earlier with that word and its end time, once.
+  const ended = new Set();
+  for (const m of endedMoments()) {
+    ended.add(m.id);
+    const entry = M.earlierEntryOf(m, iconFor(m));
+    const key = `${m.id}|${m.raw.ended_at || m.updated}`;
+    if (entry && !endedSeen.has(key)) {
+      endedSeen.add(key); saveEndedSeen();
+      const prior = earlier.list().find((x) => x.id === m.id);
+      if (!(prior && prior.state === entry.state && prior.at === entry.at)) earlier.add(entry);
+    }
+    if (S.known.has(m.id)) { S.known.delete(m.id); S.aside.delete(m.id); saveAside(); }
+  }
   const all = moments();
   const ids = new Set();
   for (const m of all) {
@@ -133,8 +153,9 @@ function sweep(now) {
       earlier.add({ id: m.id, title: m.title, kind: m.weight, icon: iconFor(m), state: 'expired', at: now });
     }
   }
+  // Gone without a tombstone (an older bus, a notice): infer the word.
   for (const [id, k] of S.known) {
-    if (ids.has(id)) continue;
+    if (ids.has(id) || ended.has(id)) continue;
     S.known.delete(id);
     const answered = S.answered && S.answered.has(id);
     const state = answered ? 'answered' : k.expires !== null && k.expires <= now ? 'expired' : 'withdrawn';
@@ -245,8 +266,10 @@ function restVm(now) {
 }
 
 /* alerts */
+/** A plain hold action (E100 `kind: hold`, no draft) fires on a completed hold; a draft goes through Confirm instead. */
+const holdOf = (a) => (a.kind === 'hold' && !a.draft ? `HOLD TO ${caps(a.label)}` : null);
 function alertPills(m, max = 2) {
-  const acts = m.actions.slice(0, max).map((a) => ({ label: a.label, act: 'aact', data: { aid: a.id } }));
+  const acts = m.actions.slice(0, max).map((a) => ({ label: a.label, act: 'aact', hold: holdOf(a), data: { aid: a.id } }));
   if (!acts.length) acts.push({ label: 'Got it', act: 'aack' });
   else if (acts.length === 1) acts.push({ label: 'Dismiss', act: 'aack' });
   return acts;
@@ -263,7 +286,8 @@ function alertVm(m, more, now) {
   const arrival = m.arrival ?? S.seen.get(m.id) ?? now;
   if (m.weight === 'urgent') {
     const lit = drainLit(arrival, m.expires ?? NaN, now);
-    if (m.src === 'event' && m.travel) {
+    // A changed time (spec 7.3, train delayed) wins over the leave-now screen.
+    if (m.src === 'event' && m.travel && !m.changed) {
       const leaveNow = !m.travel.leave_by || m.travel.leave_by <= now + 60000;
       const word = { walk: 'WALK', drive: 'DRIVE', transit: 'TRANSIT', bike: 'BIKE', train: 'TRAIN' }[m.travel.mode] || 'TRAVEL';
       return Sc.nowAlert({ ...e, top: top || `Time to go · ${hmA(now, TZ)}`, bottom: m.start ? `${m.title} at ${hm(m.start, TZ)}` : m.title, verdict: leaveNow ? ['Leave', 'Now'] : ['Leave', hm(m.travel.leave_by, TZ)], sub: `${m.travel.minutes} min ${word}`, lit, pills: withActState(alertPills(m), m, now) });
@@ -280,7 +304,7 @@ function alertVm(m, more, now) {
       return Sc.decision({ ...e, top, who: 'Needs you · Approval', headline: m.title, preview: m.preview ? m.preview.text : '', quote: false, meta: `Asked by ${src}`, actions: [{ label: 'Review', act: 'review' }, { label: 'Later', act: 'later' }], window: win });
     }
     const draft = m.actions.find((a) => a.draft);
-    const acts = draft ? [{ label: 'Review', act: 'review', data: { aid: draft.id } }] : m.actions.slice(0, 2).map((a) => ({ label: a.label, act: 'aact', data: { aid: a.id } }));
+    const acts = draft ? [{ label: 'Review', act: 'review', data: { aid: draft.id } }] : m.actions.slice(0, 2).map((a) => ({ label: a.label, act: 'aact', hold: holdOf(a), data: { aid: a.id } }));
     if (acts.length < 3) acts.push({ label: 'Later', act: 'later' });
     return Sc.decision({ ...e, top, who: `Needs you · ${src}`, headline: m.title, preview: draft ? draft.draft : m.note || '', quote: !!draft, meta: draft ? `Draft by ${src}` : '', actions: withActState(acts, m, now), window: win });
   }
@@ -711,6 +735,7 @@ function onTap(el) {
       if (!a) return;
       if (S.act && S.act.object === al.object && S.act.result && S.act.result.state === 'failed' && S.act.result.disabled) return;
       if (a.draft) { openConfirm(al, a); return; }
+      if (a.kind === 'hold' && !el.dataset.hold) return; // a hold action fires on the completed hold only
       fire({ object: al.object, actionId: a.id, action: a.raw, label: a.label, onSent: () => { answered(al); sentScreen(`${agentName()} has “${a.label}”.`); } });
       return;
     }

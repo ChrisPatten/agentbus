@@ -4,6 +4,9 @@ Feature ideas and future work that hasn't been scoped into an epic yet. Promote 
 
 ## Ideas
 
+### Surface Events as Moments: weight, consequence, changed, action kind, lifecycle → E100 (2026-11-05)
+See `_bmad-output/epics/E100-moment-fields.md`. The bus accepts `weight` (level derived), urgent-only `consequence` and `changed`, and action `kind` (tap or hold), and owns an Event `state` (open, answered, expired, withdrawn, cleared) with ended Events kept as tombstones for the Earlier tray; built on `feat/e100-moment-fields`. Follows the E99 server follow-ons.
+
 ### Intercom: Phase (Plum Dusk) web client → promoted to E99 (2026-11-05)
 See `_bmad-output/epics/E99-phase-ui-web.md`. A second web client at `/intercom/phase/` renders the Compact's Phase design from `data/intercom/design/plum-dusk/spec.md` for usability testing on the iPhone; built on `feat/e99-phase-ui`. Server follow-ons (Moment weight and consequence fields, agent-job states, undo, voice, device-shown pairing codes) are listed in the epic.
 

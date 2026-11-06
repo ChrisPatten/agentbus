@@ -19,6 +19,10 @@
  * Telegram notification's buttons are removed by the existing approvals sweep
  * (`listNeedingMessageCleanup`), as for any non-Telegram resolution.
  *
+ * E100: an Approval is a `decision` Moment (`weight: decision`, `state: open`, both buttons `kind: hold`).
+ * When it stops being pending it is kept as a tombstone: `answered` (approved or denied), `expired`, or
+ * `withdrawn` (stale, or gone from the table); `ended_at` is the resolution time when known.
+ *
  * Change detection: approvals have no event bus. Call {@link syncApprovalEvents} on a timer
  * (the desk tick / maintenance sweep) and right after a resolve; it applies ops only when
  * the set changed.
@@ -28,7 +32,8 @@ import { resolveApproval, type ResolveApprovalDeps } from '../approvals/resolve.
 import type { ApprovalDecision, ApprovalRequest } from '../approvals/types.js';
 import { conversationTitle } from '../intercom/desk.js';
 import { diffItems } from './sessions.js';
-import { BOUNDS, type ActionStatus, type ResourceHub, type SurfaceEvent } from './types.js';
+import { BOUNDS, type ActionStatus, type EventState, type ResourceHub, type SurfaceEvent } from './types.js';
+import { isTerminal, tombstone } from './lifecycle.js';
 
 export const APPROVAL_EVENT_PREFIX = 'approval-';
 
@@ -79,10 +84,12 @@ export function approvalToEvent(request: ApprovalRequest, db?: Database.Database
     title: cutTitle(title),
     body: cut(`Agent ${agent}${where ? ` · ${where}` : ''} asks to use ${request.tool_name}.`, BOUNDS.body),
     level: 'attention',
+    weight: 'decision',
+    state: 'open',
     expires_at: request.expires_at,
     actions: [
-      { id: 'approve', label: 'Approve', style: 'primary', once: true },
-      { id: 'deny', label: 'Deny', style: 'destructive', once: true },
+      { id: 'approve', label: 'Approve', style: 'primary', once: true, kind: 'hold' },
+      { id: 'deny', label: 'Deny', style: 'destructive', once: true, kind: 'hold' },
     ],
     approval: { approval_id: request.id, tool: request.tool_name, detail: cut(approvalDetail(request), BOUNDS.draft) },
     source: 'bus',
@@ -104,10 +111,21 @@ export function approvalEventsFor(db: Database.Database, now: Date | number = ne
     .map((r) => approvalToEvent(r, db));
 }
 
+/** The tombstone state and end time of an approval that is no longer pending. */
+function endOf(db: Database.Database, approvalId: string, nowIso: string): { state: Exclude<EventState, 'open'>; at: string } {
+  let row: Pick<ApprovalRequest, 'status' | 'resolved_at' | 'expires_at'> | undefined;
+  try { row = db.prepare(`SELECT status, resolved_at, expires_at FROM approval_requests WHERE id = ?`).get(approvalId) as typeof row; } catch { row = undefined; }
+  if (!row) return { state: 'withdrawn', at: nowIso };
+  if (row.status === 'approved' || row.status === 'denied') return { state: 'answered', at: row.resolved_at ?? nowIso };
+  if (row.status === 'expired' || (row.status === 'pending' && row.expires_at <= nowIso)) return { state: 'expired', at: row.resolved_at ?? row.expires_at };
+  return { state: 'withdrawn', at: row.resolved_at ?? nowIso };
+}
+
 /**
  * Bring the surface's `events` resource in line with the pending approvals: set new or
- * changed Approval events, remove ones no longer pending. Agent-published events are never
- * touched. Returns the new rev, or null when nothing changed.
+ * changed Approval events, turn ones no longer pending into tombstones (E100). Approval
+ * tombstones and agent-published events are never touched (the hub's sweep purges old
+ * tombstones). Returns the new rev, or null when nothing changed.
  */
 export function syncApprovalEvents(
   hub: Pick<ResourceHub, 'snapshot' | 'apply'>,
@@ -115,13 +133,19 @@ export function syncApprovalEvents(
   db: Database.Database,
   opts: { now?: Date | number; contactId?: string } = {},
 ): number | null {
+  const now = opts.now ?? new Date();
+  const nowIso = (typeof now === 'number' ? new Date(now) : now).toISOString();
   const current: Record<string, Record<string, unknown>> = {};
   for (const [id, item] of Object.entries(hub.snapshot(surfaceId, 'events').items)) {
-    if (id.startsWith(APPROVAL_EVENT_PREFIX) && item['kind'] === 'approval') current[id] = item;
+    if (id.startsWith(APPROVAL_EVENT_PREFIX) && item['kind'] === 'approval' && !isTerminal(item)) current[id] = item;
   }
   const next: Record<string, Record<string, unknown>> = {};
-  for (const e of approvalEventsFor(db, opts.now ?? new Date(), opts.contactId ? { contactId: opts.contactId } : {})) next[e.id] = { ...e };
-  const ops = diffItems(current, next);
+  for (const e of approvalEventsFor(db, now, opts.contactId ? { contactId: opts.contactId } : {})) next[e.id] = { ...e };
+  const ops = diffItems(current, next).map((op) => {
+    if (op.op !== 'remove') return op;
+    const end = endOf(db, approvalIdFromEvent(op.id) ?? '', nowIso);
+    return { op: 'set' as const, id: op.id, value: tombstone(current[op.id]!, end.state, end.at, nowIso) };
+  });
   return ops.length ? hub.apply(surfaceId, 'events', ops) : null;
 }
 

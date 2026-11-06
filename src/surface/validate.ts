@@ -9,9 +9,10 @@
  */
 import {
   ACTION_ID_RE, BOUNDS, BoundsError, COLOR_PALETTE, ID_RE, TRAVEL_MODES, WIDGET_TYPE_RE,
-  type ActionStyle, type EventDetail, type EventLayer, type EventOpens, type EventTravel, type FaceLayout, type Level, type NewJob,
-  type SurfaceAction, type SurfaceEvent, type SurfaceSlot, type SurfaceWidget, type TravelMode,
+  type ActionKind, type ActionStyle, type ChangedField, type EventChanged, type EventDetail, type EventLayer, type EventOpens, type EventTravel,
+  type FaceLayout, type Level, type NewJob, type SurfaceAction, type SurfaceEvent, type SurfaceSlot, type SurfaceWidget, type TravelMode, type Weight,
 } from './types.js';
+import { isLiveEvent, LEVEL_FOR_WEIGHT, WEIGHTS } from './lifecycle.js';
 
 /** Where an event's action jobs are injected: the surface's followed conversation. */
 export interface FollowTarget { contact: string; channel: string; topic?: string }
@@ -26,6 +27,8 @@ const HEX_COLOR_RE = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
 const ASSET_HASH_RE = /^[0-9a-f]{64}$/;
 const CONVERSATION_ID_RE = /^[A-Za-z0-9_:-]{1,128}$/;
 const LAYERS: readonly EventLayer[] = ['primary', 'overlap'];
+const KINDS: readonly ActionKind[] = ['tap', 'hold'];
+const CHANGED_FIELDS: readonly ChangedField[] = ['start', 'end', 'place', 'title', 'other'];
 const OPENS: readonly EventOpens[] = ['focus', 'conversation'];
 const ICON_RE = WIDGET_TYPE_RE;
 const DAY_MS = 24 * 3600_000;
@@ -134,8 +137,8 @@ export function drawsOnRing(e: { kind?: unknown; at?: unknown; end?: unknown }):
 
 /**
  * The ring holds at most {@link BOUNDS.ringPrimary} `primary` and {@link BOUNDS.ringOverlap} `overlap` events at
- * any one moment. Throws a {@link BoundsError} naming the clash when adding `event` to `existing` (live ring
- * events; the event's own id is ignored) would break that. Non-ring events pass.
+ * any one moment. Throws a {@link BoundsError} naming the clash when adding `event` to `existing` (only live ring
+ * events count: open and not expired; the event's own id is ignored) would break that. Non-ring events pass.
  */
 export function checkRingCapacity(existing: readonly Record<string, unknown>[], event: Pick<SurfaceEvent, 'id' | 'kind' | 'at' | 'end' | 'layer'>, now: number): void {
   if (!drawsOnRing(event)) return;
@@ -143,8 +146,9 @@ export function checkRingCapacity(existing: readonly Record<string, unknown>[], 
   const limit = layer === 'primary' ? BOUNDS.ringPrimary : BOUNDS.ringOverlap;
   const start = Date.parse(event.at!);
   const stop = Date.parse(event.end!);
+  // Tombstones (E100: answered, expired, withdrawn, cleared) and expired events never block the ring.
   const peers = existing.filter((o) => o['id'] !== event.id && drawsOnRing(o) && ((o['layer'] as EventLayer | undefined) ?? 'primary') === layer
-    && !(typeof o['expires_at'] === 'string' && Date.parse(o['expires_at']) <= now));
+    && isLiveEvent(o, now));
   const spans = peers
     .map((o) => ({ id: String(o['id']), a: Date.parse(o['at'] as string), b: Date.parse(o['end'] as string) }))
     .filter((o) => o.a < stop && o.b > start);
@@ -199,8 +203,17 @@ export function validateAction(raw: unknown, index: number | string, ctx: Valida
   if (sendsOnBehalf && !confirm) {
     fail(`${at}: run.sends_on_behalf is true, so confirm.draft is required (the exact text that will be sent, shown on the device before the tap fires)`);
   }
+  // E100: anything that sends is held to confirm; a plain button may ask for a hold too (irreversible things).
+  let kind: ActionKind = confirm || sendsOnBehalf ? 'hold' : 'tap';
+  if (a['kind'] !== undefined && a['kind'] !== null) {
+    if (!KINDS.includes(a['kind'] as ActionKind)) fail(`${at}.kind must be "tap" or "hold" (or leave it out: hold when the button sends, else tap)`);
+    if (a['kind'] === 'tap' && kind === 'hold') {
+      fail(`${at}.kind "tap" is not allowed on a button that sends (it has ${confirm ? 'confirm.draft' : 'run.sends_on_behalf'}); use kind "hold" or leave kind out`);
+    }
+    kind = a['kind'] as ActionKind;
+  }
 
-  const action: SurfaceAction = { id: actionId, label, ...(style ? { style } : {}), ...(confirm ? { confirm } : {}), once };
+  const action: SurfaceAction = { id: actionId, label, ...(style ? { style } : {}), ...(confirm ? { confirm } : {}), once, kind };
   const job: NewJob = {
     action_id: actionId,
     channel: ctx.follow.channel,
@@ -231,11 +244,15 @@ export function validateEvent(input: unknown, ctx: ValidateEventContext): { even
   const eventId = id(e['id'], 'id', ID_RE, 64);
   const title = text(e, 'title', BOUNDS.title, { required: true })!;
   const body = text(e, 'body', BOUNDS.body, { required: false, multiline: true });
-  let level: Level = 'info';
-  if (e['level'] !== undefined) {
-    if (!LEVELS.includes(e['level'] as Level)) fail(`level must be one of ${LEVELS.join(', ')}`);
-    level = e['level'] as Level;
+  if (e['state'] !== undefined || e['ended_at'] !== undefined) {
+    fail(`${e['state'] !== undefined ? 'state' : 'ended_at'} is set by the bus (every publish makes the event "open"); leave it out. To end an event, call surface_remove_event with reason withdrawn, answered or cleared`);
   }
+  const { level, weight } = levelAndWeight(e);
+  const urgent = level === 'urgent';
+  const consequence = text(e, 'consequence', BOUNDS.consequence, { required: false });
+  if (consequence && !urgent) fail('consequence is only for urgent events: set weight "urgent" (or level "urgent"), or leave consequence out');
+  const changed = eventChanged(e['changed']);
+  if (changed && !urgent) fail('changed is only for urgent events: set weight "urgent" (or level "urgent"), or leave changed out');
   const at = isoTime(e, 'at');
   const end = isoTime(e, 'end');
   if (end && !at) fail('end needs at (the start time)');
@@ -289,6 +306,10 @@ export function validateEvent(input: unknown, ctx: ValidateEventContext): { even
     title,
     ...(body ? { body } : {}),
     level,
+    ...(weight ? { weight } : {}),
+    ...(consequence ? { consequence } : {}),
+    ...(changed ? { changed } : {}),
+    state: 'open',
     ...(at ? { at } : {}),
     ...(end ? { end } : {}),
     ...(layer ? { layer } : {}),
@@ -304,6 +325,39 @@ export function validateEvent(input: unknown, ctx: ValidateEventContext): { even
     updated_at: nowIso,
   };
   return { event, jobs };
+}
+
+/**
+ * E100 — `level` and `weight`. Only weight: level is derived (ambient/notice → info, decision → attention,
+ * urgent → urgent). Only level: no weight is stored. Both: they must agree under that mapping.
+ */
+function levelAndWeight(e: Record<string, unknown>): { level: Level; weight?: Weight } {
+  let level: Level | undefined;
+  if (e['level'] !== undefined && e['level'] !== null) {
+    if (!LEVELS.includes(e['level'] as Level)) fail(`level must be one of ${LEVELS.join(', ')}`);
+    level = e['level'] as Level;
+  }
+  let weight: Weight | undefined;
+  if (e['weight'] !== undefined && e['weight'] !== null) {
+    if (!WEIGHTS.includes(e['weight'] as Weight)) fail(`weight must be one of ${WEIGHTS.join(', ')}`);
+    weight = e['weight'] as Weight;
+  }
+  if (weight && level && LEVEL_FOR_WEIGHT[weight] !== level) {
+    fail(`weight "${weight}" and level "${level}" disagree: weight ${weight} means level ${LEVEL_FOR_WEIGHT[weight]}. `
+      + 'Send only weight (level is derived: ambient and notice → info, decision → attention, urgent → urgent), or make them agree');
+  }
+  return { level: level ?? (weight ? LEVEL_FOR_WEIGHT[weight] : 'info'), ...(weight ? { weight } : {}) };
+}
+
+/** E100 — `changed: {field, old, new}` (urgent only; checked by the caller). */
+function eventChanged(raw: unknown): EventChanged | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (!isObject(raw)) fail('changed must be an object: { field, old, new }, e.g. { "field": "start", "old": "6:42", "new": "6:58" }');
+  const c = raw as Record<string, unknown>;
+  if (!CHANGED_FIELDS.includes(c['field'] as ChangedField)) fail(`changed.field must be one of ${CHANGED_FIELDS.join(', ')}`);
+  const oldV = text(c, 'old', BOUNDS.changedValue, { required: true, label: 'changed.old' })!;
+  const newV = text(c, 'new', BOUNDS.changedValue, { required: true, label: 'changed.new' })!;
+  return { field: c['field'] as ChangedField, old: oldV, new: newV };
 }
 
 // ── Slots ────────────────────────────────────────────────────────────────────

@@ -44,7 +44,7 @@ export interface SurfaceRuntime {
   bind(service: IntercomService): void;
   /** Rebuild the sessions resource now (after an answer-needed or subject change). */
   refreshSessions(): void;
-  /** Maintenance every minute: expired events and slots, old jobs and action keys, spent pairing codes. */
+  /** Maintenance every minute: expired events (to tombstones) and slots, old tombstones, old jobs and action keys, spent pairing codes. */
   sweep(): void;
   stop(): void;
 }
@@ -57,7 +57,7 @@ export function createSurfaceRuntime(deps: SurfaceRuntimeDeps): SurfaceRuntime {
   let service: IntercomService | null = null;
   const devices = createDeviceStore({ db: deps.db, log });
   const hub = createResourceHub({
-    db: deps.db, coalesceMs: cfg.delta_coalesce_ms, logRetentionRevs: cfg.log_retention_revs, log,
+    db: deps.db, coalesceMs: cfg.delta_coalesce_ms, logRetentionRevs: cfg.log_retention_revs, tombstoneHours: cfg.event_tombstone_hours, log,
     sink: (surfaceId, frame) => service?.pushDelta(surfaceId, frame),
   });
   const jobs = createJobStore(deps.db);
@@ -94,7 +94,8 @@ export function createSurfaceRuntime(deps: SurfaceRuntimeDeps): SurfaceRuntime {
 
   const sweep = () => {
     try {
-      // Jobs behind swept Events stay: sweepJobs keeps expired ones a day so late taps answer `expired`.
+      // Expired Events become tombstones (E100) and old tombstones are purged. Jobs behind them stay:
+      // sweepJobs keeps expired ones a day; a tap on a tombstone answers `expired` either way.
       hub.sweepExpired();
       sweepJobs(deps.db, Date.now(), cfg.action_key_ttl_hours);
       devices.sweepPairCodes();
