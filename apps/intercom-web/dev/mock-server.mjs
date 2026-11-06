@@ -18,7 +18,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = Number(process.env.PORT || 3098);
 const TOKEN = 'mock-token-0123456789abcdef0123456789abcdef';
 const GRACE_MS = 5000;
-const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.png': 'image/png', '.webmanifest': 'application/manifest+json', '.svg': 'image/svg+xml' };
+const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.png': 'image/png', '.webmanifest': 'application/manifest+json', '.svg': 'image/svg+xml', '.ttf': 'font/ttf', '.json': 'application/json', '.txt': 'text/plain' };
 const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
 function iso(d) {
@@ -85,7 +85,8 @@ const server = http.createServer((req, res) => {
   if (u.pathname === '/intercom') { res.writeHead(301, { Location: '/intercom/' }); return res.end(); }
   if (u.pathname.startsWith('/intercom/')) {
     let rel = decodeURIComponent(u.pathname.slice('/intercom/'.length)) || 'index.html';
-    const file = path.resolve(ROOT, rel);
+    let file = path.resolve(ROOT, rel);
+    if (file.startsWith(ROOT + path.sep) && fs.existsSync(file) && fs.statSync(file).isDirectory()) file = path.join(file, 'index.html'); // /intercom/phase/ as the bus serves it
     if (!file.startsWith(ROOT + path.sep) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) { res.writeHead(404); return res.end('not found'); }
     res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
     return fs.createReadStream(file).pipe(res);

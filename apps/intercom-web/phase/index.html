@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<title>Compact Phase</title>
+<meta name="theme-color" content="#000000">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-title" content="Phase">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="../icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" href="../icons/icon-192.png">
+<link rel="preload" href="fonts/LexendExa-wght.ttf" as="font" type="font/ttf" crossorigin>
+<link rel="preload" href="fonts/HankenGrotesk-wght.ttf" as="font" type="font/ttf" crossorigin>
+<link rel="stylesheet" href="phase.css">
+</head>
+<body>
+<div class="page">
+  <div class="top">
+    <button class="dotbtn" id="dotbtn" type="button" aria-label="Connection status. Long-press to unpair."><span class="dot" id="dot"></span><span id="dotlabel">Offline</span></button>
+    <button class="chip" id="size" type="button">Large</button>
+  </div>
+  <div class="stagewrap"><div class="bezel"><div class="dial" id="dial" aria-label="Compact dial"><div class="face" id="face"></div><div class="bright" id="bright"></div><div class="dimmer" id="dimmer"></div></div></div></div>
+  <div class="under" id="under">
+    <div class="demo" id="demo" hidden><button type="button" id="dprev" aria-label="Previous state">‹</button><select id="dsel" aria-label="Screen state"></select><button type="button" id="dnext" aria-label="Next state">›</button></div>
+    <div class="democap" id="democap" hidden></div>
+    <div class="hw" id="hw">
+      <button type="button" id="side" aria-label="Side button: hold to talk, double-press for Capture">SIDE<small>hold: talk · 2×: capture</small></button>
+      <button type="button" id="power" aria-label="Power button: click wakes or returns to Now, hold 3 s for the menu">POWER<small>click: Now · hold 3 s: menu</small></button>
+    </div>
+    <div class="note" id="note"></div>
+    <form class="send" id="form" autocomplete="off">
+      <input id="input" type="text" enterkeyhint="send" autocapitalize="sentences" autocomplete="off" aria-label="Message to the agent">
+      <button id="go" type="submit">SEND</button>
+    </form>
+    <div class="opts"><label><input type="checkbox" id="reduced"> Reduced motion</label></div>
+  </div>
+</div>
+<div class="calibrate" id="calibrate" hidden><div class="calbar" id="calbar"></div><div class="calrow"><button type="button" id="calminus">-</button><span id="calval"></span><button type="button" id="calplus">+</button></div><div class="calhint">Hold a ruler to the bar: adjust until it is exactly 1 inch.</div></div>
+<div class="confirm" id="confirm"><div>Unpair this device? You will need a new pairing code.</div><div class="row"><button type="button" id="cancel">Cancel</button><button type="button" class="danger" id="unpair">Unpair</button></div></div>
+<script type="module" src="app.js"></script>
+</body>
+</html>

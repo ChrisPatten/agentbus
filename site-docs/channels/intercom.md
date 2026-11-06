@@ -131,6 +131,10 @@ Pairing codes work once and expire after 12 hours. To unpair a phone, press and 
 - Turn the phone sideways to see just the dial, with the text field and buttons hidden. The dial is drawn at the real size of the Compact (1.75 inches), centred and clear of the notch. To get the inch exactly right on your phone, open the app once with `?calibrate=1`, hold a ruler to the bar and tap + or - until it measures 1 inch; it is remembered. Turn it back upright to type.
 - Add `?demo` to the address to see all the screens, including a notification sequence, with sample data and without a connection.
 
+### Try the Phase design
+
+A second app at `/intercom/phase/` (with the trailing slash) shows the Compact's newer "Phase" design for usability testing. It uses the same pairing as the main app, so a phone already paired opens it connected. It reads the same Events, notices, approvals, sessions and conversation from the bus; Earlier, Settings, quiet hours, push-to-talk and Capture are local to the phone for now. Add `?demo` to step through all 28 screens with sample data. The main app at `/intercom/` is unchanged.
+
 ## Notifications
 
 A notification is a short item your agent, a schedule or one of your own scripts puts on the screen, such as "Leave for the dentist in 20 min" or "Draft to Kate awaiting your OK". Important ones make the screen glow amber (urgent ones pulse), and an item can carry up to three buttons. Tapping "Got it" dismisses the item; tapping a button dismisses it and sends your choice to the agent, as if you had typed it in the conversation. The reply shows on the screen as usual.

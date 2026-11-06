@@ -130,3 +130,61 @@ iOS gives a Home Screen app its own storage, separate from Safari, and the launc
 - `node apps/intercom-web/dev/publish-demo.mjs` publishes demo Events, slots and widgets to a live bus (ids prefixed `demo-`) through `/api/v1/surface-publish/*`, using `BUS_TOKEN` from the environment (never printed), so the phone shows the new faces; `--clear` removes them, `--widgets` puts widgets in the context slot, `--dry-run` prints the requests. Its buttons post a harmless `[demo]` message into the followed conversation. `publish-demo.test.js` runs its payloads through the bus's own validators.
 - `PORT=3098 node apps/intercom-web/dev/cdp-surface.mjs [outDir]` drives headless Chrome through the v2 flows against the mock (pairing, segments, taps, draft, scrub, slots, widgets, approval, status, conversation, landscape, a 466 px dial), prints PASS or FAIL per check and any console errors, and saves dial screenshots; `MOCK_NO_V2=1` on the mock plus `cdp-legacy.mjs` checks the fallback. `cdp-flow.mjs` and `cdp-notify.mjs` are the older drivers (the notification one needs `?quiet=0` at night).
 - Tests: `npx vitest run apps/intercom-web`.
+
+## Phase (Plum Dusk, E99)
+
+A second, separate client for usability testing the Compact's "Phase" design on an iPhone, served at `/intercom/phase/` (note the trailing slash) next to the existing client, which is unchanged. The design source is `peggy-claude-code/data/intercom/design/plum-dusk/` (`spec.md` wins over the boards; where the spec is silent the board is matched; the remaining choices are listed below). Static HTML, CSS and ES modules, no build step, no framework, no CDN; the only fonts are Lexend Exa and Hanken Grotesk (and its italic), shipped in `phase/fonts/` with their OFL licences.
+
+### Files (`apps/intercom-web/phase/`)
+
+- `index.html`, `manifest.webmanifest` ("Compact Phase", scope and start URL `/intercom/phase/`, the existing `../icons`), `phase.css` (spec 3.1 colour tokens on `:root`, the only colours used; motion; reduced motion).
+- `time.js` (zoned time and the spec's text forms), `sun.js` (NOAA sunrise and sunset, daylight fraction, the crescent's centre), `geom.js` (dial geometry: clock angle to point, arcs, the rim drain, the moon, the burn-in walk, the Settings sliders).
+- `model.js`: pure mapping from bus data to Moments and face models (weights, sessions, rim marks and lanes, countdown, Now, Day, detail, alerts, quiet hours). `earlier.js`: the Earlier tray in `localStorage`.
+- `prims.js` (SVG and HTML primitives: crescent, rim, marks, now dot and moon, progress arcs, curved captions cut by measured arc length, icons, glyphs, capsule, pills, rows) and `screens.js` (one view-model builder per screen).
+- `states.js`: the 28 board states with frozen times, for `?state=` and `?demo`.
+- `app.js`: wiring (socket, store, screen choice, actions, rest and quiet hours, push-to-talk, Capture, the hardware stand-ins, Settings).
+- It reuses `../socket.js`, `../surface.js`, `../actions.js` and `../logic.js` unchanged.
+
+### Using it
+
+- Pairing is shared with the main client (`intercom.pair` in `localStorage`): `/intercom/phase/#pair=CODE`, or paste the link or code in the text field and tap Pair. Unpaired, the dial shows the Pairing screen and mirrors the pasted code.
+- The dial is drawn at true size (466 px of CSS at the phone's density); **Large** fills the width. In landscape the chrome hides and the dial is drawn at physical size using the same `?ppi=` setting as the main client (`intercom.ppi`), and `?calibrate=1` shows the calibration panel.
+- Below the dial: a text field and Send (the message goes to the followed conversation and opens Understood), **Side** (hold for push-to-talk; double-press starts or stops Capture) and **Power** (click wakes or returns to Now; hold 3 s for the power menu). Keyboard: Space is Side, Escape or `p` is Power, arrow keys swipe.
+- Faces, by horizontal swipe: Day · Now · Agents · Thread. Swipe down for Settings, up for Earlier.
+- `?demo` adds a picker over all 28 states (live data is ignored while a state is shown); `?state=<board>/<id>` (for example `?state=01-home/b-busy-day`) renders one state frozen, the way the screenshot driver uses it. Dev switches: `?quiet` or `?quiet=0` force quiet hours on or off, `?fast` divides the dim and rest times by 10.
+
+### Live data versus local only
+
+Live from the bus: Now, Day and event detail (from surface Events, as Moments), rim marks and the progress arcs, alerts (Events by weight, notices, approvals), the Agents face and the waiting question (sessions plus `GET /conversations/{id}`), the Thread face (the followed conversation, live appends through the `view` frame), sending text (Understood, then the agent's answer), the connection glyph and the Offline screen.
+
+- Event weight comes from `weight` when present, otherwise from `level` (info → ambient, attention → decision, urgent → urgent). Approvals become a Decision whose action uses Confirm. `consequence` and `changed` are read if present (the server does not send them yet).
+- Notices: info shows as Inform for 20 s, then goes to Earlier; attention is a Decision; urgent floods rose with the rim draining to `expires_at`. Notices come from the v2 `notices` resource and the v1 `notification` events, merged.
+- Sessions: `needs_you` or waiting → waiting, stuck → failed, working → working, finished → done; idle is hidden. The count ring on Now shows working sessions.
+- Actions go through `POST /api/v1/surface/actions` with an idempotency key. SENT ✓ shows only on `done` (or `already_done`); after 3 s without an answer the capsule shows WAITING, and TRY AGAIN on failure or after 10 s.
+
+Local only (prototype): the Earlier tray (`phase.earlier`, capped at 30, HOLD TO CLEAR keeps open items), Settings (brightness is an overlay, volume is stored only, quiet hours default 10 PM-7 AM, the Daylight city with "Use phone location", the Agent row), set-aside alerts (`phase.aside`), dimming and rest (outside quiet hours: dim to 40% after 30 s untouched, rest as a dimmed Now 2 min after that; in quiet hours the night layout rests after 20 s and a touch shows END QUIET HOURS), push-to-talk (Web Speech `SpeechRecognition` when the browser has it, otherwise a placeholder that sends nothing), Capture (a local timer; Saved says it is a prototype), the power menu.
+
+### Decisions where the spec and boards were silent
+
+- Captions are cut to a measured arc length (top 375 px, bottom 400 px), calibrated so the board's "Q4 PLANNING WITH PLATFORM…" fits.
+- The crescent uses the morning branch at a daylight fraction of exactly 0.5, so noon matches the spec table (466).
+- Capsule segments are fitted to their labels with equal spare space. Labels longer than 10 characters are cut without an ellipsis (logged once).
+- Sent: UNDO is not offered (the bus has no undo). A draft action opens Confirm with HOLD TO SEND; EDIT is not offered. An approval's Confirm offers DENY as a hold in place of EDIT.
+- LATER and Power on an alert set it aside into Earlier as open. Notices are acknowledged on the bus only by GOT IT and Dismiss.
+- "N missed" counts open or expired Earlier items since the last time Now was seen. The Now label reads "NEXT h:mm", "TOMORROW" or "NEXT"; with nothing on, only the lower arc is drawn; a third overlap reads "◆ N MORE OVERLAPPING".
+- An alert's icon is `notice.icon`, else the agent icon. Urgent pills are the first two actions plus Dismiss or Got it. Without `changed`, the urgent screen shows the detail sentence as the headline.
+- A new urgent or decision Moment wakes the glass once when it arrives; it does not hold the glass awake. Decisions do not wake the glass during quiet hours.
+- The UNDERSTOOD check sits left of the word with an 8 px gap (README).
+- The quiet-hours row cycles presets on tap (10 PM-7 AM, 11 PM-7 AM, 10 PM-6:30 AM, 9 PM-6 AM, off); quiet hours never lock the dial (a touch always wakes it, and END QUIET HOURS ends them).
+- The moon is peri on waiting screens (board) and parked but visible during push-to-talk (spec). Day rest dims to 20% with the moon hidden. Power during Capture only wakes.
+- Stale: no frame for 30 s shows the reconnecting glyph. The Thread face shows the newest agent message; the waiting screen's "who" line is the session title.
+
+### Where it differs from the boards (spec wins)
+
+Capture uses a black ground without the crescent (spec 5.3, 7.6); the Understood and Thread capsules are 296 wide with the first segment primary; Earlier rows are 66 high; the Settings sliders span 240-300°; the resting clock is Numeral L 100; the rim dots use `0.1 22.31` so the 60 dots are exact (the board's 22.41 drifts).
+
+### Dev drivers
+
+- `PORT=3098 node apps/intercom-web/dev/cdp-phase-shots.mjs [outDir]` renders every `?state=` at 466 x 466 and compares it with the board PNG inside r 229; it writes `phase/dev/SCREENSHOTS.md`. Needs the mock running. A few example renders and one diff are in `phase/dev/screenshots/`.
+- `node apps/intercom-web/dev/cdp-phase-live.mjs [outDir]` starts its own mock on port 3197 and drives headless Chrome through pairing, rim Moments, notices, a decision, approval hold-to-confirm (early release sends nothing), Day and detail, agents and the waiting question, Thread, Settings, push-to-talk, Capture, a typed message, offline and reconnect, landscape, dimming, quiet hours, the power menu and console errors (56 checks).
+- Unit tests: `apps/intercom-web/dev/phase.test.js` (geometry, crescent table within 2 px, NOAA, the drain, countdown, weights, sessions, rim marks, Earlier storage, captions, every state uses tokens only).
