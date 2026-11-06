@@ -4,7 +4,7 @@
 import * as S from './screens.js';
 import { nowModel, momentFromEvent } from './model.js';
 import { clockPoint, moonDeg, clockDeg } from './geom.js';
-import { nightShade } from './sun.js';
+import { crescentLeft } from './sun.js';
 import { zonedMs } from './time.js';
 import { glyph, icon, marks as drawMarks } from './prims.js';
 
@@ -34,7 +34,7 @@ export const BUSY_DAY = [
 /** Environment for a frozen state: the now dot, the moon and the crescent at that time. */
 function env(h, m, s, moonSec) {
   const t = at(h, m, s);
-  return { t, nowPt: clockPoint(h, m, s), moon: moonSec === null ? null : moonDeg(moonSec), crescent: nightShade(RISE, SET, null, TZ) };
+  return { t, nowPt: clockPoint(h, m, s), moon: moonSec === null ? null : moonDeg(moonSec), crescent: crescentLeft(t, RISE, SET) };
 }
 const arc = (id, h1, m1, h2, m2, lane = 1, extra = {}) => ({ id, type: 'arc', a1: clockDeg(h1, m1), a2: clockDeg(h1, m1) + ((h2 * 60 + m2 - h1 * 60 - m1) / 1440) * 360, lane, amber: lane === 2, ...extra });
 const dot = (id, h, m, extra = {}) => ({ id, type: 'dot', deg: clockDeg(h, m), ...extra });

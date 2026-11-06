@@ -9,7 +9,7 @@ import * as M from './model.js';
 import * as Sc from './screens.js';
 import { compose, setMeasure, glyph, icon, caps } from './prims.js';
 import { buildState, STATES, STATE_IDS } from './states.js';
-import { sunTimes, nightShade, FALLBACK } from './sun.js';
+import { sunTimes, crescentLeft, FALLBACK } from './sun.js';
 import { zparts, hm, hmA, mss, timer, lengthText, shortHour, agoText, monthDay, zonedMs, DEFAULT_TZ } from './time.js';
 import { createEarlier } from './earlier.js';
 import { createKeepAwake } from './wake.js';
@@ -77,7 +77,7 @@ function sun(now) {
   }
   return sunCache.v;
 }
-const crescentAt = (now) => { const s = sun(now); return nightShade(s.rise, s.set, s.polar, TZ); };
+const crescentAt = (now) => { const s = sun(now); return crescentLeft(now, s.rise, s.set, s.polar); };
 void FALLBACK;
 
 /* ---------- environment for a screen ---------- */

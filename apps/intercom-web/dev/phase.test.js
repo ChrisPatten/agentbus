@@ -1,11 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { clockPoint, clockDeg, drainLit, drainDots, upperArc, lowerArc, moonDeg, WALK, walkAt, sliderHit, sliderArcs, arcD } from '../phase/geom.js';
-import { sunTimes, nightShade } from '../phase/sun.js';
+import { sunTimes, crescentLeft, crescentCx } from '../phase/sun.js';
 import { zonedMs, hm, hmA, zparts, timer, lengthText, shortHour } from '../phase/time.js';
 import * as M from '../phase/model.js';
 import { createEarlier } from '../phase/earlier.js';
 import { STATES, STATE_IDS, EXTRA_STATES, buildState } from '../phase/states.js';
-import { crescent, compose, fitCaption, setMeasure, capsule, segWidths } from '../phase/prims.js';
+import { compose, fitCaption, setMeasure, capsule, segWidths } from '../phase/prims.js';
 
 const TZ = 'America/New_York';
 const at = (h, m, s = 0) => zonedMs(2026, 11, 5, h, m, TZ, s);
@@ -39,22 +39,19 @@ describe('clock to point, 24-hour dial (spec 4.2)', () => {
   });
 });
 
-describe('night shade on the 24-hour dial (spec 5.3)', () => {
+describe('daylight crescent (spec 5.3)', () => {
   const rise = at(6, 25), set = at(16, 37);
-  it('shades from the sunset angle clockwise through midnight to the sunrise angle', () => {
-    const sh = nightShade(rise, set, null, TZ);
-    expect(sh.a1).toBeCloseTo(clockDeg(16, 37), 3); // 249.25
-    expect(sh.a2).toBeCloseTo(clockDeg(6, 25), 3); // 96.25
-    expect(sh.a1).toBeGreaterThan(sh.a2); // wraps past 360: the wedge spans the top
-  });
-  it('handles polar day (lit) and polar night (fully shaded)', () => {
-    expect(nightShade(0, 0, 'day', TZ)).toBeNull();
-    expect(nightShade(0, 0, 'night', TZ)).toEqual({ full: true });
-  });
-  it('renders a wedge path, a full circle and nothing', () => {
-    expect(crescent(nightShade(rise, set, null, TZ))).toMatch(/^<path class="shade" d="M233 233L.*A260 260 0 1 1 /);
-    expect(crescent({ full: true })).toContain('<circle class="shade"');
-    expect(crescent(null)).toBe('');
+  const table = [[6, 25, -27], [7, 0, 29], [9, 30, 271], [11, 31, 466], [14, 48, -203], [15, 6, -174], [16, 30, -38], [16, 37, -27]];
+  for (const [h, m, left] of table) {
+    it(`box left at ${h}:${String(m).padStart(2, '0')} is ${left} (within 2 px)`, () => {
+      expect(Math.abs(crescentLeft(at(h, m), rise, set) - left)).toBeLessThanOrEqual(2);
+    });
+  }
+  it('is fully shaded at night and handles polar day and night', () => {
+    expect(crescentCx(at(3, 0), rise, set)).toBe(233);
+    expect(crescentCx(at(22, 0), rise, set)).toBe(233);
+    expect(crescentCx(0, 0, 0, 'night')).toBe(233);
+    expect(crescentCx(0, 0, 0, 'day')).toBe(726);
   });
   it('computes sunrise and sunset with the NOAA method', () => {
     const b = sunTimes(2026, 6, 21, 42.3601, -71.0589); // Boston, June solstice: 5:07 AM and 8:24 PM EDT
@@ -189,7 +186,7 @@ describe('24-hour dial fixture', () => {
     const p = clockPoint(8, 30, 0);
     expect(vm.now).toContain(`cx="${Math.round(p.x * 10) / 10}"`);
     expect(vm.marks).toContain('M' + Math.round(pt285().x * 10) / 10);
-    expect(vm.crescent).toMatchObject({ a1: expect.any(Number), a2: expect.any(Number) });
+    expect(vm.crescent).toEqual(expect.any(Number)); // the original sliding crescent, unchanged
   });
 });
 
