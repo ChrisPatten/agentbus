@@ -9,18 +9,17 @@ import * as M from './model.js';
 import * as Sc from './screens.js';
 import { compose, setMeasure, glyph, icon, caps } from './prims.js';
 import { buildState, STATES, STATE_IDS } from './states.js';
-import { sunTimes, crescentLeft, FALLBACK } from './sun.js';
+import { sunTimes, nightShade, FALLBACK } from './sun.js';
 import { zparts, hm, hmA, mss, timer, lengthText, shortHour, agoText, monthDay, zonedMs, DEFAULT_TZ } from './time.js';
 import { createEarlier } from './earlier.js';
 import { createKeepAwake } from './wake.js';
-import { clockPoint, moonDeg, walkAt, sliderHit, clockDeg, drainLit } from './geom.js';
+import { clockPoint, moonDeg, walkAt, sliderHit, drainLit } from './geom.js';
 
 const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
 const STATE_ID = params.get('state');
 const DEMO = params.has('demo');
 const TZ = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || DEFAULT_TZ; } catch { return DEFAULT_TZ; } })();
-const H12 = 12 * 3600 * 1000;
 // Dev: ?quiet forces quiet hours on, ?quiet=0 off (as in the main client).
 const FORCE_QUIET = params.has('quiet') ? params.get('quiet') !== '0' : null;
 const T = { dim: 30000, rest: 150000, home: 60000, quietRest: 20000, notice: 20000, sent: 5000, noAck: 3000, actTimeout: 10000, view: 60000 };
@@ -78,7 +77,7 @@ function sun(now) {
   }
   return sunCache.v;
 }
-const crescentAt = (now) => { const s = sun(now); return crescentLeft(now, s.rise, s.set, s.polar); };
+const crescentAt = (now) => { const s = sun(now); return nightShade(s.rise, s.set, s.polar, TZ); };
 void FALLBACK;
 
 /* ---------- environment for a screen ---------- */
@@ -297,7 +296,7 @@ function alertVm(m, more, now) {
   }
   if (m.weight === 'decision') {
     let win = null;
-    if (m.expires && m.expires > now) { const a1 = clockDeg(zparts(now, TZ).h, zparts(now, TZ).m); win = { a1, a2: a1 + (Math.min(m.expires - now, H12 - 60000) / H12) * 360 }; }
+    if (m.expires && m.expires > now) win = M.dayArc(now, m.expires, now, TZ);
     if (m.src === 'session') return waitingVm(m, now, e, top);
     const src = (m.source || '').replace(/^agent:/, '') || agentName();
     if (m.src === 'approval') {

@@ -1,5 +1,7 @@
-// NOAA sunrise and sunset (the NOAA Solar Calculator / spreadsheet algorithm) and the daylight crescent (spec 5.3).
+// NOAA sunrise and sunset (the NOAA Solar Calculator / spreadsheet algorithm) and the night shade on the 24-hour dial (spec 5.3).
 // Pure: no DOM, unit-tested under vitest.
+
+import { zparts } from './time.js';
 
 const rad = (d) => (d * Math.PI) / 180;
 const deg = (r) => (r * 180) / Math.PI;
@@ -51,19 +53,15 @@ export function sunTimes(y, mo, d, lat, lon) {
   return { rise: r.ms, set: s.ms };
 }
 
-/** Fraction of daylight elapsed (spec 5.3): d = (now - sunrise) / (sunset - sunrise). */
-export const daylightFraction = (nowMs, riseMs, setMs) => (nowMs - riseMs) / (setMs - riseMs);
+const deg24 = (ms, tz) => { const p = zparts(ms, tz); return ((p.h + p.m / 60 + p.s / 3600) / 24) * 360; };
 
 /**
- * Centre x of the shade circle (r 260). Night (d <= 0 or d >= 1): 233, fully shaded.
- * Morning: 233 + 2d x 493; afternoon: 233 + (2d - 2) x 493. `polar` 'day' gives a fully lit face (the circle off the panel).
+ * The night shade on the 24-hour dial (spec 5.3): the wedge from the sunset angle clockwise through midnight (the top) to the sunrise
+ * angle. Returns { a1, a2 } (degrees, clockwise from the top), { full: true } for polar night, null for polar day (fully lit).
+ * It depends only on the date and place, not on the time of day; the now dot shows where in the day you are.
  */
-export function crescentCx(nowMs, riseMs, setMs, polar = null) {
-  if (polar === 'day') return 233 + 493;
-  if (polar === 'night') return 233;
-  const d = daylightFraction(nowMs, riseMs, setMs);
-  if (!(d > 0) || d >= 1) return 233;
-  return d <= 0.5 ? 233 + 2 * d * 493 : 233 + (2 * d - 2) * 493;
+export function nightShade(riseMs, setMs, polar = null, tz) {
+  if (polar === 'day') return null;
+  if (polar === 'night') return { full: true };
+  return { a1: deg24(setMs, tz), a2: deg24(riseMs, tz) };
 }
-/** Box left of the shade circle (cx - 260), the figure the spec's table lists. */
-export const crescentLeft = (nowMs, riseMs, setMs, polar = null) => crescentCx(nowMs, riseMs, setMs, polar) - 260;

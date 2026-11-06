@@ -1,30 +1,37 @@
 import { describe, it, expect } from 'vitest';
 import { clockPoint, clockDeg, drainLit, drainDots, upperArc, lowerArc, moonDeg, WALK, walkAt, sliderHit, sliderArcs, arcD } from '../phase/geom.js';
-import { sunTimes, crescentLeft, crescentCx } from '../phase/sun.js';
+import { sunTimes, nightShade } from '../phase/sun.js';
 import { zonedMs, hm, hmA, zparts, timer, lengthText, shortHour } from '../phase/time.js';
 import * as M from '../phase/model.js';
 import { createEarlier } from '../phase/earlier.js';
-import { STATES, STATE_IDS, buildState } from '../phase/states.js';
-import { compose, fitCaption, setMeasure, capsule, segWidths } from '../phase/prims.js';
+import { STATES, STATE_IDS, EXTRA_STATES, buildState } from '../phase/states.js';
+import { crescent, compose, fitCaption, setMeasure, capsule, segWidths } from '../phase/prims.js';
 
 const TZ = 'America/New_York';
 const at = (h, m, s = 0) => zonedMs(2026, 11, 5, h, m, TZ, s);
 const iso = (h, m) => new Date(at(h, m)).toISOString();
 const ev = (id, h, m, end = null, extra = {}) => M.momentFromEvent({ id, kind: 'event', title: id, level: 'info', at: iso(h, m), end: end ? iso(end[0], end[1]) : null, ...extra });
 
-describe('clock to point (spec 4.2)', () => {
+describe('clock to point, 24-hour dial (spec 4.2)', () => {
   const near = (p, x, y) => { expect(Math.abs(p.x - x)).toBeLessThanOrEqual(0.1); expect(Math.abs(p.y - y)).toBeLessThanOrEqual(0.1); };
-  it('matches the spec check values on r 214', () => {
-    near(clockPoint(14, 48), 445.8, 210.6);
-    near(clockPoint(15, 6), 446.7, 244.2);
-    near(clockPoint(14, 22), 435.3, 163.3);
+  it('maps hours to angles: midnight 0, 6:00 90, noon 180, 18:00 270, 19:00 285', () => {
+    expect(clockDeg(0, 0)).toBe(0);
+    expect(clockDeg(6, 0)).toBe(90);
+    expect(clockDeg(12, 0)).toBe(180);
+    expect(clockDeg(18, 0)).toBe(270);
+    expect(clockDeg(19, 0)).toBe(285);
+    expect(clockDeg(22, 0)).toBe(330);
+    expect(clockDeg(8, 30, 0)).toBeCloseTo(127.5, 6);
+    expect(clockDeg(0, 0, 30)).toBeCloseTo(0.125, 6);
+    expect(clockDeg(24, 0)).toBe(360);
+    expect(clockDeg(2, 48)).not.toBe(clockDeg(14, 48)); // no 12-hour wrap
   });
-  it('puts 12 at the top, 3 on the right, 7:30 lower left, and wraps 12-hour', () => {
+  it('puts midnight at the top, 6 on the right, noon at the bottom and 18:00 on the left (r 214)', () => {
     near(clockPoint(0, 0), 233, 19);
-    near(clockPoint(3, 0), 447, 233);
-    near(clockPoint(19, 30), 81.7, 384.3);
-    expect(clockDeg(14, 48)).toBeCloseTo(84, 6);
-    expect(clockDeg(2, 48)).toBe(clockDeg(14, 48));
+    near(clockPoint(6, 0), 447, 233);
+    near(clockPoint(12, 0), 233, 447);
+    near(clockPoint(18, 0), 19, 233);
+    near(clockPoint(8, 30), 233 + 214 * Math.sin((127.5 * Math.PI) / 180), 233 - 214 * Math.cos((127.5 * Math.PI) / 180));
   });
   it('draws arcs clockwise with the large-arc flag past 180 degrees', () => {
     expect(arcD(75, 97.5, 197)).toMatch(/^M423\.3 182A197 197 0 0 1 /);
@@ -32,19 +39,22 @@ describe('clock to point (spec 4.2)', () => {
   });
 });
 
-describe('daylight crescent (spec 5.3)', () => {
+describe('night shade on the 24-hour dial (spec 5.3)', () => {
   const rise = at(6, 25), set = at(16, 37);
-  const table = [[6, 25, -27], [7, 0, 29], [9, 30, 271], [11, 31, 466], [14, 48, -203], [15, 6, -174], [16, 30, -38], [16, 37, -27]];
-  for (const [h, m, left] of table) {
-    it(`box left at ${h}:${String(m).padStart(2, '0')} is ${left} (within 2 px)`, () => {
-      expect(Math.abs(crescentLeft(at(h, m), rise, set) - left)).toBeLessThanOrEqual(2);
-    });
-  }
-  it('is fully shaded at night and handles polar day and night', () => {
-    expect(crescentCx(at(3, 0), rise, set)).toBe(233);
-    expect(crescentCx(at(22, 0), rise, set)).toBe(233);
-    expect(crescentCx(0, 0, 0, 'night')).toBe(233);
-    expect(crescentCx(0, 0, 0, 'day')).toBe(726);
+  it('shades from the sunset angle clockwise through midnight to the sunrise angle', () => {
+    const sh = nightShade(rise, set, null, TZ);
+    expect(sh.a1).toBeCloseTo(clockDeg(16, 37), 3); // 249.25
+    expect(sh.a2).toBeCloseTo(clockDeg(6, 25), 3); // 96.25
+    expect(sh.a1).toBeGreaterThan(sh.a2); // wraps past 360: the wedge spans the top
+  });
+  it('handles polar day (lit) and polar night (fully shaded)', () => {
+    expect(nightShade(0, 0, 'day', TZ)).toBeNull();
+    expect(nightShade(0, 0, 'night', TZ)).toEqual({ full: true });
+  });
+  it('renders a wedge path, a full circle and nothing', () => {
+    expect(crescent(nightShade(rise, set, null, TZ))).toMatch(/^<path class="shade" d="M233 233L.*A260 260 0 1 1 /);
+    expect(crescent({ full: true })).toContain('<circle class="shade"');
+    expect(crescent(null)).toBe('');
   });
   it('computes sunrise and sunset with the NOAA method', () => {
     const b = sunTimes(2026, 6, 21, 42.3601, -71.0589); // Boston, June solstice: 5:07 AM and 8:24 PM EDT
@@ -146,10 +156,40 @@ describe('rim marks (spec 5.1)', () => {
     expect(r.marks.map((k) => [k.id, k.type, k.lane, k.amber])).toEqual([['a', 'arc', 1, false], ['b', 'arc', 2, true], ['d', 'dot', undefined, undefined]]);
     expect(r.hidden).toBe(1);
   });
-  it('draws nothing more than 12 hours ahead or already past', () => {
-    const r = M.rimMarks([ev('past', 9, 0, [10, 0]), ev('far', 23, 0), ev('ok', 23, 0)], at(11, 30), TZ);
-    expect(r.marks.map((k) => k.id)).toEqual(['far', 'ok']);
-    expect(M.rimMarks([ev('far', 23, 31)], at(11, 30), TZ).marks).toEqual([]);
+  it('places a Moment by its time of day however far ahead, and skips finished and tomorrow ones', () => {
+    const tomorrow = M.momentFromEvent({ id: 'tmrw', kind: 'event', title: 'tmrw', level: 'info', at: new Date(zonedMs(2026, 11, 6, 9, 0, TZ)).toISOString(), end: null });
+    const r = M.rimMarks([ev('past', 7, 0, [8, 0]), ev('late', 23, 0), ev('eve', 19, 0, [22, 0]), tomorrow], at(8, 30), TZ);
+    expect(r.marks.map((k) => k.id)).toEqual(['eve', 'late']);
+    expect(r.marks[1]).toMatchObject({ type: 'dot', deg: 345 });
+  });
+  it('puts a 7-10 PM event at 285-330 degrees when it is 8:30 AM, with the now dot near 127', () => {
+    const r = M.rimMarks([ev('game', 19, 0, [22, 0])], at(8, 30), TZ);
+    expect(r.marks).toEqual([{ id: 'game', type: 'arc', a1: 285, a2: 330, lane: 1, amber: false }]);
+    expect(clockDeg(8, 30)).toBeCloseTo(127.5, 6);
+  });
+  it('draws a running Moment from now and clips one that crosses midnight at the top', () => {
+    const r = M.rimMarks([ev('run', 8, 0, [9, 0]), ev('late', 23, 0, [23, 59])], at(8, 30), TZ);
+    expect(r.marks[0]).toMatchObject({ id: 'run', type: 'arc', a1: clockDeg(8, 30), a2: clockDeg(9, 0) });
+    const over = M.momentFromEvent({ id: 'over', kind: 'event', title: 'over', level: 'info', at: iso(23, 0), end: new Date(zonedMs(2026, 11, 6, 1, 0, TZ)).toISOString() });
+    const c = M.rimMarks([over], at(8, 30), TZ).marks[0];
+    expect(c).toMatchObject({ type: 'arc', a1: 345, a2: 360 });
+    const yday = M.momentFromEvent({ id: 'y', kind: 'event', title: 'y', level: 'info', at: new Date(zonedMs(2026, 11, 4, 22, 0, TZ)).toISOString(), end: new Date(zonedMs(2026, 11, 5, 1, 0, TZ)).toISOString() });
+    expect(M.rimMarks([yday], at(0, 30), TZ).marks[0]).toMatchObject({ a1: clockDeg(0, 30), a2: clockDeg(1, 0) });
+  });
+  it('dayArc returns null for spans wholly outside the rest of today', () => {
+    expect(M.dayArc(at(7, 0), at(8, 0), at(8, 30), TZ)).toBeNull();
+    expect(M.dayArc(zonedMs(2026, 11, 6, 1, 0, TZ), zonedMs(2026, 11, 6, 2, 0, TZ), at(8, 30), TZ)).toBeNull();
+  });
+});
+
+const pt285 = () => ({ x: 233 + 204 * Math.sin((285 * Math.PI) / 180) });
+describe('24-hour dial fixture', () => {
+  it('builds the 8:30 AM morning-game state with the now dot at 127.5 degrees and the arc at 285-330', () => {
+    const vm = buildState(EXTRA_STATES[0].id);
+    const p = clockPoint(8, 30, 0);
+    expect(vm.now).toContain(`cx="${Math.round(p.x * 10) / 10}"`);
+    expect(vm.marks).toContain('M' + Math.round(pt285().x * 10) / 10);
+    expect(vm.crescent).toMatchObject({ a1: expect.any(Number), a2: expect.any(Number) });
   });
 });
 

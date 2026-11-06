@@ -1,4 +1,4 @@
-// Phase face geometry (spec 4): the 12-hour rim, clock-to-point, arcs, the alert drain, progress arcs, the moon.
+// Phase face geometry (spec 4): the 24-hour rim, clock-to-point, arcs, the alert drain, progress arcs, the moon.
 // Pure: no DOM, unit-tested under vitest.
 
 export const C = 233;
@@ -10,8 +10,11 @@ export const BOT_PATH = 'M51 233A182 182 0 0 0 415 233';
 
 const f1 = (n) => Math.round(n * 10) / 10;
 
-/** Clock angle in degrees, clockwise from 12 o'clock, for h (any), m, s on the 12-hour dial (spec 4.2). */
-export const clockDeg = (h, m = 0, s = 0) => (((h % 12) + m / 60 + s / 3600) / 12) * 360;
+/**
+ * Rim angle in degrees, clockwise from 12 o'clock, for a local time on the 24-hour dial (spec 4.2): midnight is the top,
+ * 6:00 is 90 (3 o'clock), noon 180 (6 o'clock), 18:00 270 (9 o'clock). h is 0-24 (24 = the next midnight, 360).
+ */
+export const clockDeg = (h, m = 0, s = 0) => ((h + m / 60 + s / 3600) / 24) * 360;
 /** Point at clock angle `deg` on radius r. */
 export function pt(deg, r) {
   const a = (deg * Math.PI) / 180;

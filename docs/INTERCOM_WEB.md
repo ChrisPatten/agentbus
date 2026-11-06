@@ -135,6 +135,8 @@ iOS gives a Home Screen app its own storage, separate from Safari, and the launc
 
 A second, separate client for usability testing the Compact's "Phase" design on an iPhone, served at `/intercom/phase/` (note the trailing slash) next to the existing client, which is unchanged. The design source is `peggy-claude-code/data/intercom/design/plum-dusk/` (`spec.md` wins over the boards; where the spec is silent the board is matched; the remaining choices are listed below). Static HTML, CSS and ES modules, no build step, no framework, no CDN; the only fonts are Lexend Exa and Hanken Grotesk (and its italic), shipped in `phase/fonts/` with their OFL licences.
 
+**24-hour rim (Nov 6, 2026).** The face rim is a 24-hour dial, midnight at the top: angle = (hours + minutes/60 + seconds/3600) / 24 x 360 clockwise (`geom.js` `clockDeg`; 6:00 is 90, noon 180, 18:00 270). `model.js` `rimMarks` places every unfinished Moment that starts today by its time of day, draws a running one from now, clips a span at the midnight that ends today (`dayArc`, `endOfDay`) and ignores tomorrow's. The 60 rim dots stay at 6 degrees (one per 24 minutes; the alert drain and pairing screens are unchanged). `sun.js` `nightShade` draws the night as a wedge from the sunset angle clockwise to the sunrise angle (polar day: none; polar night: a full circle), replacing the 12-hour sliding crescent. Boards still show the 12-hour dial; the spec wins.
+
 ### Files (`apps/intercom-web/phase/`)
 
 - `index.html`, `manifest.webmanifest` ("Compact Phase", scope and start URL `/intercom/phase/`, the existing `../icons`), `phase.css` (spec 3.1 colour tokens on `:root`, the only colours used; motion; reduced motion).

@@ -37,14 +37,22 @@ export const caps = (s) => String(s || '').toUpperCase();
 
 /* ---------- layers ---------- */
 
-/** The daylight shade: one r 260 circle whose box left is `left` (spec 5.3); on the rose flood it is alert-shade at 14%. */
-export function crescent(left, alert = false) {
-  if (left === null || left === undefined) return '';
-  return `<circle class="shade" cx="${f1(left + 260)}" cy="233" r="260" style="fill:${V(alert ? 'alert-shade' : 'shade')}" fill-opacity="${alert ? 0.14 : 0.5}"/>`;
+/**
+ * The night shade (spec 5.3): a wedge from the centre over the night part of the 24-hour dial, from the sunset angle clockwise
+ * (through midnight at the top) to the sunrise angle; `shade` is { a1, a2 } or { full: true }, null for none. On the rose flood it is
+ * alert-shade at 14%.
+ */
+export function crescent(shade, alert = false) {
+  if (!shade) return '';
+  const fill = `style="fill:${V(alert ? 'alert-shade' : 'shade')}" fill-opacity="${alert ? 0.14 : 0.5}"`;
+  if (shade.full) return `<circle class="shade" cx="233" cy="233" r="260" ${fill}/>`;
+  const sweep = (((shade.a2 - shade.a1) % 360) + 360) % 360;
+  const p1 = pt(shade.a1, 260), p2 = pt(shade.a1 + sweep, 260);
+  return `<path class="shade" d="M233 233L${f1(p1.x)} ${f1(p1.y)}A260 260 0 ${sweep > 180 ? 1 : 0} 1 ${f1(p2.x)} ${f1(p2.y)}Z" ${fill}/>`;
 }
 
 /**
- * The rim (spec 5.1, 7). kind: 'dots' (60 dots, rim at 80%), 'dashed' (offline: dash 10 / 12.4 at 70%), 'faint' (pairing: 25%),
+ * The rim (spec 5.1, 7). kind: 'dots' (60 dots, one per 24 minutes of the 24-hour dial, rim at 80%), 'dashed' (offline: dash 10 / 12.4 at 70%), 'faint' (pairing: 25%),
  * 'night' (night-line), 'alert' (rose-ink at 22%, 3.5 px), 'none'.
  */
 export function rim(kind = 'dots') {

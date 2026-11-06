@@ -4,7 +4,7 @@
 import * as S from './screens.js';
 import { nowModel, momentFromEvent } from './model.js';
 import { clockPoint, moonDeg, clockDeg } from './geom.js';
-import { crescentLeft } from './sun.js';
+import { nightShade } from './sun.js';
 import { zonedMs } from './time.js';
 import { glyph, icon, marks as drawMarks } from './prims.js';
 
@@ -21,6 +21,8 @@ export const QUIET_DAY = [
   ev('design', 'Design review', 15, 30, null, { detail: { location: 'Room 4B' } }),
   ev('call', 'Call with Sam', 16, 0), ev('pickup', 'Pick up Gracie', 17, 45), ev('dinner', 'Dinner', 19, 30),
 ];
+/** Morning with an evening game (8:30 AM): the 24-hour dial puts the now dot at 127.5 degrees and the 7-10 PM arc at 285-330. */
+export const MORNING_GAME = [ev('game', 'Celtics @ Hornets', 19, 0, [22, 0], { detail: { location: 'Spectrum Center, Charlotte' } })];
 /** Busy day (2:22 PM): standup ended 1:55; Q4 planning 2:30-3:15 overlaps the vendor call 3:00-3:45. */
 export const BUSY_DAY = [
   ev('standup', 'Standup', 13, 30, [13, 55]),
@@ -32,9 +34,9 @@ export const BUSY_DAY = [
 /** Environment for a frozen state: the now dot, the moon and the crescent at that time. */
 function env(h, m, s, moonSec) {
   const t = at(h, m, s);
-  return { t, nowPt: clockPoint(h, m, s), moon: moonSec === null ? null : moonDeg(moonSec), crescent: crescentLeft(t, RISE, SET) };
+  return { t, nowPt: clockPoint(h, m, s), moon: moonSec === null ? null : moonDeg(moonSec), crescent: nightShade(RISE, SET, null, TZ) };
 }
-const arc = (id, h1, m1, h2, m2, lane = 1, extra = {}) => ({ id, type: 'arc', a1: clockDeg(h1, m1), a2: clockDeg(h1, m1) + ((h2 * 60 + m2 - h1 * 60 - m1) / 720) * 360, lane, amber: lane === 2, ...extra });
+const arc = (id, h1, m1, h2, m2, lane = 1, extra = {}) => ({ id, type: 'arc', a1: clockDeg(h1, m1), a2: clockDeg(h1, m1) + ((h2 * 60 + m2 - h1 * 60 - m1) / 1440) * 360, lane, amber: lane === 2, ...extra });
 const dot = (id, h, m, extra = {}) => ({ id, type: 'dot', deg: clockDeg(h, m), ...extra });
 
 const row26 = (name, tone) => icon(name, 26, tone);
@@ -142,9 +144,16 @@ export const STATES = [
 ];
 
 export const STATE_IDS = STATES.map((s) => s.id);
+/** Extra ?state= fixtures with no board (not in the demo cycle or the board comparison): the 24-hour dial check. */
+export const EXTRA_STATES = [
+  { id: 'extra/24h-morning-game', time: [8, 30, 0], moon: 0, build(e) {
+    const m = nowModel(MORNING_GAME, e.t, TZ);
+    return S.nowFace({ ...e, ...m, marks: m.marks });
+  } },
+];
 /** Build the view model of one state, frozen at its reference time. */
 export function buildState(id) {
-  const s = STATES.find((x) => x.id === id);
+  const s = STATES.find((x) => x.id === id) || EXTRA_STATES.find((x) => x.id === id);
   if (!s) return null;
   const [h, m, sec] = s.time;
   const e = env(h, m, sec, s.moon === 'park' ? 0 : s.moon);

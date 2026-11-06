@@ -125,29 +125,44 @@ export function questionOf(session, messages) {
 
 /* ---------- rim marks (spec 5.1) ---------- */
 
-const H12 = 12 * 3600 * 1000;
 const degOf = (t, tz) => { const p = zparts(t, tz); return clockDeg(p.h, p.m, p.s); };
 /** Open Moments with a start that the rim and the day list use, sorted by start. A terminal Moment never takes the face. */
 export const timedMoments = (moments) => (moments || []).filter((m) => m.start !== null && m.src === 'event' && isOpen(m)).sort((a, b) => a.start - b.start || (a.end === null) - (b.end === null) || String(a.id).localeCompare(String(b.id)));
 
+/** Local midnight that ends the day containing `nowMs` (the rim's right edge). */
+export function endOfDay(nowMs, tz) {
+  const p = zparts(nowMs, tz);
+  return zonedMs(...ymdPlus(p, 1), 0, 0, tz);
+}
 /**
- * Rim marks for the next 12 hours. Points are dots on r 214; spans are arcs on lane r 204; the later of two overlapping spans
- * moves to lane r 196 in amber; a third overlapping span is not drawn and is counted in `hidden`.
- * A Moment that started before now and is still running draws from now to its end.
+ * The rim angles of a span on the 24-hour dial (spec 4.2): from max(start, now) to the end, clipped at the midnight that ends today
+ * (a span that crosses midnight stops at the top, 360). Null if nothing of it lies in the rest of today.
+ */
+export function dayArc(startMs, endMs, nowMs, tz) {
+  const eod = endOfDay(nowMs, tz);
+  const s = Math.max(startMs, nowMs), e = Math.min(endMs, eod);
+  if (!(e > s) || s >= eod) return null;
+  return { a1: degOf(s, tz), a2: e >= eod ? 360 : degOf(e, tz), clipped: endMs > eod };
+}
+
+/**
+ * Rim marks for the rest of today on the 24-hour dial (midnight at the top, spec 4.2, 5.1). Points are dots on r 214; spans are arcs
+ * on lane r 204; the later of two overlapping spans moves to lane r 196 in amber; a third overlapping span is not drawn and is
+ * counted in `hidden`. A Moment that started before now and is still running draws from now to its end. A Moment is placed by its
+ * time of day if it starts today (however far ahead); tomorrow's are not drawn, and a span crossing midnight is clipped there.
  */
 export function rimMarks(moments, nowMs, tz) {
   const marks = [];
+  const eod = endOfDay(nowMs, tz);
   let lane1End = -Infinity, lane2End = -Infinity, hidden = 0;
   for (const m of timedMoments(moments)) {
     const endish = m.end ?? m.start;
-    if (endish < nowMs || m.start > nowMs + H12) continue;
-    if (m.end === null) { marks.push({ id: m.id, type: 'dot', deg: degOf(m.start, tz) }); continue; }
-    const s = Math.max(m.start, nowMs), e = Math.min(m.end, nowMs + H12 - 60000);
+    if (endish < nowMs || m.start >= eod) continue;
+    const arc = m.end !== null && m.end > m.start ? dayArc(m.start, m.end, nowMs, tz) : null;
+    if (!arc) { if (m.start >= nowMs) marks.push({ id: m.id, type: 'dot', deg: degOf(m.start, tz) }); continue; }
     let lane;
     if (m.start >= lane1End) { lane = 1; lane1End = m.end; } else if (m.start >= lane2End) { lane = 2; lane2End = m.end; } else { hidden++; continue; }
-    const a1 = degOf(s, tz);
-    let a2 = a1 + ((e - s) / H12) * 360;
-    marks.push({ id: m.id, type: 'arc', a1, a2, lane, amber: lane === 2 });
+    marks.push({ id: m.id, type: 'arc', a1: arc.a1, a2: arc.a2, lane, amber: lane === 2 });
   }
   return { marks, hidden };
 }
