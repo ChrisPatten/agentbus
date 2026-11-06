@@ -455,7 +455,7 @@ function restTick(now) {
   const idle = now - S.lastTouch;
   const quiet = quietActive(now);
   if (quiet) S.rest = idle >= T.quietRest ? 'rest' : 'awake';
-  else S.rest = idle >= T.rest ? 'rest' : idle >= T.dim ? 'dim' : 'awake';
+  else S.rest = 'awake'; // Nov 6: no auto-dim or daytime rest on the web app (Mr. Patten); quiet hours still rest
   // Day, Agents, Thread, Earlier, Settings untouched for 60 s: back to Now.
   if (idle >= T.home && (S.face !== 'now' || S.overlay || S.view) && !S.modal) { S.face = 'now'; S.overlay = null; S.view = null; S.threadId = null; }
 }
