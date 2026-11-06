@@ -11,6 +11,10 @@
  * concurrent duplicates; `once` jobs fire at most once across keys; nothing fires after
  * the job or its Event expires; a job that sends on Chris's behalf fires only when the
  * device echoes the exact `confirm.draft` the Event shows.
+ *
+ * E100: a tap on an ended Event (a tombstone) answers `expired` with `reason` = its state
+ * (`expired`, `withdrawn`, `answered`, `cleared`); a `done` fire on a decision or urgent Event
+ * ends it as `answered`.
  */
 import { randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
@@ -21,6 +25,7 @@ import {
   type ActionHandler, type ActionResult, type ActionStatus, type Device, type JobStore,
   type NewJob, type ResourceHub, type SurfaceAction, type SurfaceJob,
 } from './types.js';
+import { isDecisionOrUrgent, isTerminal, stateOf, tombstone } from './lifecycle.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const RATE_WINDOW_MS = 60_000;
@@ -143,7 +148,8 @@ export function sweepJobs(db: Database.Database, now: number = Date.now(), keyTt
 
 export interface ActionHandlerDeps {
   db: Database.Database;
-  hub: Pick<ResourceHub, 'get'>;
+  /** `apply` is needed for the E100 auto-answer of decision and urgent Events; without it they stay open. */
+  hub: Pick<ResourceHub, 'get'> & Partial<Pick<ResourceHub, 'apply'>>;
   jobs: JobStore;
   /** The bus inbound pipeline (`processInbound` bound to its deps), as the scheduler uses it. */
   submitInbound: (msg: InboundMessage, system?: InboundSystemOptions) => Promise<InboundResult | InboundAbort>;
@@ -267,6 +273,7 @@ export function createActionHandler(deps: ActionHandlerDeps): ActionHandler {
     if (!event) {
       return store(device, key, job && isPast(job.expires_at, t) ? result(key, 'expired') : failed(key, 'not_found'));
     }
+    if (kind === 'events' && isTerminal(event)) return store(device, key, result(key, 'expired', { reason: stateOf(event) }));
     // An Event has up to three buttons; a slot override has at most one (`action`).
     const actions = kind === 'events'
       ? (Array.isArray(event['actions']) ? (event['actions'] as SurfaceAction[]) : [])
@@ -323,7 +330,23 @@ export function createActionHandler(deps: ActionHandlerDeps): ActionHandler {
       res = out.reason === 'command_handled' ? result(key, 'done', { message_id: messageId }) : failed(key, out.reason || 'rejected');
     }
     putKey.run(device.surface_id, key, device.id, JSON.stringify(res), new Date(now()).toISOString());
+    if (res.status === 'done' && kind === 'events') autoAnswer(device.surface_id, eventId, event);
     return res;
+  }
+
+  /**
+   * E100: a decision or urgent Event is answered once one of its buttons fired. Only the version the tap
+   * was made against (same `updated_at`, still open) is ended, so a re-publish in between is not.
+   */
+  function autoAnswer(surfaceId: string, eventId: string, fired: Record<string, unknown>): void {
+    if (!deps.hub.apply || fired['kind'] !== 'event' || !isDecisionOrUrgent(fired)) return;
+    try {
+      const cur = deps.hub.get(surfaceId, 'events', eventId);
+      if (!cur || isTerminal(cur) || cur['updated_at'] !== fired['updated_at']) return;
+      deps.hub.apply(surfaceId, 'events', [{ op: 'set', id: eventId, value: tombstone(cur, 'answered', new Date(now()).toISOString()) }]);
+    } catch (err) {
+      log(`auto-answer of events:${eventId} failed: ${String(err)}`);
+    }
   }
 
   async function process(device: Device, req: z.infer<typeof ActionRequestSchema>): Promise<ActionResult> {
@@ -353,6 +376,7 @@ export function createActionHandler(deps: ActionHandlerDeps): ActionHandler {
       const event = deps.hub.get(device.surface_id, 'events', id);
       if (event && event['kind'] === 'approval') {
         const approval = deps.approvalAction;
+        if (isTerminal(event)) return store(device, key, result(key, 'expired', { reason: stateOf(event) }));
         if (!approval) return store(device, key, failed(key, 'not_found'));
         if (isPast(event['expires_at'], now())) return store(device, key, result(key, 'expired'));
         const decision = req.action_id;

@@ -110,11 +110,12 @@ export interface ResourceHub {
   /** Frames that bring a device from `revs` to now: per resource, nothing, one coalesced delta, or a reset. */
   resume(surfaceId: string, revs: Partial<Record<ResourceName, number>>): DeltaFrame[];
   /**
-   * Remove `events` whose `expires_at` and `slots` whose `until` is at or before `now`
-   * (through {@link apply}, so devices get deltas). Returns what was removed so the
-   * caller can drop related jobs.
+   * Expiry and retention (through {@link apply}, so devices get deltas): open `events` whose
+   * `expires_at` is at or before `now` become `expired` tombstones (E100), tombstones past their
+   * retention are removed, and `slots` whose `until` passed are removed. Returns what changed
+   * (`change`: `expired` for a new tombstone, `removed` for a deleted item).
    */
-  sweepExpired(now?: number): { surface: string; resource: ResourceName; id: string }[];
+  sweepExpired(now?: number): { surface: string; resource: ResourceName; id: string; change: 'expired' | 'removed' }[];
   /** Flush pending coalesced deltas immediately (tests, shutdown). */
   flush(): void;
   /** Clear coalescing timers. Pending frames are dropped: call {@link flush} first to send them. */
@@ -129,7 +130,13 @@ export class BoundsError extends Error {
 // ── Object shapes (items inside resources) ──────────────────────────────────
 
 export type Level = 'info' | 'attention' | 'urgent';
+/** E100 — Moment weight. `level` is derived from it: ambient/notice → info, decision → attention, urgent → urgent. */
+export type Weight = 'ambient' | 'notice' | 'decision' | 'urgent';
+/** E100 — bus-owned lifecycle state of an Event. Everything but `open` is terminal (a tombstone). */
+export type EventState = 'open' | 'answered' | 'expired' | 'withdrawn' | 'cleared';
 export type ActionStyle = 'default' | 'primary' | 'destructive';
+/** E100 — how the device fires a button: a tap, or a hold-to-confirm (anything that sends or cannot be undone). */
+export type ActionKind = 'tap' | 'hold';
 
 /** A button on an Event (or Approval). The device sees this; the job behind it stays on the bus. */
 export interface SurfaceAction {
@@ -145,6 +152,12 @@ export interface SurfaceAction {
   confirm?: { draft: string; prompt?: string };
   /** One-shot (default true): after one successful fire, further taps get `already_done`. */
   once?: boolean;
+  /**
+   * E100 — `hold` (press and hold to confirm) or `tap`. Resolved by the bus on publish: default `hold` when
+   * the button has `confirm` or sends on Chris's behalf, else `tap`; `tap` on such a button is refused.
+   * Absent on items stored before E100 (clients then treat a `confirm.draft` as `hold`).
+   */
+  kind?: ActionKind;
 }
 
 export type EventLayer = 'primary' | 'overlap';
@@ -158,13 +171,28 @@ export interface EventDetail {
   image?: string;
 }
 
+/** E100 — what changed on an urgent event, for the struck-through old value ("6:42" → "6:58"). */
+export type ChangedField = 'start' | 'end' | 'place' | 'title' | 'other';
+export interface EventChanged { field: ChangedField; old: string; new: string }
+
 /** `events` item. Agent-created cards on the dial ("I'm here", "Train in 10 min", ...). */
 export interface SurfaceEvent {
   id: string;
   kind: 'event' | 'approval';
   title: string;
   body?: string;
+  /** Always present. Derived from `weight` when the agent gave only a weight. */
   level: Level;
+  /** E100 — Moment weight, stored only when the agent gave one (clients map `level` otherwise). */
+  weight?: Weight;
+  /** E100 — urgent only: what happens if Chris does nothing ("Misses your 7:15 transfer"). */
+  consequence?: string;
+  /** E100 — urgent only: the value that changed. */
+  changed?: EventChanged;
+  /** E100 — bus-owned lifecycle state. Absent on items stored before E100, which read as `open`. */
+  state?: EventState;
+  /** E100 — when a terminal event ended (ISO); absent while open. */
+  ended_at?: string;
   /**
    * Ring placement (ISO). Only a `kind: 'event'` with BOTH `at` and `end` draws a segment on the
    * Day Dial ring; an event with only `at` is a card, and approvals never draw on the ring.
@@ -350,7 +378,10 @@ export interface ActionResult {
   type: 'action_result';
   idempotency_key: string;
   status: ActionStatus;
-  /** For `failed`: `not_found`, `confirm_required`, `draft_mismatch`, `read_only`, `rate_limited`, `invalid`, or the pipeline's reason. */
+  /**
+   * For `failed`: `not_found`, `confirm_required`, `draft_mismatch`, `read_only`, `rate_limited`, `invalid`, or the pipeline's reason.
+   * For `expired` on an ended Event (E100): its state, `expired`, `withdrawn`, `answered` or `cleared`.
+   */
   reason?: string;
   message_id?: string;
 }
@@ -363,8 +394,12 @@ export const BOUNDS = {
   actionLabel: 24,
   actionsPerObject: 3,
   draft: 2000,
-  /** Live (non-expired) events per surface. */
+  /** Live (open, non-expired) events per surface; tombstones do not count. */
   eventsPerSurface: 50,
+  /** E100 — urgent `consequence`, characters. */
+  consequence: 60,
+  /** E100 — urgent `changed.old` and `changed.new`, characters each. */
+  changedValue: 24,
   slotText: 60,
   /** Context slot `lines`: how many, and characters per line. */
   contextLines: 2,

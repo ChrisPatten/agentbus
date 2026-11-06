@@ -13,6 +13,7 @@ import {
   BOUNDS, BoundsError, RESOURCE_NAMES,
   type DeltaFrame, type ResourceHub, type ResourceName, type ResourceOp, type ResourceSnapshot,
 } from './types.js';
+import { DEFAULT_TOMBSTONE_HOURS, isLiveEvent, isTerminal, tombstone, tombstoneDue } from './lifecycle.js';
 
 type Item = Record<string, unknown>;
 type Items = Record<string, Item>;
@@ -25,11 +26,13 @@ export interface ResourceHubOptions {
   coalesceMs?: number;
   /** Revisions of ops kept per (surface, resource) for resume. Older revs get a `reset`. */
   logRetentionRevs?: number;
+  /** E100: hours a terminal event (tombstone) stays in `events` after its `ended_at` (default 24). */
+  tombstoneHours?: number;
   now?: () => number;
   log?: (line: string) => void;
 }
 
-export interface SweptItem { surface: string; resource: ResourceName; id: string }
+export interface SweptItem { surface: string; resource: ResourceName; id: string; change: 'expired' | 'removed' }
 
 export interface ResourceHubImpl extends ResourceHub {
   /** Delete every resource row (items, revs, log) of a surface and drop its pending frames. */
@@ -112,7 +115,8 @@ function isPast(v: unknown, now: number): boolean {
 }
 
 function countLive(resource: ResourceName, items: Items, now: number): number {
-  if (resource === 'events') return Object.values(items).filter((e) => !isPast(e['expires_at'], now)).length;
+  // E100: tombstones (terminal events) and expired-but-not-yet-swept events do not count.
+  if (resource === 'events') return Object.values(items).filter((e) => isLiveEvent(e, now)).length;
   return Object.keys(items).length;
 }
 
@@ -130,6 +134,7 @@ export function createResourceHub(opts: ResourceHubOptions): ResourceHubImpl {
   const { db, sink } = opts;
   const coalesceMs = Math.max(0, opts.coalesceMs ?? 250);
   const retention = Math.max(1, opts.logRetentionRevs ?? 500);
+  const tombstoneMs = Math.max(0, opts.tombstoneHours ?? DEFAULT_TOMBSTONE_HOURS) * 3_600_000;
   const nowFn = opts.now ?? Date.now;
   const log = opts.log ?? (() => {});
 
@@ -304,17 +309,35 @@ export function createResourceHub(opts: ResourceHubOptions): ResourceHubImpl {
 
   // ── Expiry ──
   function sweepExpired(now = nowFn()): SweptItem[] {
-    const removed: SweptItem[] = [];
-    const rules: [ResourceName, string][] = [['events', 'expires_at'], ['slots', 'until']];
-    for (const [resource, field] of rules) {
-      for (const { surface_id } of q.surfacesWith.all(resource) as { surface_id: string }[]) {
-        const ids = Object.entries(readItems(surface_id, resource)).filter(([, item]) => isPast(item[field], now)).map(([id]) => id);
-        if (ids.length === 0) continue;
-        apply(surface_id, resource, ids.map((id) => ({ op: 'remove', id })));
-        for (const id of ids) removed.push({ surface: surface_id, resource, id });
+    const out: SweptItem[] = [];
+    const at = new Date(now).toISOString();
+    // Events (E100): an open event past expires_at becomes an `expired` tombstone (ended_at = its expires_at);
+    // a tombstone past its retention is removed. One change per surface.
+    for (const { surface_id } of q.surfacesWith.all('events') as { surface_id: string }[]) {
+      const ops: ResourceOp[] = [];
+      const swept: SweptItem[] = [];
+      for (const [id, item] of Object.entries(readItems(surface_id, 'events'))) {
+        if (isTerminal(item)) {
+          if (tombstoneDue(item, now, tombstoneMs)) { ops.push({ op: 'remove', id }); swept.push({ surface: surface_id, resource: 'events', id, change: 'removed' }); }
+        } else if (isPast(item['expires_at'], now)) {
+          const ended = new Date(Date.parse(item['expires_at'] as string)).toISOString();
+          const value = tombstone(item, 'expired', ended, at);
+          // Retention already over (the bus was down a long time): skip the tombstone.
+          if (tombstoneDue(value, now, tombstoneMs)) { ops.push({ op: 'remove', id }); swept.push({ surface: surface_id, resource: 'events', id, change: 'removed' }); }
+          else { ops.push({ op: 'set', id, value }); swept.push({ surface: surface_id, resource: 'events', id, change: 'expired' }); }
+        }
       }
+      if (ops.length === 0) continue;
+      apply(surface_id, 'events', ops);
+      out.push(...swept);
     }
-    return removed;
+    for (const { surface_id } of q.surfacesWith.all('slots') as { surface_id: string }[]) {
+      const ids = Object.entries(readItems(surface_id, 'slots')).filter(([, item]) => isPast(item['until'], now)).map(([id]) => id);
+      if (ids.length === 0) continue;
+      apply(surface_id, 'slots', ids.map((id) => ({ op: 'remove', id })));
+      for (const id of ids) out.push({ surface: surface_id, resource: 'slots', id, change: 'removed' });
+    }
+    return out;
   }
 
   function flush(): void {

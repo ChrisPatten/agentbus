@@ -102,6 +102,28 @@ describe('surface tools (E96)', () => {
     await call('clear_answer_needed', {});
     expect(sent(1)).toEqual({ url: `${BUS_URL}/api/v1/surface-publish/answer-needed/clear`, method: 'POST', body: { conversation_id: 'conv-9', agent_id: 'peggy-pool-1' } });
   });
+  it('E100: publish_event passes weight, consequence, changed and action kind; remove_event passes reason', async () => {
+    fetchMock.mockResolvedValue(json(200, { ok: true }));
+    const fields = {
+      weight: 'urgent', consequence: 'Misses your 7:15 transfer', changed: { field: 'start', old: '6:42', new: '6:58' },
+      actions: [{ id: 'route', label: 'New route', kind: 'hold', run: { body: 'r' } }],
+    };
+    await call('surface_publish_event', { surface: 'compact', id: 'train', title: 'Train delayed', ...fields });
+    expect(sent(0).body).toMatchObject({ title: 'Train delayed', ...fields });
+    await call('surface_remove_event', { surface: 'compact', id: 'train', reason: 'cleared' });
+    expect(sent(1)).toEqual({ url: `${BUS_URL}/api/v1/surface-publish/compact/events/train?agent_id=peggy-pool-1&reason=cleared`, method: 'DELETE', body: undefined });
+    const bad = await call('surface_remove_event', { surface: 'compact', id: 'train', reason: 'deleted' });
+    expect(bad.isError).toBe(true);
+    const c = await connect((s) => registerSurfaceTools(s, BUS_URL, 'peggy'));
+    const tools = (await c.listTools()).tools;
+    await c.close();
+    const ev = tools.find((t) => t.name === 'surface_publish_event')!;
+    expect(Object.keys((ev.inputSchema as { properties: object }).properties)).toEqual(expect.arrayContaining(['weight', 'consequence', 'changed']));
+    expect(ev.description).toMatch(/Urgent only: consequence \(at most 60 characters/);
+    expect(ev.description).toMatch(/kind "tap" on a button that sends is refused/);
+    expect(Object.keys((tools.find((t) => t.name === 'surface_remove_event')!.inputSchema as { properties: object }).properties)).toEqual(['surface', 'id', 'reason']);
+  });
+
   it('publish_event passes the ring fields through and documents them', async () => {
     fetchMock.mockResolvedValueOnce(json(201, { ok: true, id: 'dentist' }));
     const fields = {

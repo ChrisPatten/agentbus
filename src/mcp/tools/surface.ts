@@ -42,7 +42,15 @@ export const EVENT_DESCRIPTION =
   'the device shows the draft before the tap fires, and the call is rejected without it. Same id again replaces the event and its buttons. ' +
   'Ring placement (Day Dial): an event with BOTH at and end is drawn as a ring segment; layer is "primary" (default; at most 1 at a time) or "overlap" (at most 2 at a time), ' +
   `color is #rgb, #rrggbb or one of ${COLOR_PALETTE.join('/')}, travel adds a travel wedge. detail (description ${BOUNDS.description}, location ${BOUNDS.location}, image = asset hash) fills the focus view. ` +
-  'opens "conversation" (with conversation_id) makes a tap open that conversation instead of the focus view.';
+  'opens "conversation" (with conversation_id) makes a tap open that conversation instead of the focus view. ' +
+  'Weight (the Moment model): ambient (rim mark and Day row only), notice (shown briefly), decision (takes the face until answered) or urgent (rose flood, wakes the device). ' +
+  'Give weight OR level: level is derived from weight (ambient/notice → info, decision → attention, urgent → urgent); if you give both they must agree. ' +
+  `Urgent only: consequence (at most ${BOUNDS.consequence} characters, what happens if nothing is done) and changed {field: start|end|place|title|other, old, new} ` +
+  `(old and new at most ${BOUNDS.changedValue} characters, e.g. "6:42" → "6:58"); on a non-urgent event they are refused. ` +
+  'Button kind is tap or hold (hold to confirm): default hold when the button has confirm or run.sends_on_behalf, else tap; kind "tap" on a button that sends is refused; ' +
+  'set kind "hold" yourself for anything irreversible. Lifecycle: the bus owns state. Publishing makes the event open (re-publishing an ended id starts a new life); ' +
+  'it ends as expired (expires_at), answered (a button on a decision or urgent event fired, or surface_remove_event reason answered), withdrawn or cleared, ' +
+  'and stays visible on the device in its Earlier tray for a while; its buttons then answer expired.';
 
 const actionSchema = z.object({
   id: z.string().min(1).max(32).describe('Button id, unique within the event: 1-32 lowercase letters, digits, - or _'),
@@ -53,6 +61,7 @@ const actionSchema = z.object({
     prompt: z.string().optional().describe(`Short question shown with the draft (at most ${BOUNDS.title} characters)`),
   }).optional().describe('Required when run.sends_on_behalf is true'),
   once: z.boolean().optional().describe('One-shot (default true): later taps answer already_done'),
+  kind: z.enum(['tap', 'hold']).optional().describe('tap, or hold to confirm. Default: hold when the button has confirm or run.sends_on_behalf, else tap. "tap" on a button that sends is refused; use "hold" for anything irreversible'),
   run: z.object({
     body: z.string().min(1).describe(`Message injected into the followed conversation when tapped, as if the user sent it (at most ${BOUNDS.jobPayload} characters)`),
     sends_on_behalf: z.boolean().optional().describe('True when acting on this message sends something as the user; requires confirm.draft'),
@@ -88,7 +97,14 @@ export function registerSurfaceTools(server: McpServer, busBaseUrl: string, agen
         id: idField('Event id'),
         title: z.string().min(1).describe(`Card title, at most ${BOUNDS.title} characters`),
         body: z.string().optional().describe(`Detail text, at most ${BOUNDS.body} characters`),
-        level: z.enum(['info', 'attention', 'urgent']).optional().describe('info (default), attention or urgent'),
+        weight: z.enum(['ambient', 'notice', 'decision', 'urgent']).optional().describe('Moment weight: ambient, notice, decision or urgent. Sets level for you (ambient/notice → info, decision → attention, urgent → urgent)'),
+        level: z.enum(['info', 'attention', 'urgent']).optional().describe('info (default), attention or urgent. Older field: prefer weight; if you give both they must agree'),
+        consequence: z.string().optional().describe(`Urgent only: what happens if nothing is done, e.g. "Misses your 7:15 transfer" (at most ${BOUNDS.consequence} characters)`),
+        changed: z.object({
+          field: z.enum(['start', 'end', 'place', 'title', 'other']),
+          old: z.string().describe(`Previous value, at most ${BOUNDS.changedValue} characters (shown struck through), e.g. "6:42"`),
+          new: z.string().describe(`New value, at most ${BOUNDS.changedValue} characters, e.g. "6:58"`),
+        }).optional().describe('Urgent only: what changed'),
         at: z.string().optional().describe('ISO time the event is about (e.g. a train departure), for placement on the day dial'),
         end: z.string().optional().describe('ISO end time (needs at)'),
         layer: z.enum(['primary', 'overlap']).optional().describe('Ring layer (needs at and end): primary (default, one at a time) or overlap (up to two at a time)'),
@@ -113,8 +129,18 @@ export function registerSurfaceTools(server: McpServer, busBaseUrl: string, agen
 
   server.registerTool(
     'surface_remove_event',
-    { description: 'Remove an Event you published (its buttons stop working).', inputSchema: { surface: surfaceField, id: z.string().min(1).describe('Event id') } },
-    async ({ surface, id }) => run('remove event', 'DELETE', `${path(surface, 'events', id)}?${q}`),
+    {
+      description:
+        'End an Event you published: it leaves the face, its buttons stop working (they answer expired) and the device shows it in its Earlier tray ' +
+        'with the reason for a while. reason: withdrawn (default: no longer needed), answered (Chris answered it some other way) or cleared (done or acknowledged). ' +
+        'Publishing the same id again starts a new open event.',
+      inputSchema: {
+        surface: surfaceField,
+        id: z.string().min(1).describe('Event id'),
+        reason: z.enum(['withdrawn', 'answered', 'cleared']).optional().describe('Why it ends (default withdrawn)'),
+      },
+    },
+    async ({ surface, id, reason }) => run('remove event', 'DELETE', `${path(surface, 'events', id)}?${q}${reason ? `&reason=${encodeURIComponent(reason)}` : ''}`),
   );
 
   server.registerTool(

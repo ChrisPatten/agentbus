@@ -8,11 +8,11 @@ let db: Database.Database;
 let hub: ResourceHubImpl | undefined;
 let frames: { surface: string; frame: DeltaFrame }[];
 
-function setup(opts: { coalesceMs?: number; logRetentionRevs?: number; now?: () => number } = {}) {
+function setup(opts: { coalesceMs?: number; logRetentionRevs?: number; tombstoneHours?: number; now?: () => number } = {}) {
   db = new Database(':memory:');
   runMigrations(db);
   frames = [];
-  hub = createResourceHub({ db, sink: (surface, frame) => frames.push({ surface, frame }), coalesceMs: opts.coalesceMs ?? 0, logRetentionRevs: opts.logRetentionRevs, now: opts.now });
+  hub = createResourceHub({ db, sink: (surface, frame) => frames.push({ surface, frame }), coalesceMs: opts.coalesceMs ?? 0, logRetentionRevs: opts.logRetentionRevs, tombstoneHours: opts.tombstoneHours, now: opts.now });
   return hub;
 }
 
@@ -199,7 +199,7 @@ describe('delta push and coalescing', () => {
 });
 
 describe('sweepExpired', () => {
-  it('removes past events and slots through apply and reports them', () => {
+  it('turns past events into expired tombstones, removes past slots, through apply, and reports them', () => {
     const now = Date.parse('2026-11-03T12:00:00Z');
     const h = setup({ now: () => now });
     h.apply('s', 'events', [
@@ -212,17 +212,73 @@ describe('sweepExpired', () => {
     frames.length = 0;
 
     expect(h.sweepExpired()).toEqual([
-      { surface: 's', resource: 'events', id: 'old' },
-      { surface: 's', resource: 'slots', id: 'top' },
+      { surface: 's', resource: 'events', id: 'old', change: 'expired' },
+      { surface: 's', resource: 'slots', id: 'top', change: 'removed' },
     ]);
-    expect(Object.keys(h.snapshot('s', 'events').items).sort()).toEqual(['forever', 'live']);
+    expect(Object.keys(h.snapshot('s', 'events').items).sort()).toEqual(['forever', 'live', 'old']);
+    const tomb = { ...ev('old', { expires_at: '2026-11-03T11:59:59Z' }), state: 'expired', ended_at: '2026-11-03T11:59:59.000Z', updated_at: '2026-11-03T12:00:00.000Z' };
+    expect(h.get('s', 'events', 'old')).toEqual(tomb);
     expect(h.snapshot('s', 'slots').items).toEqual({});
+    // The delta carries the state change (a set), not a bare removal.
     expect(frames.map((f) => [f.frame.resource, 'ops' in f.frame ? f.frame.ops : null])).toEqual([
-      ['events', [{ op: 'remove', id: 'old' }]],
+      ['events', [{ op: 'set', id: 'old', value: tomb }]],
       ['slots', [{ op: 'remove', id: 'top' }]],
     ]);
     expect(h.sweepExpired()).toEqual([]);
-    expect(h.sweepExpired(Date.parse('2026-11-05T00:00:00Z')).map((r) => `${r.surface}/${r.resource}/${r.id}`)).toEqual(['s/events/live', 't/slots/top']);
+    // A day later: "old" is purged (24 h after it ended), "live" expires, the slot on t goes.
+    expect(h.sweepExpired(Date.parse('2026-11-04T12:30:00Z')).map((r) => `${r.surface}/${r.resource}/${r.id}:${r.change}`).sort())
+      .toEqual(['s/events/live:expired', 's/events/old:removed', 't/slots/top:removed']);
+  });
+});
+
+describe('event tombstones (E100)', () => {
+  const T = Date.parse('2026-11-03T12:00:00Z');
+  const H = 3_600_000;
+
+  it('purges a tombstone once ended_at + retention has passed, using the configured hours', () => {
+    const h = setup({ now: () => T, tombstoneHours: 2 });
+    h.apply('s', 'events', [{ op: 'set', id: 'w', value: ev('w', { state: 'withdrawn', ended_at: new Date(T).toISOString() }) }]);
+    expect(h.sweepExpired(T + 2 * H - 1)).toEqual([]);
+    expect(h.sweepExpired(T + 2 * H)).toEqual([{ surface: 's', resource: 'events', id: 'w', change: 'removed' }]);
+    expect(h.get('s', 'events', 'w')).toBeNull();
+  });
+
+  it('never re-expires a tombstone, and removes outright an event that expired longer ago than the retention', () => {
+    const h = setup({ now: () => T });
+    h.apply('s', 'events', [
+      { op: 'set', id: 'ans', value: ev('ans', { state: 'answered', ended_at: new Date(T).toISOString(), expires_at: '2026-11-03T11:00:00Z' }) },
+      { op: 'set', id: 'ancient', value: ev('ancient', { expires_at: '2026-11-01T00:00:00Z' }) },
+    ]);
+    expect(h.sweepExpired()).toEqual([{ surface: 's', resource: 'events', id: 'ancient', change: 'removed' }]);
+    expect(h.get('s', 'events', 'ans')).toMatchObject({ state: 'answered' });
+  });
+
+  it('tombstones do not count toward eventsPerSurface', () => {
+    const h = setup({ now: () => T });
+    const tombs = Array.from({ length: BOUNDS.eventsPerSurface }, (_, i) => ({ op: 'set' as const, id: `t${i}`, value: ev(`t${i}`, { state: 'cleared', ended_at: new Date(T).toISOString() }) }));
+    h.apply('s', 'events', tombs);
+    const live = Array.from({ length: BOUNDS.eventsPerSurface }, (_, i) => ({ op: 'set' as const, id: `l${i}`, value: ev(`l${i}`, { state: 'open' }) }));
+    expect(() => h.apply('s', 'events', live)).not.toThrow();
+    expect(() => h.apply('s', 'events', [{ op: 'set', id: 'one-more', value: ev('one-more') }])).toThrow(/limit 50/);
+    // Ending one frees a place.
+    h.apply('s', 'events', [{ op: 'set', id: 'l0', value: ev('l0', { state: 'withdrawn', ended_at: new Date(T).toISOString() }) }]);
+    expect(() => h.apply('s', 'events', [{ op: 'set', id: 'one-more', value: ev('one-more') }])).not.toThrow();
+  });
+
+  it('resume and snapshot agree after open → expired → purged', () => {
+    let now = T;
+    const h = setup({ now: () => now });
+    h.apply('s', 'events', [{ op: 'set', id: 'a', value: ev('a', { state: 'open', expires_at: new Date(T + H).toISOString() }) }]);
+    const rev1 = h.revs('s').events;
+    now = T + 2 * H; h.sweepExpired();
+    const [mid] = h.resume('s', { events: rev1 });
+    expect(mid).toMatchObject({ type: 'delta', base_rev: rev1, ops: [{ op: 'set', id: 'a', value: { state: 'expired' } }] });
+    const replay = applyOps({ a: ev('a', { state: 'open', expires_at: new Date(T + H).toISOString() }) }, (mid as { ops: ResourceOp[] }).ops);
+    expect(replay).toEqual(h.snapshot('s', 'events').items);
+    now = T + 30 * H; h.sweepExpired();
+    const [end] = h.resume('s', { events: rev1 });
+    expect(applyOps({ a: ev('a') }, (end as { ops: ResourceOp[] }).ops)).toEqual(h.snapshot('s', 'events').items);
+    expect(h.snapshot('s', 'events').items).toEqual({});
   });
 });
 
