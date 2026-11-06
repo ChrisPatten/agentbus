@@ -21,6 +21,8 @@ enum MessageTextBuilder {
     /// Marks the newline between two blocks, which Markdown writes as a blank line. Newlines inside a
     /// block (soft line breaks, between list items) are not marked.
     static let blockBreakKey = NSAttributedString.Key("agentbus.blockBreak")
+    /// Marks a table drawn as aligned pipe text (operator bubbles), which `MarkdownWriter` writes as is.
+    static let tableKey = NSAttributedString.Key("agentbus.table")
 
     private static let blockGap: CGFloat = 10
     private static let itemGap: CGFloat = 4
@@ -88,9 +90,47 @@ enum MessageTextBuilder {
                 out.append(NSAttributedString(string: " ", attributes: [
                     .font: body, ruleKey: true, .paragraphStyle: style(before: gap),
                 ]))
+            case .table(let table):
+                // Agent messages draw tables as their own view (`MarkdownTableView`); this is the bubble form.
+                let text = NSMutableAttributedString(string: tableText(table), attributes: [
+                    .font: NSFont.monospacedSystemFont(ofSize: body.pointSize * 0.92, weight: .regular),
+                    .foregroundColor: colors.text, tableKey: true,
+                ])
+                out.append(paragraphs(text) { first in style(before: first ? gap : 0) })
             }
         }
         return out
+    }
+
+    /// A table as aligned GFM pipe text: cells padded to their column's width, with a delimiter row that
+    /// keeps the alignment markers, so the text is itself a valid table. Inline Markdown is shown as plain text.
+    static func tableText(_ table: MarkdownBlock.Table) -> String {
+        let plain = { (cell: String) in String(MarkdownParser.inline(cell).characters) }
+        let header = table.header.map(plain)
+        let rows = table.rows.map { $0.map(plain) }
+        let widths = header.indices.map { column in
+            max(3, ([header] + rows).map { $0[column].count }.max() ?? 0)
+        }
+        func line(_ cells: [String]) -> String {
+            "| " + cells.enumerated().map { column, cell in
+                let pad = widths[column] - cell.count
+                switch table.alignments[column] {
+                case .leading: return cell + String(repeating: " ", count: pad)
+                case .trailing: return String(repeating: " ", count: pad) + cell
+                case .center:
+                    let left = pad / 2
+                    return String(repeating: " ", count: left) + cell + String(repeating: " ", count: pad - left)
+                }
+            }.joined(separator: " | ") + " |"
+        }
+        let delimiter = "| " + widths.enumerated().map { column, width in
+            switch table.alignments[column] {
+            case .leading: String(repeating: "-", count: width)
+            case .center: ":" + String(repeating: "-", count: width - 2) + ":"
+            case .trailing: String(repeating: "-", count: width - 1) + ":"
+            }
+        }.joined(separator: " | ") + " |"
+        return ([line(header), delimiter] + rows.map(line)).joined(separator: "\n")
     }
 
     /// Inline Markdown (bold, italic, code, strikethrough, links) as attributed text.

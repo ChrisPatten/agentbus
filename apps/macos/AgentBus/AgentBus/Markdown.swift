@@ -4,12 +4,20 @@ import AppKit
 /// Block-level Markdown. `AttributedString(markdown:)` renders the inline styles inside each block.
 enum MarkdownBlock: Equatable {
     struct Item: Equatable { var level: Int; var marker: String; var text: String }
+    /// A GFM pipe table. Every row has exactly `header.count` cells; cell text is still inline Markdown.
+    struct Table: Equatable {
+        enum Alignment: Equatable { case leading, center, trailing }
+        var header: [String]
+        var alignments: [Alignment]
+        var rows: [[String]]
+    }
     case paragraph(String)
     case heading(Int, String)
     case list([Item])
     case code(language: String, text: String)
     case quote(String)
     case rule
+    case table(Table)
 }
 
 enum MarkdownParser {
@@ -18,12 +26,14 @@ enum MarkdownParser {
         var paragraph: [String] = []
         var quote: [String] = []
         var items: [MarkdownBlock.Item] = []
+        var table: MarkdownBlock.Table?
         var fence: (marker: String, language: String, lines: [String])?
 
         func flush() {
             if !paragraph.isEmpty { blocks.append(.paragraph(paragraph.joined(separator: "\n"))); paragraph = [] }
             if !quote.isEmpty { blocks.append(.quote(quote.joined(separator: "\n"))); quote = [] }
             if !items.isEmpty { blocks.append(.list(items)); items = [] }
+            if let open = table { blocks.append(.table(open)); table = nil }
         }
 
         for line in source.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n") {
@@ -44,6 +54,21 @@ enum MarkdownParser {
                 continue
             }
             if trimmed.isEmpty { flush(); continue }
+            if var open = table {
+                // Body rows continue until a blank line or a line that isn't a row.
+                if let cells = tableRow(trimmed) {
+                    open.rows.append(fitted(cells, to: open.header.count)); table = open; continue
+                }
+                flush()
+            }
+            // A delimiter row turns the paragraph's last line into a table header when their cell counts match.
+            if let alignments = tableDelimiter(trimmed), let last = paragraph.last,
+               let header = tableRow(last.trimmingCharacters(in: .whitespaces)), header.count == alignments.count {
+                paragraph.removeLast()
+                flush()
+                table = .init(header: header, alignments: alignments, rows: [])
+                continue
+            }
             if let heading = heading(trimmed) { flush(); blocks.append(heading); continue }
             if ["---", "***", "___"].contains(trimmed.replacingOccurrences(of: " ", with: "")) && paragraph.isEmpty {
                 flush(); blocks.append(.rule); continue
@@ -87,6 +112,55 @@ enum MarkdownParser {
         return .init(level: indent / 2, marker: String(digits) + ".", text: String(after.dropFirst(2)))
     }
 
+    /// A table row's cells, or nil when the line has no unescaped pipe. Leading and trailing pipes are
+    /// optional. As in GFM, only `\|` keeps a pipe inside a cell, including inside a code span.
+    static func tableRow(_ line: String) -> [String]? {
+        guard !line.hasPrefix(">"), !line.hasPrefix("```"), !line.hasPrefix("~~~") else { return nil }
+        var cells: [String] = []
+        var cell = ""
+        var escaped = false
+        var sawPipe = false
+        for character in line {
+            if escaped {
+                // `\|` becomes a literal pipe; any other escape is left for the inline parser.
+                cell += character == "|" ? "|" : "\\" + String(character)
+                escaped = false
+            } else if character == "\\" {
+                escaped = true
+            } else if character == "|" {
+                sawPipe = true
+                cells.append(cell); cell = ""
+            } else {
+                cell.append(character)
+            }
+        }
+        if escaped { cell += "\\" }
+        guard sawPipe else { return nil }
+        cells.append(cell)
+        // An outer pipe leaves an empty first or last cell.
+        if line.hasPrefix("|") { cells.removeFirst() }
+        if line.hasSuffix("|") && !line.hasSuffix("\\|") && !cells.isEmpty { cells.removeLast() }
+        return cells.map { $0.trimmingCharacters(in: .whitespaces) }
+    }
+
+    /// The column alignments of a delimiter row such as `| --- | :---: | ---: |`, or nil.
+    static func tableDelimiter(_ line: String) -> [MarkdownBlock.Table.Alignment]? {
+        guard let cells = tableRow(line), !cells.isEmpty else { return nil }
+        var alignments: [MarkdownBlock.Table.Alignment] = []
+        for cell in cells {
+            let left = cell.hasPrefix(":"), right = cell.hasSuffix(":")
+            let dashes = cell.dropFirst(left ? 1 : 0).dropLast(right && cell.count > 1 ? 1 : 0)
+            guard !dashes.isEmpty, dashes.allSatisfy({ $0 == "-" }) else { return nil }
+            alignments.append(left && right ? .center : right ? .trailing : .leading)
+        }
+        return alignments
+    }
+
+    /// Pads a ragged row with empty cells, or drops the extra ones.
+    private static func fitted(_ cells: [String], to count: Int) -> [String] {
+        cells.count >= count ? Array(cells.prefix(count)) : cells + Array(repeating: "", count: count - cells.count)
+    }
+
     static func inline(_ text: String) -> AttributedString {
         (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
             ?? AttributedString(text)
@@ -104,20 +178,27 @@ struct MarkdownView: View, Equatable {
         self.replyTarget = replyTarget
     }
 
-    /// A message is a run of text blocks in one selectable text view, then a code block, then another
-    /// run. A selection can span a whole run but stops at a code block.
+    /// A message is a run of text blocks in one selectable text view, then a code block or table, then
+    /// another run. A selection can span a whole run but stops at a code block or table.
     enum Segment: Equatable {
         case text([MarkdownBlock])
         case code(language: String, text: String)
+        case table(MarkdownBlock.Table)
     }
 
     static func segments(_ blocks: [MarkdownBlock]) -> [Segment] {
         var segments: [Segment] = []
         var run: [MarkdownBlock] = []
         for block in blocks {
-            if case .code(let language, let text) = block {
+            let standalone: Segment?
+            switch block {
+            case .code(let language, let text): standalone = .code(language: language, text: text)
+            case .table(let table): standalone = .table(table)
+            default: standalone = nil
+            }
+            if let standalone {
                 if !run.isEmpty { segments.append(.text(run)); run = [] }
-                segments.append(.code(language: language, text: text))
+                segments.append(standalone)
             } else {
                 run.append(block)
             }
@@ -134,8 +215,73 @@ struct MarkdownView: View, Equatable {
                     MessageTextView(blocks: blocks, kind: .agent, copyMessage: { copyToPasteboard(source) }, replyTarget: replyTarget)
                 case .code(let language, let text):
                     CodeBlockView(language: language, code: text)
+                case .table(let table):
+                    MarkdownTableView(table: table)
                 }
             }
+        }
+    }
+}
+
+/// A GFM table as a grid: semibold header on a fill, a divider between rows, per-column alignment, and
+/// inline Markdown in cells. Cells don't wrap; a table wider than the message column scrolls sideways.
+struct MarkdownTableView: View {
+    let table: MarkdownBlock.Table
+
+    var body: some View {
+        ScrollView(.horizontal) { MarkdownTableGrid(table: table) }
+            .scrollIndicators(.automatic)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// The table itself, at its natural width.
+struct MarkdownTableGrid: View {
+    let table: MarkdownBlock.Table
+
+    var body: some View {
+        Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
+            GridRow {
+                ForEach(Array(table.header.enumerated()), id: \.offset) { column, text in
+                    cell(text, column: column).fontWeight(.semibold)
+                        .gridColumnAlignment(alignment(column))
+                }
+            }
+            .background(.fill.tertiary)
+            ForEach(Array(table.rows.enumerated()), id: \.offset) { _, row in
+                Divider()
+                GridRow {
+                    ForEach(Array(row.enumerated()), id: \.offset) { column, text in cell(text, column: column) }
+                }
+            }
+        }
+        .textSelection(.enabled)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(.separator))
+    }
+
+    private func cell(_ text: String, column: Int) -> some View {
+        Text(MarkdownParser.inline(text))
+            .font(.body)
+            .multilineTextAlignment(textAlignment(column))
+            .fixedSize()
+            .padding(.horizontal, 10).padding(.vertical, 5)
+            .frame(maxWidth: .infinity, alignment: Alignment(horizontal: alignment(column), vertical: .center))
+    }
+
+    private func alignment(_ column: Int) -> HorizontalAlignment {
+        switch table.alignments[column] {
+        case .leading: .leading
+        case .center: .center
+        case .trailing: .trailing
+        }
+    }
+
+    private func textAlignment(_ column: Int) -> TextAlignment {
+        switch table.alignments[column] {
+        case .leading: .leading
+        case .center: .center
+        case .trailing: .trailing
         }
     }
 }

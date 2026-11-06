@@ -31,6 +31,8 @@ enum MarkdownWriter {
     }
 
     private static func styled(_ run: String, _ attributes: [NSAttributedString.Key: Any], startsParagraph: Bool) -> String {
+        // A table drawn as pipe text is already Markdown; its monospaced font isn't inline code.
+        if attributes[MessageTextBuilder.tableKey] != nil { return run }
         let heading = attributes[MessageTextBuilder.headingKey] as? Int
         let listLevel = attributes[MessageTextBuilder.listLevelKey] as? Int ?? 0
         let quoted = attributes[MessageTextBuilder.quoteKey] != nil

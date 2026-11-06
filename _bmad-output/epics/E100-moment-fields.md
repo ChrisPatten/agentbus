@@ -3,12 +3,12 @@
 | Field | Value |
 |---|---|
 | Epic ID | E100 |
-| Dependencies | E96 (Surface API v2), E99 (Phase web client) |
+| Dependencies | E96 (Surface API v2), E101 (Phase web client) |
 | Story Count | 6 |
 | Estimated Complexity | M |
 | Status | Built on `feat/e100-moment-fields` (Nov 5, 2026); not merged or deployed |
 
-Design source: `peggy-claude-code/data/intercom/design/plum-dusk/spec.md`, section 6 (data model) and 7.3 (alerts). Follows the "Server work this exposes" list in E99.
+Design source: `peggy-claude-code/data/intercom/design/plum-dusk/spec.md`, section 6 (data model) and 7.3 (alerts). Follows the "Server work this exposes" list in E101.
 
 ---
 
@@ -57,4 +57,4 @@ The Compact's Phase design models every Surface Event as a **Moment** with a wei
 
 - `preview` (covered by `confirm.draft`) and `place` (covered by `detail.location`).
 - Notices (E89) keep their own states; they are not Moments on the bus.
-- Agent-job fields in `sessions`, undo, voice: still listed in E99.
+- Agent-job fields in `sessions`, undo, voice: still listed in E101.

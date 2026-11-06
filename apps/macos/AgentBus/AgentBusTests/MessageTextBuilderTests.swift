@@ -1,5 +1,6 @@
 import XCTest
 import AppKit
+import SwiftUI
 @testable import AgentBus
 
 final class MessageTextBuilderTests: XCTestCase {
@@ -75,6 +76,46 @@ final class MessageTextBuilderTests: XCTestCase {
             .code(language: "", text: "code"),
             .text([.paragraph("two"), .paragraph("three")]),
         ])
+    }
+
+    @MainActor func testSegmentsSplitAtTables() {
+        let blocks = MarkdownParser.parse("one\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\ntwo")
+        XCTAssertEqual(MarkdownView.segments(blocks), [
+            .text([.paragraph("one")]),
+            .table(.init(header: ["a", "b"], alignments: [.leading, .leading], rows: [["1", "2"]])),
+            .text([.paragraph("two")]),
+        ])
+    }
+
+    func testBubbleTableIsAlignedPipeText() {
+        let text = build("| Name | n |\n|:-:|--:|\n| **alpha** | 1 |\n| b | 22 |", kind: .operatorBubble)
+        XCTAssertEqual(text.string, """
+            | Name  |   n |
+            | :---: | --: |
+            | alpha |   1 |
+            |   b   |  22 |
+            """)
+        XCTAssertTrue(traits(text, at: 0).contains(.monoSpace))
+        // The pipe text is itself a table, so quoting it writes it back unchanged rather than as inline code.
+        XCTAssertEqual(MarkdownWriter.markdown(from: text), text.string)
+        XCTAssertEqual(MarkdownParser.parse(text.string), [
+            .table(.init(header: ["Name", "n"], alignments: [.center, .trailing], rows: [["alpha", "1"], ["b", "22"]])),
+        ])
+    }
+
+    @MainActor func testTableGridRendersAtNaturalWidth() throws {
+        let table = MarkdownBlock.Table(header: ["Key", "Value"], alignments: [.leading, .trailing],
+                                        rows: [["`id`", "**42**"], ["name", "[docs](https://example.com)"]])
+        // ImageRenderer can't draw a ScrollView's content, so render the grid that MarkdownTableView scrolls.
+        let renderer = ImageRenderer(content: MarkdownTableGrid(table: table).padding(8).background(.white))
+        renderer.scale = 2
+        let image = try XCTUnwrap(renderer.nsImage)
+        XCTAssertGreaterThan(image.size.height, 40)
+        XCTAssertLessThan(image.size.width, 300)
+        if let directory = ProcessInfo.processInfo.environment["AGENTBUS_SNAPSHOT_DIR"],
+           let tiff = image.tiffRepresentation, let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {
+            try png.write(to: URL(fileURLWithPath: directory).appendingPathComponent("markdown-table.png"))
+        }
     }
 
     // A rendered message must read back as the Markdown it came from, so a selection can be quoted later.
