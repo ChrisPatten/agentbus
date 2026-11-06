@@ -2,7 +2,7 @@
 // Positions are panel px from the boards (screens/<board>/<id>.html); type and colour follow spec 3.
 // Common props: crescent (shade box left), nowPt ({x, y} on r 214), moon (degrees or null), moonTone.
 import { font, tx, caps, esc, V, marks as drawMarks, nowDot, progressArcs, caption, capsule, pill, listRow, glyph, icon, iconAt, pulseDots, rimDotsAt, measure } from './prims.js';
-import { arcD, arcAround, drainDots, sliderArcs, pt } from './geom.js';
+import { arcD, arcAround, drainDots, sliderArcs, pt, R } from './geom.js';
 
 const LX = (w, s, lh, ls = 0) => font(w, s, lh, ls, 'lx');
 const HK = (w, s, lh, italic = false) => font(w, s, lh, 0, 'hk', italic);
@@ -161,7 +161,7 @@ export function decision(p) {
   if (p.preview) html += tx({ top: 186, left: 83, width: 300, f: HK(500, 19, 25), color: 'ink', style: balance + clamp(3), text: p.quote === false ? p.preview : `“${p.preview}”` });
   if (p.meta) html += tx({ top: 268, f: LX(600, 13, 16, 0.1), color: 'ink-2', text: caps(p.meta) });
   html += periActions(p.actions, 312);
-  const rimExtra = p.window ? `<path d="${arcD(p.window.a1, p.window.a2, 197)}" fill="none" style="stroke:${V('peri')}" stroke-width="4" stroke-linecap="round"/>` : '';
+  const rimExtra = p.window ? `<path d="${arcD(p.window.a1, p.window.a2, R.lane1)}" fill="none" style="stroke:${V('peri')}" stroke-width="4" stroke-linecap="round"/>` : '';
   return base({ ...p, moonTone: 'peri' }, { screen: 'decision', rimExtra, svg: WAIT_GLYPH + caps1(p.top, 'top'), html });
 }
 

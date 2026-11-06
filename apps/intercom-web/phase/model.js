@@ -131,8 +131,8 @@ const degOf = (t, tz) => { const p = zparts(t, tz); return clockDeg(p.h, p.m, p.
 export const timedMoments = (moments) => (moments || []).filter((m) => m.start !== null && m.src === 'event' && isOpen(m)).sort((a, b) => a.start - b.start || (a.end === null) - (b.end === null) || String(a.id).localeCompare(String(b.id)));
 
 /**
- * Rim marks for the next 12 hours. Points are dots on r 214; spans are arcs on lane r 197; the later of two overlapping spans
- * moves to lane r 184 in amber; a third overlapping span is not drawn and is counted in `hidden`.
+ * Rim marks for the next 12 hours. Points are dots on r 214; spans are arcs on lane r 204; the later of two overlapping spans
+ * moves to lane r 196 in amber; a third overlapping span is not drawn and is counted in `hidden`.
  * A Moment that started before now and is still running draws from now to its end.
  */
 export function rimMarks(moments, nowMs, tz) {

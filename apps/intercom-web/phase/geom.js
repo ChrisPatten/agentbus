@@ -2,7 +2,7 @@
 // Pure: no DOM, unit-tested under vitest.
 
 export const C = 233;
-export const R = { panel: 233, rim: 214, tap: 210, lane1: 197, text: 190, lane2: 184, capBottom: 182, capTop: 168, prog: 150 };
+export const R = { panel: 233, rim: 214, tap: 210, lane1: 204, text: 190, lane2: 196, capBottom: 182, capTop: 168, prog: 150 };
 export const RIM_DOTS = 60;
 export const RIM_DASH = '0.1 22.31'; // 60 round-capped dots on r 214, one every 6 degrees (period 22.41 = 2 pi 214 / 60)
 export const TOP_PATH = 'M65 233A168 168 0 0 1 401 233';

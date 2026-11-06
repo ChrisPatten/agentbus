@@ -64,7 +64,7 @@ export function rimDotsAt(angles, tone, width, opacity = 1) {
 }
 
 /**
- * Moment marks (spec 5.1): { type: 'dot', deg } discs r 4 on r 214; { type: 'arc', a1, a2, lane, amber } 3 px arcs on r 197 / r 184.
+ * Moment marks (spec 5.1): { type: 'dot', deg } discs r 4 on r 214; { type: 'arc', a1, a2, lane, amber } 3 px arcs on r 204 / r 196 (lanes tightened Nov 6 at Chris's request; spec said 197 / 184).
  * opts: selected (id drawn 4 px, others dropped), dim (opacity, offline 0.55), tone override, diamond (no-end detail mark), width.
  */
 export function marks(list, opts = {}) {
