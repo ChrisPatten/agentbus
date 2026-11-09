@@ -404,7 +404,27 @@ Inbound messages are appended after the pipeline accepts them (including surface
 - `state` frames (`quiet`, `battery`) also update the device's `device` item.
 - A `read_only` device may connect, receive everything and send `ping`, `state`, `view` and `notification_ack`. `send` and `notification_action` answer `{"type":"error","code":"read_only"}`; an `action` answers `action_result` `failed` / `read_only`.
 - Close codes: **4401** unauthorized or hello timeout, **4403** `revoked` (the device was revoked), 1001 ping timeout.
-- Voice frames are reserved for a later epic and not implemented.
+- Push-to-talk audio frames: see [Push-to-talk audio](#push-to-talk-audio-e92).
+- The `welcome` (and `GET /health`) `follow` object carries `conversation_id`, the followed conversation's id, so a device can open its thread (`GET /conversations/:id`, `view`) without computing the hash itself.
+
+### Push-to-talk audio (E92)
+
+A surface (the Compact while BOOT is held) streams its microphone over the same socket; the bus transcribes it and sends the text into the followed conversation exactly as a typed `send` with the same `client_msg_id`. Works on protocol v1 and v2. Source: `src/intercom/voice.ts`.
+
+| Frame | Direction | Meaning |
+|---|---|---|
+| `{"type":"audio_start","client_msg_id","rate?":16000,"format?":"pcm_s16le"}` | device → bus | Opens a recording on this socket (replacing any open one). `client_msg_id` 1-100 characters, unique per utterance, and becomes the send's id. `rate` 8000-48000 (default 16000); only `pcm_s16le` (16-bit little-endian mono) is accepted. A malformed frame answers `error` / `invalid_frame` |
+| binary frames | device → bus | Raw PCM for the open recording, any size (the Compact sends 100 ms, 3,200 bytes). Ignored when no recording is open. A binary first frame closes the socket with 4401 |
+| `{"type":"audio_end","client_msg_id"}` | device → bus | Release: transcribe and send |
+| `{"type":"audio_cancel","client_msg_id"}` | device → bus | Drop the recording; nothing is transcribed or sent |
+| `{"type":"transcript","client_msg_id","final":false,"text"}` | bus → device | Interim transcript of the audio so far, while the button is held (at most one per `voice.partial_interval_ms`, only after at least 0.8 s of new audio) |
+| `{"type":"transcript","client_msg_id","final":true,"status","text?","reason?","duration_ms?"}` | bus → device | The answer to `audio_end`. `ok` with `text`, then the usual `ack` for the send follows (`queued`, `rejected` or `command`, exactly as for `send`); `empty` (shorter than `voice.min_ms`, quieter than `voice.silence_peak`, or nothing recognised); `failed` with `reason` `unavailable` (no engine), `stt_error`, `timeout` (no audio for `voice.idle_timeout_ms`) or `no_recording` (no open recording with that id) |
+
+- The send carries metadata `input: "voice"` and `transcript_engine`, the agent's Intercom note gains one line saying the text is a speech transcript, and the Telegram echo reads `🎙️ text` instead of `⌨️ text`. Idempotency, dedup, the interaction window and the `reply` events are those of `send`.
+- A `read_only` device gets `error` / `read_only` for the three frames.
+- **Bounds.** Audio past `voice.max_seconds` (60) is dropped; the recording is still transcribed. Audio lives in memory only and is gone once transcribed or dropped; nothing is written to disk except the command engine's temporary WAV, removed after the run. A socket that closes drops its recording, and a transcription still running for it is discarded.
+- **Latency mark.** `[intercom] {"evt":"latency","mark":"transcript_final","client_msg_id","ms","audio_ms","chars"}`, `ms` from `audio_end` to the final transcript.
+- **Engines** (`adapters.intercom.voice`, see [INTERCOM.md](INTERCOM.md#configure-the-bus)): `openai` posts a WAV to `<base_url>/audio/transcriptions` (default model `gpt-4o-mini-transcribe`, about 1.5 s for a short clip) with the key from the env var `voice.openai.api_key_env` (`OPENAI_API_KEY`); `command` runs `voice.command.argv` without a shell (`{wav}` is the path of a temporary 16-bit mono WAV, `{lang}` the language) and reads the transcript from stdout. `auto` (default) uses OpenAI when the key is set, else the command when one is configured, else voice answers `unavailable`. E92's resident local engine (S92.2) and its latency target (S92.3) are not built; a cold `whisper` CLI run takes about 35 s on bobafett, so the command engine suits only a warm local server.
 
 ## Actions and jobs
 
@@ -548,7 +568,7 @@ Each device that has connected has an item in its surface's `device` resource. I
 ## Deviations and not yet reconciled
 
 - **Object shapes were defined here, then reconciled.** E96 was built without `architecture.md` section 3; the follow-on (event shape, slots, faces, assets) brought the shapes in line with it. Where this implementation intentionally differs from the design, [SURFACE_API_CHANGES.md](SURFACE_API_CHANGES.md) lists it.
-- **Voice frames** are reserved in protocol v2 and not implemented.
+- **Push-to-talk** (E92) is built without S92.2 (a resident local engine), S92.3 (the latency target) or S92.5 (the sample bank); audio is not kept 24 hours (S92.4 said it would be): it is dropped as soon as it is transcribed.
 - **Assets are never deleted** and the store has no listing route.
 - **Widgets are data only.** There is no reactive key store and no sandboxed code; the slot-to-widget binding (`context.widgets`) is the only coupling.
 - **v1 re-pairing creates a device each time.** A phone that loses its stored token and pairs again with a v1 code gets a new device; after `max_devices` of them the code answers `409 device_limit` (which the v1 web app does not explain). Revoke stale devices with `scripts/surface-devices.ts`.

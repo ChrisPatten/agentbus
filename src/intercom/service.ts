@@ -34,6 +34,7 @@ import { buildDeparture, buildDeskPayload, createPlanSource, deskSignature, live
 import { OnMyWayStore } from './on-my-way.js';
 import type { LiveSource, LivePrediction } from './mbta.js';
 import { resolveGlance, surfaceBody } from './glance.js';
+import { createTranscriber, VoiceSessions, type Transcriber, type VoiceClient } from './voice.js';
 import {
   acknowledgeNotification, attentionFor, expireDue, getNotification, isTerminal, openForSurface, publicNotification,
   sweepNotifications, targetsSurface, updateNotification, upsertNotification, listNotifications,
@@ -132,7 +133,12 @@ export interface IntercomDeps {
   appConfig?: AppConfig;
   /** E96 — devices, resources and actions. */
   surfaceApi?: SurfaceApiDeps;
+  /** E92 — the speech-to-text engine for push-to-talk. Absent: built from `config.voice` and the env; null: voice unavailable. */
+  transcriber?: Transcriber | null;
 }
+
+/** E92 — a socket as push-to-talk sees it. */
+export interface VoiceSocket extends VoiceClient { surface: Surface }
 
 export const normalizeTopic = (topic: string | undefined | null): string => (!topic || topic === 'general' ? 'general' : topic);
 const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
@@ -172,9 +178,22 @@ export class IntercomService {
   private readonly onMyWay: OnMyWayStore;
   private lastCalendarDate = '';
   private readonly writeHits = new Map<string, number[]>();
+  /** E92 — push-to-talk recordings per socket. */
+  readonly voice: VoiceSessions<VoiceSocket>;
 
   constructor(private readonly deps: IntercomDeps) {
     const env = deps.env ?? process.env;
+    this.voice = new VoiceSessions<VoiceSocket>({
+      config: deps.config.voice,
+      transcriber: deps.transcriber !== undefined ? deps.transcriber : createTranscriber(deps.config.voice, env),
+      submit: (c, clientMsgId, text, engine) => this.handleSend(c.surface, { client_msg_id: clientMsgId, body: text }, {
+        noteLine: 'Spoken by push-to-talk: the text is a speech transcript and may contain recognition errors.',
+        metadata: { input: 'voice', transcript_engine: engine },
+        echoIcon: '🎙️',
+      }),
+      ...(deps.now ? { now: deps.now } : {}),
+      log: (l) => this.log(l),
+    });
     this.calendar = deps.calendar ?? new CalendarFeed(deps.config.calendar);
     this.commute = deps.commute !== undefined ? deps.commute : loadCommute(deps.config.desk.commute_file, (l) => this.log(l));
     this.plan = deps.plan ?? createPlanSource(deps.config.desk.plan_file, (l) => this.log(l));
@@ -286,6 +305,7 @@ export class IntercomService {
       if (st.interaction?.closeTimer) clearTimeout(st.interaction.closeTimer);
     }
     this.sweepTimer = this.calendarTimer = this.deskTimer = null;
+    this.voice.stop();
   }
 
   // ── Auth ─────────────────────────────────────────────────────────────────
@@ -343,8 +363,8 @@ export class IntercomService {
     };
   }
 
-  followJson(surface: Surface): { contact: string; channel: string; topic?: string } {
-    return { contact: surface.follow.contact, channel: surface.follow.channel, ...(surface.follow.topic ? { topic: surface.follow.topic } : {}) };
+  followJson(surface: Surface): { contact: string; channel: string; topic?: string; conversation_id: string } {
+    return { contact: surface.follow.contact, channel: surface.follow.channel, ...(surface.follow.topic ? { topic: surface.follow.topic } : {}), conversation_id: surface.conversationId };
   }
 
   // ── Sockets ──────────────────────────────────────────────────────────────
@@ -794,7 +814,7 @@ export class IntercomService {
 
   // ── Surface send ─────────────────────────────────────────────────────────
 
-  async handleSend(surface: Surface, frame: { client_msg_id?: unknown; body?: unknown }, extra: { noteLine?: string; metadata?: Record<string, unknown> } = {}): Promise<Record<string, unknown>> {
+  async handleSend(surface: Surface, frame: { client_msg_id?: unknown; body?: unknown }, extra: { noteLine?: string; metadata?: Record<string, unknown>; echoIcon?: string } = {}): Promise<Record<string, unknown>> {
     const clientMsgId = typeof frame.client_msg_id === 'string' ? frame.client_msg_id : '';
     if (!clientMsgId || clientMsgId.length > 100) return { type: 'error', code: 'invalid_frame' };
     const reject = (reason: string, messageId = ''): Record<string, unknown> => ({ type: 'ack', client_msg_id: clientMsgId, status: 'rejected', reason, ...(messageId ? { message_id: messageId } : {}) });
@@ -849,7 +869,7 @@ export class IntercomService {
       }
       const ack = { type: 'ack', client_msg_id: clientMsgId, status: 'queued', message_id: messageId, interaction_id: interaction.id };
       putSend(this.deps.db, surface.id, clientMsgId, messageId, ack);
-      void this.echo(surface, body);
+      void this.echo(surface, body, extra.echoIcon);
       return ack;
     } finally {
       this.sendLocks.delete(lockKey);
@@ -865,7 +885,7 @@ export class IntercomService {
   }
 
   /** The silent `⌨️ text` echo into the followed Telegram chat. Bookkeeping only: it bypasses the queue and DeliveryWorker. */
-  private async echo(surface: Surface, body: string): Promise<void> {
+  private async echo(surface: Surface, body: string, icon = '⌨️'): Promise<void> {
     if (!this.deps.config.echo_to_followed) return;
     try {
       const adapter = this.deps.registry?.lookupPrimaryByChannel(surface.follow.channel);
@@ -874,7 +894,7 @@ export class IntercomService {
         id: randomUUID(), timestamp: new Date(this.now()).toISOString(),
         channel: surface.follow.channel, topic: normalizeTopic(surface.follow.topic),
         sender: 'system:bus', recipient: `contact:${surface.follow.contact}`, reply_to: null, priority: 'normal',
-        payload: { type: 'text', body: `⌨️ ${body}\n— via Intercom` },
+        payload: { type: 'text', body: `${icon} ${body}\n— via Intercom` },
         metadata: { adapter_id: adapter.id, silent: true, no_preview: true, intercom_echo: true, bus_notice: true },
       };
       const res = await adapter.send(echo);

@@ -651,6 +651,41 @@ export const IntercomAdapterSchema = z.object({
       on_my_way_timeout_min: z.number().int().min(10).max(720).default(180),
     }).prefault({}),
   }).prefault({}),
+  /**
+   * Push-to-talk (E92 S92.1 / S92.4): a surface streams 16 kHz PCM over its socket (`audio_start`,
+   * binary frames, `audio_end`); the bus transcribes it and sends the text into the followed
+   * conversation like a typed `send`. See docs/SURFACE_API.md "Push-to-talk audio".
+   */
+  voice: z.object({
+    enabled: z.boolean().default(true),
+    /** `auto`: OpenAI when its key env var is set, else `command` when `command.argv` is set, else voice is unavailable. */
+    engine: z.enum(['auto', 'openai', 'command']).default('auto'),
+    openai: z.object({
+      api_key_env: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/).default('OPENAI_API_KEY'),
+      model: z.string().min(1).default('gpt-4o-mini-transcribe'),
+      base_url: z.string().url().default('https://api.openai.com/v1'),
+      /** Optional vocabulary hint (names, places) passed as the transcription prompt. */
+      prompt: z.string().max(800).optional(),
+    }).prefault({}),
+    /** A local engine: argv run without a shell; `{wav}` is replaced by the path of a 16-bit mono WAV file, `{lang}` by `language`. The transcript is its stdout. */
+    command: z.object({
+      argv: z.array(z.string().min(1)).min(1).optional(),
+    }).prefault({}),
+    /** ISO-639-1 language hint; empty lets the engine detect it. */
+    language: z.string().max(8).default('en'),
+    /** Audio past this length is dropped (the device stops at the same limit). */
+    max_seconds: z.number().int().min(1).max(300).default(60),
+    /** Shorter recordings are answered `empty` without transcribing. */
+    min_ms: z.number().int().min(0).max(5000).default(300),
+    /** A recording whose loudest sample stays under this (of 32,767) is silence: answered `empty`. 0 turns the check off. */
+    silence_peak: z.number().int().min(0).max(32767).default(200),
+    /** Interim transcripts while the button is held, at most one every this many ms (0 = off). */
+    partial_interval_ms: z.number().int().min(0).max(30_000).default(2000),
+    /** One transcription may take this long before the recording is answered `failed`. */
+    timeout_ms: z.number().int().min(1000).max(300_000).default(20_000),
+    /** A recording with no audio for this long is dropped (`failed` / `timeout`). */
+    idle_timeout_ms: z.number().int().min(1000).max(120_000).default(15_000),
+  }).prefault({}),
   surfaces: z.array(IntercomSurfaceSchema).default([]),
 }).superRefine((cfg, ctx) => {
   const seen = new Set<string>();

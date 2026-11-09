@@ -19,7 +19,8 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import websocket from '@fastify/websocket';
 import { z } from 'zod';
 import type { IntercomAdapterConfig } from '../config/schema.js';
-import { IntercomService, type Client, type SocketLike } from '../intercom/service.js';
+import { randomUUID } from 'node:crypto';
+import { IntercomService, type Client, type SocketLike, type VoiceSocket } from '../intercom/service.js';
 import type { ResourceName } from '../surface/types.js';
 import { createPairCode, redeemPairCode } from '../intercom/store.js';
 
@@ -153,6 +154,7 @@ type WsSocket = SocketLike & { on: (e: string, l: (...a: any[]) => void) => void
 /**
  * The WebSocket handler behind `/api/v1/intercom/ws` (v1 alias) and `/api/v1/surface/ws` (E96).
  * Protocol v1 frames work on both; `hello.protocol: 2` adds `delta`, `action` and `view`.
+ * Push-to-talk (E92) works on both: `audio_start`, binary PCM frames, `audio_end` / `audio_cancel`.
  * One heartbeat per server.
  */
 export function surfaceSocketHandler(server: FastifyInstance, service: IntercomService, config: IntercomAdapterConfig): (socket: WsSocket) => void {
@@ -179,12 +181,19 @@ export function surfaceSocketHandler(server: FastifyInstance, service: IntercomS
 
   return (socket: WsSocket) => {
     let client: Client | null = null;
+    let voice: VoiceSocket | null = null;
     const helloTimer = setTimeout(() => { if (!client) socket.close(4401, 'hello timeout'); }, config.hello_timeout_ms);
     const send = (frame: Record<string, unknown>) => { try { if (socket.readyState === 1) socket.send(JSON.stringify(frame)); } catch { /* closing */ } };
-    socket.on('close', () => { clearTimeout(helloTimer); if (client) { service.detach(client); sockets.delete(client); } });
+    socket.on('close', () => { clearTimeout(helloTimer); if (voice) service.voice.detach(voice); if (client) { service.detach(client); sockets.delete(client); } });
     socket.on('error', () => { /* the close handler cleans up */ });
     socket.on('pong', () => { if (client) client.lastPong = Date.now(); });
-    socket.on('message', (data: Buffer) => { void (async () => {
+    socket.on('message', (data: Buffer, isBinary?: boolean) => { void (async () => {
+      // E92: binary frames are push-to-talk PCM. Appended synchronously, so they stay in order with audio_end.
+      if (isBinary) {
+        if (!client) { socket.close(4401, 'invalid hello'); return; }
+        if (client.ready && voice) service.voice.chunk(voice, data);
+        return;
+      }
       let frame: Record<string, unknown>;
       try { frame = JSON.parse(data.toString()) as Record<string, unknown>; }
       catch { if (!client) { socket.close(4401, 'invalid hello'); return; } send({ type: 'error', code: 'invalid_frame' }); return; }
@@ -198,6 +207,7 @@ export function surfaceSocketHandler(server: FastifyInstance, service: IntercomS
           ...(auth.device ? { device: auth.device } : {}), protocol: hello.data.protocol ?? 1,
         };
         sockets.add(client);
+        voice = { id: randomUUID(), surface: auth.surface, send };
         await service.attach(client, hello.data.cursor, hello.data.client, hello.data.revs as Partial<Record<ResourceName, number>> | undefined);
         return;
       }
@@ -222,6 +232,13 @@ export function surfaceSocketHandler(server: FastifyInstance, service: IntercomS
         return;
       }
       if (frame['type'] === 'state') { service.setSurfaceState(client.surface, frame, client); return; }
+      if (frame['type'] === 'audio_start' || frame['type'] === 'audio_end' || frame['type'] === 'audio_cancel') {
+        if (readOnly) { send({ type: 'error', code: 'read_only' }); return; }
+        if (frame['type'] === 'audio_start') { const err = service.voice.start(voice!, frame); if (err) send(err); }
+        else if (frame['type'] === 'audio_cancel') service.voice.cancel(voice!, frame);
+        else await service.voice.end(voice!, frame);
+        return;
+      }
       if (client.protocol === 2 && frame['type'] === 'action') {
         const { type: _t, ...request } = frame;
         send(await service.handleAction(client.surface, client.device, request) as unknown as Record<string, unknown>);

@@ -29,6 +29,7 @@ const calendar = { today: async () => ({ date: '2026-11-01', tz: 'America/New_Yo
 
 describe('Intercom routes', () => {
   let db: Database.Database; let server: FastifyInstance; let service: IntercomService; let webRoot: string; let base: string; let wsBase: string;
+  let inbound: { body: string; metadata: Record<string, unknown> | undefined }[] = [];
   const sockets: WebSocket[] = [];
 
   beforeEach(async () => {
@@ -40,8 +41,10 @@ describe('Intercom routes', () => {
     writeFileSync(join(webRoot, 'manifest.webmanifest'), '{}');
     writeFileSync(join(webRoot, 'sub', 'index.html'), 'sub index');
     writeFileSync(join(webRoot, '..', 'intercom-secret.txt'), 'TOPSECRETCONTENT');
+    inbound = [];
     service = new IntercomService({ config: cfg, db, calendar, env: { T: TOKEN, T2: 'u'.repeat(40) }, log: () => {},
-      submitInbound: async () => ({ ok: true, id: 'x', queued: true, enqueued_count: 1 }) });
+      transcriber: { name: 'fake', transcribe: async (wav) => (wav.length > 44 ? 'Turn on the porch light' : '') },
+      submitInbound: async (m) => { inbound.push({ body: m.payload.type === 'text' ? m.payload.body : '', metadata: m.metadata }); return { ok: true, id: 'x', queued: true, enqueued_count: 1 }; } });
     server = Fastify();
     await registerIntercomRoutes(server, { config: cfg, db, service, webRoot });
     await server.listen({ host: '127.0.0.1', port: 0 });
@@ -136,7 +139,7 @@ describe('Intercom routes', () => {
       const { ws, frames } = await open();
       ws.send(JSON.stringify({ type: 'hello', token: TOKEN, cursor: 0, client: 'intercom-web/0.1' }));
       await until(() => frames.some((f) => f.event === 'calendar'));
-      expect(frames[0]).toMatchObject({ type: 'welcome', version: 1, surface_id: 'iphone-proto', follow: { contact: 'chris', channel: 'telegram:peggy' }, latest_seq: 0, reset: false });
+      expect(frames[0]).toMatchObject({ type: 'welcome', version: 1, surface_id: 'iphone-proto', follow: { contact: 'chris', channel: 'telegram:peggy', conversation_id: expect.stringMatching(/^[0-9a-f]{64}$/) }, latest_seq: 0, reset: false });
       expect(frames[1]).toMatchObject({ type: 'event', event: 'activity', data: { state: 'idle', status_text: null, interaction_id: null } });
       expect(frames[2]).toMatchObject({ type: 'event', event: 'calendar', data: { date: '2026-11-01' } });
     });
@@ -204,6 +207,40 @@ describe('Intercom routes', () => {
       service.onDelivered({ id: 'x', timestamp: '', channel: 'telegram:peggy', topic: 'general', sender: 'agent:p', recipient: 'contact:chris', reply_to: null, priority: 'normal', payload: { type: 'text', body: 'Hi back. Anything else?' }, metadata: {} });
       await until(() => frames.some((f) => f.event === 'reply'));
       expect(frames.find((f) => f.event === 'reply')).toMatchObject({ seq: 4, data: { glance: 'Hi back.', body: 'Hi back. Anything else?' } });
+    });
+  });
+
+  describe('push-to-talk', () => {
+    const pcm = (ms: number) => { const b = Buffer.alloc(32 * ms); for (let i = 0; i < b.length / 2; i++) b.writeInt16LE(i % 16 < 8 ? 3000 : -3000, i * 2); return b; };
+    it('streams PCM, answers the transcript, and sends it into the followed conversation like a typed send', async () => {
+      const { ws, frames } = await open();
+      ws.send(JSON.stringify({ type: 'hello', token: TOKEN }));
+      await until(() => frames.some((f) => f.event === 'calendar'));
+      ws.send(JSON.stringify({ type: 'audio_start', client_msg_id: 'v-1', rate: 16000, format: 'pcm_s16le' }));
+      for (let i = 0; i < 6; i++) ws.send(pcm(100), { binary: true });
+      ws.send(JSON.stringify({ type: 'audio_end', client_msg_id: 'v-1' }));
+      await until(() => frames.some((f) => f.type === 'ack'));
+      expect(frames.find((f) => f.type === 'transcript')).toEqual({ type: 'transcript', client_msg_id: 'v-1', final: true, status: 'ok', text: 'Turn on the porch light', duration_ms: 600 });
+      expect(frames.find((f) => f.type === 'ack')).toMatchObject({ client_msg_id: 'v-1', status: 'queued', interaction_id: expect.any(String) });
+      expect(inbound).toEqual([{ body: 'Turn on the porch light', metadata: expect.objectContaining({ origin: 'intercom', input: 'voice', transcript_engine: 'fake', client_msg_id: 'v-1' }) }]);
+    });
+    it('ignores binary frames outside a recording and drops a cancelled one', async () => {
+      const { ws, frames } = await open();
+      ws.send(JSON.stringify({ type: 'hello', token: TOKEN }));
+      await until(() => frames.some((f) => f.event === 'calendar'));
+      ws.send(pcm(100), { binary: true });
+      ws.send(JSON.stringify({ type: 'audio_start', client_msg_id: 'v-2' }));
+      ws.send(pcm(500), { binary: true });
+      ws.send(JSON.stringify({ type: 'audio_cancel', client_msg_id: 'v-2' }));
+      ws.send(JSON.stringify({ type: 'audio_end', client_msg_id: 'v-2' }));
+      await until(() => frames.some((f) => f.type === 'transcript'));
+      expect(frames.find((f) => f.type === 'transcript')).toMatchObject({ client_msg_id: 'v-2', status: 'failed', reason: 'no_recording' });
+      expect(inbound).toEqual([]);
+    });
+    it('closes a socket whose first frame is binary', async () => {
+      const { ws, closed } = await open();
+      ws.send(pcm(10), { binary: true });
+      expect(await closed).toBe(4401);
     });
   });
 

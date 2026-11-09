@@ -73,6 +73,31 @@ Nothing to do: each Intercom message carries a short note asking the agent for a
 
 Notifications put a short "needs you soon" item on the screen: a leaving time, a bill due today, a draft waiting for your OK. See [Notifications](#notifications) below.
 
+### 5. Talk to it (optional)
+
+A screen with a microphone, such as the Compact, can send what you say: hold its talk button, speak, and let go. The bus turns the recording into text and sends it into the followed chat as if you had typed it, so your agent answers there as usual, and the chat shows it as `🎙️ your words`. Voice uses OpenAI's transcription service by default: put your key in the bus's `.env` as `OPENAI_API_KEY` and restart the bus. To use a speech-to-text program on your own computer instead, give its command:
+
+```yaml
+adapters:
+  intercom:
+    voice:
+      engine: command
+      command:
+        argv: ["/usr/local/bin/my-stt", "--file", "{wav}", "--lang", "{lang}"]
+```
+
+| Option | Default | What it does |
+|---|---|---|
+| `voice.enabled` | `true` | Turns push-to-talk on |
+| `voice.engine` | `auto` | `openai`, `command`, or `auto` (OpenAI when its key is set, otherwise your command) |
+| `voice.openai.model` | `gpt-4o-mini-transcribe` | Which OpenAI model transcribes |
+| `voice.openai.prompt` | none | Names and words it should expect, to spell them right |
+| `voice.command.argv` | none | Your own program; `{wav}` becomes the recording's file, and it prints the text |
+| `voice.language` | `en` | The language you speak |
+| `voice.max_seconds` | `60` | Longest recording kept |
+
+Recordings stay in memory only and are thrown away once transcribed.
+
 ## Troubleshooting
 
 | Problem | What to try |

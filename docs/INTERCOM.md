@@ -16,6 +16,8 @@ adapters:
     enabled: true
     interaction_grace_s: 120      # window stays open this long after the agent's turn ends
     echo_to_followed: true        # silent "⌨️ text" echo into the followed Telegram chat
+    voice:                        # E92 push-to-talk; needs OPENAI_API_KEY in the bus env, or a command engine
+      engine: auto
     calendar:
       calendars: ["Birthdays", "Boston Celtics 2026-27 Full-Season Schedule", "Formula 1", "Patriots 🏈", "Events Calendar 🎪", "Home", "Family", "Kids", "Work", "Chris Patten", "BCG"]
       cache_s: 300
@@ -43,6 +45,20 @@ adapters:
 | `calendar.cache_s` | `300` | Seconds a `calctl` result is reused |
 | `calendar.calctl_path` | `calctl` | Binary to run |
 | `calendar.timezone` | `America/New_York` | Zone for "today" and the event offsets |
+| `voice.enabled` | `true` | Accept push-to-talk audio (`audio_start`, binary PCM, `audio_end`; see [SURFACE_API.md](SURFACE_API.md#push-to-talk-audio-e92)) |
+| `voice.engine` | `auto` | `openai`, `command`, or `auto` (OpenAI when its key is set, else the command, else voice answers `unavailable`) |
+| `voice.openai.api_key_env` | `OPENAI_API_KEY` | Env var holding the OpenAI key |
+| `voice.openai.model` | `gpt-4o-mini-transcribe` | Transcription model (`whisper-1` also works) |
+| `voice.openai.base_url` | `https://api.openai.com/v1` | API base; any server with an OpenAI-compatible `/audio/transcriptions` works |
+| `voice.openai.prompt` | none | Vocabulary hint (names, places), at most 800 characters |
+| `voice.command.argv` | none | Local engine: argv run without a shell, `{wav}` and `{lang}` substituted; stdout is the transcript |
+| `voice.language` | `en` | Language hint; empty lets the engine detect it |
+| `voice.max_seconds` | `60` | Audio past this is dropped |
+| `voice.min_ms` | `300` | Shorter recordings answer `empty` without transcribing |
+| `voice.silence_peak` | `200` | A recording whose loudest sample stays under this (of 32,767) answers `empty`; 0 turns the check off |
+| `voice.partial_interval_ms` | `2000` | Interim transcripts while held, at most this often; 0 turns them off |
+| `voice.timeout_ms` | `20000` | One transcription may take this long |
+| `voice.idle_timeout_ms` | `15000` | A recording with no audio for this long is dropped (`failed` / `timeout`) |
 | `desk.commute_file` | `integrations/intercom/commute.json` | Desk-mode timetable (E94): MBTA trains and holidays. See Desk mode below |
 | `desk.plan_file` | `/Users/chrispatten/workspace/peggy-claude-code/memory/project_commute_plan.md` | Office-day plan: a Markdown file with a fenced `commute-plan` block (office days, AM/PM train, lead time, per-date overrides). Re-read when its modification time changes |
 | `desk.event_travel_min` | `20` | **Deprecated, ignored.** Calendar events no longer produce a leave-by; kept only so existing configs still load |
