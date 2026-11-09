@@ -19,6 +19,7 @@
  *   - notify, update_notification, list_notifications (E89; Intercom attention items)
  *   - list_surfaces, surface_publish_event, surface_remove_event, surface_set_slot, surface_clear_slot,
  *     surface_write_widget, surface_remove_widget, clear_answer_needed (E96; surface publishing)
+ *   - speak (E102; say a push-to-talk answer aloud on the Intercom device)
  *   - send_location, send_venue, send_contact, send_document, ask_input, send_rich, edit_message,
  *     pin_message, unpin_message (E81; only when a Telegram adapter is configured)
  */
@@ -46,6 +47,7 @@ import { registerProposalTools } from './proposals.js';
 import { registerStatusTool } from './status.js';
 import { registerNotificationTools } from './notifications.js';
 import { registerSurfaceTools } from './surface.js';
+import { registerSpeakTool } from './speak.js';
 import { getTelegramInstances } from '../../config/schema.js';
 import { originFromEnv } from '../../core/origin.js';
 
@@ -96,6 +98,7 @@ export function registerAllTools(
   registerProposalTools(server, busBaseUrl, agentId);
   registerNotificationTools(server, busBaseUrl, agentId);
   registerSurfaceTools(server, busBaseUrl, agentId);
+  registerSpeakTool(server, busBaseUrl, agentId);
   registerStatusTool(server);
   maybeRegisterEmailTool(server, busBaseUrl, agentId, config);
   maybeRegisterTelegramTools(server, busBaseUrl, agentId, config);
@@ -158,6 +161,7 @@ export function registerHeadlessTools(
   registerProposalTools(server, busBaseUrl, agentId);
   registerNotificationTools(server, busBaseUrl, agentId);
   registerSurfaceTools(server, busBaseUrl, agentId);
+  registerSpeakTool(server, busBaseUrl, agentId);
   registerStatusTool(server);
   maybeRegisterEmailTool(server, busBaseUrl, agentId, config);
   maybeRegisterTelegramTools(server, busBaseUrl, agentId, config);

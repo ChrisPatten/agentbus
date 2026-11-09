@@ -35,7 +35,7 @@ import { OnMyWayStore } from './on-my-way.js';
 import type { LiveSource, LivePrediction } from './mbta.js';
 import { resolveGlance, surfaceBody } from './glance.js';
 import { createTranscriber, VoiceSessions, type Transcriber, type VoiceClient } from './voice.js';
-import { createSynthesizer, inQuietHours, Speaker, speechText, type Synthesizer } from './speech.js';
+import { agentSpeechText, createSynthesizer, inQuietHours, Speaker, speechText, type Synthesizer } from './speech.js';
 import {
   acknowledgeNotification, attentionFor, expireDue, getNotification, isTerminal, openForSurface, publicNotification,
   sweepNotifications, targetsSurface, updateNotification, upsertNotification, listNotifications,
@@ -104,8 +104,22 @@ interface Interaction {
   firstReplyLogged: boolean;
   closeTimer: NodeJS.Timeout | null;
   /** Spoken replies: the socket that sent this interaction's latest push-to-talk message. Null after a typed send. */
-  speak?: { to: VoiceSocket; at: number; left: number } | null;
+  speak?: {
+    to: VoiceSocket; at: number; left: number;
+    /** E102: the visible text of the latest `speak` call for this voice message; null until the agent calls it. */
+    spoken: string | null;
+    /** E102: the pending fallback (auto-speech of the first reply), cancelled by a `speak` call. */
+    fallbackTimer: NodeJS.Timeout | null;
+    /** E102: the fallback already ran; later replies follow the pre-E102 rule (spoken up to `left`). */
+    fallbackRan: boolean;
+  } | null;
 }
+
+/** E102 — outcome of the agent's `speak` call, as the bus route returns it. */
+export type SpeakResult =
+  | { ok: true; status: 'spoken' | 'queued'; text: string; interaction_id: string; surface_id: string; echo: string }
+  | { ok: true; status: 'skipped'; reason: string }
+  | { ok: false; error: string };
 
 interface SurfaceState {
   interaction: Interaction | null;
@@ -166,6 +180,9 @@ export function agentNote(surfaceId: string, withNotify = false): string {
   return withNotify ? `${base} ${NOTIFY_GUIDANCE}` : base;
 }
 
+/** The per-message line for a push-to-talk message (the long style guide is a separate once-per-session block, E102). */
+export const VOICE_NOTE = 'Spoken by push-to-talk: the text is a speech transcript and may contain recognition errors. It is answered aloud: call speak(message_id, text) first with the short spoken answer, then reply() for anything longer.';
+
 /** N9 — when to raise a dial notification instead of sending a message. */
 export const NOTIFY_GUIDANCE =
   'notify() puts a short-lived "needs you soon" item on the dial (leaving time, a bill due today, a draft awaiting approval, a job finished): give it a key so you can resolve it later. ' +
@@ -183,6 +200,10 @@ export class IntercomService {
   private readonly clients = new Set<Client>();
   private readonly state = new Map<string, SurfaceState>();
   private readonly sendLocks = new Map<string, Promise<void>>();
+  /** E102 — push-to-talk message id -> its surface and interaction, so `speak(message_id)` finds the device. */
+  private readonly voiceMessages = new Map<string, { surfaceId: string; interactionId: string }>();
+  /** E102 — utterances wait their turn per device socket. */
+  private readonly speechChains = new WeakMap<object, Promise<void>>();
   private readonly pairHits = new Map<string, number[]>();
   readonly calendar: CalendarFeed;
   private sweepTimer: NodeJS.Timeout | null = null;
@@ -205,7 +226,7 @@ export class IntercomService {
       config: deps.config.voice,
       transcriber: deps.transcriber !== undefined ? deps.transcriber : createTranscriber(deps.config.voice, env),
       submit: (c, clientMsgId, text, engine) => this.handleSend(c.surface, { client_msg_id: clientMsgId, body: text }, {
-        noteLine: 'Spoken by push-to-talk: the text is a speech transcript and may contain recognition errors.',
+        noteLine: VOICE_NOTE,
         metadata: { input: 'voice', transcript_engine: engine },
         echoIcon: '🎙️',
         speakTo: c,
@@ -328,6 +349,7 @@ export class IntercomService {
     for (const st of this.state.values()) {
       if (st.staleTimer) clearTimeout(st.staleTimer);
       if (st.interaction?.closeTimer) clearTimeout(st.interaction.closeTimer);
+      if (st.interaction?.speak?.fallbackTimer) clearTimeout(st.interaction.speak.fallbackTimer);
     }
     this.sweepTimer = this.calendarTimer = this.deskTimer = null;
     this.voice.stop();
@@ -743,6 +765,7 @@ export class IntercomService {
     const i = st.interaction;
     if (!i || (id && i.id !== id)) return;
     if (i.closeTimer) clearTimeout(i.closeTimer);
+    if (i.speak?.fallbackTimer) clearTimeout(i.speak.fallbackTimer);
     st.interaction = null;
     this.emitEphemeral(surface, 'interaction', { interaction_id: i.id, state: 'closed' });
     if (st.activity.interaction_id === i.id) this.setActivity(surface, { interaction_id: null });
@@ -814,6 +837,7 @@ export class IntercomService {
       if (!envelope.sender.startsWith('agent:')) return;                       // bus notices, command replies, echoes
       if (meta['intercom_echo'] === true || meta['system_only'] === true || meta['context_only'] === true || meta['bus_notice'] === true) return;
       if (envelope.payload.type !== 'text') return;
+      if (meta['intercom_spoken'] === true) return;                              // E102: the record of a `speak` call; the device was already shown it
       for (const s of this.surfaces.values()) {
         if (!this.matches(s, envelope.channel, envelope.topic, envelope.recipient)) continue;
         const st = this.state.get(s.id)!;
@@ -827,13 +851,18 @@ export class IntercomService {
         const moreOnTelegram = hasAttachments || !!tsend || hasChoices || cut;
         if (!i.firstReplyLogged) { i.firstReplyLogged = true; this.mark(s, i, 'first_reply'); }
         const glance = resolveGlance(meta['glance'], body);
+        // E102: once the agent has `speak`-ed in this interaction, that is the device's answer; a later reply
+        // goes to the Thread and Telegram, and its `reply` event keeps the spoken text so Understood is not overwritten.
+        const spokenAnswer = i.speak?.spoken ?? null;
         this.emitDurable(s, 'reply', {
           message_id: envelope.id, interaction_id: i.id,
-          glance, body: text,
-          has_attachments: hasAttachments, more_on_telegram: moreOnTelegram,
+          glance: spokenAnswer ? resolveGlance(null, spokenAnswer) : glance,
+          body: spokenAnswer ?? text,
+          has_attachments: hasAttachments, more_on_telegram: spokenAnswer ? true : moreOnTelegram,
+          ...(spokenAnswer ? { spoken: true } : {}),
           created_at: new Date(this.now()).toISOString(),
         });
-        this.maybeSpeak(s, i, body, glance);
+        this.replySpeech(s, i, body, glance);
       }
     } catch (err) {
       this.log(`warn: onDelivered failed: ${String(err)}`);
@@ -856,13 +885,84 @@ export class IntercomService {
     return null;
   }
 
+  /** One utterance at a time per device: a new one waits for the one playing. Returns true when it had to wait. */
+  private enqueueSpeech(target: VoiceSocket, text: string): boolean {
+    const prev = this.speechChains.get(target);
+    const busy = !!prev || this.speaker.speaking(target.id);
+    const run = (prev ?? Promise.resolve()).then(() => (target.closed ? undefined : this.speaker.speak(target, text)));
+    const tail = run.catch(() => undefined).then(() => { if (this.speechChains.get(target) === tail) this.speechChains.delete(target); });
+    this.speechChains.set(target, tail);
+    return busy;
+  }
+
   private maybeSpeak(surface: Surface, i: Interaction, body: string, glance: string): void {
     const why = this.speechBlocked(surface, i);
     if (why) { if (why !== 'not_voice') this.log(JSON.stringify({ evt: 'speech_skipped', surface_id: surface.id, interaction_id: i.id, why })); return; }
     const text = speechText(body, glance, this.deps.config.voice.speech.max_chars);
     if (!text) return;
     i.speak!.left--;
-    void this.speaker.speak(i.speak!.to, text);
+    this.enqueueSpeech(i.speak!.to, text);
+  }
+
+  /**
+   * E102 — fallback auto-speech for a reply. The agent's own `speak` call is the primary path: once one has been
+   * made for this voice message, replies are never auto-spoken. Without one, the first reply's glance (or short
+   * body) is spoken after `voice.speech.fallback_grace_s`, unless `speak` arrives first; `fallback: false` turns it off.
+   */
+  private replySpeech(surface: Surface, i: Interaction, body: string, glance: string): void {
+    const sp = i.speak;
+    if (!sp) return;
+    const cfg = this.deps.config.voice.speech;
+    if (sp.spoken !== null) return;
+    if (!cfg.fallback) { this.log(JSON.stringify({ evt: 'speech_skipped', surface_id: surface.id, interaction_id: i.id, why: 'fallback_off' })); return; }
+    if (sp.fallbackRan) { this.maybeSpeak(surface, i, body, glance); return; }
+    if (sp.fallbackTimer) return;                                               // the first reply's fallback is already pending
+    const run = (): void => {
+      sp.fallbackTimer = null;
+      if (this.state.get(surface.id)?.interaction !== i || i.speak !== sp || sp.spoken !== null) return;
+      sp.fallbackRan = true;
+      this.log(JSON.stringify({ evt: 'speech_fallback', surface_id: surface.id, interaction_id: i.id }));
+      this.maybeSpeak(surface, i, body, glance);
+    };
+    if (cfg.fallback_grace_s <= 0) run();
+    else { sp.fallbackTimer = setTimeout(run, cfg.fallback_grace_s * 1000); sp.fallbackTimer.unref?.(); }
+  }
+
+  /**
+   * E102 — the agent's `speak(message_id, text)`: say `text` on the device that sent that push-to-talk message.
+   * Returns at once; synthesis and streaming run behind it. Anything not allowed is an error or a skip with a
+   * reason, never a partial effect. On success the device's Understood screen shows the text as the answer.
+   */
+  speakFor(messageId: string, rawText: string): SpeakResult {
+    const cfg = this.deps.config.voice.speech;
+    const ref = this.voiceMessages.get(messageId);
+    if (!ref) return { ok: false, error: 'speak is only for a message that arrived by push-to-talk from an Intercom device (this id is not one, or its window is gone). Use reply().' };
+    const surface = this.surfaces.get(ref.surfaceId);
+    const i = surface ? this.state.get(surface.id)?.interaction : null;
+    if (!surface || !i || i.id !== ref.interactionId) return { ok: false, error: 'the voice interaction for this message has closed. Use reply().' };
+    const sp = i.speak;
+    if (!sp) return { ok: false, error: 'a typed message followed this voice message, so nothing is spoken any more. Use reply().' };
+    if (this.now() - sp.at > cfg.reply_window_s * 1000) return { ok: false, error: `the voice message is older than ${cfg.reply_window_s} s, too late to speak. Use reply().` };
+    const prepared = agentSpeechText(rawText, cfg.speak_max_chars);
+    if ('error' in prepared) {
+      return { ok: false, error: prepared.error === 'empty' ? 'text is empty after removing Markdown and links.' : `text is ${prepared.chars} characters; speak at most ${cfg.speak_max_chars} (audio tags do not count). Shorten it and put the rest in reply().` };
+    }
+    const why = this.speechBlocked(surface, i);
+    if (why) {
+      this.log(JSON.stringify({ evt: 'speech_skipped', surface_id: surface.id, interaction_id: i.id, why, via: 'speak' }));
+      return { ok: true, status: 'skipped', reason: why };
+    }
+    sp.left--;
+    sp.spoken = prepared.visible;
+    if (sp.fallbackTimer) { clearTimeout(sp.fallbackTimer); sp.fallbackTimer = null; }
+    this.emitDurable(surface, 'reply', {
+      message_id: messageId, interaction_id: i.id,
+      glance: resolveGlance(null, prepared.visible), body: prepared.visible,
+      has_attachments: false, more_on_telegram: false, spoken: true,
+      created_at: new Date(this.now()).toISOString(),
+    });
+    const waited = this.enqueueSpeech(sp.to, prepared.tts);
+    return { ok: true, status: waited ? 'queued' : 'spoken', text: prepared.visible, interaction_id: i.id, surface_id: surface.id, echo: `🔊 ${prepared.visible}` };
   }
 
   // ── Surface send ─────────────────────────────────────────────────────────
@@ -921,7 +1021,12 @@ export class IntercomService {
         this.setActivity(surface, { interaction_id: interaction.id });
       }
       // Spoken replies follow a push-to-talk message only; a typed send in the same window turns them off.
-      interaction.speak = extra.speakTo ? { to: extra.speakTo, at: this.now(), left: this.deps.config.voice.speech.max_replies } : null;
+      if (interaction.speak?.fallbackTimer) clearTimeout(interaction.speak.fallbackTimer);
+      interaction.speak = extra.speakTo ? { to: extra.speakTo, at: this.now(), left: this.deps.config.voice.speech.max_replies, spoken: null, fallbackTimer: null, fallbackRan: false } : null;
+      if (extra.speakTo) {
+        this.voiceMessages.set(messageId, { surfaceId: surface.id, interactionId: interaction.id });
+        if (this.voiceMessages.size > 200) this.voiceMessages.delete(this.voiceMessages.keys().next().value as string);
+      }
       const ack = { type: 'ack', client_msg_id: clientMsgId, status: 'queued', message_id: messageId, interaction_id: interaction.id };
       putSend(this.deps.db, surface.id, clientMsgId, messageId, ack);
       void this.echo(surface, body, extra.echoIcon);

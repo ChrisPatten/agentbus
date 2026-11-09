@@ -2739,6 +2739,19 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       });
     }
     if (config.notifications?.enabled) registerNotificationRoutes(server, { config: config.notifications, service: deps.intercom });
+    // E102 — the agent's `speak` tool. Behind the shared bus token like the other agent routes.
+    {
+      const intercomService = deps.intercom;
+      server.post('/api/v1/speak', async (req, reply) => {
+        const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, unknown>;
+        const messageId = typeof body['message_id'] === 'string' ? body['message_id'].trim() : '';
+        const text = typeof body['text'] === 'string' ? body['text'] : '';
+        if (!messageId || !text.trim()) return reply.code(400).send({ ok: false, error: 'message_id and text are required' });
+        const result = intercomService.speakFor(messageId, text);
+        if (!result.ok) return reply.code(400).send(result);
+        return reply.send(result);
+      });
+    }
   }
 
   return server;

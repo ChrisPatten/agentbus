@@ -63,6 +63,10 @@ adapters:
 | `voice.speech.reply_window_s` | `300` | Later replies are not spoken |
 | `voice.speech.quiet_hours` | `{enabled: true, start: "22:00", end: "07:00"}` | Never speak in this window |
 | `voice.speech.timezone` | `America/New_York` | Zone for `quiet_hours` |
+| `voice.speech.speak_max_chars` | `400` | Longest text the agent's `speak` tool may say (audio tags do not count) |
+| `voice.speech.fallback` | `true` | Speak the reply's glance or short body when the agent never called `speak` (see [SURFACE_API.md](SURFACE_API.md#the-speak-tool-e102)) |
+| `voice.speech.fallback_grace_s` | `3` | Seconds after the first reply to wait for a `speak` call before the fallback speaks (0: at once) |
+| `voice.speech.style_file` | `""` (off) | Markdown voice style guide, read fresh from disk and injected once per agent session on a push-to-talk message (and again when its content changes) |
 | `surfaces[].speech` | `true` | `false` turns spoken replies off for that surface |
 | `voice.openai.api_key_env` | `OPENAI_API_KEY` | Env var holding the OpenAI key |
 | `voice.openai.model` | `gpt-4o-mini-transcribe` | Transcription model (`whisper-1` also works) |

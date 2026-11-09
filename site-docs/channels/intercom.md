@@ -100,11 +100,16 @@ Recordings stay in memory only and are thrown away once transcribed.
 
 With an ElevenLabs key (`ELEVENLABS_API_KEY` in the bus's `.env`), the bus uses ElevenLabs for both directions: it transcribes what you say, and when you spoke a message, it speaks your agent's short answer back on the screen you spoke into. Only short answers are spoken, or the one-line summary of a long one; typed messages and notifications are never spoken, and nothing is spoken between 10 PM and 7 AM. Turn the screen's volume to zero to keep it silent.
 
+Your agent can also choose its own words: when a message came in by voice, it has a `speak` tool that says a short answer (up to about 400 characters, with ElevenLabs tags such as `[warmly]` if your speech model supports them) and shows the same words on the screen. It writes the spoken line into the chat as `🔊 …`, and anything longer goes in a normal reply, which is not spoken and does not replace what the screen shows. If the agent does not speak within about three seconds of replying, the bus speaks the reply's one-line summary instead. Set `voice.speech.style_file` to a Markdown file of guidance (tone, length, how to say numbers) and the agent is given it once per session.
+
 | Option | Default | What it does |
 |---|---|---|
 | `voice.elevenlabs.voice_id` | a calm American voice | Which ElevenLabs voice speaks |
 | `voice.elevenlabs.tts_model` | `eleven_flash_v2_5` | The speech model (fast) |
 | `voice.speech.enabled` | `true` | Speak answers to spoken messages |
+| `voice.speech.fallback` | `true` | Speak the short answer for your agent when it did not speak itself |
+| `voice.speech.fallback_grace_s` | `3` | How long to wait for your agent to speak before the bus does |
+| `voice.speech.style_file` | off | A Markdown file describing how your agent should sound; it is shown to the agent once per session when you speak to it, and again if you edit the file |
 | `voice.speech.quiet_hours` | 22:00 to 07:00 | When nothing is spoken |
 | `surfaces[].speech` | `true` | `false` keeps one screen silent |
 

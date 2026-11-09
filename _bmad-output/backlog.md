@@ -4,6 +4,9 @@ Feature ideas and future work that hasn't been scoped into an epic yet. Promote 
 
 ## Ideas
 
+### Intercom: agent-authored speech (`speak` tool) and once-per-session voice style guide → E102 (2026-11-09)
+See `_bmad-output/epics/E102-intercom-speak-tool.md`. The agent chooses what the Compact says aloud for a push-to-talk message (`speak`), the bus's automatic speech becomes a fallback, and a style-guide file is injected once per agent session; built on `feat/intercom-speak-tool`.
+
 ### Surface Events as Moments: weight, consequence, changed, action kind, lifecycle → E100 (2026-11-05)
 See `_bmad-output/epics/E100-moment-fields.md`. The bus accepts `weight` (level derived), urgent-only `consequence` and `changed`, and action `kind` (tap or hold), and owns an Event `state` (open, answered, expired, withdrawn, cleared) with ended Events kept as tombstones for the Earlier tray; built on `feat/e100-moment-fields`. Follows the E101 server follow-ons.
 

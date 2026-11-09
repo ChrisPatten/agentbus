@@ -20,7 +20,7 @@ import { VERSION } from '../version.js';
 const TOKEN = 't'.repeat(48);
 const cfg = IntercomAdapterSchema.parse({
   hello_timeout_ms: 300, pair_rate_limit_per_min: 4,
-  voice: { speech: { quiet_hours: { enabled: false } } },
+  voice: { speech: { quiet_hours: { enabled: false }, fallback_grace_s: 0 } },
   surfaces: [
     { id: 'iphone-proto', token_env: 'T', follow: { contact: 'chris', channel: 'telegram:peggy' } },
     { id: 'other', token_env: 'T2', follow: { contact: 'chris', channel: 'telegram:peggy' } },

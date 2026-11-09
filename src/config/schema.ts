@@ -731,6 +731,14 @@ export const IntercomAdapterSchema = z.object({
         end: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).default('07:00'),
       }).prefault({}),
       timezone: z.string().min(1).default('America/New_York'),
+      /** E102: spoken text passed to the `speak` tool may be this long (ElevenLabs audio tags like `[warmly]` do not count). */
+      speak_max_chars: z.number().int().min(20).max(1000).default(400),
+      /** E102: speak the reply's glance or short body automatically when the agent never called `speak` for a voice message. */
+      fallback: z.boolean().default(true),
+      /** E102: seconds after the first reply of a voice message to wait for a `speak` call before the fallback speaks. 0 = at once. */
+      fallback_grace_s: z.number().min(0).max(30).default(3),
+      /** E102: Markdown voice style guide, re-read from disk each time. Injected into an agent session once per (session, content hash) on its first voice message. Empty: off. */
+      style_file: z.string().default(''),
     }).prefault({}),
   }).prefault({}),
   surfaces: z.array(IntercomSurfaceSchema).default([]),

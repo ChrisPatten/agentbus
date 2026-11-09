@@ -234,6 +234,11 @@ function loadMigrations(): Migration[] {
       description: 'Surface API v2: surfaces, devices, revisioned resources, action jobs, answer-needed (E96)',
       sql: readFileSync(join(migrationsDir, '046_surface_api.sql'), 'utf-8'),
     },
+    {
+      version: 47,
+      description: 'voice_style_injections: once-per-session Intercom voice style guide (E102)',
+      sql: readFileSync(join(migrationsDir, '047_voice_style_injections.sql'), 'utf-8'),
+    },
   ];
 }
 

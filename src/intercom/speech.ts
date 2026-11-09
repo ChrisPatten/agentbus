@@ -88,6 +88,33 @@ export function speechText(body: string, glance: string, maxChars: number): stri
   return Array.from(text).length > maxChars ? truncateAtWord(text, maxChars) : text;
 }
 
+/** ElevenLabs audio tags: `[quickly]`, `[warmly]`, `[short pause]` (not a Markdown link, so not followed by `(`). */
+const AUDIO_TAG_RE = /\[[A-Za-z][A-Za-z' -]{0,40}\](?!\()/g;
+
+/** The text with ElevenLabs audio tags removed and spacing tidied: what is shown and recorded. */
+export function stripAudioTags(text: string): string {
+  return text.replace(AUDIO_TAG_RE, ' ').replace(/\s+([,.;:!?])/g, '$1').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * E102 — what an agent's `speak` call says. Markdown, links and emoji are dropped as for replies, but audio
+ * tags pass through to the synthesiser untouched. `visible` is the same text without the tags (the length
+ * cap counts it). Null `error` text: empty or longer than `maxChars`.
+ */
+export function agentSpeechText(text: string, maxChars: number): { tts: string; visible: string } | { error: 'empty' | 'too_long'; chars: number } {
+  const tts = stripMarkdown(text)
+    .replace(/https?:\/\/\S+/g, '')
+    .replace(/[\p{Extended_Pictographic}\u{FE0F}\u{200D}]/gu, '')
+    .replace(/^\s*•\s*/gm, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const visible = stripAudioTags(tts);
+  const chars = Array.from(visible).length;
+  if (!visible) return { error: 'empty', chars: 0 };
+  if (chars > maxChars) return { error: 'too_long', chars };
+  return { tts, visible };
+}
+
 /** Minutes since local midnight in `timeZone`. */
 function localMinutes(at: Date, timeZone: string): number {
   const parts = new Intl.DateTimeFormat('en-US', { timeZone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(at);

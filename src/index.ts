@@ -83,6 +83,7 @@ import { createBusAdvisoryTransport } from './advisories/transport.js';
 import { createTopicContextInject } from './pipeline/stages/topic-context-inject.js';
 import { createAdvisoryInject } from './pipeline/stages/advisory-inject.js';
 import { createPendingContextInject } from './pipeline/stages/pending-context-inject.js';
+import { createVoiceStyleInject } from './pipeline/stages/voice-style-inject.js';
 import { resolveJournalingSettings } from './journaling/config.js';
 import { reviewChains } from './journaling/advisories.js';
 import { JournalEngine } from './journaling/engine.js';
@@ -337,6 +338,8 @@ pipeline.use({ slot: 87, name: 'journal-hold',     stage: createJournalHoldNotic
 // agent lists in pending_context.channels) gets the pending-context block on
 // the envelope; the ack advances the watermark. (87 is taken by journal-hold.)
 pipeline.use({ slot: 88, name: 'pending-context-inject', stage: createPendingContextInject(db, config), critical: false });
+// E102 — the Intercom voice style guide, once per agent session on a push-to-talk message.
+pipeline.use({ slot: 89, name: 'voice-style-inject', stage: createVoiceStyleInject(db, config), critical: false });
 
 // ── Siri channel (E42) ───────────────────────────────────────────────────────
 // Registered before the HTTP server is built because the /api/v1/siri routes
