@@ -166,6 +166,12 @@ export interface ActionHandlerDeps {
   conversationAction?: (device: Device, conversationId: string, index: number, messageId: string | undefined, idempotencyKey: string) => Promise<ActionResult>;
   /** Approve/Deny on an `approval` Event whose id is `approval-<approvalId>`. */
   approvalAction?: (device: Device, approvalId: string, decision: 'approve' | 'deny', idempotencyKey: string) => Promise<ActionResult>;
+  /**
+   * An Event's button fired: called once the tap answers `done`, or `already_done` because its `once` job fired
+   * before. Not called for a replayed idempotency key, a slot button or a failed tap. A throw is logged, never
+   * changes the result. The Intercom service uses it for the commute "On my way" flag.
+   */
+  onEventFired?: (info: { surfaceId: string; eventId: string; actionId: string; label: string }) => void;
 }
 
 const ActionRequestSchema = z.object({
@@ -283,7 +289,15 @@ export function createActionHandler(deps: ActionHandlerDeps): ActionHandler {
       return store(device, key, job && isPast(job.expires_at, t) ? result(key, 'expired') : failed(key, 'not_found'));
     }
     if (isPast(job.expires_at, t) || isPast(event[kind === 'events' ? 'expires_at' : 'until'], t)) return store(device, key, result(key, 'expired'));
-    if (job.once && job.fire_count > 0) return store(device, key, result(key, 'already_done'));
+    /** Tell `onEventFired` about an Event tap that answered done or already_done. */
+    const fired = (res: ActionResult): ActionResult => {
+      if (kind === 'events' && deps.onEventFired && (res.status === 'done' || res.status === 'already_done')) {
+        try { deps.onEventFired({ surfaceId: device.surface_id, eventId, actionId: req.action_id, label: typeof action.label === 'string' ? action.label : '' }); }
+        catch (err) { log(`onEventFired for ${ref} failed: ${String(err)}`); }
+      }
+      return res;
+    };
+    if (job.once && job.fire_count > 0) return fired(store(device, key, result(key, 'already_done')));
 
     // confirm.draft: the job's stored draft and the one the device shows must agree, and the device must echo it.
     const shownDraft = typeof action.confirm?.draft === 'string' ? action.confirm.draft : null;
@@ -301,7 +315,7 @@ export function createActionHandler(deps: ActionHandlerDeps): ActionHandler {
     }
 
     const claimed = claim(device, key, job);
-    if (claimed !== 'claimed') return claimed;
+    if (claimed !== 'claimed') return fired(claimed);
 
     const messageId = randomUUID();
     const msg: InboundMessage = {
@@ -331,7 +345,7 @@ export function createActionHandler(deps: ActionHandlerDeps): ActionHandler {
     }
     putKey.run(device.surface_id, key, device.id, JSON.stringify(res), new Date(now()).toISOString());
     if (res.status === 'done' && kind === 'events') autoAnswer(device.surface_id, eventId, event);
-    return res;
+    return fired(res);
   }
 
   /**

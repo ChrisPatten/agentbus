@@ -14,6 +14,7 @@ import type { InboundMessage } from '../http/api.js';
 import { registerSurfaceServer } from '../http/surface-routes.js';
 import { registerSurfacePublishRoutes } from '../http/surface-publish-routes.js';
 import { createSurfaceRuntime, type SurfaceRuntime } from './runtime.js';
+import { localDay } from '../intercom/desk.js';
 import { setAnswerNeeded } from './flags.js';
 import { ChoiceStore } from '../choices/store.js';
 import { notifyInboundAccepted } from './inbound-hook.js';
@@ -95,6 +96,24 @@ describe('surface runtime', () => {
     expect(await (await send('POST', '/api/v1/surface/actions', tap, a.paired.credential)).json()).toMatchObject({ status: 'done' });
     expect(await (await send('POST', '/api/v1/surface/actions', tap, b.paired.credential)).json()).toMatchObject({ status: 'already_done' });
     expect(injected.map((m) => m.payload)).toEqual([{ type: 'text', body: 'Chris is at the school gate' }]);
+  });
+
+  it('a commute Event "Taking it" tap flags the train as on my way; "Later train" does not', async () => {
+    const a = await pairAndConnect('Kitchen');
+    const today = localDay(new Date(), config.adapters.intercom!.calendar.timezone).date;
+    const flags = () => db.prepare('SELECT date, train FROM intercom_on_my_way').all();
+    const publish = (train: string) => send('PUT', `/api/v1/surface-publish/desk/events/commute-pm-${today}-${train}`, {
+      agent_id: 'peggy', title: `Train ${train}`, level: 'urgent',
+      actions: [{ id: 'taking', label: 'Taking it', run: { body: '[tapped] Taking it' } }, { id: 'later', label: 'Later train', run: { body: '[tapped] Later train' } }],
+    });
+    expect((await publish('6029')).status).toBe(201);
+    expect((await publish('6031')).status).toBe(201);
+    const tap = (train: string, action: string, key: string) => send('POST', '/api/v1/surface/actions', { object: `events:commute-pm-${today}-${train}`, action_id: action, idempotency_key: key }, a.paired.credential);
+    expect(await (await tap('6031', 'later', 'l1')).json()).toMatchObject({ status: 'done' });
+    expect(flags()).toEqual([]);
+    expect(await (await tap('6029', 'taking', 't1')).json()).toMatchObject({ status: 'done' });
+    expect(flags()).toEqual([{ date: today, train: '6029' }]);
+    expect(injected.map((m) => (m.payload as { body: string }).body)).toEqual(['[tapped] Later train', '[tapped] Taking it']);
   });
 
   it('rejects an over-limit or unauthorised publish with a readable error', async () => {

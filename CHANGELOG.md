@@ -11,6 +11,7 @@ Versions are tracked via `package.json` and git tags (`vX.Y.Z`), created with
 ## [Unreleased]
 
 ### Fixed
+- **Intercom: "On my way" / "Taking it" on the commute train Event flags the train again.** The commute watcher now raises an urgent Surface v2 Event (`commute-am-<date>`, `commute-pm-<date>-<train>`) instead of an E89 notification, so the tap no longer reached the notification path that set the on-my-way flag and the desk never showed the train's live departure. The action handler now calls a new `onEventFired` hook when an Event button fires (`done`, or `already_done` for a one-shot button), and the Intercom service flags the train for action ids `omw` / `taking` (or those labels) on a commute Event dated today in the calendar timezone; "Later train", other Events and other days' Events do nothing. The notification path behaves as before; both share one function.
 - **`send_message` and the Telegram send tools reject a recipient that is not a `contact:` or `agent:` id.** A channel string such as `telegram:peggy:group:-100...` in `to` was queued but never picked up by the delivery worker (which dequeues `contact:` recipients only), so the row stayed `pending` while the tool reported success. The tool now returns an error naming the fix.
 
 ### Changed

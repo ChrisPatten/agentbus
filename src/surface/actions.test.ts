@@ -450,3 +450,47 @@ describe('ActionHandler: E100 lifecycle', () => {
     expect(approvalAction).not.toHaveBeenCalled();
   });
 });
+
+describe('ActionHandler: onEventFired', () => {
+  const setupFired = (over: Partial<NewJob> = {}, submitImpl?: (m: InboundMessage) => Promise<InboundResult | InboundAbort>) => {
+    const fired = vi.fn();
+    const s = setup({ onEventFired: fired }, submitImpl);
+    s.hub.setEvent(event('commute-am-2026-11-03', [{ id: 'omw', label: 'On my way' }]));
+    s.jobs.replaceForEvent(S, 'commute-am-2026-11-03', [job({ action_id: 'omw', ...over })], 'agent:peggy');
+    return { s, fired };
+  };
+  const tap = (key: string) => ({ object: 'events:commute-am-2026-11-03', action_id: 'omw', idempotency_key: key });
+
+  it('is told about a done fire with the event, action id and label', async () => {
+    const { s, fired } = setupFired();
+    expect((await s.handler.handle(device(), tap('k1'))).status).toBe('done');
+    expect(fired).toHaveBeenCalledExactlyOnceWith({ surfaceId: S, eventId: 'commute-am-2026-11-03', actionId: 'omw', label: 'On my way' });
+  });
+
+  it('is told about already_done from a once job tapped with a new key, not about a replayed key', async () => {
+    const { s, fired } = setupFired();
+    await s.handler.handle(device(), tap('k1'));
+    await s.handler.handle(device(), tap('k1'));                                // replay of the same key
+    expect(fired).toHaveBeenCalledTimes(1);
+    expect((await s.handler.handle(device({ id: 'dev-2' }), tap('k2'))).status).toBe('already_done');
+    expect(fired).toHaveBeenCalledTimes(2);
+  });
+
+  it('is not told about failed, expired or not-found taps', async () => {
+    const { s, fired } = setupFired({}, async () => ({ ok: true, queued: true, id: 'x', enqueued_count: 0 }));
+    expect(await s.handler.handle(device(), tap('k1'))).toMatchObject({ status: 'failed', reason: 'no_route' });
+    expect(await s.handler.handle(device(), { ...tap('k2'), action_id: 'later' })).toMatchObject({ status: 'failed', reason: 'not_found' });
+    s.hub.setEvent(event('commute-am-2026-11-03', [{ id: 'omw', label: 'On my way' }], { expires_at: new Date(T0 - 1).toISOString() }));
+    expect((await s.handler.handle(device(), tap('k3'))).status).toBe('expired');
+    expect(fired).not.toHaveBeenCalled();
+  });
+
+  it('a throwing callback is logged and does not change the result', async () => {
+    const log = vi.fn();
+    const s = setup({ onEventFired: () => { throw new Error('boom'); }, log });
+    s.hub.setEvent(event('pickup', [{ id: 'here', label: "I'm here" }]));
+    s.jobs.replaceForEvent(S, 'pickup', [job()], 'agent:peggy');
+    expect((await s.handler.handle(device(), req('k1'))).status).toBe('done');
+    expect(log).toHaveBeenCalledWith(expect.stringMatching(/onEventFired .* failed: Error: boom/));
+  });
+});

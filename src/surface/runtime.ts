@@ -88,6 +88,7 @@ export function createSurfaceRuntime(deps: SurfaceRuntimeDeps): SurfaceRuntime {
       syncApprovals();
       return { ...base, status: out.status, ...(out.reason ? { reason: out.reason } : {}) };
     },
+    onEventFired: (info) => service?.noteEventFired(info),
   });
   const certFingerprint = cfg.tls ? certFingerprintFile(cfg.tls.cert) : null;
   if (cfg.enabled && !certFingerprint) log(`warn: could not read the surface certificate ${cfg.tls?.cert}; pairing payloads carry no fingerprint`);

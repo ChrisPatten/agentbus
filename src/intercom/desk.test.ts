@@ -382,4 +382,46 @@ describe('on-my-way tap and live ETA through the service', () => {
     await service.handleNotificationAction(service.surfaces.get('s')!, { client_msg_id: 'p', id: n.id, index: 0 });
     expect(db.prepare('SELECT date, train FROM intercom_on_my_way').all()).toEqual([{ date: '2026-11-03', train: '6029' }]);
   });
+  describe('commute Event taps (Surface v2)', () => {
+    const flags = (db: Database.Database) => db.prepare('SELECT date, train FROM intercom_on_my_way ORDER BY train').all();
+    it('a morning Event "On my way" tap flags the day\'s AM train and the face shows its live ETA', async () => {
+      const { service, db } = build({ t: at('06:50').getTime() }, feed('07:09'));
+      service.noteEventFired({ eventId: 'commute-am-2026-11-03', actionId: 'omw', label: 'On my way' });
+      expect(flags(db)).toEqual([{ date: '2026-11-03', train: '6008' }]);
+      expect((await service.desk(at('07:05'))).departure).toMatchObject({ kind: 'train', on_my_way: true, delay_min: 8 });
+    });
+    it('an evening Event "Taking it" tap flags the train in the id', () => {
+      const { service, db } = build({ t: at('16:00').getTime() }, null);
+      service.noteEventFired({ eventId: 'commute-pm-2026-11-03-6029', actionId: 'taking', label: 'Taking it' });
+      expect(flags(db)).toEqual([{ date: '2026-11-03', train: '6029' }]);
+    });
+    it('matches on the action id or on the label', () => {
+      const { service, db } = build({ t: at('16:00').getTime() }, null);
+      service.noteEventFired({ eventId: 'commute-pm-2026-11-03-6031', actionId: 'taking', label: 'Yes' });
+      service.noteEventFired({ eventId: 'commute-pm-2026-11-03-6033', actionId: 'go', label: ' taking it ' });
+      expect(flags(db)).toEqual([{ date: '2026-11-03', train: '6031' }, { date: '2026-11-03', train: '6033' }]);
+    });
+    it('"Later train", a non-commute Event and another day\'s Event flag nothing', () => {
+      const { service, db } = build({ t: at('16:00').getTime() }, null);
+      service.noteEventFired({ eventId: 'commute-pm-2026-11-03-6029', actionId: 'later', label: 'Later train' });
+      service.noteEventFired({ eventId: 'pickup', actionId: 'omw', label: 'On my way' });
+      service.noteEventFired({ eventId: 'dentist-2026-11-03', actionId: 'taking', label: 'Taking it' });
+      service.noteEventFired({ eventId: 'commute-am', actionId: 'omw', label: 'On my way' });             // the notification key shape
+      service.noteEventFired({ eventId: 'commute-pm-2026-11-02-6029', actionId: 'taking', label: 'Taking it' });
+      service.noteEventFired({ eventId: 'commute-am-2026-11-04', actionId: 'omw', label: 'On my way' });
+      expect(flags(db)).toEqual([]);
+    });
+    it('uses the calendar timezone for "today": 11:30 PM Eastern is still Nov 3', () => {
+      const { service, db } = build({ t: at('23:30').getTime() }, null);                  // 04:30Z on Nov 4
+      service.noteEventFired({ eventId: 'commute-pm-2026-11-04-6029', actionId: 'taking', label: 'Taking it' });
+      expect(flags(db)).toEqual([]);
+      service.noteEventFired({ eventId: 'commute-pm-2026-11-03-6029', actionId: 'taking', label: 'Taking it' });
+      expect(flags(db)).toEqual([{ date: '2026-11-03', train: '6029' }]);
+    });
+    it('a morning Event on a day without an office-day AM train flags nothing', () => {
+      const { service, db } = build({ t: Date.parse('2026-11-07T07:00:00-05:00') }, null);  // Saturday
+      service.noteEventFired({ eventId: 'commute-am-2026-11-07', actionId: 'omw', label: 'On my way' });
+      expect(flags(db)).toEqual([]);
+    });
+  });
 });

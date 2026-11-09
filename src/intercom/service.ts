@@ -150,6 +150,9 @@ export const NOTIFY_GUIDANCE =
   'Use reply()/send_message for content. When background work started from an Intercom turn finishes, notify with level "info" (or "attention" if a decision is needed) and a key, and reply the result.';
 
 const WRITE_WINDOW_MS = 60_000;
+/** Commute alert buttons that mean "I'm catching this train" (labels on E89 notifications and Events; action ids on Events). */
+const ON_MY_WAY_LABEL_RE = /^(on my way|taking it)$/i;
+const ON_MY_WAY_ACTION_IDS = new Set(['omw', 'taking']);
 const DESK_CHECK_MS = 5_000;
 
 export class IntercomService {
@@ -434,17 +437,37 @@ export class IntercomService {
     return out;
   }
 
-  /** The Commute alert's "On my way" / "Taking it" tap: flag that train so the face shows its live ETA. */
+  /** The Commute notification's "On my way" / "Taking it" tap (E89 path): flag that train so the face shows its live ETA. */
   private noteOnMyWay(n: { key: string | null; source: string }, label: string): void {
-    if (!/^(on my way|taking it)$/i.test(label.trim()) || n.source.toLowerCase() !== 'commute') return;
+    if (!ON_MY_WAY_LABEL_RE.test(label.trim()) || n.source.toLowerCase() !== 'commute') return;
     const m = /^commute-(?:am|pm-(\d+))$/.exec(n.key ?? '');
     if (!m) return;
+    this.noteOnMyWayTrain(m[1] ?? null);
+  }
+
+  /**
+   * The commute watcher's urgent Event (Surface v2) fired a button: `commute-am-<date>` with `omw`, or
+   * `commute-pm-<date>-<train>` with `taking` (or the "On my way" / "Taking it" label). Flags the train like
+   * the notification tap. A tap on another day's Event (local date in the calendar timezone) is ignored.
+   */
+  noteEventFired(info: { eventId: string; actionId: string; label: string }): void {
+    if (!ON_MY_WAY_ACTION_IDS.has(info.actionId) && !ON_MY_WAY_LABEL_RE.test(info.label.trim())) return;
+    const m = /^commute-(?:am-(\d{4}-\d{2}-\d{2})|pm-(\d{4}-\d{2}-\d{2})-(\d+))$/.exec(info.eventId);
+    if (!m) return;
+    const date = m[1] ?? m[2];
+    const today = localDay(new Date(this.now()), this.deps.config.calendar.timezone).date;
+    if (date !== today) { this.log(`intercom: on my way ignored for event ${info.eventId} (not today, ${today})`); return; }
+    this.noteOnMyWayTrain(m[3] ?? null);
+  }
+
+  /** Flag `train` (null = today's office-day AM train) as on my way for today, then push the desk. */
+  private noteOnMyWayTrain(train: string | null): void {
     const now = new Date(this.now());
     const tz = this.deps.config.calendar.timezone;
-    const train = m[1] ?? (this.commute ? officeDay(this.commute, this.plan.get(), now)?.am : null);
-    if (!train) return;
-    this.onMyWay.set(localDay(now, tz).date, train, now.getTime());
-    this.log(`intercom: on my way flagged for train ${train}`);
+    const number = train ?? (this.commute ? officeDay(this.commute, this.plan.get(), now)?.am : null);
+    if (!number) return;
+    this.onMyWay.set(localDay(now, tz).date, number, now.getTime());
+    this.log(`intercom: on my way flagged for train ${number}`);
     void this.pushDesk();
   }
 
