@@ -149,12 +149,13 @@ export async function registerIntercomRoutes(server: FastifyInstance, deps: Inte
   service.start();
 }
 
-type WsSocket = SocketLike & { on: (e: string, l: (...a: any[]) => void) => void };
+type WsSocket = SocketLike & { on: (e: string, l: (...a: any[]) => void) => void; send(data: string | Buffer, opts?: { binary?: boolean }): void };
 
 /**
  * The WebSocket handler behind `/api/v1/intercom/ws` (v1 alias) and `/api/v1/surface/ws` (E96).
  * Protocol v1 frames work on both; `hello.protocol: 2` adds `delta`, `action` and `view`.
- * Push-to-talk (E92) works on both: `audio_start`, binary PCM frames, `audio_end` / `audio_cancel`.
+ * Push-to-talk (E92) works on both: `audio_start`, binary PCM frames, `audio_end` / `audio_cancel`; spoken replies
+ * come back as `speech_start`, binary PCM, `speech_end` / `speech_cancel`, and `speech_stop` ends one early.
  * One heartbeat per server.
  */
 export function surfaceSocketHandler(server: FastifyInstance, service: IntercomService, config: IntercomAdapterConfig): (socket: WsSocket) => void {
@@ -184,7 +185,15 @@ export function surfaceSocketHandler(server: FastifyInstance, service: IntercomS
     let voice: VoiceSocket | null = null;
     const helloTimer = setTimeout(() => { if (!client) socket.close(4401, 'hello timeout'); }, config.hello_timeout_ms);
     const send = (frame: Record<string, unknown>) => { try { if (socket.readyState === 1) socket.send(JSON.stringify(frame)); } catch { /* closing */ } };
-    socket.on('close', () => { clearTimeout(helloTimer); if (voice) service.voice.detach(voice); if (client) { service.detach(client); sockets.delete(client); } });
+    const sendBinary = (data: Buffer): boolean => {
+      if (socket.readyState !== 1) return false;
+      try { socket.send(data, { binary: true }); return true; } catch { return false; }
+    };
+    socket.on('close', () => {
+      clearTimeout(helloTimer);
+      if (voice) { voice.closed = true; service.voice.detach(voice); service.speaker.cancel(voice.id, 'closed'); }
+      if (client) { service.detach(client); sockets.delete(client); }
+    });
     socket.on('error', () => { /* the close handler cleans up */ });
     socket.on('pong', () => { if (client) client.lastPong = Date.now(); });
     socket.on('message', (data: Buffer, isBinary?: boolean) => { void (async () => {
@@ -207,7 +216,7 @@ export function surfaceSocketHandler(server: FastifyInstance, service: IntercomS
           ...(auth.device ? { device: auth.device } : {}), protocol: hello.data.protocol ?? 1,
         };
         sockets.add(client);
-        voice = { id: randomUUID(), surface: auth.surface, send };
+        voice = { id: randomUUID(), surface: auth.surface, send, sendBinary };
         await service.attach(client, hello.data.cursor, hello.data.client, hello.data.revs as Partial<Record<ResourceName, number>> | undefined);
         return;
       }
@@ -231,10 +240,20 @@ export function surfaceSocketHandler(server: FastifyInstance, service: IntercomS
         send(await service.handleNotificationAction(client.surface, frame));
         return;
       }
-      if (frame['type'] === 'state') { service.setSurfaceState(client.surface, frame, client); return; }
+      if (frame['type'] === 'state') {
+        if (voice) {
+          // Spoken replies: `volume: 0` or `speech: false` mutes this device; `quiet: true` (asleep) holds them too.
+          if (typeof frame['volume'] === 'number' || typeof frame['speech'] === 'boolean') voice.muted = frame['volume'] === 0 || frame['speech'] === false;
+          voice.asleep = frame['quiet'] === true;
+          if (voice.muted || voice.asleep) service.speaker.cancel(voice.id, voice.muted ? 'muted' : 'asleep');
+        }
+        service.setSurfaceState(client.surface, frame, client);
+        return;
+      }
+      if (frame['type'] === 'speech_stop') { if (voice) service.speaker.cancel(voice.id, 'stopped'); return; }
       if (frame['type'] === 'audio_start' || frame['type'] === 'audio_end' || frame['type'] === 'audio_cancel') {
         if (readOnly) { send({ type: 'error', code: 'read_only' }); return; }
-        if (frame['type'] === 'audio_start') { const err = service.voice.start(voice!, frame); if (err) send(err); }
+        if (frame['type'] === 'audio_start') { service.speaker.cancel(voice!.id, 'listening'); const err = service.voice.start(voice!, frame); if (err) send(err); }
         else if (frame['type'] === 'audio_cancel') service.voice.cancel(voice!, frame);
         else await service.voice.end(voice!, frame);
         return;

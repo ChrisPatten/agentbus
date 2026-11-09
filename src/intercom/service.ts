@@ -35,6 +35,7 @@ import { OnMyWayStore } from './on-my-way.js';
 import type { LiveSource, LivePrediction } from './mbta.js';
 import { resolveGlance, surfaceBody } from './glance.js';
 import { createTranscriber, VoiceSessions, type Transcriber, type VoiceClient } from './voice.js';
+import { createSynthesizer, inQuietHours, Speaker, speechText, type Synthesizer } from './speech.js';
 import {
   acknowledgeNotification, attentionFor, expireDue, getNotification, isTerminal, openForSurface, publicNotification,
   sweepNotifications, targetsSurface, updateNotification, upsertNotification, listNotifications,
@@ -63,6 +64,8 @@ export interface Surface {
   tokenHash: string;
   /** E96 — bare agent ids allowed to publish to this surface. */
   publishers: string[];
+  /** Spoken replies allowed on this surface (`surfaces[].speech`); absent means allowed. */
+  speech?: boolean;
 }
 
 export interface Client {
@@ -100,6 +103,8 @@ interface Interaction {
   firstStatusLogged: boolean;
   firstReplyLogged: boolean;
   closeTimer: NodeJS.Timeout | null;
+  /** Spoken replies: the socket that sent this interaction's latest push-to-talk message. Null after a typed send. */
+  speak?: { to: VoiceSocket; at: number; left: number } | null;
 }
 
 interface SurfaceState {
@@ -135,10 +140,21 @@ export interface IntercomDeps {
   surfaceApi?: SurfaceApiDeps;
   /** E92 — the speech-to-text engine for push-to-talk. Absent: built from `config.voice` and the env; null: voice unavailable. */
   transcriber?: Transcriber | null;
+  /** Spoken replies — the text-to-speech engine. Absent: built from `config.voice` and the env; null: no speech. */
+  synthesizer?: Synthesizer | null;
 }
 
-/** E92 — a socket as push-to-talk sees it. */
-export interface VoiceSocket extends VoiceClient { surface: Surface }
+/** E92 — a socket as push-to-talk and spoken replies see it. */
+export interface VoiceSocket extends VoiceClient {
+  surface: Surface;
+  /** Raw PCM down the socket; false once it is closed. */
+  sendBinary(data: Buffer): boolean;
+  /** From the device's `state` frame: `volume: 0` or `speech: false`. */
+  muted?: boolean;
+  /** From the device's `state` frame: `quiet: true` (the Compact sends it while asleep). */
+  asleep?: boolean;
+  closed?: boolean;
+}
 
 export const normalizeTopic = (topic: string | undefined | null): string => (!topic || topic === 'general' ? 'general' : topic);
 const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
@@ -180,6 +196,8 @@ export class IntercomService {
   private readonly writeHits = new Map<string, number[]>();
   /** E92 — push-to-talk recordings per socket. */
   readonly voice: VoiceSessions<VoiceSocket>;
+  /** Spoken replies to push-to-talk messages. */
+  readonly speaker: Speaker;
 
   constructor(private readonly deps: IntercomDeps) {
     const env = deps.env ?? process.env;
@@ -190,8 +208,14 @@ export class IntercomService {
         noteLine: 'Spoken by push-to-talk: the text is a speech transcript and may contain recognition errors.',
         metadata: { input: 'voice', transcript_engine: engine },
         echoIcon: '🎙️',
+        speakTo: c,
       }),
       ...(deps.now ? { now: deps.now } : {}),
+      log: (l) => this.log(l),
+    });
+    this.speaker = new Speaker({
+      config: deps.config.voice.speech,
+      synth: deps.synthesizer !== undefined ? deps.synthesizer : createSynthesizer(deps.config.voice, env),
       log: (l) => this.log(l),
     });
     this.calendar = deps.calendar ?? new CalendarFeed(deps.config.calendar);
@@ -213,6 +237,7 @@ export class IntercomService {
         conversationId: computeConversationId(follow.contact, follow.channel, normalizeTopic(follow.topic)),
         tokenHash: tokenOk ? sha256(token) : '',
         publishers: s.publishers,
+        speech: s.speech,
       };
       this.surfaces.set(s.id, surface);
       if (surface.tokenHash) this.byTokenHash.set(surface.tokenHash, surface);
@@ -306,6 +331,7 @@ export class IntercomService {
     }
     this.sweepTimer = this.calendarTimer = this.deskTimer = null;
     this.voice.stop();
+    this.speaker.stop();
   }
 
   // ── Auth ─────────────────────────────────────────────────────────────────
@@ -800,21 +826,48 @@ export class IntercomService {
         const hasChoices = meta['choices'] !== undefined && meta['choices'] !== null;
         const moreOnTelegram = hasAttachments || !!tsend || hasChoices || cut;
         if (!i.firstReplyLogged) { i.firstReplyLogged = true; this.mark(s, i, 'first_reply'); }
+        const glance = resolveGlance(meta['glance'], body);
         this.emitDurable(s, 'reply', {
           message_id: envelope.id, interaction_id: i.id,
-          glance: resolveGlance(meta['glance'], body), body: text,
+          glance, body: text,
           has_attachments: hasAttachments, more_on_telegram: moreOnTelegram,
           created_at: new Date(this.now()).toISOString(),
         });
+        this.maybeSpeak(s, i, body, glance);
       }
     } catch (err) {
       this.log(`warn: onDelivered failed: ${String(err)}`);
     }
   }
 
+  /** Why a reply in this interaction would not be spoken, or null when it will be. */
+  speechBlocked(surface: Surface, i: Interaction): string | null {
+    const cfg = this.deps.config.voice.speech;
+    const sp = i.speak;
+    if (!sp) return 'not_voice';
+    if (!cfg.enabled || !this.speaker.available) return 'off';
+    if (surface.speech === false) return 'surface_off';
+    if (sp.left <= 0) return 'enough';
+    if (this.now() - sp.at > cfg.reply_window_s * 1000) return 'late';
+    if (sp.to.closed) return 'gone';
+    if (sp.to.muted) return 'muted';
+    if (sp.to.asleep) return 'asleep';
+    if (inQuietHours(cfg, new Date(this.now()))) return 'quiet_hours';
+    return null;
+  }
+
+  private maybeSpeak(surface: Surface, i: Interaction, body: string, glance: string): void {
+    const why = this.speechBlocked(surface, i);
+    if (why) { if (why !== 'not_voice') this.log(JSON.stringify({ evt: 'speech_skipped', surface_id: surface.id, interaction_id: i.id, why })); return; }
+    const text = speechText(body, glance, this.deps.config.voice.speech.max_chars);
+    if (!text) return;
+    i.speak!.left--;
+    void this.speaker.speak(i.speak!.to, text);
+  }
+
   // ── Surface send ─────────────────────────────────────────────────────────
 
-  async handleSend(surface: Surface, frame: { client_msg_id?: unknown; body?: unknown }, extra: { noteLine?: string; metadata?: Record<string, unknown>; echoIcon?: string } = {}): Promise<Record<string, unknown>> {
+  async handleSend(surface: Surface, frame: { client_msg_id?: unknown; body?: unknown }, extra: { noteLine?: string; metadata?: Record<string, unknown>; echoIcon?: string; speakTo?: VoiceSocket } = {}): Promise<Record<string, unknown>> {
     const clientMsgId = typeof frame.client_msg_id === 'string' ? frame.client_msg_id : '';
     if (!clientMsgId || clientMsgId.length > 100) return { type: 'error', code: 'invalid_frame' };
     const reject = (reason: string, messageId = ''): Record<string, unknown> => ({ type: 'ack', client_msg_id: clientMsgId, status: 'rejected', reason, ...(messageId ? { message_id: messageId } : {}) });
@@ -867,6 +920,8 @@ export class IntercomService {
       } else {
         this.setActivity(surface, { interaction_id: interaction.id });
       }
+      // Spoken replies follow a push-to-talk message only; a typed send in the same window turns them off.
+      interaction.speak = extra.speakTo ? { to: extra.speakTo, at: this.now(), left: this.deps.config.voice.speech.max_replies } : null;
       const ack = { type: 'ack', client_msg_id: clientMsgId, status: 'queued', message_id: messageId, interaction_id: interaction.id };
       putSend(this.deps.db, surface.id, clientMsgId, messageId, ack);
       void this.echo(surface, body, extra.echoIcon);

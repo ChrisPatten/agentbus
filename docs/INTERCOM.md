@@ -46,7 +46,24 @@ adapters:
 | `calendar.calctl_path` | `calctl` | Binary to run |
 | `calendar.timezone` | `America/New_York` | Zone for "today" and the event offsets |
 | `voice.enabled` | `true` | Accept push-to-talk audio (`audio_start`, binary PCM, `audio_end`; see [SURFACE_API.md](SURFACE_API.md#push-to-talk-audio-e92)) |
-| `voice.engine` | `auto` | `openai`, `command`, or `auto` (OpenAI when its key is set, else the command, else voice answers `unavailable`) |
+| `voice.engine` | `auto` | `elevenlabs`, `openai`, `command`, or `auto` (ElevenLabs when its key is set, else OpenAI, else the command, else voice answers `unavailable`) |
+| `voice.elevenlabs.api_key_env` | `ELEVENLABS_API_KEY` | Env var holding the ElevenLabs key (speech-to-text and spoken replies) |
+| `voice.elevenlabs.base_url` | `https://api.elevenlabs.io` | API base |
+| `voice.elevenlabs.stt_model` | `scribe_v2` | Scribe model for push-to-talk |
+| `voice.elevenlabs.keyterms` | `[]` | Words to bias recognition towards (names, places), at most 100 |
+| `voice.elevenlabs.tts_model` | `eleven_flash_v2_5` | Text-to-speech model for spoken replies |
+| `voice.elevenlabs.voice_id` | `XrExE9yKIg1WjnnlVkGX` | The voice that speaks replies |
+| `voice.elevenlabs.output_format` | `pcm_16000` | `pcm_16000`, `pcm_22050` or `pcm_24000` |
+| `voice.elevenlabs.stability`, `similarity_boost`, `style`, `speed` | voice's own | Optional per-request voice settings |
+| `voice.speech.enabled` | `true` | Speak replies to push-to-talk messages (see [SURFACE_API.md](SURFACE_API.md#spoken-replies)) |
+| `voice.speech.max_chars` | `160` | A plain-text reply up to this is spoken whole; longer ones as their glance |
+| `voice.speech.max_seconds` | `20` | Longest utterance sent |
+| `voice.speech.timeout_ms` | `15000` | Longest an utterance may take |
+| `voice.speech.max_replies` | `2` | Replies spoken per push-to-talk message |
+| `voice.speech.reply_window_s` | `300` | Later replies are not spoken |
+| `voice.speech.quiet_hours` | `{enabled: true, start: "22:00", end: "07:00"}` | Never speak in this window |
+| `voice.speech.timezone` | `America/New_York` | Zone for `quiet_hours` |
+| `surfaces[].speech` | `true` | `false` turns spoken replies off for that surface |
 | `voice.openai.api_key_env` | `OPENAI_API_KEY` | Env var holding the OpenAI key |
 | `voice.openai.model` | `gpt-4o-mini-transcribe` | Transcription model (`whisper-1` also works) |
 | `voice.openai.base_url` | `https://api.openai.com/v1` | API base; any server with an OpenAI-compatible `/audio/transcriptions` works |

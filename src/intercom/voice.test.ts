@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { IntercomAdapterSchema } from '../config/schema.js';
-import { cleanTranscript, createTranscriber, CommandTranscriber, OpenAiTranscriber, pcmPeak, pcmToWav, VoiceSessions, type Transcriber, type VoiceClient } from './voice.js';
+import { cleanTranscript, createTranscriber, CommandTranscriber, ElevenLabsTranscriber, OpenAiTranscriber, pcmPeak, pcmToWav, VoiceSessions, type Transcriber, type VoiceClient } from './voice.js';
 
 const voiceCfg = (over: Record<string, unknown> = {}) => IntercomAdapterSchema.parse({ voice: { partial_interval_ms: 0, ...over } }).voice;
 
@@ -49,6 +49,39 @@ describe('pcm helpers', () => {
 });
 
 describe('createTranscriber', () => {
+  it('prefers ElevenLabs, then OpenAI, then the command', () => {
+    expect(createTranscriber(voiceCfg(), { ELEVENLABS_API_KEY: 'x', OPENAI_API_KEY: 'k' })?.name).toBe('elevenlabs:scribe_v2');
+    expect(createTranscriber(voiceCfg({ engine: 'openai' }), { ELEVENLABS_API_KEY: 'x', OPENAI_API_KEY: 'k' })?.name).toBe('openai:gpt-4o-mini-transcribe');
+    expect(createTranscriber(voiceCfg({ engine: 'elevenlabs' }), { OPENAI_API_KEY: 'k' })).toBeNull();
+  });
+
+  it('sends 16 kHz audio to Scribe as raw PCM and returns its text', async () => {
+    const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const form = init!.body as FormData;
+      expect(form.get('model_id')).toBe('scribe_v2');
+      expect(form.get('file_format')).toBe('pcm_s16le_16');
+      expect(form.get('language_code')).toBe('en');
+      expect(form.getAll('keyterms')).toEqual(['Peggy', 'Mansfield']);
+      expect((form.get('file') as Blob).size).toBe(640);
+      return new Response(JSON.stringify({ text: 'book the aloft', language_code: 'en', words: [] }), { status: 200 });
+    });
+    const t = new ElevenLabsTranscriber({ apiKey: 'x', model: 'scribe_v2', baseUrl: 'https://xi.test/', keyterms: ['Peggy', 'Mansfield'], fetchImpl: fetchImpl as unknown as typeof fetch });
+    expect(await t.transcribe(pcmToWav(Buffer.alloc(640), 16000), { language: 'en', signal: new AbortController().signal })).toBe('book the aloft');
+    expect(String(fetchImpl.mock.calls[0]![0])).toBe('https://xi.test/v1/speech-to-text');
+    expect((fetchImpl.mock.calls[0]![1]!.headers as Record<string, string>)['xi-api-key']).toBe('x');
+  });
+
+  it('sends other rates to Scribe as the WAV file', async () => {
+    const fetchImpl = vi.fn(async (_u: string | URL | Request, init?: RequestInit) => {
+      const form = init!.body as FormData;
+      expect(form.get('file_format')).toBeNull();
+      expect((form.get('file') as Blob).size).toBe(44 + 480);
+      return new Response(JSON.stringify({ text: 'ok' }), { status: 200 });
+    });
+    const t = new ElevenLabsTranscriber({ apiKey: 'x', model: 'scribe_v2', baseUrl: 'https://xi.test', fetchImpl: fetchImpl as unknown as typeof fetch });
+    expect(await t.transcribe(pcmToWav(Buffer.alloc(480), 24000), { language: '', signal: new AbortController().signal })).toBe('ok');
+  });
+
   it('prefers OpenAI when its key is set, else the command, else nothing', () => {
     expect(createTranscriber(voiceCfg(), { OPENAI_API_KEY: 'k' })?.name).toBe('openai:gpt-4o-mini-transcribe');
     expect(createTranscriber(voiceCfg({ command: { argv: ['whisper-x', '{wav}'] } }), {})?.name).toBe('command:whisper-x');

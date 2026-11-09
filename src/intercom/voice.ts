@@ -11,8 +11,9 @@
  * followed conversation exactly like a typed `send` with the same `client_msg_id`, so the usual `ack`
  * follows and the agent's answer arrives as `reply` / `conversation_append` events.
  *
- * Engines: the OpenAI transcription API (`gpt-4o-mini-transcribe` by default, about 1.5 s for a short
- * clip) or any local command that prints a transcript for a WAV file. Audio is held in memory only and
+ * Engines: ElevenLabs Scribe (`scribe_v2`, raw 16 kHz PCM), the OpenAI transcription API
+ * (`gpt-4o-mini-transcribe`, kept as a fallback until OpenAI retires it on 2027-02-26) or any local command
+ * that prints a transcript for a WAV file. Audio is held in memory only and
  * dropped once transcribed. See docs/SURFACE_API.md "Push-to-talk audio".
  */
 import { execFile } from 'node:child_process';
@@ -81,6 +82,34 @@ export class OpenAiTranscriber implements Transcriber {
   }
 }
 
+/**
+ * ElevenLabs Scribe (`POST /v1/speech-to-text`). 16 kHz recordings go as raw PCM (`file_format:
+ * pcm_s16le_16`, the low-latency path); other rates as the WAV file.
+ */
+export class ElevenLabsTranscriber implements Transcriber {
+  readonly name: string;
+  constructor(private readonly opts: { apiKey: string; model: string; baseUrl: string; keyterms?: string[]; fetchImpl?: typeof fetch }) {
+    this.name = `elevenlabs:${opts.model}`;
+  }
+  async transcribe(wav: Buffer, { language, signal }: { language: string; signal: AbortSignal }): Promise<string> {
+    const form = new FormData();
+    const raw = wav.length >= 44 && wav.toString('ascii', 0, 4) === 'RIFF' && wav.readUInt32LE(24) === 16000 && wav.readUInt16LE(22) === 1;
+    const bytes = raw ? wav.subarray(44) : wav;
+    form.append('model_id', this.opts.model);
+    form.append('file', new Blob([new Uint8Array(bytes)], { type: raw ? 'application/octet-stream' : 'audio/wav' }), raw ? 'ptt.pcm' : 'ptt.wav');
+    if (raw) form.append('file_format', 'pcm_s16le_16');
+    if (language) form.append('language_code', language);
+    form.append('tag_audio_events', 'false');
+    for (const k of this.opts.keyterms ?? []) form.append('keyterms', k);
+    const res = await (this.opts.fetchImpl ?? fetch)(`${this.opts.baseUrl.replace(/\/+$/, '')}/v1/speech-to-text`, {
+      method: 'POST', headers: { 'xi-api-key': this.opts.apiKey }, body: form, signal,
+    });
+    if (!res.ok) throw new Error(`transcription HTTP ${res.status}`);
+    const j = await res.json() as { text?: unknown };
+    return typeof j.text === 'string' ? j.text : '';
+  }
+}
+
 /** A local engine: `argv` with `{wav}` and `{lang}` substituted, run without a shell; stdout is the transcript. */
 export class CommandTranscriber implements Transcriber {
   readonly name: string;
@@ -106,10 +135,14 @@ export class CommandTranscriber implements Transcriber {
 export function createTranscriber(cfg: VoiceConfig, env: NodeJS.ProcessEnv): Transcriber | null {
   if (!cfg.enabled) return null;
   const key = env[cfg.openai.api_key_env];
+  const xi = env[cfg.elevenlabs.api_key_env];
+  const eleven = () => new ElevenLabsTranscriber({ apiKey: xi!, model: cfg.elevenlabs.stt_model, baseUrl: cfg.elevenlabs.base_url, keyterms: cfg.elevenlabs.keyterms });
   const openai = () => new OpenAiTranscriber({ apiKey: key!, model: cfg.openai.model, baseUrl: cfg.openai.base_url, ...(cfg.openai.prompt ? { prompt: cfg.openai.prompt } : {}) });
   const command = () => new CommandTranscriber(cfg.command.argv!);
+  if (cfg.engine === 'elevenlabs') return xi ? eleven() : null;
   if (cfg.engine === 'openai') return key ? openai() : null;
   if (cfg.engine === 'command') return cfg.command.argv ? command() : null;
+  if (xi) return eleven();
   if (key) return openai();
   return cfg.command.argv ? command() : null;
 }

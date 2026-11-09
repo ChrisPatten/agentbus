@@ -407,6 +407,25 @@ Inbound messages are appended after the pipeline accepts them (including surface
 - Push-to-talk audio frames: see [Push-to-talk audio](#push-to-talk-audio-e92).
 - The `welcome` (and `GET /health`) `follow` object carries `conversation_id`, the followed conversation's id, so a device can open its thread (`GET /conversations/:id`, `view`) without computing the hash itself.
 
+### Spoken replies
+
+When an interaction's latest surface message came from push-to-talk, the agent's replies in that interaction are spoken on the socket that sent it. Source: `src/intercom/speech.ts`.
+
+| Frame | Direction | Meaning |
+|---|---|---|
+| `{"type":"speech_start","id","rate","format":"pcm_s16le","chars"}` | bus → device | An utterance begins. `rate` is the PCM sample rate (16000 by default), `chars` the length of the spoken text. A new `speech_start` replaces whatever was playing |
+| binary frames | bus → device | 16-bit little-endian mono PCM, 3,200 bytes each (the last may be shorter, always whole samples) |
+| `{"type":"speech_end","id","ms","truncated?"}` | bus → device | All audio sent; `ms` of it. `truncated: true` when `voice.speech.max_seconds` cut it |
+| `{"type":"speech_cancel","id","reason"}` | bus → device | Stopped early: `tts_error`, `timeout`, `replaced`, `listening` (an `audio_start` from this socket), `stopped`, `muted` or `asleep`. A cancel for an id that is no longer playing is to be ignored |
+| `{"type":"speech_stop"}` | device → bus | The device stopped playing (PWR, a new press): the bus stops sending |
+| `state` frame `volume` (0-100) or `speech` (bool) | device → bus | `volume: 0` or `speech: false` mutes the device: nothing is synthesised or sent. `quiet: true` (the Compact sends it while asleep) holds speech too |
+
+- **What is spoken:** the reply body when, as plain text (Markdown, links, emoji and list markers removed), it is at most `voice.speech.max_chars` (160); otherwise its glance line. Never a long body.
+- **When:** only replies delivered in the interaction window to the socket whose push-to-talk message started or last refreshed it, at most `voice.speech.max_replies` (2) per message and within `voice.speech.reply_window_s` (300). A typed `send` in the same window turns it off; notifications, Events and typed messages are never spoken. Never in `voice.speech.quiet_hours` (default 22:00-07:00 in `voice.speech.timezone`), never on a surface with `speech: false`, never to a muted or sleeping device.
+- **Bounds:** at most `voice.speech.max_seconds` (20) of audio and `voice.speech.timeout_ms` (15 s) per utterance; one at a time per socket.
+- **Engine:** ElevenLabs streaming text-to-speech, `POST <base_url>/v1/text-to-speech/<voice_id>/stream?output_format=pcm_16000`, model `voice.elevenlabs.tts_model` (`eleven_flash_v2_5`). Without `ELEVENLABS_API_KEY` nothing is spoken. 16 kHz is the default because the Compact's speaker shares its I2S clock with the microphones.
+- **Log:** `[intercom] {"evt":"speech","id","chars","audio_ms","ms","end"}` per utterance and `{"evt":"speech_skipped",...,"why"}` when a voice interaction's reply is not spoken (`off`, `surface_off`, `enough`, `late`, `gone`, `muted`, `asleep`, `quiet_hours`).
+
 ### Push-to-talk audio (E92)
 
 A surface (the Compact while BOOT is held) streams its microphone over the same socket; the bus transcribes it and sends the text into the followed conversation exactly as a typed `send` with the same `client_msg_id`. Works on protocol v1 and v2. Source: `src/intercom/voice.ts`.
@@ -424,7 +443,7 @@ A surface (the Compact while BOOT is held) streams its microphone over the same 
 - A `read_only` device gets `error` / `read_only` for the three frames.
 - **Bounds.** Audio past `voice.max_seconds` (60) is dropped; the recording is still transcribed. Audio lives in memory only and is gone once transcribed or dropped; nothing is written to disk except the command engine's temporary WAV, removed after the run. A socket that closes drops its recording, and a transcription still running for it is discarded.
 - **Latency mark.** `[intercom] {"evt":"latency","mark":"transcript_final","client_msg_id","ms","audio_ms","chars"}`, `ms` from `audio_end` to the final transcript.
-- **Engines** (`adapters.intercom.voice`, see [INTERCOM.md](INTERCOM.md#configure-the-bus)): `openai` posts a WAV to `<base_url>/audio/transcriptions` (default model `gpt-4o-mini-transcribe`, about 1.5 s for a short clip) with the key from the env var `voice.openai.api_key_env` (`OPENAI_API_KEY`); `command` runs `voice.command.argv` without a shell (`{wav}` is the path of a temporary 16-bit mono WAV, `{lang}` the language) and reads the transcript from stdout. `auto` (default) uses OpenAI when the key is set, else the command when one is configured, else voice answers `unavailable`. E92's resident local engine (S92.2) and its latency target (S92.3) are not built; a cold `whisper` CLI run takes about 35 s on bobafett, so the command engine suits only a warm local server.
+- **Engines** (`adapters.intercom.voice`, see [INTERCOM.md](INTERCOM.md#configure-the-bus)): `elevenlabs` posts to ElevenLabs Scribe, `<base_url>/v1/speech-to-text` (default model `scribe_v2`, key from `voice.elevenlabs.api_key_env`, `ELEVENLABS_API_KEY`), sending 16 kHz recordings as raw PCM (`file_format: pcm_s16le_16`) with `language_code` and any `keyterms`; `openai` posts a WAV to `<base_url>/audio/transcriptions` (default model `gpt-4o-mini-transcribe`, about 1.5 s for a short clip) with the key from the env var `voice.openai.api_key_env` (`OPENAI_API_KEY`); `command` runs `voice.command.argv` without a shell (`{wav}` is the path of a temporary 16-bit mono WAV, `{lang}` the language) and reads the transcript from stdout. `auto` (default) uses ElevenLabs when its key is set, else OpenAI, else the command, else voice answers `unavailable`. OpenAI retires `gpt-4o-mini-transcribe` on 2027-02-26; it stays only as a fallback until then. E92's resident local engine (S92.2) and its latency target (S92.3) are not built; a cold `whisper` CLI run takes about 35 s on bobafett, so the command engine suits only a warm local server.
 
 ## Actions and jobs
 

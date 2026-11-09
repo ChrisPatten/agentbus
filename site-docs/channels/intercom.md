@@ -98,6 +98,16 @@ adapters:
 
 Recordings stay in memory only and are thrown away once transcribed.
 
+With an ElevenLabs key (`ELEVENLABS_API_KEY` in the bus's `.env`), the bus uses ElevenLabs for both directions: it transcribes what you say, and when you spoke a message, it speaks your agent's short answer back on the screen you spoke into. Only short answers are spoken, or the one-line summary of a long one; typed messages and notifications are never spoken, and nothing is spoken between 10 PM and 7 AM. Turn the screen's volume to zero to keep it silent.
+
+| Option | Default | What it does |
+|---|---|---|
+| `voice.elevenlabs.voice_id` | a calm American voice | Which ElevenLabs voice speaks |
+| `voice.elevenlabs.tts_model` | `eleven_flash_v2_5` | The speech model (fast) |
+| `voice.speech.enabled` | `true` | Speak answers to spoken messages |
+| `voice.speech.quiet_hours` | 22:00 to 07:00 | When nothing is spoken |
+| `surfaces[].speech` | `true` | `false` keeps one screen silent |
+
 ## Troubleshooting
 
 | Problem | What to try |

@@ -604,6 +604,8 @@ export const IntercomSurfaceSchema = z.object({
   publishers: z.array(z.string().min(1)).default([]),
   /** E96 — paired (non-revoked) devices allowed at once. */
   max_devices: z.number().int().min(1).max(50).default(10),
+  /** Speak the agent's reply on the device after a push-to-talk message (`adapters.intercom.voice.speech`). False: never on this surface. */
+  speech: z.boolean().default(true),
 });
 export type IntercomSurfaceConfig = z.infer<typeof IntercomSurfaceSchema>;
 
@@ -658,8 +660,28 @@ export const IntercomAdapterSchema = z.object({
    */
   voice: z.object({
     enabled: z.boolean().default(true),
-    /** `auto`: OpenAI when its key env var is set, else `command` when `command.argv` is set, else voice is unavailable. */
-    engine: z.enum(['auto', 'openai', 'command']).default('auto'),
+    /** `auto`: ElevenLabs when its key env var is set, else OpenAI when its key is set, else `command` when `command.argv` is set, else voice is unavailable. */
+    engine: z.enum(['auto', 'elevenlabs', 'openai', 'command']).default('auto'),
+    /** ElevenLabs: Scribe speech-to-text, and the text-to-speech for spoken replies (`speech`). */
+    elevenlabs: z.object({
+      api_key_env: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/).default('ELEVENLABS_API_KEY'),
+      base_url: z.string().url().default('https://api.elevenlabs.io'),
+      /** Scribe model for `POST /v1/speech-to-text`. */
+      stt_model: z.string().min(1).default('scribe_v2'),
+      /** Words to bias recognition towards (names, places): sent as `keyterms`. */
+      keyterms: z.array(z.string().min(1).max(50)).max(100).default([]),
+      /** Text-to-speech model for spoken replies. */
+      tts_model: z.string().min(1).default('eleven_flash_v2_5'),
+      /** The voice that speaks replies. List the account's voices with GET /v2/voices. */
+      voice_id: z.string().regex(/^[A-Za-z0-9]{8,64}$/).default('XrExE9yKIg1WjnnlVkGX'),
+      /** Raw PCM sent to devices: 16 kHz matches the Compact's I2S clock (shared with its microphones). */
+      output_format: z.enum(['pcm_16000', 'pcm_22050', 'pcm_24000']).default('pcm_16000'),
+      /** Optional per-request voice settings; absent keeps the voice's stored ones. */
+      stability: z.number().min(0).max(1).optional(),
+      similarity_boost: z.number().min(0).max(1).optional(),
+      style: z.number().min(0).max(1).optional(),
+      speed: z.number().min(0.7).max(1.2).optional(),
+    }).prefault({}),
     openai: z.object({
       api_key_env: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/).default('OPENAI_API_KEY'),
       model: z.string().min(1).default('gpt-4o-mini-transcribe'),
@@ -685,6 +707,31 @@ export const IntercomAdapterSchema = z.object({
     timeout_ms: z.number().int().min(1000).max(300_000).default(20_000),
     /** A recording with no audio for this long is dropped (`failed` / `timeout`). */
     idle_timeout_ms: z.number().int().min(1000).max(120_000).default(15_000),
+    /**
+     * Spoken replies: after a push-to-talk message, the agent's reply is spoken on the device that sent it
+     * (ElevenLabs text-to-speech, streamed as raw PCM: `speech_start`, binary frames, `speech_end`). Never for
+     * typed messages or notifications, never in quiet hours, never to a device that reports volume 0.
+     */
+    speech: z.object({
+      enabled: z.boolean().default(true),
+      /** A plain-text reply this short is spoken whole; a longer one is spoken as its glance line. */
+      max_chars: z.number().int().min(20).max(400).default(160),
+      /** Audio past this length is not sent (the device gets `speech_end` with `truncated: true`). */
+      max_seconds: z.number().int().min(1).max(60).default(20),
+      /** One utterance may take this long from request to `speech_end`. */
+      timeout_ms: z.number().int().min(1000).max(60_000).default(15_000),
+      /** Replies spoken per push-to-talk message, at most. */
+      max_replies: z.number().int().min(1).max(5).default(2),
+      /** Replies arriving later than this after the push-to-talk message are not spoken. */
+      reply_window_s: z.number().int().min(10).max(3600).default(300),
+      /** Never speak between these local times (HH:MM, 24 h; start after end wraps midnight). */
+      quiet_hours: z.object({
+        enabled: z.boolean().default(true),
+        start: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).default('22:00'),
+        end: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).default('07:00'),
+      }).prefault({}),
+      timezone: z.string().min(1).default('America/New_York'),
+    }).prefault({}),
   }).prefault({}),
   surfaces: z.array(IntercomSurfaceSchema).default([]),
 }).superRefine((cfg, ctx) => {

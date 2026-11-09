@@ -20,6 +20,7 @@ import { VERSION } from '../version.js';
 const TOKEN = 't'.repeat(48);
 const cfg = IntercomAdapterSchema.parse({
   hello_timeout_ms: 300, pair_rate_limit_per_min: 4,
+  voice: { speech: { quiet_hours: { enabled: false } } },
   surfaces: [
     { id: 'iphone-proto', token_env: 'T', follow: { contact: 'chris', channel: 'telegram:peggy' } },
     { id: 'other', token_env: 'T2', follow: { contact: 'chris', channel: 'telegram:peggy' } },
@@ -44,6 +45,7 @@ describe('Intercom routes', () => {
     inbound = [];
     service = new IntercomService({ config: cfg, db, calendar, env: { T: TOKEN, T2: 'u'.repeat(40) }, log: () => {},
       transcriber: { name: 'fake', transcribe: async (wav) => (wav.length > 44 ? 'Turn on the porch light' : '') },
+      synthesizer: { name: 'fake-tts', rate: 16000, async *stream() { yield new Uint8Array(4000); yield new Uint8Array(2400); } },
       submitInbound: async (m) => { inbound.push({ body: m.payload.type === 'text' ? m.payload.body : '', metadata: m.metadata }); return { ok: true, id: 'x', queued: true, enqueued_count: 1 }; } });
     server = Fastify();
     await registerIntercomRoutes(server, { config: cfg, db, service, webRoot });
@@ -62,7 +64,7 @@ describe('Intercom routes', () => {
       const ws = new WebSocket(`${wsBase}/api/v1/intercom/ws`);
       sockets.push(ws);
       const frames: any[] = [];
-      ws.on('message', (d) => frames.push(JSON.parse(d.toString())));
+      ws.on('message', (d, isBinary) => { if (!isBinary) frames.push(JSON.parse(d.toString())); });
       const closed = new Promise<number>((r) => ws.on('close', (code) => r(code)));
       ws.on('open', () => resolve({ ws, frames, closed }));
       ws.on('error', reject);
@@ -236,6 +238,43 @@ describe('Intercom routes', () => {
       await until(() => frames.some((f) => f.type === 'transcript'));
       expect(frames.find((f) => f.type === 'transcript')).toMatchObject({ client_msg_id: 'v-2', status: 'failed', reason: 'no_recording' });
       expect(inbound).toEqual([]);
+    });
+    it('speaks the reply to a push-to-talk message on the device that sent it, and not to a typed one', async () => {
+      const { ws, frames } = await open();
+      const bins: number[] = [];
+      ws.on('message', (d, isBinary) => { if (isBinary) bins.push((d as Buffer).length); });
+      ws.send(JSON.stringify({ type: 'hello', token: TOKEN }));
+      await until(() => frames.some((f) => f.event === 'calendar'));
+      ws.send(JSON.stringify({ type: 'audio_start', client_msg_id: 'v-9' }));
+      ws.send(pcm(500), { binary: true });
+      ws.send(JSON.stringify({ type: 'audio_end', client_msg_id: 'v-9' }));
+      await until(() => frames.some((f) => f.type === 'ack'));
+      const agent = (body: string) => service.onDelivered({ id: `a-${body.length}`, timestamp: '', channel: 'telegram:peggy', topic: 'general', sender: 'agent:p', recipient: 'contact:chris', reply_to: null, priority: 'normal', payload: { type: 'text', body }, metadata: {} });
+      agent('**Done.** Porch light is on.');
+      await until(() => frames.some((f) => f.type === 'speech_end'));
+      expect(frames.find((f) => f.type === 'speech_start')).toMatchObject({ rate: 16000, format: 'pcm_s16le', chars: 24 });
+      expect(bins).toEqual([3200, 3200]);
+      // a typed send in the same window: its replies are not spoken
+      ws.send(JSON.stringify({ type: 'send', client_msg_id: 't-1', body: 'thanks' }));
+      await until(() => frames.filter((f) => f.type === 'ack').length === 2);
+      agent('You are welcome.');
+      await until(() => frames.filter((f) => f.event === 'reply').length === 2);
+      await new Promise((r) => setTimeout(r, 30));
+      expect(frames.filter((f) => f.type === 'speech_start').length).toBe(1);
+    });
+    it('does not speak to a device that reports volume 0', async () => {
+      const { ws, frames } = await open();
+      ws.send(JSON.stringify({ type: 'hello', token: TOKEN }));
+      await until(() => frames.some((f) => f.event === 'calendar'));
+      ws.send(JSON.stringify({ type: 'state', quiet: false, battery: 80, volume: 0 }));
+      ws.send(JSON.stringify({ type: 'audio_start', client_msg_id: 'v-10' }));
+      ws.send(pcm(500), { binary: true });
+      ws.send(JSON.stringify({ type: 'audio_end', client_msg_id: 'v-10' }));
+      await until(() => frames.some((f) => f.type === 'ack'));
+      service.onDelivered({ id: 'a-1', timestamp: '', channel: 'telegram:peggy', topic: 'general', sender: 'agent:p', recipient: 'contact:chris', reply_to: null, priority: 'normal', payload: { type: 'text', body: 'Done.' }, metadata: {} });
+      await until(() => frames.some((f) => f.event === 'reply'));
+      await new Promise((r) => setTimeout(r, 30));
+      expect(frames.some((f) => f.type === 'speech_start')).toBe(false);
     });
     it('closes a socket whose first frame is binary', async () => {
       const { ws, closed } = await open();
