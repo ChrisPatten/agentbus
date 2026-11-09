@@ -708,36 +708,25 @@ export const IntercomAdapterSchema = z.object({
     /** A recording with no audio for this long is dropped (`failed` / `timeout`). */
     idle_timeout_ms: z.number().int().min(1000).max(120_000).default(15_000),
     /**
-     * Spoken replies: after a push-to-talk message, the agent's reply is spoken on the device that sent it
-     * (ElevenLabs text-to-speech, streamed as raw PCM: `speech_start`, binary frames, `speech_end`). Never for
-     * typed messages or notifications, never in quiet hours, never to a device that reports volume 0.
+     * Speech (E92, E102). The agent speaks through the `speak` tool and is responsible for following the owner's
+     * voice style guide: the bus applies no policy limits (no length, count, window, quiet-hours or typed-send
+     * rules). It only declines for physical reasons: the device is asleep, its volume is 0, or it is not connected.
+     * Old keys `max_seconds`, `timeout_ms`, `max_replies`, `reply_window_s`, `quiet_hours`, `timezone` and
+     * `speak_max_chars` are accepted in a config file and ignored.
      */
     speech: z.object({
       enabled: z.boolean().default(true),
-      /** A plain-text reply this short is spoken whole; a longer one is spoken as its glance line. */
+      /** Fallback auto-speech only: a plain-text reply this short is spoken whole; a longer one is spoken as its glance line. */
       max_chars: z.number().int().min(20).max(400).default(160),
-      /** Audio past this length is not sent (the device gets `speech_end` with `truncated: true`). */
-      max_seconds: z.number().int().min(1).max(60).default(20),
-      /** One utterance may take this long from request to `speech_end`. */
-      timeout_ms: z.number().int().min(1000).max(60_000).default(15_000),
-      /** Replies spoken per push-to-talk message, at most. */
-      max_replies: z.number().int().min(1).max(5).default(2),
-      /** Replies arriving later than this after the push-to-talk message are not spoken. */
-      reply_window_s: z.number().int().min(10).max(3600).default(300),
-      /** Never speak between these local times (HH:MM, 24 h; start after end wraps midnight). */
-      quiet_hours: z.object({
-        enabled: z.boolean().default(true),
-        start: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).default('22:00'),
-        end: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).default('07:00'),
-      }).prefault({}),
-      timezone: z.string().min(1).default('America/New_York'),
-      /** E102: spoken text passed to the `speak` tool may be this long (ElevenLabs audio tags like `[warmly]` do not count). */
-      speak_max_chars: z.number().int().min(20).max(1000).default(400),
-      /** E102: speak the reply's glance or short body automatically when the agent never called `speak` for a voice message. */
-      fallback: z.boolean().default(true),
-      /** E102: seconds after the first reply of a voice message to wait for a `speak` call before the fallback speaks. 0 = at once. */
+      /** Technical, not a length cap: a text-to-speech stream that sends no bytes for this long is abandoned. */
+      stall_timeout_s: z.number().int().min(2).max(300).default(20),
+      /** Audio is sent at about real time, at most this many seconds ahead of playback (the device buffers about 32 s and drops the rest). */
+      lead_s: z.number().min(1).max(25).default(8),
+      /** Speak the reply's glance or short body when the agent never called `speak` for a voice message. Off by default. */
+      fallback: z.boolean().default(false),
+      /** Seconds after the first reply of a voice message to wait for a `speak` call before the fallback speaks. 0 = at once. */
       fallback_grace_s: z.number().min(0).max(30).default(3),
-      /** E102: Markdown voice style guide, re-read from disk each time. Injected into an agent session once per (session, content hash) on its first voice message. Empty: off. */
+      /** Markdown voice style guide, re-read from disk each time. Injected into an agent session once per (session, content hash) on its first voice message. Empty: off. */
       style_file: z.string().default(''),
     }).prefault({}),
   }).prefault({}),

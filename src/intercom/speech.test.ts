@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { IntercomAdapterSchema } from '../config/schema.js';
-import { createSynthesizer, ElevenLabsSynthesizer, inQuietHours, Speaker, SPEECH_FRAME_BYTES, speechText, type SpeechTarget, type Synthesizer } from './speech.js';
+import { createSynthesizer, ElevenLabsSynthesizer, Speaker, SPEECH_FRAME_BYTES, speechText, splitForTts, type SpeechTarget, type Synthesizer } from './speech.js';
 
 const voiceCfg = (over: Record<string, unknown> = {}) => IntercomAdapterSchema.parse({ voice: over }).voice;
 const speechCfg = (over: Record<string, unknown> = {}) => voiceCfg({ speech: over }).speech;
@@ -41,19 +41,15 @@ describe('speechText', () => {
   });
 });
 
-describe('inQuietHours', () => {
-  const at = (iso: string) => new Date(iso);
-  it('wraps midnight by default (22:00-07:00 New York)', () => {
-    const c = speechCfg();
-    expect(inQuietHours(c, at('2026-11-09T03:30:00Z'))).toBe(true);    // 22:30 EST
-    expect(inQuietHours(c, at('2026-11-09T11:59:00Z'))).toBe(true);    // 06:59
-    expect(inQuietHours(c, at('2026-11-09T12:00:00Z'))).toBe(false);   // 07:00
-    expect(inQuietHours(c, at('2026-11-09T20:00:00Z'))).toBe(false);   // 15:00
-  });
-  it('handles a same-day window, an empty one, and off', () => {
-    expect(inQuietHours(speechCfg({ quiet_hours: { start: '13:00', end: '14:00' } }), at('2026-11-09T18:30:00Z'))).toBe(true);
-    expect(inQuietHours(speechCfg({ quiet_hours: { start: '13:00', end: '13:00' } }), at('2026-11-09T18:30:00Z'))).toBe(false);
-    expect(inQuietHours(speechCfg({ quiet_hours: { enabled: false } }), at('2026-11-09T03:30:00Z'))).toBe(false);
+describe('splitForTts', () => {
+  it('leaves short text whole and splits long text at sentence ends, never refusing', () => {
+    expect(splitForTts('Short.', 50)).toEqual(['Short.']);
+    const long = Array.from({ length: 30 }, (_, i) => `Sentence number ${i}.`).join(' ');
+    const parts = splitForTts(long, 100);
+    expect(parts.length).toBeGreaterThan(4);
+    expect(parts.every((p) => Array.from(p).length <= 100)).toBe(true);
+    expect(parts.join(' ')).toBe(long);
+    expect(splitForTts('x'.repeat(250), 100).map((p) => p.length)).toEqual([100, 100, 50]);
   });
 });
 
@@ -89,18 +85,40 @@ describe('Speaker', () => {
   it('frames PCM in 3,200-byte pieces between speech_start and speech_end', async () => {
     const t = target();
     const sp = new Speaker({ config: speechCfg(), synth: synth([5000, 3001, 1]), log: () => {} });
-    await sp.speak(t, 'Holding the Aloft.');
+    const p = sp.speak(t, 'Holding the Aloft.');
+    await p;
     expect(t.frames[0]).toMatchObject({ type: 'speech_start', rate: 16000, format: 'pcm_s16le', chars: 18 });
     expect(t.bytes).toEqual([SPEECH_FRAME_BYTES, SPEECH_FRAME_BYTES, 1602]);
     expect(t.frames[1]).toEqual({ type: 'speech_end', id: t.frames[0]!['id'], ms: 250 });
   });
 
-  it('stops at max_seconds and says so', async () => {
+  it('plays arbitrarily long speech in full, paced to at most lead_s ahead of playback', async () => {
+    vi.useFakeTimers();
+    const t = target(); const sentAt: number[] = [];
+    t.sendBinary = (b) => { t.bytes.push(b.length); sentAt.push(Date.now()); return true; };
+    const sp = new Speaker({ config: speechCfg({ lead_s: 2 }), synth: synth(Array(20).fill(32000)), log: () => {} });   // 20 s of audio
+    const t0 = Date.now();
+    const p = sp.speak(t, 'A very long passage.');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(t.bytes.reduce((a, b) => a + b, 0)).toBeLessThanOrEqual(32000 * 2 + SPEECH_FRAME_BYTES);   // only the lead is out at once
+    await vi.advanceTimersByTimeAsync(30_000);
+    await p;
+    vi.useRealTimers();
+    expect(t.bytes.reduce((a, b) => a + b, 0)).toBe(640000);
+    expect(t.frames.at(-1)).toMatchObject({ type: 'speech_end', ms: 20000 });
+    expect(t.frames.some((f) => f['truncated'])).toBe(false);
+    // never more than lead ahead: bytes sent by elapsed time e
+    let cum = 0;
+    sentAt.forEach((at, n) => { cum += t.bytes[n]!; expect(cum / 32000 - (at - t0) / 1000).toBeLessThanOrEqual(2.0001); });
+  });
+
+  it('splits text over the per-request ceiling into sequential requests inside one utterance', async () => {
     const t = target();
-    const sp = new Speaker({ config: speechCfg({ max_seconds: 1 }), synth: synth([20000, 20000]), log: () => {} });
-    await sp.speak(t, 'Long.');
-    expect(t.bytes.reduce((a, b) => a + b, 0)).toBe(32000);
-    expect(t.frames[1]).toMatchObject({ type: 'speech_end', ms: 1000, truncated: true });
+    const s = synth([3200]);
+    await new Speaker({ config: speechCfg(), synth: s, log: () => {} }).speak(t, `${'Word. '.repeat(1500)}`.trim());
+    expect(s.texts.length).toBeGreaterThan(1);
+    expect(t.frames.filter((f) => f['type'] === 'speech_start')).toHaveLength(1);
+    expect(t.bytes).toHaveLength(s.texts.length);
   });
 
   it('answers speech_cancel on an engine error, a timeout, or a cancel', async () => {
@@ -110,7 +128,7 @@ describe('Speaker', () => {
 
     vi.useFakeTimers();
     const t2 = target();
-    const slow = new Speaker({ config: speechCfg({ timeout_ms: 1000 }), synth: synth([3200], { wait: () => new Promise((r) => setTimeout(r, 5000)) }), log: () => {} });
+    const slow = new Speaker({ config: speechCfg({ stall_timeout_s: 2 }), synth: synth([3200], { wait: () => new Promise((r) => setTimeout(r, 5000)) }), log: () => {} });
     const p = slow.speak(t2, 'x');
     await vi.advanceTimersByTimeAsync(5000);
     await p;

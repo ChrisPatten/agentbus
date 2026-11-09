@@ -5,8 +5,8 @@
  *
  *   {"type":"speech_start","id","rate":16000,"format":"pcm_s16le","chars"}   binary PCM frames   {"type":"speech_end","id","ms","truncated?"}
  *
- * or `{"type":"speech_cancel","id","reason"}` when it stops early. Only the reply's glance (or a short body)
- * is spoken, length and time are bounded, and nothing is spoken in quiet hours or to a muted device.
+ * or `{"type":"speech_cancel","id","reason"}` when it stops early. The agent's `speak` text is spoken
+ * (E102), paced to the device, with no policy limits; nothing is spoken to a muted or sleeping device.
  * The device may send `{"type":"speech_stop"}` to end it early. See docs/SURFACE_API.md "Spoken replies".
  */
 import { randomUUID } from 'node:crypto';
@@ -98,10 +98,10 @@ export function stripAudioTags(text: string): string {
 
 /**
  * E102 — what an agent's `speak` call says. Markdown, links and emoji are dropped as for replies, but audio
- * tags pass through to the synthesiser untouched. `visible` is the same text without the tags (the length
- * cap counts it). Null `error` text: empty or longer than `maxChars`.
+ * tags pass through to the synthesiser untouched. `visible` is the same text without the tags. There is no
+ * length cap: long text is split into sequential synthesis requests ({@link splitForTts}).
  */
-export function agentSpeechText(text: string, maxChars: number): { tts: string; visible: string } | { error: 'empty' | 'too_long'; chars: number } {
+export function agentSpeechText(text: string): { tts: string; visible: string } | { error: 'empty' } {
   const tts = stripMarkdown(text)
     .replace(/https?:\/\/\S+/g, '')
     .replace(/[\p{Extended_Pictographic}\u{FE0F}\u{200D}]/gu, '')
@@ -109,26 +109,35 @@ export function agentSpeechText(text: string, maxChars: number): { tts: string; 
     .replace(/\s+/g, ' ')
     .trim();
   const visible = stripAudioTags(tts);
-  const chars = Array.from(visible).length;
-  if (!visible) return { error: 'empty', chars: 0 };
-  if (chars > maxChars) return { error: 'too_long', chars };
-  return { tts, visible };
+  return visible ? { tts, visible } : { error: 'empty' };
 }
 
-/** Minutes since local midnight in `timeZone`. */
-function localMinutes(at: Date, timeZone: string): number {
-  const parts = new Intl.DateTimeFormat('en-US', { timeZone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(at);
-  const h = Number(parts.find((p) => p.type === 'hour')?.value ?? 0), m = Number(parts.find((p) => p.type === 'minute')?.value ?? 0);
-  return h * 60 + m;
-}
-const hhmm = (s: string) => Number(s.slice(0, 2)) * 60 + Number(s.slice(3, 5));
+/** Technical per-request ceiling for text-to-speech (ElevenLabs accepts about 5,000 characters per request on its tag-aware models). */
+export const TTS_REQUEST_CHARS = 4000;
 
-/** True inside the configured quiet hours (start after end wraps midnight; start = end means none). */
-export function inQuietHours(cfg: SpeechConfig, at: Date): boolean {
-  if (!cfg.quiet_hours.enabled) return false;
-  const m = localMinutes(at, cfg.timezone), a = hhmm(cfg.quiet_hours.start), b = hhmm(cfg.quiet_hours.end);
-  if (a === b) return false;
-  return a < b ? m >= a && m < b : m >= a || m < b;
+/** Split `text` into pieces of at most `max` characters at sentence ends (else word ends), so long speech is several requests, not a refusal. */
+export function splitForTts(text: string, max = TTS_REQUEST_CHARS): string[] {
+  if (Array.from(text).length <= max) return [text];
+  const out: string[] = [];
+  let cur = '';
+  const push = () => { if (cur.trim()) out.push(cur.trim()); cur = ''; };
+  const pieces = text.split(/(?<=[.!?…])\s+/u).flatMap((sentence) => {
+    if (Array.from(sentence).length <= max) return [sentence];
+    const words = sentence.split(/\s+/);
+    const chunks: string[] = []; let w = '';
+    for (const word of words) {
+      const piece = Array.from(word).length > max ? Array.from(word).reduce<string[]>((acc, ch) => { const last = acc[acc.length - 1]; if (last !== undefined && Array.from(last).length < max) acc[acc.length - 1] = last + ch; else acc.push(ch); return acc; }, []) : [word];
+      for (const x of piece) { if (w && Array.from(`${w} ${x}`).length > max) { chunks.push(w); w = x; } else w = w ? `${w} ${x}` : x; }
+    }
+    if (w) chunks.push(w);
+    return chunks;
+  });
+  for (const piece of pieces) {
+    if (cur && Array.from(`${cur} ${piece}`).length > max) push();
+    cur = cur ? `${cur} ${piece}` : piece;
+  }
+  push();
+  return out;
 }
 
 /** Where speech goes: one device socket. */
@@ -141,7 +150,23 @@ export interface SpeechTarget {
 
 interface Active { id: string; abort: AbortController; reason: string | null }
 
-/** Streams utterances to device sockets, one at a time per socket (a new one cancels the old). */
+/** Resolves after `ms`, or at once when `signal` aborts. */
+const sleep = (ms: number, signal: AbortSignal): Promise<void> => new Promise((resolve) => {
+  if (signal.aborted) { resolve(); return; }
+  const t = setTimeout(done, Math.max(0, ms));
+  function done() { clearTimeout(t); signal.removeEventListener('abort', done); resolve(); }
+  signal.addEventListener('abort', done, { once: true });
+});
+
+/**
+ * Streams utterances to device sockets, one at a time per socket (a new one cancels the old).
+ *
+ * Pacing (E102): audio goes down the socket at about real time, never more than `lead_s` ahead of playback
+ * (computed from bytes sent and the time since `speech_start`), because the device's jitter buffer holds
+ * about 32 s and drops what does not fit. There is no cap on total length. TTS chunks are read as fast as
+ * they arrive into memory; only the sending is paced. After `speech_end` the call resolves once the audio
+ * has had time to play out, so a queued utterance does not cut the tail off.
+ */
 export class Speaker {
   private readonly active = new Map<string, Active>();
   constructor(private readonly deps: { config: SpeechConfig; synth: Synthesizer | null; log?: (line: string) => void }) {}
@@ -149,7 +174,7 @@ export class Speaker {
   get available(): boolean { return !!this.deps.synth; }
   private log(line: string): void { (this.deps.log ?? ((l) => console.log(`[intercom] ${l}`)))(line); }
 
-  /** Speak `text` on `target`. Resolves when the utterance ended, was cancelled or failed. Never throws. */
+  /** Speak `text` on `target`. Resolves when the utterance ended (and played out), was cancelled or failed. Never throws. */
   async speak(target: SpeechTarget, text: string): Promise<void> {
     const synth = this.deps.synth;
     if (!synth || !text) return;
@@ -157,43 +182,72 @@ export class Speaker {
     const cfg = this.deps.config;
     const a: Active = { id: randomUUID().slice(0, 12), abort: new AbortController(), reason: null };
     this.active.set(target.id, a);
-    const timer = setTimeout(() => { a.reason = 'timeout'; a.abort.abort(); }, cfg.timeout_ms);
-    const max = cfg.max_seconds * synth.rate * 2;
+    const bps = synth.rate * 2;
+    const leadMs = cfg.lead_s * 1000;
+    const stallMs = cfg.stall_timeout_s * 1000;
+    const parts = splitForTts(text);
     const started = Date.now();
-    let sent = 0, truncated = false, pending: Buffer = Buffer.alloc(0), opened = false;
-    const flush = (all: boolean): boolean => {
-      while (pending.length >= SPEECH_FRAME_BYTES || (all && pending.length >= 2)) {
-        const n = pending.length >= SPEECH_FRAME_BYTES ? SPEECH_FRAME_BYTES : pending.length & ~1;
-        if (!target.sendBinary(pending.subarray(0, n))) { a.reason = 'closed'; return false; }
-        sent += n;
-        pending = pending.subarray(n);
-      }
-      return true;
-    };
+    let sent = 0, opened = false, t0 = 0;
+
+    // Producer: read synthesis into memory as fast as it arrives; the consumer below paces the sending.
+    const chunks: Buffer[] = [];
+    let producerDone = false, producerError: unknown = null, lastByteAt = Date.now();
+    let wake: (() => void) | null = null;
+    const poke = () => { const w = wake; wake = null; w?.(); };
+    const producer = (async () => {
+      try {
+        for (const part of parts) {
+          for await (const chunk of synth.stream(part, { signal: a.abort.signal })) {
+            if (a.abort.signal.aborted) return;
+            chunks.push(Buffer.from(chunk)); lastByteAt = Date.now(); poke();
+          }
+        }
+      } catch (err) { producerError = err; }
+      finally { producerDone = true; poke(); }
+    })();
+
+    let pending: Buffer = Buffer.alloc(0);
+    const take = (): boolean => { if (!chunks.length) return false; pending = Buffer.concat([pending, ...chunks.splice(0)]); return true; };
     try {
       target.send({ type: 'speech_start', id: a.id, rate: synth.rate, format: 'pcm_s16le', chars: Array.from(text).length });
-      opened = true;
-      for await (const chunk of synth.stream(text, { signal: a.abort.signal })) {
+      opened = true; t0 = Date.now();
+      for (;;) {
         if (a.abort.signal.aborted) break;
-        let piece = Buffer.from(chunk);
-        if (sent + pending.length + piece.length > max) { piece = piece.subarray(0, Math.max(0, max - sent - pending.length)); truncated = true; }
-        pending = pending.length ? Buffer.concat([pending, piece]) : piece;
-        if (!flush(false) || truncated) break;
+        take();
+        const n = pending.length >= SPEECH_FRAME_BYTES ? SPEECH_FRAME_BYTES : producerDone && chunks.length === 0 ? pending.length & ~1 : 0;
+        if (n > 0) {
+          const aheadMs = ((sent + n) / bps) * 1000 - (Date.now() - t0);
+          if (aheadMs > leadMs) { await sleep(aheadMs - leadMs, a.abort.signal); continue; }
+          if (!target.sendBinary(pending.subarray(0, n))) { a.reason = 'closed'; break; }
+          sent += n; pending = pending.subarray(n);
+          continue;
+        }
+        if (producerDone && chunks.length === 0) break;
+        // Starved: wait for more audio, but not for ever.
+        const left = stallMs - (Date.now() - lastByteAt);
+        if (left <= 0) { a.reason = 'timeout'; break; }
+        const timer = setTimeout(poke, left);
+        a.abort.signal.addEventListener('abort', poke, { once: true });
+        await new Promise<void>((resolve) => { wake = resolve; });
+        clearTimeout(timer);
+        a.abort.signal.removeEventListener('abort', poke);
       }
-      if (a.reason === null) {
-        if (flush(true)) target.send({ type: 'speech_end', id: a.id, ms: Math.round((sent / 2 / synth.rate) * 1000), ...(truncated ? { truncated: true } : {}) });
-        if (truncated) a.abort.abort();                       /* stop the download */
-      } else if (a.reason !== 'closed') {
+      if (a.reason === null && producerError !== null) a.reason = 'tts_error';
+      if (a.reason === null && !a.abort.signal.aborted) {
+        target.send({ type: 'speech_end', id: a.id, ms: Math.round((sent / bps) * 1000) });
+        await sleep((sent / bps) * 1000 - (Date.now() - t0), a.abort.signal);   // let it play out before the next utterance starts
+      } else if (a.reason !== null && a.reason !== 'closed' && opened) {
         target.send({ type: 'speech_cancel', id: a.id, reason: a.reason });
       }
+      if (a.reason === 'tts_error') this.log(`warn: speech failed (${synth.name}): ${String(producerError)}`);
     } catch (err) {
       if (a.reason === null) a.reason = 'tts_error';
-      if (a.reason === 'tts_error') this.log(`warn: speech failed (${synth.name}): ${String(err)}`);
+      this.log(`warn: speech failed (${synth.name}): ${String(err)}`);
       if (opened && a.reason !== 'closed') target.send({ type: 'speech_cancel', id: a.id, reason: a.reason });
     } finally {
-      clearTimeout(timer);
+      a.abort.abort();                                                          /* stop any download still running */
+      this.log(JSON.stringify({ evt: 'speech', id: a.id, chars: Array.from(text).length, parts: parts.length, audio_ms: Math.round((sent / bps) * 1000), ms: Date.now() - started, end: a.reason ?? 'done' }));
       if (this.active.get(target.id) === a) this.active.delete(target.id);
-      this.log(JSON.stringify({ evt: 'speech', id: a.id, chars: Array.from(text).length, audio_ms: Math.round((sent / 2 / synth.rate) * 1000), ms: Date.now() - started, end: a.reason ?? (truncated ? 'truncated' : 'done') }));
     }
   }
 

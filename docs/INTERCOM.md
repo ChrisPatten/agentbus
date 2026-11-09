@@ -55,16 +55,11 @@ adapters:
 | `voice.elevenlabs.voice_id` | `XrExE9yKIg1WjnnlVkGX` | The voice that speaks replies |
 | `voice.elevenlabs.output_format` | `pcm_16000` | `pcm_16000`, `pcm_22050` or `pcm_24000` |
 | `voice.elevenlabs.stability`, `similarity_boost`, `style`, `speed` | voice's own | Optional per-request voice settings |
-| `voice.speech.enabled` | `true` | Speak replies to push-to-talk messages (see [SURFACE_API.md](SURFACE_API.md#spoken-replies)) |
-| `voice.speech.max_chars` | `160` | A plain-text reply up to this is spoken whole; longer ones as their glance |
-| `voice.speech.max_seconds` | `20` | Longest utterance sent |
-| `voice.speech.timeout_ms` | `15000` | Longest an utterance may take |
-| `voice.speech.max_replies` | `2` | Replies spoken per push-to-talk message |
-| `voice.speech.reply_window_s` | `300` | Later replies are not spoken |
-| `voice.speech.quiet_hours` | `{enabled: true, start: "22:00", end: "07:00"}` | Never speak in this window |
-| `voice.speech.timezone` | `America/New_York` | Zone for `quiet_hours` |
-| `voice.speech.speak_max_chars` | `400` | Longest text the agent's `speak` tool may say (audio tags do not count) |
-| `voice.speech.fallback` | `true` | Speak the reply's glance or short body when the agent never called `speak` (see [SURFACE_API.md](SURFACE_API.md#the-speak-tool-e102)) |
+| `voice.speech.enabled` | `true` | Allow speech (the agent's `speak` tool) (see [SURFACE_API.md](SURFACE_API.md#spoken-replies)) |
+| `voice.speech.max_chars` | `160` | Fallback auto-speech only: a plain-text reply up to this is spoken whole; longer ones as their glance |
+| `voice.speech.lead_s` | `8` | Audio is paced to the device at about real time, at most this many seconds ahead of playback (its buffer is about 32 s) |
+| `voice.speech.stall_timeout_s` | `20` | A synthesis stream with no bytes for this long is abandoned. Not a length cap: speech may be any length |
+| `voice.speech.fallback` | `false` | Speak the reply's glance or short body when the agent never called `speak` for a voice message (see [SURFACE_API.md](SURFACE_API.md#the-speak-tool-e102)) |
 | `voice.speech.fallback_grace_s` | `3` | Seconds after the first reply to wait for a `speak` call before the fallback speaks (0: at once) |
 | `voice.speech.style_file` | `""` (off) | Markdown voice style guide, read fresh from disk and injected once per agent session on a push-to-talk message (and again when its content changes) |
 | `surfaces[].speech` | `true` | `false` turns spoken replies off for that surface |

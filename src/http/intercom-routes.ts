@@ -217,6 +217,7 @@ export function surfaceSocketHandler(server: FastifyInstance, service: IntercomS
         };
         sockets.add(client);
         voice = { id: randomUUID(), surface: auth.surface, send, sendBinary };
+        client.voice = voice;
         await service.attach(client, hello.data.cursor, hello.data.client, hello.data.revs as Partial<Record<ResourceName, number>> | undefined);
         return;
       }

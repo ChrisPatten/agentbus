@@ -98,19 +98,18 @@ adapters:
 
 Recordings stay in memory only and are thrown away once transcribed.
 
-With an ElevenLabs key (`ELEVENLABS_API_KEY` in the bus's `.env`), the bus uses ElevenLabs for both directions: it transcribes what you say, and when you spoke a message, it speaks your agent's short answer back on the screen you spoke into. Only short answers are spoken, or the one-line summary of a long one; typed messages and notifications are never spoken, and nothing is spoken between 10 PM and 7 AM. Turn the screen's volume to zero to keep it silent.
+With an ElevenLabs key (`ELEVENLABS_API_KEY` in the bus's `.env`), the bus uses ElevenLabs for both directions: it transcribes what you say, and your agent can speak back on the screen. Your agent decides what to say and follows your own voice guide; the bus puts no limits on length, number of replies or hours. It stays silent only when the screen is asleep, its volume is zero, or it is not connected. Press the power button (or talk) to stop it at any time.
 
-Your agent can also choose its own words: when a message came in by voice, it has a `speak` tool that says a short answer (up to about 400 characters, with ElevenLabs tags such as `[warmly]` if your speech model supports them) and shows the same words on the screen. It writes the spoken line into the chat as `🔊 …`, and anything longer goes in a normal reply, which is not spoken and does not replace what the screen shows. If the agent does not speak within about three seconds of replying, the bus speaks the reply's one-line summary instead. Set `voice.speech.style_file` to a Markdown file of guidance (tone, length, how to say numbers) and the agent is given it once per session.
+Your agent has a `speak` tool. It uses it to answer something you said, and also at any other time: in a Telegram chat you can say "let me know on the Compact when that's done", and when it is, the agent speaks there. Long speech plays in full. The spoken words are written into the chat as `🔊 …`. The screen's text comes from the agent's normal reply, not from `speak`. If the screen is asleep or off, the agent is told and sends you a notification instead. Set `voice.speech.style_file` to a Markdown file of guidance (tone, length, how to say numbers); the agent is given it once per session when you speak to it, and again if you edit the file. If you want the bus to speak a short summary for an agent that never speaks itself, set `voice.speech.fallback` to `true`.
 
 | Option | Default | What it does |
 |---|---|---|
 | `voice.elevenlabs.voice_id` | a calm American voice | Which ElevenLabs voice speaks |
 | `voice.elevenlabs.tts_model` | `eleven_flash_v2_5` | The speech model (fast) |
 | `voice.speech.enabled` | `true` | Speak answers to spoken messages |
-| `voice.speech.fallback` | `true` | Speak the short answer for your agent when it did not speak itself |
+| `voice.speech.fallback` | `false` | Speak the short answer for your agent when it did not speak itself |
 | `voice.speech.fallback_grace_s` | `3` | How long to wait for your agent to speak before the bus does |
 | `voice.speech.style_file` | off | A Markdown file describing how your agent should sound; it is shown to the agent once per session when you speak to it, and again if you edit the file |
-| `voice.speech.quiet_hours` | 22:00 to 07:00 | When nothing is spoken |
 | `surfaces[].speech` | `true` | `false` keeps one screen silent |
 
 ## Troubleshooting

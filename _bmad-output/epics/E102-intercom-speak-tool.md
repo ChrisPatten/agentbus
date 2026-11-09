@@ -29,3 +29,17 @@ Today the bus speaks a clipped version of whatever the agent replies (body if at
 ## Docs
 
 `docs/SURFACE_API.md` ("The `speak` tool"), `docs/INTERCOM.md` (config), `site-docs/channels/intercom.md`, `CHANGELOG.md`.
+
+---
+
+## v2 (Nov 9, 2026, Chris's design review) — `feat/intercom-speak-v2`
+
+Principle: the agent is responsible for following Chris's speech rules (the style guide); the bus must not refuse speech on policy limits.
+
+1. **`speak` always allowed** except when the target device is asleep (skipped, reason `asleep`) or physically muted (volume 0, `muted`). Removed: `speak_max_chars` (long text splits into sequential TTS requests of at most 4,000 characters), `max_replies`, `reply_window_s`, the typed-send rule, the voice-only requirement, quiet hours (keys accepted and ignored).
+2. **Any session.** `speak({ text, message_id?, surface? })`. A push-to-talk `message_id` targets its device; otherwise every connected, awake, audible socket of `surface` (default: the only speech-enabled surface; several and none named: error listing them). No socket: `offline`. The tool description tells the agent to follow the voice guide and use `notify` when skipped.
+3. **Screen comes from `reply`.** Reverted: `speak` emitting a `reply` event and later replies carrying the spoken text. The Compact's speaker mark keys on audio state (`thread.c` `s_speaking`), so audio before or without a reply is harmless; no firmware change.
+4. **Fallback auto-speech defaults off** (`voice.speech.fallback: false`; option kept; never to an asleep or muted device).
+5. **🔊 record kept**, into the target surface's followed conversation and Telegram echo; unguarded (no `reply_to` or `conversation_id`) for proactive speech.
+6. **Pacing.** Frames go out at about real time, at most `voice.speech.lead_s` (8 s) ahead of playback, computed from bytes sent and time since `speech_start`; TTS is buffered in memory at full speed. `max_seconds` and `timeout_ms` removed; `stall_timeout_s` (20 s with no bytes) remains as a technical guard. A queued utterance starts after the previous one has had time to play out.
+7. **Style guide injection** unchanged.

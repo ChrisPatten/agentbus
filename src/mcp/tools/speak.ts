@@ -1,9 +1,9 @@
 /**
  * E102 — `speak`: the agent says its answer aloud on the Intercom device that sent a push-to-talk message.
  *
- * The bus finds the device from the message id (the tool never takes a device id), applies every speech
- * guard (quiet hours, muted or sleeping device, length, one utterance at a time, reply window), and starts
- * synthesis in the background. On success this tool also records the spoken text (🔊, audio tags removed) as
+ * The bus finds the device from the message id or the surface (the tool never takes a device id) and starts
+ * paced synthesis in the background. It declines only when the device is asleep, muted or not connected;
+ * the agent, not the bus, follows the owner's voice guide. On success this tool also records the spoken text (🔊, audio tags removed) as
  * a quiet message in the followed conversation so the Thread, Telegram and journaling see it.
  */
 import { z } from 'zod';
@@ -13,17 +13,18 @@ import { toolError, toolSuccess } from './helpers.js';
 import { originFromEnv } from '../../core/origin.js';
 
 export const SPEAK_DESCRIPTION =
-  'Say something aloud on the Intercom device (the Compact) that sent you a push-to-talk message, and show it as the answer on its screen. ' +
-  'Use it ONLY for a message that says it was spoken by push-to-talk (a speech transcript); pass that message\'s id as message_id. ' +
-  'The bus picks the device; you never name one. Call speak FIRST, with the short answer as you would say it to someone at your desk: ' +
-  'one to three plain sentences (up to about 400 characters), no Markdown, no lists, no links, no emoji, numbers and times written the way you would say them. ' +
-  'Then, only if there is more to say, call reply() with the full text: it goes to the Thread and Telegram and is NOT spoken, and it does not replace what the device shows. ' +
-  'You may speak twice (for example "Checking now." then the result). ' +
-  'ElevenLabs audio tags such as [warmly], [quickly] or [short pause] may be put in the text; they are sent to the voice untouched and removed from the written copy. ' +
-  'Returns at once: status "spoken" (audio is being streamed now), "queued" (it follows an utterance still playing) or "skipped" with a reason ' +
-  '(quiet_hours, muted, asleep, off, enough, gone: nothing is spoken and nothing is shown; answer with reply() instead). ' +
-  'An error means speaking is not allowed here (not a push-to-talk message, a typed message came after it, the window has passed, or the text is too long or empty): use reply(). ' +
-  'If you never call speak, the bus speaks your reply\'s glance for you after a short grace, so always pass a glance on reply() too. Follow the voice style guide you were given.';
+  'Say something aloud on Chris\'s Intercom device (the Compact on his desk). Use it to answer a push-to-talk message (pass that message\'s id as message_id) ' +
+  'AND any other time you want to be heard there: for example in a Telegram chat he said "let me know on the Compact when that is done", and now it is. ' +
+  'It is allowed at any time and from any session; the bus applies no limits on length, count or hours, so YOU are responsible for following his voice guide ' +
+  '(the file named by voice.speech.style_file, normally data/intercom/voice-style.md: tone, brevity, how to say numbers and times). Re-read it if you no longer have it. ' +
+  'Targeting: with a message_id of a push-to-talk message still in progress, it speaks on the device that sent it. Otherwise it speaks on every connected, awake device of ' +
+  '`surface` (default: the one surface that has speech enabled, "compact"; if several are eligible and you name none, you get an error listing them). ' +
+  'Write plain prose as you would say it: no Markdown, lists, links or emoji. ElevenLabs audio tags such as [warmly], [quickly] or [short pause] are sent to the voice untouched and removed from the written copy. ' +
+  'Long text is fine: it is split and played in full, paced to the device; several calls play in order. ' +
+  'speak changes audio only. The Understood screen shows what you give reply() (pass a glance), so for a push-to-talk message also call reply(); a reply is not spoken unless the bus fallback is on. ' +
+  'Returns at once: "spoken" (audio is streaming), "queued" (it follows audio still playing) or "skipped" with reason "asleep", "muted" (volume 0), "offline" (no device connected) or "off" (speech disabled). ' +
+  'When skipped as asleep, muted or offline, nothing was spoken: use notify (or send_message) to reach him instead. ' +
+  'The spoken text is also recorded in the Intercom conversation as "🔊 text" so the Thread and Telegram show what was said.';
 
 export function registerSpeakTool(server: McpServer, busBaseUrl: string, agentId: string): void {
   server.registerTool(
@@ -31,16 +32,17 @@ export function registerSpeakTool(server: McpServer, busBaseUrl: string, agentId
     {
       description: SPEAK_DESCRIPTION,
       inputSchema: {
-        message_id: z.string().min(1).describe('ID of the push-to-talk message you are answering (the [id:...] of the message that says it was spoken)'),
-        text: z.string().min(1).max(2000).describe('What to say, plain prose, up to about 400 characters (audio tags like [warmly] do not count)'),
+        text: z.string().min(1).max(50_000).describe('What to say, plain prose as you would speak it, following the voice guide. Audio tags like [warmly] are allowed'),
+        message_id: z.string().min(1).optional().describe('The [id:...] of the push-to-talk message you are answering, to speak on the device that sent it. Omit for proactive speech'),
+        surface: z.string().min(1).optional().describe('Intercom surface id for proactive speech; default: the one speech-enabled surface (compact)'),
       },
     },
-    async ({ message_id, text }) => {
+    async ({ text, message_id, surface }) => {
       let data: Record<string, unknown>;
       try {
         const res = await fetch(`${busBaseUrl}/api/v1/speak`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message_id, text, agent_id: agentId }),
+          body: JSON.stringify({ text, ...(message_id ? { message_id } : {}), ...(surface ? { surface } : {}), agent_id: agentId }),
         });
         data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
         if (!res.ok || !data['ok']) {
@@ -51,30 +53,37 @@ export function registerSpeakTool(server: McpServer, busBaseUrl: string, agentId
       }
       if (data['status'] === 'skipped') return toolSuccess({ status: 'skipped', reason: data['reason'] });
 
-      // Spoken: record it in the followed conversation, quietly. A failure here does not undo the speech.
+      // Spoken: record it in the surface's followed conversation, quietly. A failure here does not undo the speech.
       let recorded: string | null = null;
       try {
-        const orig = await fetch(`${busBaseUrl}/api/v1/messages/${message_id}`);
-        if (orig.ok) {
-          const original = ((await orig.json()) as { message: MessageEnvelope }).message;
-          const conv = original.metadata?.['conversation_id'];
-          const res = await fetch(`${busBaseUrl}/api/v1/messages`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              channel: original.channel, topic: original.topic,
-              sender: original.recipient, recipient: original.sender, reply_to: original.id, priority: 'normal',
-              payload: { type: 'text', body: String(data['echo'] ?? '') },
-              metadata: {
-                ...(typeof conv === 'string' ? { conversation_id: conv } : {}),
-                intercom_spoken: true, silent: true, no_preview: true, origin: originFromEnv(agentId),
-              },
-            }),
-          });
-          const r = (await res.json().catch(() => ({}))) as { ok?: boolean; id?: string };
-          if (r.ok) recorded = r.id ?? null;
+        const follow = data['follow'] as { channel: string; topic?: string; contact: string };
+        let replyTo: string | null = null;
+        let conversationId: string | undefined;
+        if (data['interaction_message'] === true && message_id) {
+          const orig = await fetch(`${busBaseUrl}/api/v1/messages/${message_id}`);
+          if (orig.ok) {
+            const original = ((await orig.json()) as { message: MessageEnvelope }).message;
+            replyTo = original.id;
+            const conv = original.metadata?.['conversation_id'];
+            if (typeof conv === 'string') conversationId = conv;
+          }
         }
+        const res = await fetch(`${busBaseUrl}/api/v1/messages`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            channel: follow.channel, ...(follow.topic ? { topic: follow.topic } : {}),
+            sender: `agent:${agentId}`, recipient: `contact:${follow.contact}`, reply_to: replyTo, priority: 'normal',
+            payload: { type: 'text', body: String(data['echo'] ?? '') },
+            metadata: {
+              ...(conversationId ? { conversation_id: conversationId } : {}),
+              intercom_spoken: true, silent: true, no_preview: true, origin: originFromEnv(agentId),
+            },
+          }),
+        });
+        const r = (await res.json().catch(() => ({}))) as { ok?: boolean; id?: string };
+        if (r.ok) recorded = r.id ?? null;
       } catch { /* recorded stays null */ }
-      return toolSuccess({ status: data['status'], spoken: data['text'], recorded_message_id: recorded });
+      return toolSuccess({ status: data['status'], spoken: data['text'], surface: data['surface_id'], devices: data['devices'], recorded_message_id: recorded });
     },
   );
 }

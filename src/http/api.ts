@@ -2744,10 +2744,10 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
       const intercomService = deps.intercom;
       server.post('/api/v1/speak', async (req, reply) => {
         const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, unknown>;
-        const messageId = typeof body['message_id'] === 'string' ? body['message_id'].trim() : '';
+        const str = (k: string): string | undefined => (typeof body[k] === 'string' && body[k].trim() ? (body[k] as string).trim() : undefined);
         const text = typeof body['text'] === 'string' ? body['text'] : '';
-        if (!messageId || !text.trim()) return reply.code(400).send({ ok: false, error: 'message_id and text are required' });
-        const result = intercomService.speakFor(messageId, text);
+        if (!text.trim()) return reply.code(400).send({ ok: false, error: 'text is required' });
+        const result = intercomService.speakFor({ text, messageId: str('message_id'), surface: str('surface') });
         if (!result.ok) return reply.code(400).send(result);
         return reply.send(result);
       });
