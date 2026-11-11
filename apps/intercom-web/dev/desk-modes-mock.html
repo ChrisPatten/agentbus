@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Compact desk modes mockup</title>
+<style>
+:root{--page:#0b0a08;--panel:#15120e;--line:#2e2920;--cream:#f6eedb;--dim:#b3aa9a;--brass:#d9b23a;--amber:#ffb347;--green:#74c978;--red:#ef6a5d;--grey:#77706a;--blue:#8fb8e8}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;background:#000;color:var(--cream);font:16px/1.35 -apple-system,"Avenir Next","Helvetica Neue",Arial,sans-serif}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer;padding:0}
+button:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
+.wrap{max-width:520px;margin:0 auto;padding:12px 16px 40px}
+h1{font-size:16px;font-weight:600;color:var(--dim);margin:4px 0 10px;letter-spacing:.5px}
+.stage{display:flex;justify-content:center;touch-action:pan-y;user-select:none;-webkit-user-select:none}
+.bezel{border-radius:50%;padding:20px;background:radial-gradient(circle at 30% 25%,#a29d94,#4b4843 45%,#2a2826 70%,#7d7972);flex:none}
+.dial{position:relative;border-radius:50%;background:#000;overflow:hidden;cursor:pointer}
+.face{position:absolute;left:0;top:0;width:466px;height:466px;transform-origin:0 0;border-radius:50%;overflow:hidden;font-weight:500;text-align:center}
+.c{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;transition:transform .6s}
+.c svg.bg{position:absolute;inset:0;width:466px;height:466px}
+.c>*{position:relative}.c>svg.bg,.c>.abs{position:absolute}
+.lab{font-size:26px;letter-spacing:3px;text-transform:uppercase;color:var(--brass);font-weight:600}
+.xl{font-size:84px;line-height:1;font-weight:600;font-variant-numeric:tabular-nums}
+.lg{font-size:54px;line-height:1.1;font-weight:600}
+.md{font-size:38px;line-height:1.15;font-weight:600}
+.sm{font-size:28px;line-height:1.2;color:var(--dim)}
+.am{color:var(--amber)}.rd{color:var(--red)}.gr{color:var(--green)}.br{color:var(--brass)}.dm{color:var(--dim)}
+.rows{width:340px;display:flex;flex-direction:column;gap:8px}
+.row{display:flex;justify-content:space-between;gap:12px;align-items:baseline;padding:8px 14px;border-radius:14px;background:#17140f;text-align:left;font-size:28px;line-height:1.15;border:2px solid transparent;width:100%}
+.row b{font-weight:600}.row i{font-style:normal;color:var(--dim);font-size:26px;white-space:nowrap}
+.row.hot{border-color:var(--amber)}.row .t{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pulse{animation:pulse 2.4s ease-in-out infinite}.fast{animation:pulse .9s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.4}}
+.glow{position:absolute;inset:0;background:radial-gradient(circle,transparent 48%,rgba(255,179,71,.38) 100%);animation:breathe 4s ease-in-out infinite}
+@keyframes breathe{50%{opacity:.25}}
+.blob{position:absolute;border-radius:50%;filter:blur(40px);opacity:.55}
+@keyframes d1{0%,100%{transform:translate(-60px,-40px)}50%{transform:translate(70px,50px)}}
+@keyframes d2{0%,100%{transform:translate(60px,40px) scale(1)}50%{transform:translate(-50px,-60px) scale(1.25)}}
+@keyframes d3{0%,100%{transform:translate(0,70px)}50%{transform:translate(20px,-80px)}}
+@keyframes spin{to{transform:rotate(360deg)}}
+.listen{position:absolute;inset:0;background:rgba(0,0,0,.88);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;z-index:5}
+.listen .ring{width:120px;height:120px;border-radius:50%;border:5px solid var(--amber);animation:ripple 1.2s ease-out infinite}
+@keyframes ripple{from{transform:scale(.6);opacity:1}to{transform:scale(1.5);opacity:0}}
+.ripple{position:absolute;left:50%;top:50%;width:200px;height:200px;margin:-100px;border-radius:50%;border:6px solid var(--amber);animation:ripple 1.4s ease-out 2;pointer-events:none}
+.dots{display:flex;justify-content:center;gap:10px;margin:14px 0 6px}
+.dots button{width:14px;height:14px;border-radius:50%;background:#3a352d}.dots button.on{background:var(--brass)}
+.cap{text-align:center;min-height:96px}.cap h2{margin:6px 0 4px;font-size:20px}.cap p{margin:3px 0;color:var(--dim);font-size:15px}.cap p b{color:var(--cream);font-weight:600}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:12px;margin-top:12px}
+.panel h3{margin:0 0 8px;font-size:13px;letter-spacing:2px;text-transform:uppercase;color:var(--brass)}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip{padding:9px 13px;border:1px solid #3a352d;border-radius:18px;color:var(--dim);font-size:15px}
+.chip.on{background:var(--brass);color:#14110a;border-color:var(--brass)}.chip.ev{border-color:var(--amber);color:var(--amber)}
+.list{display:grid;grid-template-columns:1fr 1fr;gap:6px}.list button{text-align:left;padding:9px 10px;border-radius:10px;background:#1c1812;font-size:14px;color:var(--dim)}
+.list button.on{color:var(--cream);outline:1px solid var(--brass)}
+.mono{font-variant-numeric:tabular-nums;color:var(--dim);font-size:14px;margin-top:8px;line-height:1.5}
+</style></head><body><div class="wrap">
+<h1>THE COMPACT · DESK MODE EXPLORATION · fake data</h1>
+<div class="stage" id="stage"><div class="bezel" id="bezel"><div class="dial" id="dial"><div class="face" id="face"></div></div></div></div>
+<div class="dots" id="dots"></div>
+<div class="cap" id="cap"></div>
+<div class="panel"><h3>Day cycle (quiet hours 22:00 to 06:30)</h3><div class="chips" id="phases"></div>
+<div class="chips" style="margin-top:8px"><button class="chip" id="plus">+10 min</button><button class="chip" id="presence">Presence: seated</button></div></div>
+<div class="panel"><h3>Inject event</h3><div class="chips" id="events"></div></div>
+<div class="panel"><h3>Concepts</h3><div class="list" id="list"></div></div>
+<div class="panel"><h3>Burn-in policy demo</h3>
+<div class="chips"><button class="chip on" id="auto">Auto pixel drift</button><button class="chip" id="nudge">Nudge now</button><button class="chip" id="exag">Exaggerate 4x</button></div>
+<div class="mono" id="burn"></div>
+<div class="mono">Policy: content shifts 1 to 3 px every 4 min (demo: every 12 s); brightness by time of day and never above 70% for static text; panel off after 20 min away, wakes on motion (tap the dial in Away); no element sits at a fixed spot for long, and the ambient art has no static edges at all.</div></div>
+<p class="mono">Tap the dial: secondary view. Hold: listening. Swipe: next concept. Not a real device render; tested for syntax only.</p>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+const PH={morning:{n:'Morning',m:465,b:.75},work:{n:'Work',m:620,b:1},evening:{n:'Evening',m:1120,b:.55},night:{n:'Night',m:1390,b:.12}};
+const S={i:0,flip:0,ph:'work',off:0,away:0,ev:{needs:0,bill:0,delay:0,knock:0},di:0,auto:1,ex:0,focus:1500,rot:0,sl:0};
+const DR=[[0,0],[3,-2],[-2,3],[-3,-1],[2,2]];
+const fmt=m=>{m=((m%1440)+1440)%1440;const h=Math.floor(m/60),mm=m%60;return (h%12||12)+':'+String(mm).padStart(2,'0')};
+const now=()=>PH[S.ph].m+S.off;
+const P=(r,a)=>{const t=(a-90)*Math.PI/180;return[233+r*Math.cos(t),233+r*Math.sin(t)]};
+const arc=(r,a0,a1,c,w,x='')=>{const[p,q]=P(r,a0),[u,v]=P(r,a1);return`<path d="M${p} ${q}A${r} ${r} 0 ${a1-a0>180?1:0} 1 ${u} ${v}" stroke="${c}" stroke-width="${w}" fill="none" stroke-linecap="round" ${x}/>`};
+const svg=b=>`<svg class="bg" viewBox="0 0 466 466">${b}</svg>`;
+const E=S.ev;
+/* 1 status ring */
+function sess(){const a=[['Main chat','work'],['Highlander','work'],['Email scan','work'],['Compact build','needs']];if(E.needs)a.push(['Paper inbox','needs']);return a}
+const SC={work:'#d9b23a',needs:'#ffb347',done:'#74c978',idle:'#77706a'};
+function r1(){const a=sess(),n=a.length,seg=360/n,w=a.filter(x=>x[1]=='work').length,k=a.filter(x=>x[1]=='needs').length;
+ if(S.flip)return`<div class="lab" style="margin-bottom:10px">Sessions</div><div class="rows">${a.map(x=>`<div class="row ${x[1]=='needs'?'hot':''}"><span class="t">${x[0]}</span><i class="${x[1]=='needs'?'am':''}">${x[1]=='needs'?'needs you':'working'}</i></div>`).join('')}</div>`;
+ return(k?'<div class="glow abs"></div>':'')+svg(a.map((x,i)=>arc(214,i*seg+5,(i+1)*seg-5,SC[x[1]],x[1]=='needs'?18:12,x[1]=='needs'?'class="pulse"':'')).join(''))+
+ `<div class="lab">Peggy</div><div class="lg" style="margin-top:6px">${w} working</div><div class="lg ${k?'am pulse':'gr'}" style="font-size:46px;margin-top:6px">${k?k+' needs you':'all clear'}</div><div class="sm" style="margin-top:12px">${k?'tap to see which':'nothing waiting'}</div>`}
+/* 2 day ring */
+function evs(){const d=E.delay;return[{l:'Train 8:12 in',t:492+d,lb:478+d,tr:1},{l:'Team sync',t:660},{l:'Design review',t:900},{l:'Train home',t:1057+d,lb:1040+d,tr:1},{l:'Bath time',t:1170}]}
+function r2(){const n=now(),L=evs(),nx=L.find(e=>(e.lb||e.t)>n-1),ang=m=>(m-360)/960*360;
+ let ring=arc(214,0,359.9,'#2a251d',14);L.forEach(e=>{const a=Math.max(0,ang(e.t));ring+=arc(214,a,a+5,e.tr?'#f6eedb':'#d9b23a',22)});
+ const [x,y]=P(214,Math.min(359,Math.max(0,ang(n))));ring+=`<circle cx="${x}" cy="${y}" r="13" fill="#ffb347"/>`;
+ if(S.flip)return svg(ring)+`<div class="lab" style="margin-bottom:10px">Today</div><div class="rows">${L.filter(e=>e.t>=n).slice(0,4).map(e=>`<div class="row"><span class="t">${e.tr?e.l.replace(' in',''):e.l}</span><i>${fmt(e.t)}</i></div>`).join('')||'<div class="sm">Nothing more today</div>'}</div>`;
+ if(!nx)return svg(ring)+`<div class="lab">Today</div><div class="lg" style="margin-top:8px">Done</div><div class="sm" style="margin-top:8px">${fmt(n)}</div>`;
+ let col='#f6eedb',cls='',big,sub;
+ if(nx.lb){const s=nx.lb-n;col=s>30?'#74c978':s>15?'#ffb347':'#ef6a5d';cls=s<=15?'fast':'';big=s>0?`Leave in ${s} min`:'Leave now';sub=`${nx.tr?'Train':''} ${fmt(nx.t)}${E.delay&&nx.tr?' (+'+E.delay+' late)':''}`}
+ else{big=`in ${nx.t-n} min`;sub=fmt(nx.t)}
+ return svg(ring)+`<div class="lab">${fmt(n)} · next</div><div class="md" style="margin-top:8px">${nx.tr?'Train':nx.l}</div><div class="lg ${cls}" style="color:${col};margin-top:6px;font-size:50px">${big}</div><div class="sm" style="margin-top:8px">${sub}</div>`}
+/* 3 commitments */
+const ITEMS=()=>{const a=[{k:'You owe',t:'Org chart to Dave',a:'2d late',h:1},{k:'Owed you',t:'Todesco invoice',a:'due Tue'},{k:'Draft',t:'Reply to Naomi',a:'1h'}];if(E.needs)a.unshift({k:'Approve',t:'Reply to Mr. Fitch',a:'now',h:1});return a.filter(x=>!S.done||!S.done[x.t])};
+function r3(){const a=ITEMS();S.done=S.done||{};
+ if(S.flip){const x=a[0];return x?`<div class="lab">${x.k}</div><div class="lg" style="margin:10px 0;max-width:360px;font-size:46px">${x.t}</div><div class="sm">${x.a}</div><div style="display:flex;gap:14px;margin-top:22px"><button class="row" data-do="${x.t}" style="width:auto;background:#74c978;color:#10170f;font-weight:700;justify-content:center">Approve</button><button class="row" data-hold="1" style="width:auto;justify-content:center">Hold</button></div>`:'<div class="lg gr">All clear</div>'}
+ return`<div class="lab" style="margin-bottom:10px">${a.length} open</div><div class="rows">${a.slice(0,3).map(x=>`<button class="row ${x.h?'hot':''}" data-do="${x.t}"><span class="t"><span class="dm" style="font-size:24px">${x.k}</span><br><b>${x.t}</b></span><i class="${x.h?'am':''}">${x.a}</i></button>`).join('')||'<div class="lg gr">All clear</div>'}</div><div class="sm" style="margin-top:8px">${a.length>3?'+'+(a.length-3)+' more':'tap a row to clear'}</div>`}
+/* 4 household */
+function r4(){
+ if(S.flip)return`<div class="lab" style="margin-bottom:10px">Where</div><div class="rows">${[['You','Desk',1],['Kate','Sapphire office',1],['Johnny','Qualters',1],['Gracie','Robinson',1]].map(x=>`<div class="row"><span class="t">${x[0]}</span><i><span class="gr">●</span> ${x[1]}</i></div>`).join('')}</div>`;
+ return`<div class="lab" style="margin-bottom:8px">Home · ${PH[S.ph].n}</div><div class="rows">${E.knock?`<button class="row hot" data-knock="1"><span class="t am"><b>Kate knocked</b></span><i>Call me?</i></button>`:''}${[['J','Bus home 2:15'],['G','Swim bag Fri'],['Kate','Home 5:30'],['Dinner','Tacos, GF']].slice(0,E.knock?3:4).map(x=>`<div class="row"><b>${x[0]}</b><i>${x[1]}</i></div>`).join('')}</div>${E.knock?'<div class="ripple abs"></div>':''}`}
+/* 5 money */
+function r5(){const spent=412,pace=420,bill=E.bill?['Water $166','Thu']:['Citi $2,410','Fri'];
+ if(S.flip)return`<div class="lab" style="margin-bottom:10px">Cash posture</div><div class="rows">${[['Checking 77','$3,214'],['Citizens','$5,880'],['Cover','21 days'],['Card payoff','Day 18 of 30']].map(x=>`<div class="row"><span class="t">${x[0]}</span><i>${x[1]}</i></div>`).join('')}</div>`;
+ const f=spent/700,A=-150,B=A+300*f,p=A+300*(pace/700),[x0,y0]=P(196,p),[x1,y1]=P(236,p);
+ return svg(arc(214,A,150,'#2a251d',24)+arc(214,A,B,'#d9b23a',24)+`<line x1="${x0}" y1="${y0}" x2="${x1}" y2="${y1}" stroke="#f6eedb" stroke-width="6"/>`)+
+ `<div class="lab">Discretionary</div><div class="xl" style="margin-top:6px">$${spent}</div><div class="sm">of $700 · <span class="gr">$${pace-spent} under pace</span></div><div class="md ${E.bill?'am':''}" style="margin-top:22px;font-size:34px">${bill[0]}</div><div class="sm ${E.bill?'am':''}">due ${bill[1]}${E.bill?' · new':''}</div>`}
+/* 6 world */
+function lines(){const d=E.delay;return[['Weather','41°, clearing','High 52° at 3 pm',0],['Rain','Rain in 18 min','Light, ends by 11:40',0],['Commute',d?'Providence line +'+d+' min':'Providence line on time',d?'Leave later; 8:24 now':'8:12 from Mansfield',d],['Celtics','Tonight 7:30','vs. Knicks, home',0],['Red Sox','Offseason','Pitchers report Feb 12',0],['F1','Qualifying in 5h 20m','Mexico City',0]]}
+function r6(){const L=lines();
+ if(S.flip)return`<div class="lab" style="margin-bottom:8px">All lines</div><div class="rows" style="gap:5px">${L.map(x=>`<div class="row" style="padding:5px 14px"><span class="t ${x[3]?'am':''}">${x[0]}</span><i style="font-size:24px">${x[1].replace('Providence line','Line').replace('Qualifying in','Qual')}</i></div>`).join('')}</div>`;
+ const k=E.delay&&S.rot%7==6?2:S.rot%L.length,x=L[k];
+ return svg(arc(214,0,359.9,'#2a251d',8)+arc(214,0,((S.sl%4)+1)*90-2,x[3]?'#ffb347':'#d9b23a',8))+`<div class="lab ${x[3]?'am':''}">${x[0]}</div><div class="lg ${x[3]?'am':''}" style="margin:12px 0 8px;max-width:340px;font-size:50px">${x[1]}</div><div class="sm">${x[2]}</div>`}
+/* 7 focus */
+function r7(){const m=Math.floor(S.focus/60),s=S.focus%60,f=S.focus/1500;
+ if(S.flip)return`<div class="lab" style="margin-bottom:10px">Presence</div><div class="rows">${[['Now',S.away?'Away':'Seated'],['Seated since','9:02'],['Dim after','5 min away'],['Off after','20 min away']].map(x=>`<div class="row"><span class="t">${x[0]}</span><i>${x[1]}</i></div>`).join('')}</div>`;
+ return svg(arc(214,0,359.9,'#221e17',10)+arc(214,0,Math.max(1,359*f),'#74c978',10))+`<div class="lab">Focus</div><div class="xl" style="margin:10px 0">${m}:${String(s).padStart(2,'0')}</div><div class="md" style="font-size:32px">Peggy is handling it</div><div class="sm" style="margin-top:10px">${E.needs?'<span class="am">● 1 held back</span>':'nothing waiting'}</div>`}
+/* 8 art */
+function r8(){const c=E.needs?['#ffb347','#8a4f10']:E.delay?['#ef6a5d','#6a2a22']:E.bill?['#d9b23a','#6a5415']:['#4e7a86','#2a4a52'];
+ if(S.flip)return`<div class="lab" style="margin-bottom:10px">Colour key</div><div class="rows">${[['Calm','#4e7a86'],['Bill due','#d9b23a'],['Delay','#ef6a5d'],['Needs you','#ffb347']].map(x=>`<div class="row"><span class="t">${x[0]}</span><i><span style="color:${x[1]}">████</span></i></div>`).join('')}</div>`;
+ return`<div class="abs" style="inset:0"><div class="blob" style="left:40px;top:60px;width:260px;height:260px;background:${c[0]};animation:d1 70s ease-in-out infinite"></div><div class="blob" style="left:180px;top:170px;width:240px;height:240px;background:${c[1]};animation:d2 90s ease-in-out infinite"></div><div class="blob" style="left:120px;top:120px;width:200px;height:200px;background:${c[0]};opacity:.3;animation:d3 110s ease-in-out infinite"></div></div>`}
+const R=[r1,r2,r3,r4,r5,r6,r7,r8];
+const C=[
+['Agent status ring','Know at a glance whether Peggy is busy or blocked on you.','Counts of working vs needs-you, one coloured arc per session; the rim breathes amber when something waits.'],
+['Day ring + now/next','Never miss the leave-by for the train or the next appointment.','Next event, minutes until you must leave, colour from green to red as departure nears. Try Morning, then +10 min.'],
+['Commitments + approvals','Clear what is owed by you, to you, and drafts waiting for a yes.','Top three open items with age; tap one to clear it, tap the dial for approve or hold.'],
+['Household board','Run the family day from one face.','Bus, swim bag, who is home, dinner; a knock from Mrs. Patten rises to the top.'],
+['Money + bills','Keep the $700 discretionary target and the next bill in view.','A gauge of spend vs pace tick, plus the next bill due.'],
+['Ambient world','The outside world in one rotating line.','Weather, rain countdown, commute, Celtics, Red Sox, F1; a delay jumps the queue.'],
+['Focus + presence','Protect a work block; Peggy holds the noise.','Timer, held-back count, quiet; dims when away and wakes when you sit.'],
+['Ambient art','Colour-only status that can stay on all night, burn-in safe.','Slow drifting light with no static edges: teal calm, brass bill, red delay, amber needs you.']];
+function render(){
+ const b=S.away?0:(S.ph=='night'&&E.needs?.2:PH[S.ph].b);
+ const dr=DR[S.di%5],k=S.ex?4:1;
+ let h=S.away?'':R[S.i]();
+ if(S.ph=='night'&&S.i!=7&&!S.away)h+='<div class="lab abs dm" style="top:40px;width:100%">Quiet</div>';
+ $('face').innerHTML=`<div class="c" style="transform:translate(${dr[0]*k}px,${dr[1]*k}px);filter:brightness(${b})">${h}</div>`;
+ $('dots').innerHTML=C.map((_,i)=>`<button class="${i==S.i?'on':''}" data-i="${i}" aria-label="Concept ${i+1}"></button>`).join('');
+ $('cap').innerHTML=`<h2>${S.i+1}. ${C[S.i][0]}</h2><p><b>For:</b> ${C[S.i][1]}</p><p><b>Glance:</b> ${C[S.i][2]}</p>`+(S.ph=='night'?'<p class="am">Quiet hours: default would be concept 8, brightness 12%.</p>':'');
+ $('list').innerHTML=C.map((c,i)=>`<button class="${i==S.i?'on':''}" data-i="${i}">${i+1}. ${c[0]}</button>`).join('');
+ $('phases').innerHTML=Object.keys(PH).map(k=>`<button class="chip ${k==S.ph?'on':''}" data-ph="${k}">${PH[k].n} ${fmt(PH[k].m)}</button>`).join('');
+ $('events').innerHTML=[['needs','Needs-you item'],['bill','Bill arrives'],['delay','Train delay'],['knock','Knock from Kate'],['clr','Clear all']].map(x=>`<button class="chip ev" data-ev="${x[0]}">${x[1]}</button>`).join('');
+ $('presence').textContent='Presence: '+(S.away?'away (off)':'seated');
+ $('auto').className='chip'+(S.auto?' on':'');$('exag').className='chip'+(S.ex?' on':'');
+ $('burn').textContent=`drift ${dr[0]*k},${dr[1]*k} px · brightness ${Math.round(b*100)}% · ${S.away?'panel off':S.ph=='night'?'quiet hours':'active'} · clock ${fmt(now())}`;
+ fit()}
+function fit(){const s=Math.min(1,(Math.min(innerWidth,520)-32-40)/466);$('dial').style.width=$('dial').style.height=466*s+'px';$('face').style.transform=`scale(${s})`}
+function go(i){S.i=(i+8)%8;S.flip=0;render()}
+document.addEventListener('click',e=>{const t=e.target.closest('[data-i],[data-ph],[data-ev],[data-do],[data-knock],[data-hold]');if(!t)return;
+ if(t.dataset.i!=null)go(+t.dataset.i);
+ if(t.dataset.ph){S.ph=t.dataset.ph;S.off=0;S.away=0;if(S.ph=='night')S.i=7;render()}
+ if(t.dataset.ev){const k=t.dataset.ev;if(k=='clr'){for(const x in E)E[x]=0;S.done={}}else if(k=='delay')E.delay=12;else E[k]=1;S.flip=0;render()}
+ if(t.dataset.do){S.done=S.done||{};S.done[t.dataset.do]=1;if(t.dataset.do.startsWith('Reply to Mr.'))E.needs=0;S.flip=0;render()}
+ if(t.dataset.knock){E.knock=0;render()}
+ if(t.dataset.hold){S.flip=0;render()}});
+$('plus').onclick=()=>{S.off+=10;render()};
+$('presence').onclick=()=>{S.away=!S.away;render()};
+$('auto').onclick=()=>{S.auto=!S.auto;render()};$('exag').onclick=()=>{S.ex=!S.ex;render()};$('nudge').onclick=()=>{S.di++;render()};
+/* dial gestures: tap flip, hold listen, swipe */
+let down=null,ht=null,held=0;const dial=$('dial');
+dial.addEventListener('pointerdown',e=>{down=[e.clientX,e.clientY];held=0;ht=setTimeout(()=>{held=1;const l=document.createElement('div');l.className='listen';l.id='lis';l.innerHTML='<div class="ring"></div><div class="md">Listening</div>';$('face').appendChild(l)},450)});
+const up=e=>{clearTimeout(ht);const l=$('lis');if(l)l.remove();if(!down)return;const dx=e.clientX-down[0],dy=e.clientY-down[1];down=null;
+ if(S.away){S.away=0;render();return}
+ if(Math.abs(dx)>40&&Math.abs(dx)>Math.abs(dy)){go(S.i+(dx<0?1:-1));return}
+ if(held||e.target.closest('button'))return;S.flip=!S.flip;render()};
+dial.addEventListener('pointerup',up);dial.addEventListener('pointercancel',()=>{clearTimeout(ht);down=null;const l=$('lis');if(l)l.remove()});
+setInterval(()=>{if(S.i==6&&!S.flip&&!S.away){S.focus=S.focus>0?S.focus-1:1500;render()}
+ S.sl++;if(S.sl%4==0)S.rot++;if(S.i==5&&!S.flip&&!S.away)render()},1000);
+setInterval(()=>{if(S.auto){S.di++;render()}},12000);
+addEventListener('resize',fit);render();
+</script></body></html>

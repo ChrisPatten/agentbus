@@ -1,0 +1,605 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Intercom Sessions mockup</title>
+<style>
+:root{--page:#0b0a08;--panel:#15120e;--panel2:#1c1812;--line:#2e2920;--cream:#f6eedb;--dim:#b3aa9a;--brass:#d9b23a;--amber:#ffb347;--green:#74c978;--red:#ef6a5d;--grey:#77706a;--blue:#8fb8e8;--ease:cubic-bezier(.2,.8,.2,1)}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;background:#000;color:var(--cream);font:16px/1.35 -apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",Arial,sans-serif;overscroll-behavior:none}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer;padding:0}
+button:focus-visible,input:focus-visible,summary:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
+.stage{min-height:100%;display:flex;align-items:center;justify-content:center;gap:48px;padding:24px}
+.phone{position:relative;width:390px;height:844px;max-height:calc(100dvh - 24px);background:var(--page);border-radius:46px;border:1px solid #3a352d;box-shadow:0 0 0 8px #151310,0 30px 80px #000;overflow:hidden;display:flex;flex-direction:column;flex:none}
+.aside{display:none;flex-direction:column;align-items:center;gap:14px;color:var(--dim);font-size:14px;max-width:340px;text-align:center}
+@media(min-width:960px){.aside{display:flex}}
+@media(max-width:430px){.stage{padding:0}.phone{width:100vw;height:100dvh;max-height:none;border-radius:0;border:0;box-shadow:none}}
+.serif{font-family:Georgia,"Times New Roman",serif}
+/* top bar */
+.top{padding:18px 18px 8px;display:flex;align-items:flex-end;justify-content:space-between;flex:none}
+.top h1{margin:0;font-size:30px;font-weight:700;letter-spacing:-.3px}
+.top .sub{font-size:13px;color:var(--dim);margin-top:2px}
+.sub b{color:var(--cream);font-weight:600}
+.iconbtn{height:40px;min-width:40px;padding:0 12px;border-radius:20px;border:1px solid var(--line);background:var(--panel);display:inline-flex;align-items:center;gap:6px;font-size:14px;color:var(--cream);transition:transform .15s var(--ease),background .15s}
+.iconbtn:active{transform:scale(.94);background:var(--panel2)}
+.tops{display:flex;gap:8px}
+/* scroll */
+.scroll{flex:1;overflow-y:auto;overflow-x:hidden;padding:4px 14px 20px;scrollbar-width:none}
+.scroll::-webkit-scrollbar{display:none}
+.grp{margin:16px 4px 8px;font-size:12px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--brass);display:flex;align-items:center;gap:8px}
+.grp .n{color:var(--dim);letter-spacing:0;font-weight:600}
+.grp.needs{color:var(--amber)}
+.empty{color:var(--dim);font-size:14px;padding:6px 6px 2px}
+/* rows */
+.swipe{position:relative;margin-bottom:10px;border-radius:18px;overflow:hidden;background:var(--panel2)}
+.acts{position:absolute;right:0;top:0;bottom:0;display:flex}
+.acts button{width:76px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;font-size:12px;font-weight:600}
+.acts .a1{background:#3a2f12;color:var(--amber)}.acts .a2{background:#3b1814;color:var(--red)}
+.row{position:relative;background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:13px 14px 12px;transition:transform .28s var(--ease),border-color .3s,background .3s;touch-action:pan-y;cursor:pointer;width:100%;text-align:left;display:block}
+.row.dragging{transition:none}
+.row.needs{border-color:#6b5320;background:linear-gradient(180deg,#201a0e,var(--panel))}
+.row.stuckrow{border-color:#6b2a24}
+.row.flash{animation:flash 1.1s var(--ease)}
+@keyframes flash{0%{box-shadow:0 0 0 0 rgba(255,179,71,.7)}100%{box-shadow:0 0 0 14px rgba(255,179,71,0)}}
+.r1{display:flex;align-items:flex-start;gap:8px;justify-content:space-between}
+.title{font-size:17px;font-weight:650;line-height:1.25;min-width:0;flex:1}
+.pin{color:var(--brass);margin-right:4px;vertical-align:-1px}
+.sum{font-size:14px;color:var(--dim);margin:3px 0 10px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.chip{flex:none;display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 10px;border-radius:12px;font-size:12px;font-weight:700;letter-spacing:.3px;border:1px solid transparent;white-space:nowrap;transition:background .3s,color .3s}
+.chip i{width:7px;height:7px;border-radius:50%;background:currentColor;display:block}
+.chip.working{color:var(--brass);background:#2a2208;border-color:#52440f}.chip.working i{animation:pulse 1.3s ease-in-out infinite}
+.chip.waiting{color:#1b1204;background:var(--amber)}
+.chip.finished{color:var(--green);background:#12261a;border-color:#244a2c}
+.chip.idle{color:var(--dim);background:#1f1b16;border-color:#35302a}
+.chip.stuck{color:#fff;background:#8f2c24}
+.chip.paused{color:var(--blue);background:#14212f;border-color:#2b4561}
+@keyframes pulse{50%{opacity:.25;transform:scale(.7)}}
+.r3{display:flex;align-items:center;gap:10px;font-size:12px;color:var(--dim)}
+.glyphs{display:flex;gap:4px}
+.g{width:22px;height:22px;border-radius:7px;background:#23201a;border:1px solid #38332a;display:inline-flex;align-items:center;justify-content:center;color:var(--cream)}
+.g svg{width:14px;height:14px}
+.g.live{border-color:var(--amber);color:var(--amber)}
+.sp{flex:1}
+.bar{width:54px;height:6px;border-radius:3px;background:#2b2720;overflow:hidden;display:inline-block;vertical-align:middle}
+.bar b{display:block;height:100%;background:var(--brass);border-radius:3px;transition:width .6s var(--ease),background .3s}
+.bar.hi b{background:var(--amber)}.bar.crit b{background:var(--red)}
+.mono{font-variant-numeric:tabular-nums}
+.quick{margin-top:10px;display:flex;gap:8px}
+.qbtn{height:38px;padding:0 14px;border-radius:19px;font-size:14px;font-weight:650;border:1px solid #4a4030;background:#221d14;transition:transform .15s var(--ease)}
+.qbtn:active{transform:scale(.94)}
+.qbtn.pri{background:var(--amber);color:#1b1204;border-color:var(--amber)}
+.qbtn.danger{border-color:#7a342d;color:var(--red)}
+/* tab bar */
+.tabs{flex:none;display:flex;border-top:1px solid var(--line);background:#0e0c09;padding:6px 8px calc(10px + env(safe-area-inset-bottom))}
+.tab{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:6px 0;font-size:11px;font-weight:600;color:var(--dim);position:relative}
+.tab svg{width:24px;height:24px}
+.tab.on{color:var(--amber)}
+.tab .badge{position:absolute;top:0;left:calc(50% + 6px);min-width:18px;height:18px;border-radius:9px;background:var(--amber);color:#1b1204;font-size:11px;font-weight:800;display:flex;align-items:center;justify-content:center;padding:0 5px}
+/* sheets */
+.sheet{position:absolute;inset:0;background:var(--page);transform:translateX(100%);transition:transform .38s var(--ease);display:flex;flex-direction:column;z-index:20;visibility:hidden}
+.sheet.open{transform:none;visibility:visible}
+.sheet.up{transform:translateY(100%)}.sheet.up.open{transform:none}
+.sheet.modal{inset:auto 0 0 0;top:auto;max-height:78%;border-radius:26px 26px 0 0;border-top:1px solid #3a352d;background:#14110d;z-index:40;box-shadow:0 -20px 60px #000}
+.scrim{position:absolute;inset:0;background:rgba(0,0,0,.6);opacity:0;pointer-events:none;transition:opacity .3s;z-index:30}
+.scrim.on{opacity:1;pointer-events:auto}
+.shead{display:flex;align-items:center;justify-content:space-between;padding:16px 14px 8px;flex:none}
+.back{height:40px;padding:0 12px 0 6px;display:inline-flex;align-items:center;gap:2px;color:var(--amber);font-weight:600;font-size:16px}
+.sbody{flex:1;overflow-y:auto;padding:4px 16px 16px;scrollbar-width:none}
+.sbody::-webkit-scrollbar{display:none}
+.dtitle{font-size:26px;font-weight:700;line-height:1.2;margin:4px 0 8px;letter-spacing:-.2px}
+.dsum{font-family:Georgia,serif;font-size:18px;line-height:1.4;color:var(--cream);margin:10px 0 14px}
+.meta{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:12px 0}
+.mc{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:10px 12px}
+.mc small{display:block;font-size:11px;letter-spacing:1.2px;text-transform:uppercase;color:var(--dim);margin-bottom:2px}
+.mc span{font-size:16px;font-weight:650}
+.mc .bar{width:100%;margin-top:6px;display:block}
+.sec{margin:20px 0 8px;font-size:12px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--brass)}
+.src{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--line);font-size:14px}
+.src .g{width:28px;height:28px;border-radius:9px}.src .g svg{width:16px;height:16px}
+.src em{font-style:normal;color:var(--dim);margin-left:auto;font-size:13px}
+.msg{max-width:88%;padding:9px 12px;border-radius:16px;margin:6px 0;font-size:15px;line-height:1.35;animation:pop .3s var(--ease)}
+@keyframes pop{from{opacity:0;transform:translateY(8px) scale(.97)}}
+.msg.you{background:#2b2410;border:1px solid #4d3f14;margin-left:auto;border-bottom-right-radius:5px}
+.msg.peggy{background:var(--panel);border:1px solid var(--line);font-family:Georgia,serif;border-bottom-left-radius:5px}
+.msg small{display:flex;align-items:center;gap:5px;font-family:-apple-system,Helvetica,Arial,sans-serif;font-size:11px;color:var(--dim);margin-bottom:3px}
+.msg small svg{width:11px;height:11px}
+details{background:var(--panel);border:1px solid var(--line);border-radius:14px;margin:14px 0}
+summary{list-style:none;padding:13px 14px;font-weight:600;font-size:15px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;min-height:48px}
+summary::-webkit-details-marker{display:none}
+summary:after{content:"+";color:var(--amber);font-size:22px;transition:transform .25s}
+details[open] summary:after{transform:rotate(45deg)}
+.why{padding:0 14px 14px;font-size:14px;color:var(--dim)}
+.why ul{margin:8px 0;padding-left:18px}.why li{margin:4px 0}.why b{color:var(--cream)}
+.score{display:flex;align-items:center;gap:8px;margin:6px 0}
+.ctl{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.cbtn{min-height:62px;border-radius:14px;background:var(--panel);border:1px solid var(--line);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;font-size:13px;font-weight:600;transition:transform .15s var(--ease),background .2s;padding:6px 4px;text-align:center}
+.cbtn:active{transform:scale(.95)}
+.cbtn svg{width:20px;height:20px}
+.cbtn.on{color:var(--brass);border-color:#52440f}
+.cbtn.danger{color:var(--red)}
+.cbtn.confirm{background:#8f2c24;color:#fff;border-color:#8f2c24}
+.replybar{flex:none;display:flex;gap:8px;align-items:center;padding:10px 12px calc(14px + env(safe-area-inset-bottom));border-top:1px solid var(--line);background:#0e0c09}
+.replybar input{flex:1;min-width:0;height:48px;border-radius:24px;border:1px solid #3a352d;background:#16130f;color:var(--cream);padding:0 16px;font:inherit;font-size:16px}
+.hold{width:48px;height:48px;border-radius:50%;background:var(--amber);color:#1b1204;display:flex;align-items:center;justify-content:center;flex:none;touch-action:none;user-select:none;-webkit-user-select:none;transition:transform .15s var(--ease)}
+.hold.rec{transform:scale(1.35);box-shadow:0 0 0 8px rgba(255,179,71,.25),0 0 0 18px rgba(255,179,71,.12);animation:pulse2 1s infinite}
+@keyframes pulse2{50%{box-shadow:0 0 0 12px rgba(255,179,71,.2),0 0 0 26px rgba(255,179,71,.06)}}
+.sendbtn{height:48px;padding:0 16px;border-radius:24px;background:#2b2410;border:1px solid #52440f;color:var(--amber);font-weight:700}
+.listen{position:absolute;left:12px;right:12px;bottom:78px;background:#1b1508;border:1px solid var(--amber);border-radius:16px;padding:10px 14px;font-size:15px;opacity:0;transform:translateY(8px);pointer-events:none;transition:.2s}
+.listen.on{opacity:1;transform:none}
+.listen small{color:var(--amber);letter-spacing:1.5px;font-size:11px;font-weight:700;display:block}
+/* picker list */
+.pick{display:flex;align-items:center;gap:12px;width:100%;text-align:left;padding:14px 16px;border-bottom:1px solid var(--line);min-height:56px;transition:background .15s}
+.pick:active{background:var(--panel2)}
+.pick .t{flex:1;min-width:0}.pick .t b{display:block;font-weight:600;font-size:16px}.pick .t span{font-size:13px;color:var(--dim)}
+.pick .ck{color:var(--amber);font-weight:800}
+.mtitle{padding:18px 16px 6px;font-size:18px;font-weight:700}
+.msub{padding:0 16px 8px;color:var(--dim);font-size:14px}
+/* toast */
+.toast{position:absolute;left:12px;right:12px;bottom:84px;z-index:60;background:#1d1709;border:1px solid #6b5320;border-radius:20px;padding:12px 14px 10px;box-shadow:0 14px 40px #000;transform:translateY(30px);opacity:0;pointer-events:none;transition:.35s var(--ease);overflow:hidden}
+.toast.on{transform:none;opacity:1;pointer-events:auto}
+.toast .l1{font-size:11px;letter-spacing:1.5px;font-weight:700;color:var(--brass);text-transform:uppercase;display:flex;align-items:center;gap:6px}
+.toast .l1 .g{width:18px;height:18px;border-radius:6px}.toast .l1 .g svg{width:11px;height:11px}
+.toast .l2{font-size:17px;font-weight:650;margin:3px 0 8px}
+.toast .l2 span{font-weight:400;color:var(--dim);font-size:14px}
+.toast .tb{display:flex;gap:8px}
+.toast .tb button{flex:1;height:42px;border-radius:21px;border:1px solid #5a4a22;background:#2a2108;font-weight:650;font-size:14px;transition:transform .15s var(--ease)}
+.toast .tb button:active{transform:scale(.95)}
+.toast .tb .ok{background:transparent;color:var(--dim);border-color:var(--line)}
+.toast .life{position:absolute;left:0;bottom:0;height:3px;background:var(--amber);width:100%;transform-origin:left}
+.toast.on .life{animation:life 8s linear forwards}
+@keyframes life{to{transform:scaleX(0)}}
+.note{position:absolute;left:50%;top:60px;transform:translate(-50%,-20px);background:#262017;border:1px solid #4a4030;padding:9px 16px;border-radius:20px;font-size:14px;opacity:0;transition:.3s var(--ease);z-index:90;pointer-events:none;white-space:nowrap;max-width:92%;overflow:hidden;text-overflow:ellipsis}
+.note.on{opacity:1;transform:translate(-50%,0)}
+/* refile */
+.mchip{margin:10px 0;padding:12px 14px;border-radius:16px;background:#2b2410;border:1px solid #4d3f14;font-size:16px;transition:transform .6s var(--ease),opacity .4s}
+.cand{display:flex;align-items:center;gap:10px;padding:12px 14px;border:1px solid var(--line);border-radius:14px;margin:8px 0;background:var(--panel);width:100%;text-align:left;min-height:56px;transition:.4s var(--ease)}
+.cand.cur{opacity:.5;text-decoration:line-through}
+.cand.dest{border-color:var(--green);background:#12261a;transform:scale(1.02)}
+.cand .t{flex:1}.cand .t b{display:block;font-weight:600}.cand .t span{font-size:13px;color:var(--dim)}
+.cand .sc{font-size:13px;color:var(--dim)}
+.learn{margin-top:12px;font-size:14px;color:var(--green);display:none;font-family:Georgia,serif}
+.learn.on{display:block;animation:pop .4s var(--ease)}
+/* demo menu */
+.demo{padding:2px 16px 18px;display:flex;flex-direction:column;gap:8px}
+.demo button{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:12px 14px;text-align:left;min-height:56px}
+.demo button b{display:block;font-weight:600;font-size:15px}.demo button span{font-size:13px;color:var(--dim)}
+/* dial */
+.dialwrap{display:flex;flex-direction:column;align-items:center;gap:16px;padding:6px 0}
+.bezel{border-radius:50%;padding:calc(var(--dial)*20/466);background:radial-gradient(circle at 30% 25%,#a29d94,#4b4843 45%,#2a2826 70%,#7d7972);flex:none}
+.dial{position:relative;width:var(--dial);height:var(--dial);border-radius:50%;background:#000;overflow:hidden;cursor:pointer}
+.face{position:absolute;left:0;top:0;width:466px;height:466px;transform:scale(var(--s));transform-origin:0 0;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;font-weight:500;border-radius:50%}
+@keyframes fadein{from{opacity:0}}
+.face svg.rim{position:absolute;inset:0;width:466px;height:466px}
+.face .label{font-size:26px;letter-spacing:3px;text-transform:uppercase;color:var(--brass);font-weight:600;position:relative}
+.face .big{font-size:60px;line-height:1.1;font-weight:600;position:relative;margin:6px 0}
+.face .dsub{font-size:34px;color:var(--amber);font-weight:600;position:relative}
+.face .dsub.calm{color:var(--dim)}
+.face .peggy{font-family:Georgia,serif;font-size:36px;line-height:1.2;max-width:330px;font-weight:400;position:relative;margin:8px 0 12px}
+.face .btn{border-radius:40px;height:72px;line-height:66px;width:300px;font-size:34px;font-weight:700;margin:5px 0;border:3px solid var(--grey);color:var(--cream);position:relative;background:none}
+.face .btn.ok{background:var(--green);border-color:var(--green);color:#081a09}
+.face .btn.row2{display:inline-block;width:auto}
+.face .btn.back{color:var(--dim);border-color:#3a352d;height:60px;line-height:54px;font-size:28px;width:200px}
+.glow{position:absolute;inset:0;border-radius:50%;box-shadow:inset 0 0 70px 22px rgba(255,179,71,.6);animation:gpulse 2.6s ease-in-out infinite}
+@keyframes gpulse{50%{opacity:.35}}
+.dialcap{font-size:13px;color:var(--dim);text-align:center;max-width:300px}
+.seg{display:flex;gap:6px;background:var(--panel);border:1px solid var(--line);border-radius:20px;padding:3px}
+.seg button{height:34px;padding:0 14px;border-radius:17px;font-size:13px;font-weight:600;color:var(--dim)}
+.seg button.on{background:var(--amber);color:#1b1204}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style></head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+<defs>
+<symbol id="i-compact" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="2.2"/><circle cx="12" cy="12" r="2.6" fill="currentColor"/></symbol>
+<symbol id="i-pebble" viewBox="0 0 24 24"><rect x="6" y="3" width="12" height="18" rx="6" fill="none" stroke="currentColor" stroke-width="2.2"/><circle cx="12" cy="12" r="2" fill="currentColor"/></symbol>
+<symbol id="i-telegram" viewBox="0 0 24 24"><path d="M3 11.5 21 4l-3 16-5.5-4.2L9.8 18l-.8-4.8z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></symbol>
+<symbol id="i-siri" viewBox="0 0 24 24"><path d="M4 12h2M8 7v10M12 4v16M16 8v8M20 11v2" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" fill="none"/></symbol>
+<symbol id="i-email" viewBox="0 0 24 24"><rect x="3" y="5.5" width="18" height="13" rx="2.5" fill="none" stroke="currentColor" stroke-width="2.2"/><path d="m4 8 8 5.5L20 8" fill="none" stroke="currentColor" stroke-width="2"/></symbol>
+<symbol id="i-sched" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="2.2"/><path d="M12 7v5l3.5 2" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></symbol>
+<symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14" stroke="currentColor" stroke-width="3.2" stroke-linecap="round"/></symbol>
+<symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l12-7.5z" fill="currentColor"/></symbol>
+<symbol id="i-stop" viewBox="0 0 24 24"><rect x="5.5" y="5.5" width="13" height="13" rx="2.5" fill="currentColor"/></symbol>
+<symbol id="i-edit" viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16zM13.5 6.5l4 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></symbol>
+<symbol id="i-pin" viewBox="0 0 24 24"><path d="M9 3h6l-1 6 3 3v2H7v-2l3-3zM12 14v7" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/></symbol>
+<symbol id="i-merge" viewBox="0 0 24 24"><path d="M6 4v6c0 4 12 2 12 8M18 4v6c0 1.5-.6 2.6-1.5 3.4M12 12.5V20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+<symbol id="i-model" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+<symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="12" rx="3" fill="currentColor"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></symbol>
+<symbol id="i-talk" viewBox="0 0 24 24"><path d="M4 5h16v11H10l-5 4v-4H4z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></symbol>
+<symbol id="i-list" viewBox="0 0 24 24"><path d="M9 6h11M9 12h11M9 18h11" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><circle cx="4.5" cy="6" r="1.6" fill="currentColor"/><circle cx="4.5" cy="12" r="1.6" fill="currentColor"/><circle cx="4.5" cy="18" r="1.6" fill="currentColor"/></symbol>
+<symbol id="i-check" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2.2"/><path d="m8 12.5 3 3 5-6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+<symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="2.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+<symbol id="i-dial" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 7v5l3 2" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></symbol>
+<symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></symbol>
+<symbol id="i-back" viewBox="0 0 24 24"><path d="m15 5-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+</defs></svg>
+
+<div class="stage">
+ <div class="phone" id="phone">
+  <div class="top">
+   <div><h1>Sessions</h1><div class="sub" id="subline"></div></div>
+   <div class="tops">
+     <button class="iconbtn" id="btnDial" aria-label="Show the dial glance"><svg width="18" height="18"><use href="#i-dial"/></svg>Dial</button>
+     <button class="iconbtn" id="btnDemo" aria-label="Simulate a message"><svg width="18" height="18"><use href="#i-plus"/></svg>Say</button>
+   </div>
+  </div>
+  <div class="scroll" id="list"></div>
+  <nav class="tabs" aria-label="Main">
+   <button class="tab" data-t="Talk"><svg><use href="#i-talk"/></svg>Talk</button>
+   <button class="tab on" data-t="Sessions" aria-current="page"><svg><use href="#i-list"/></svg>Sessions<span class="badge" id="tabBadge">1</span></button>
+   <button class="tab" data-t="Approvals"><svg><use href="#i-check"/></svg>Approvals</button>
+   <button class="tab" data-t="Today"><svg><use href="#i-sun"/></svg>Today</button>
+  </nav>
+
+  <!-- detail -->
+  <section class="sheet" id="detail" aria-label="Session detail">
+   <div class="shead"><button class="back" id="dBack"><svg width="22" height="22"><use href="#i-back"/></svg>Sessions</button><span class="chip" id="dChip"></span></div>
+   <div class="sbody" id="dBody"></div>
+   <div class="listen" id="listen"><small>LISTENING</small><span id="listenTxt">Release to send</span></div>
+   <div class="replybar">
+     <input id="dInput" placeholder="Reply to this thread" aria-label="Reply text" enterkeyhint="send">
+     <button class="sendbtn" id="dSend">Send</button>
+     <button class="hold" id="dHold" aria-label="Hold to talk"><svg width="22" height="22"><use href="#i-mic"/></svg></button>
+   </div>
+  </section>
+
+  <!-- dial sheet -->
+  <section class="sheet up" id="dialSheet" aria-label="Dial glance">
+   <div class="shead"><button class="back" id="dialBack"><svg width="22" height="22"><use href="#i-back"/></svg>Sessions</button><div class="seg" id="dialSeg"><button class="on" data-f="status">Status</button><button data-f="needs">Needs you</button></div></div>
+   <div class="sbody"><div class="dialwrap"><div id="dialHost"></div><div class="dialcap">The same data on the Compact. Tap the dial to flip faces, tap a button to answer. Live with the list.</div></div></div>
+  </section>
+
+  <div class="scrim" id="scrim"></div>
+  <section class="sheet up modal" id="modal" role="dialog" aria-modal="true"></section>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <div class="note" id="note" role="status"></div>
+ </div>
+
+ <aside class="aside">
+   <div style="font-size:13px;letter-spacing:2px;color:var(--brass);font-weight:700">THE COMPACT, SAME DATA</div>
+   <div id="dialSide"></div>
+   <div>Wide screens show the dial beside the phone. Everything is fake data and updates every few seconds.</div>
+ </aside>
+</div>
+
+<script>
+const $=s=>document.querySelector(s);
+const ic=(n,sz)=>`<svg ${sz?`width="${sz}" height="${sz}"`:''}><use href="#i-${n}"/></svg>`;
+const CH={compact:'Compact',pebble:'Pebble',telegram:'Telegram',siri:'Siri',email:'Email',sched:'Schedule'};
+const STATE={working:'Working',waiting:'Needs you',finished:'Finished',idle:'Idle',stuck:'Stuck',paused:'Paused'};
+const MODELS=[['Opus','Deepest reasoning, slowest, priciest'],['Sonnet 5.5','Default for most threads'],['Haiku','Fast and cheap, for triage']];
+
+function seed(){return [
+ {id:'hl',title:'Highlander replacement research',sum:'Narrowed to Highlander Hybrid, Pilot and Telluride. Need a budget cap before pricing trims.',state:'waiting',age:140,ch:['telegram','compact','siri'],live:'telegram',ctx:62,cost:1.84,model:'Sonnet 5.5',pane:2,pinned:true,topic:'Highlander Replacement',
+  ask:{q:'Which budget cap for the new car?',opts:['$45k','$55k']},
+  why:['Message mentioned "Highlander" and "lease end".','Same Telegram topic as the last 3 messages (Highlander Replacement).','Active 2 minutes ago, so inside the 30 minute attach window.'],conf:.94,
+  ex:[['you','telegram','What does a 2027 Highlander Hybrid cost versus the Pilot?'],['peggy','','The Highlander Hybrid starts near $44,900; the Pilot near $42,800. I have pulled three dealer quotes within 25 miles.'],['you','siri','Does Kate prefer the third row?'],['peggy','','Mrs. Patten noted the third row on Oct 28. Which budget cap shall I price against?']]},
+ {id:'ic',title:'Intercom Sessions view mockup',sum:'Building the clickable mockup; list, detail, routing toast and dial are drafted.',state:'working',age:8,ch:['telegram','compact'],live:'telegram',ctx:41,cost:3.2,model:'Sonnet 5.5',pane:0,topic:'Intercom',
+  why:['Topic "Intercom" in Telegram is bound to this lease.','Phrase "sessions view" matched the thread summary.'],conf:.97,
+  ex:[['you','compact','Mock up a sessions screen for the Compact app.'],['peggy','','Right away. Reading the PRD and the dial styles first.']]},
+ {id:'es',title:'Morning email scan',sum:'Reading 14 new messages; two look like bills.',state:'working',age:20,ch:['email','sched'],live:'sched',ctx:18,cost:.42,model:'Haiku',pane:3,topic:'system:peggy',
+  why:['Scheduled job "email-scan" owns this lease.','No human message routed here.'],conf:1,
+  ex:[['peggy','','Scan started 6:02 AM. Mail Watcher returned 14 records.']]},
+ {id:'ff',title:'Fantasy football watch',sum:'Sunday window: monitoring injuries for Kelce and Smack.',state:'working',age:30,ch:['sched','telegram'],live:'sched',ctx:27,cost:.31,model:'Haiku',pane:4,topic:'Fantasy',
+  why:['Scheduled Fantasy Watch fired; Telegram "Fantasy" topic is bound.'],conf:1,
+  ex:[['peggy','','Both active. Smack questionable until the 12:30 inactives list.']]},
+ {id:'mt',title:'Mortgage refinance question',sum:'SFCU rate is 0.4 points above current. Recommended holding.',state:'finished',age:1500,ch:['telegram','pebble'],live:'',ctx:34,cost:.88,model:'Sonnet 5.5',pane:1,topic:'DM',
+  why:['Pebble note "should I refi" matched Oct thread on SFCU.','Last activity 25 minutes ago.'],conf:.88,
+  ex:[['you','pebble','Should I refi with SFCU?'],['peggy','','If I may, I would hold off. SFCU is 0.4 points above your current rate.']]},
+ {id:'pi',title:'Paper inbox: scanned mail',sum:'Filed 3 pages. Water bill $166.20 added to obligations.',state:'finished',age:5400,ch:['sched'],live:'',ctx:22,cost:.37,model:'Sonnet 5.5',pane:null,topic:'system:peggy',
+  why:['Triggered by scanner event on rpi4.'],conf:1,
+  ex:[['peggy','','Three pages filed under data/paperwork. 📋']]},
+ {id:'kd',title:'Kindle dashboard refresh',sum:'Published at 6:41 AM. Nothing pending.',state:'idle',age:15000,ch:['sched'],live:'',ctx:9,cost:.11,model:'Haiku',pane:null,topic:'system:peggy',why:['Scheduled post-brief hook.'],conf:1,ex:[['peggy','','Dashboard published.']]},
+ {id:'ja',title:"Johnny's account ledger",sum:"Balance $23.50 after Saturday's yard work.",state:'idle',age:90000,ch:['telegram','siri'],live:'',ctx:6,cost:0,model:'Haiku',pane:null,topic:'DM',why:['Siri phrase "Johnny earned" matched the ledger thread.'],conf:.9,ex:[['you','siri','Johnny earned five dollars for the recycling.'],['peggy','','Noted, and filed. Balance $23.50.']]}
+]}
+let S=seed(), open=null, face='status', dragging=false, flashId=null, t=0;
+
+const fmtAge=a=>a<10?'now':a<60?a+'s':a<3600?Math.floor(a/60)+'m':a<86400?Math.floor(a/3600)+'h':Math.floor(a/86400)+'d';
+const money=c=>'$'+c.toFixed(2);
+const glyphs=(s,sz)=>s.ch.map(c=>`<span class="g ${s.live===c&&s.state==='working'?'live':''}" title="${CH[c]}">${ic(c)}</span>`).join('');
+const barCls=p=>p>=90?'crit':p>=70?'hi':'';
+const get=id=>S.find(x=>x.id===id);
+const counts=()=>({w:S.filter(s=>s.state==='working').length,n:S.filter(s=>s.state==='waiting'||s.state==='stuck').length});
+
+function quick(s){
+  if(s.state==='waiting')return `<button class="qbtn pri" data-a="open" data-id="${s.id}">Answer</button><button class="qbtn" data-a="snooze" data-id="${s.id}">Later</button>`;
+  if(s.state==='stuck')return `<button class="qbtn pri" data-a="retry" data-id="${s.id}">Retry</button><button class="qbtn danger" data-a="stop" data-id="${s.id}">Stop</button>`;
+  return '';
+}
+function rowHtml(s){
+  const cls=['row',(s.state==='waiting')&&'needs',s.state==='stuck'&&'stuckrow',flashId===s.id&&'flash'].filter(Boolean).join(' ');
+  const p2=s.state==='working'?'pause':(s.state==='paused'||s.state==='idle')?'play':'edit';
+  const l2=s.state==='working'?'Pause':(s.state==='paused'||s.state==='idle')?'Resume':'Rename';
+  return `<div class="swipe" data-id="${s.id}"><div class="acts"><button class="a1" data-a="${l2.toLowerCase()}" data-id="${s.id}">${ic(p2,20)}${l2}</button><button class="a2" data-a="stop" data-id="${s.id}">${ic('stop',20)}Stop</button></div>
+  <div class="${cls}" role="button" tabindex="0" data-open="${s.id}" aria-label="${s.title}, ${STATE[s.state]}">
+   <div class="r1"><div class="title">${s.pinned?`<span class="pin">${ic('pin',14)}</span>`:''}${s.title}</div><span class="chip ${s.state}"><i></i>${STATE[s.state]}</span></div>
+   <div class="sum">${s.sum}</div>
+   <div class="r3"><div class="glyphs">${glyphs(s)}</div><span class="sp"></span><span class="mono">${money(s.cost)}</span><span class="bar ${barCls(s.ctx)}" title="Context ${s.ctx}%"><b style="width:${s.ctx}%"></b></span><span class="mono" style="min-width:30px;text-align:right">${fmtAge(s.age)}</span></div>
+   ${quick(s)?`<div class="quick">${quick(s)}</div>`:''}
+  </div></div>`;
+}
+function groupHtml(name,cls,items,emptyTxt){
+  return `<div class="grp ${cls||''}">${name}<span class="n">${items.length}</span></div>`+(items.length?items.map(rowHtml).join(''):`<div class="empty">${emptyTxt}</div>`);
+}
+function render(){
+  const by=f=>S.filter(f).sort((a,b)=>(b.pinned?1:0)-(a.pinned?1:0)||a.age-b.age);
+  const needs=by(s=>s.state==='waiting'||s.state==='stuck');
+  const work=by(s=>s.state==='working'||s.state==='paused');
+  const rec=by(s=>s.state==='finished');
+  const idle=by(s=>s.state==='idle');
+  const sc=$('#list').scrollTop;
+  $('#list').innerHTML=groupHtml('Needs you','needs',needs,'Nothing waiting. Quiet office.')+groupHtml('Working','',work,'Nothing running.')+groupHtml('Recent','',rec,'No recent finishes.')+groupHtml('Idle','',idle,'')+`<div style="height:6px"></div>`;
+  $('#list').scrollTop=sc; flashId=null;
+  const c=counts();
+  $('#subline').innerHTML=`<b>${c.w}</b> working &middot; <b>${c.n}</b> need${c.n===1?'s':''} you &middot; ${money(S.reduce((a,s)=>a+s.cost,0))} today`;
+  const b=$('#tabBadge'); b.textContent=c.n; b.style.display=c.n?'flex':'none';
+  renderDial(); if(open&&!$('#rn')&&!document.querySelector('#dBody .confirm'))renderDetail(true);
+}
+
+/* swipe */
+(function(){
+  let el=null,sx=0,dx=0,base=0,moved=false;
+  const L=$('#list');
+  L.addEventListener('pointerdown',e=>{
+    const r=e.target.closest('.row'); if(!r||e.target.closest('button'))return;
+    el=r;sx=e.clientX;dx=0;moved=false;base=r.dataset.o==='1'?-152:0;
+    document.querySelectorAll('.row[data-o="1"]').forEach(o=>{if(o!==r){o.style.transform='';o.dataset.o=''}});
+  });
+  window.addEventListener('pointermove',e=>{
+    if(!el)return; dx=e.clientX-sx;
+    if(Math.abs(dx)>8){moved=true;dragging=true;el.classList.add('dragging');el.style.transform=`translateX(${Math.max(-152,Math.min(0,base+dx))}px)`}
+  });
+  window.addEventListener('pointerup',()=>{
+    if(!el)return; const r=el; el=null; r.classList.remove('dragging');
+    if(moved){const x=Math.max(-152,Math.min(0,base+dx)); const o=x<-70; r.style.transform=o?'translateX(-152px)':''; r.dataset.o=o?'1':''; if(navigator.vibrate)navigator.vibrate(8); r.dataset.swiped='1'; setTimeout(()=>{delete r.dataset.swiped},60)}
+    setTimeout(()=>dragging=false,0);
+  });
+  L.addEventListener('click',e=>{
+    const a=e.target.closest('[data-a]'); 
+    if(a){act(a.dataset.a,a.dataset.id);return}
+    const r=e.target.closest('.row'); if(!r||r.dataset.swiped)return;
+    if(r.dataset.o==='1'){r.style.transform='';r.dataset.o='';return}
+    openDetail(r.dataset.open);
+  });
+  L.addEventListener('keydown',e=>{if((e.key==='Enter'||e.key===' ')&&e.target.matches('.row')){e.preventDefault();openDetail(e.target.dataset.open)}});
+})();
+
+function note(t){const n=$('#note');n.textContent=t;n.classList.add('on');clearTimeout(note.h);note.h=setTimeout(()=>n.classList.remove('on'),2200)}
+function setState(id,st,sum){const s=get(id);s.state=st;if(sum)s.sum=sum;s.age=0;flashId=id;render()}
+function act(a,id){
+  const s=get(id);
+  if(a==='open')return openDetail(id);
+  if(a==='pause'){setState(id,'paused','Paused by you. Context is kept in the pane.');note('Paused: '+s.title)}
+  else if(a==='resume'){setState(id,'working','Resumed. Picking up where it left off.');note('Resumed')}
+  else if(a==='stop'){setState(id,'idle','Stopped by you. Lease released after 30 minutes idle.');note('Stopped')}
+  else if(a==='retry'){setState(id,'working','Retrying (attempt 2 of 3).');note('Retrying')}
+  else if(a==='snooze'){note('Will nudge in 1 hour');s.snoozed=true}
+  else if(a==='rename'){openDetail(id);setTimeout(()=>renameFlow(),400)}
+}
+
+/* detail */
+function renderDetail(keep){
+  const s=get(open); if(!s)return;
+  const ch=$('#dChip'); ch.className='chip '+s.state; ch.innerHTML=`<i></i>${STATE[s.state]}`;
+  const cur=$('#dBody'); const sc=cur.scrollTop; const wasOpen=cur.querySelector('details')&&cur.querySelector('details').open;
+  const srcs=s.ch.map((c,i)=>`<div class="src"><span class="g">${ic(c)}</span>${CH[c]}${c==='telegram'&&s.topic?` <span style="color:var(--dim)">&middot; ${s.topic}</span>`:''}<em>${i===0?fmtAge(s.age)+' ago':fmtAge(s.age+300*(i+1))+' ago'}</em></div>`).join('');
+  const ex=s.ex.map(m=>`<div class="msg ${m[0]}"><small>${m[0]==='you'?`${ic(m[1])}${CH[m[1]]}`:'Peggy'}</small>${m[2]}</div>`).join('');
+  const pool=s.pane==null?'none (parked)':'pane '+s.pane;
+  const paused=s.state==='paused'||s.state==='idle';
+  cur.innerHTML=`<div class="dtitle" id="dtitle">${s.title}</div>
+  <div class="dsum">${s.sum}</div>
+  ${s.state==='waiting'&&s.ask?`<div class="quick" style="margin:0 0 6px">${s.ask.opts.map((o,i)=>`<button class="qbtn ${i?'':'pri'}" data-ans="${o}" style="height:48px;flex:1;font-size:16px">${o}</button>`).join('')}</div>`:''}
+  <div class="meta">
+   <div class="mc"><small>Model</small><span>${s.model}</span></div>
+   <div class="mc"><small>Lease</small><span>${pool}</span></div>
+   <div class="mc"><small>Idle</small><span class="mono">${fmtAge(s.age)}</span></div>
+   <div class="mc" style="grid-column:span 2"><small>Context ${s.ctx}% of window</small><span class="bar ${barCls(s.ctx)}"><b style="width:${s.ctx}%"></b></span></div>
+   <div class="mc"><small>Cost today</small><span class="mono">${money(s.cost)}</span></div>
+  </div>
+  <div class="sec">Controls</div>
+  <div class="ctl">
+   <button class="cbtn" data-c="${paused?'resume':'pause'}">${ic(paused?'play':'pause')}${paused?'Resume':'Pause'}</button>
+   <button class="cbtn danger" data-c="stop" id="stopBtn">${ic('stop')}Stop</button>
+   <button class="cbtn" data-c="rename">${ic('edit')}Rename</button>
+   <button class="cbtn ${s.pinned?'on':''}" data-c="pin">${ic('pin')}${s.pinned?'Pinned':'Pin'}</button>
+   <button class="cbtn" data-c="merge">${ic('merge')}Merge into&hellip;</button>
+   <button class="cbtn" data-c="model">${ic('model')}Model</button>
+   <button class="cbtn" data-c="tg" style="grid-column:span 3;min-height:48px;flex-direction:row;gap:8px">${ic('telegram')}Open in Telegram${s.topic&&s.topic!=='DM'&&!s.topic.startsWith('system')?' &middot; '+s.topic:''}</button>
+  </div>
+  <details><summary>Why was this routed here?</summary><div class="why">
+   <div class="score"><span class="bar ${s.conf<.9?'hi':''}" style="width:90px"><b style="width:${Math.round(s.conf*100)}%;background:var(--green)"></b></span><b style="color:var(--cream)">${Math.round(s.conf*100)}% match</b></div>
+   <ul>${s.why.map(w=>`<li>${w}</li>`).join('')}</ul>
+   <div>Next best: <b>${S.filter(x=>x.id!==s.id)[0].title}</b> (${Math.round((1-s.conf)*60)}%).</div></div></details>
+  <div class="sec">Recent exchanges</div>${ex}
+  <div class="sec">Heard from</div>${srcs}<div style="height:10px"></div>`;
+  if(wasOpen&&keep)cur.querySelector('details').open=true;
+  cur.scrollTop=keep?sc:0;
+}
+function openDetail(id){open=id;renderDetail();$('#detail').classList.add('open');if(navigator.vibrate)navigator.vibrate(6)}
+function closeDetail(){$('#detail').classList.remove('open');open=null}
+$('#dBack').onclick=closeDetail;
+
+$('#dBody').addEventListener('click',e=>{
+  const s=get(open);
+  const an=e.target.closest('[data-ans]'); if(an){answer(open,an.dataset.ans);return}
+  const b=e.target.closest('[data-c]'); if(!b)return; const c=b.dataset.c;
+  if(c==='pause'||c==='resume')act(c,open);
+  else if(c==='stop'){ if(!b.classList.contains('confirm')){b.classList.add('confirm');b.innerHTML=ic('stop')+'Tap to confirm';setTimeout(()=>{if(open)renderDetail(true)},2600)} else act('stop',open)}
+  else if(c==='pin'){s.pinned=!s.pinned;render();note(s.pinned?'Pinned to top':'Unpinned')}
+  else if(c==='rename')renameFlow();
+  else if(c==='merge')mergeModal();
+  else if(c==='model')modelModal();
+  else if(c==='tg')note('Opening Telegram'+(s.topic&&s.topic!=='DM'?' topic "'+s.topic+'"':' DM')+' (mock)');
+});
+function renameFlow(){
+  const s=get(open),t=$('#dtitle'); if(!t)return;
+  t.innerHTML=`<input id="rn" value="${s.title.replace(/"/g,'&quot;')}" style="width:100%;font:inherit;color:inherit;background:#16130f;border:1px solid var(--amber);border-radius:12px;padding:6px 10px" aria-label="Session title">`;
+  const i=$('#rn');i.focus();i.select();
+  const done=()=>{if(i.value.trim())s.title=i.value.trim();render();note('Renamed')};
+  i.onblur=done;i.onkeydown=e=>{if(e.key==='Enter')i.blur()};
+}
+function answer(id,opt){
+  const s=get(id); s.ex.push(['you','compact','Budget cap '+opt+'.']);
+  s.ex.push(['peggy','','Very good. Pricing trims at '+opt+' or under now.']);
+  s.ask=null; setState(id,'working','Pricing trims under '+opt+' at three dealers.'); note('Sent: '+opt);
+}
+/* modal helpers */
+function showModal(html){$('#modal').innerHTML=html;$('#modal').classList.add('open');$('#scrim').classList.add('on')}
+function hideModal(){$('#modal').classList.remove('open');$('#scrim').classList.remove('on')}
+$('#scrim').onclick=hideModal;
+function mergeModal(){
+  const s=get(open);
+  showModal(`<div class="mtitle">Merge into another thread</div><div class="msub">"${s.title}" moves into the thread you pick. Exchanges are combined; this session is released.</div>`+
+   S.filter(x=>x.id!==s.id).map(x=>`<button class="pick" data-m="${x.id}"><span class="t"><b>${x.title}</b><span>${STATE[x.state]} &middot; ${fmtAge(x.age)} ago</span></span></button>`).join('')+`<div style="height:20px"></div>`);
+  $('#modal').onclick=e=>{const p=e.target.closest('[data-m]');if(!p)return;const d=get(p.dataset.m);d.ex=d.ex.concat(s.ex);d.cost+=s.cost;S=S.filter(x=>x.id!==s.id);hideModal();closeDetail();render();note('Merged into '+d.title)};
+}
+function modelModal(){
+  const s=get(open);
+  showModal(`<div class="mtitle">Change model</div><div class="msub">Takes effect on the next turn; the pane relaunches with --model.</div>`+
+   MODELS.map(m=>`<button class="pick" data-mo="${m[0]}"><span class="t"><b>${m[0]}</b><span>${m[1]}</span></span>${s.model===m[0]?'<span class="ck">&#10003;</span>':''}</button>`).join('')+`<div style="height:20px"></div>`);
+  $('#modal').onclick=e=>{const p=e.target.closest('[data-mo]');if(!p)return;s.model=p.dataset.mo;hideModal();renderDetail(true);note('Model: '+s.model)};
+}
+
+/* reply + routing */
+function sendFrom(text,via,forced){
+  // simulate router
+  const r=forced||route(text); let s=get(r.id);
+  if(r.id==='new'){s={id:'n'+Date.now(),title:r.title,sum:'Just started. Thinking.',state:'working',age:0,ch:[via],live:via,ctx:3,cost:.01,model:'Sonnet 5.5',pane:5,topic:'DM',why:['No recent thread matched above 60%.','Started a new train of thought.'],conf:.55,ex:[]};S.push(s)}
+  s.ex.push(['you',via,text]);
+  if(!s.ch.includes(via))s.ch.unshift(via); s.live=via;
+  if(s.state!=='working'){s.state='working';s.sum='Working on: '+text}
+  s.age=0;s.ask=null;lastMsg={text,via,from:s.id};
+  render(); toastRoute(s,via,r.id==='new');
+}
+let lastMsg=null;
+function route(text){
+  const t=text.toLowerCase();
+  if(/car|highlander|pilot|hybrid|budget/.test(t))return{id:'hl'};
+  if(/mortgage|refi|rate/.test(t))return{id:'mt'};
+  if(/intercom|dial|compact|session/.test(t))return{id:'ic'};
+  if(/fantasy|kelce|lineup/.test(t))return{id:'ff'};
+  return{id:'new',title:text.length>34?text.slice(0,32)+'…':text};
+}
+function toastRoute(s,via,isNew){
+  const T=$('#toast');
+  T.innerHTML=`<div class="l1"><span class="g">${ic(via)}</span>${isNew?'New thread':'Routed'} from ${CH[via]}</div>
+   <div class="l2">${isNew?'Started':'Continuing'}: ${s.title}</div>
+   <div class="tb"><button data-t="wrong">Wrong thread</button><button data-t="new">New thread</button><button class="ok" data-t="ok">Fine</button></div><div class="life"></div>`;
+  T.classList.remove('on');void T.offsetWidth;T.classList.add('on');
+  clearTimeout(toastRoute.h);toastRoute.h=setTimeout(()=>T.classList.remove('on'),8000);
+}
+$('#toast').addEventListener('click',e=>{
+  const b=e.target.closest('[data-t]');if(!b)return; $('#toast').classList.remove('on');clearTimeout(toastRoute.h);
+  if(b.dataset.t==='wrong')refile(false);
+  else if(b.dataset.t==='new')refile(true);
+});
+function refile(toNew){
+  const m=lastMsg;if(!m)return; const from=get(m.from);
+  const cands=S.filter(x=>x.id!==m.from&&x.state!=='idle').slice(0,3).map((x,i)=>({x,sc:[58,31,17][i]}));
+  showModal(`<div class="mtitle">Re-file this message</div><div class="msub">Peggy attached it to "${from?from.title:'a thread'}". Pick where it belongs.</div>
+   <div style="padding:0 16px"><div class="mchip" id="mchip">${ic(m.via,14)} &nbsp;${m.text}</div>
+   <button class="cand cur" aria-disabled="true"><span class="t"><b>${from?from.title:'(thread)'}</b><span>Current</span></span><span class="sc">86%</span></button>
+   ${cands.map(c=>`<button class="cand" data-to="${c.x.id}"><span class="t"><b>${c.x.title}</b><span>${STATE[c.x.state]}</span></span><span class="sc">${c.sc}%</span></button>`).join('')}
+   <button class="cand" data-to="new"><span class="t"><b>Start a new thread</b><span>Router will title it</span></span>${ic('plus',18)}</button>
+   <div class="learn" id="learn"></div></div><div style="height:20px"></div>`);
+  const pickNew=()=>doRefile('new');
+  $('#modal').onclick=e=>{const c=e.target.closest('[data-to]');if(c)doRefile(c.dataset.to)};
+  if(toNew)setTimeout(pickNew,350);
+  function doRefile(to){
+    $('#modal').onclick=null;
+    const btn=document.querySelector(`#modal [data-to="${to}"]`);btn.classList.add('dest');
+    $('#mchip').style.transform='translateY(150px) scale(.96)';$('#mchip').style.opacity='.0';
+    setTimeout(()=>{
+      if(from)from.ex=from.ex.filter(e=>e[2]!==m.text);
+      let dest;
+      if(to==='new'){dest={id:'n'+Date.now(),title:m.text.length>34?m.text.slice(0,32)+'…':m.text,sum:'Re-filed here from a wrong match.',state:'working',age:0,ch:[m.via],live:m.via,ctx:3,cost:.01,model:'Sonnet 5.5',pane:5,topic:'DM',why:['You corrected the router: new thread.'],conf:1,ex:[]};S.push(dest)}
+      else dest=get(to);
+      dest.ex.push(['you',m.via,m.text]);dest.age=0;if(dest.state==='idle'||dest.state==='finished')dest.state='working';
+      if(from&&from.ex.length===0&&from.id.startsWith('n'))S=S.filter(x=>x.id!==from.id);
+      flashId=dest.id;render();
+      $('#learn').textContent='Re-filed to "'+dest.title+'". The router will weigh this phrase toward that thread next time.';$('#learn').classList.add('on');
+      setTimeout(hideModal,2400);
+    },650);
+  }
+}
+$('#dSend').onclick=()=>{const i=$('#dInput');if(!i.value.trim())return;const s=get(open);sendFrom(i.value.trim(),'telegram',{id:s.id});i.value=''};
+$('#dInput').onkeydown=e=>{if(e.key==='Enter')$('#dSend').click()};
+// hold to talk
+(function(){
+  const h=$('#dHold'),L=$('#listen');let tm=null,rec=false;
+  const phrases=['Cap it at fifty-five thousand','What is the lease buyout on the Highlander','Add the Telluride to the shortlist'];
+  const start=e=>{e.preventDefault();rec=true;h.classList.add('rec');L.classList.add('on');$('#listenTxt').textContent='…';let i=0,p=phrases[Math.floor(Math.random()*3)];tm=setInterval(()=>{i+=2;$('#listenTxt').textContent=p.slice(0,i)},60);h.dataset.p=p;if(navigator.vibrate)navigator.vibrate(10)};
+  const end=()=>{if(!rec)return;rec=false;clearInterval(tm);h.classList.remove('rec');L.classList.remove('on');const s=get(open);sendFrom(h.dataset.p,'compact',{id:s.id})};
+  h.addEventListener('pointerdown',start);window.addEventListener('pointerup',end);
+  h.addEventListener('keydown',e=>{if((e.key===' '||e.key==='Enter')&&!rec){start(e)}});h.addEventListener('keyup',e=>{if(e.key===' '||e.key==='Enter')end()});
+})();
+
+/* demo menu: simulated utterances arriving from anywhere */
+$('#btnDemo').onclick=()=>{
+  showModal(`<div class="mtitle">Simulate a message</div><div class="msub">Pretend Mr. Patten just spoke or typed. Watch the router file it.</div><div class="demo">
+   <button data-u="0"><b>"What about the Pilot's towing?"</b><span>Siri &middot; should join Highlander research</span></button>
+   <button data-u="1"><b>"Move the mortgage chat to Monday"</b><span>Pebble &middot; should join the mortgage thread</span></button>
+   <button data-u="2"><b>"Remind me about the school form"</b><span>Compact &middot; no match, starts a new thread</span></button></div>`);
+  $('#modal').onclick=e=>{const b=e.target.closest('[data-u]');if(!b)return;hideModal();const u=[["What about the Pilot's towing?",'siri'],['Move the mortgage chat to Monday','pebble'],['Remind me about the school form','compact']][b.dataset.u];setTimeout(()=>sendFrom(u[0],u[1]),250)};
+};
+
+/* dial */
+function arcs(){
+  const n=S.length,r=215,cx=233,cy=233,gap=.05,seg=2*Math.PI/n;
+  const col={working:'#d9b23a',waiting:'#ffb347',stuck:'#ef6a5d',finished:'#74c978',idle:'#4a443b',paused:'#8fb8e8'};
+  return S.map((s,i)=>{
+    const a0=-Math.PI/2+i*seg+gap,a1=-Math.PI/2+(i+1)*seg-gap,p=(a,rr)=>[cx+rr*Math.cos(a),cy+rr*Math.sin(a)];
+    const [x0,y0]=p(a0,r),[x1,y1]=p(a1,r);
+    return `<path d="M${x0} ${y0}A${r} ${r} 0 0 1 ${x1} ${y1}" stroke="${col[s.state]}" stroke-width="${s.state==='waiting'||s.state==='stuck'?14:9}" fill="none" stroke-linecap="round"/>`;
+  }).join('');
+}
+function faceHtml(f){
+  const c=counts(),nd=S.find(s=>s.state==='waiting'&&s.ask)||S.find(s=>s.state==='stuck'||s.state==='waiting');
+  if(f==='needs'&&nd){
+    const o=nd.ask?nd.ask.opts:['Retry'];
+    return `<div class="face"><div class="glow"></div><svg class="rim" viewBox="0 0 466 466">${arcs()}</svg>
+     <div class="label">${nd.state==='stuck'?'Stuck':'Needs you'}</div><div class="peggy">${nd.ask?nd.ask.q:nd.title+': '+nd.sum}</div>
+     ${o.map((x,i)=>`<div class="btn ${i?'':'ok'}" role="button" data-dans="${x}" data-did="${nd.id}">${x}</div>`).join('')}</div>`;
+  }
+  return `<div class="face"><svg class="rim" viewBox="0 0 466 466">${arcs()}</svg>
+   <div class="label">Peggy</div><div class="big">${c.w} working</div>
+   <div class="dsub ${c.n?'':'calm'}">${c.n?c.n+(c.n===1?' needs you':' need you'):'all quiet'}</div>
+   ${c.n?'<div class="glow"></div>':''}</div>`;
+}
+function dialHtml(size,id){
+  const s=size/466;
+  return `<div class="bezel" style="--dial:${size}px"><div class="dial" style="--dial:${size}px;--s:${s}" data-dial="${id}">${faceHtml(face)}</div></div>`;
+}
+function renderDial(){
+  const c=counts();
+  if(face==='needs'&&!c.n)face='status';
+  $('#dialHost').innerHTML=dialHtml(300,'h');
+  $('#dialSide').innerHTML=dialHtml(380,'s');
+  document.querySelectorAll('#dialSeg button').forEach(b=>b.classList.toggle('on',b.dataset.f===face));
+}
+document.addEventListener('click',e=>{
+  const d=e.target.closest('[data-dans]');
+  if(d){const s=get(d.dataset.did);if(s.ask)answer(s.id,d.dataset.dans);else act('retry',s.id);face='status';render();return}
+  const dial=e.target.closest('[data-dial]');
+  if(dial){face=face==='status'&&counts().n?'needs':'status';renderDial()}
+});
+$('#dialSeg').onclick=e=>{const b=e.target.closest('button');if(!b)return;face=b.dataset.f==='needs'&&!counts().n?'status':b.dataset.f;renderDial()};
+$('#btnDial').onclick=()=>$('#dialSheet').classList.add('open');
+$('#dialBack').onclick=()=>$('#dialSheet').classList.remove('open');
+document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{if(b.dataset.t!=='Sessions')note(b.dataset.t+' is not part of this mockup')});
+
+/* live ticks */
+const script={5:()=>{const s=get('es');s.ex.push(['peggy','','Scan finished: 14 new, 2 flagged (Citi statement, school note).']);setState('es','finished','14 new, 2 flagged: Citi statement and a school note.')},
+ 9:()=>{const s=get('pi');s.ch=['sched'];setState('pi','working','Reading 2 new pages from the scanner.')},
+ 14:()=>{setState('ff','stuck','Yahoo token refresh failed (401). Retrying in 5 minutes.')},
+ 20:()=>{const s=get('ic');s.ask={q:'Swipe or long-press for quick actions?',opts:['Swipe','Long-press']};setState('ic','waiting','Quick actions: which gesture do you prefer?')},
+ 27:()=>{const s=get('pi');setState('pi','finished','Filed 2 pages. Nothing due this week.')},
+ 33:()=>{S=seed();face='status';flashId='hl';render()}};
+setInterval(()=>{
+  t++;
+  S.forEach(s=>{s.age++;if(s.state==='working'){s.cost+=.004+Math.random()*.006;s.ctx=Math.min(96,s.ctx+(Math.random()<.3?1:0))}});
+  if(script[t])script[t]();
+  if(!dragging&&!document.querySelector('.row[data-o="1"]'))render();
+  if(t>=34)t=0;
+},1000);
+render();
+</script>
+</body></html>
