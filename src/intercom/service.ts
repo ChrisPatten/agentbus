@@ -35,6 +35,7 @@ import { OnMyWayStore } from './on-my-way.js';
 import type { LiveSource, LivePrediction } from './mbta.js';
 import { resolveGlance, surfaceBody } from './glance.js';
 import { createTranscriber, VoiceSessions, type Transcriber, type VoiceClient } from './voice.js';
+import { CAPTURE_NOTE, CaptureStore, captureMessage, captureStartLabel, type CaptureResult } from './capture.js';
 import { agentSpeechText, createSynthesizer, Speaker, speechText, type Synthesizer } from './speech.js';
 import {
   acknowledgeNotification, attentionFor, expireDue, getNotification, isTerminal, openForSurface, publicNotification,
@@ -158,6 +159,8 @@ export interface IntercomDeps {
   transcriber?: Transcriber | null;
   /** Spoken replies — the text-to-speech engine. Absent: built from `config.voice` and the env; null: no speech. */
   synthesizer?: Synthesizer | null;
+  /** Capture — the chunk spool and the output folder (each overridden by `capture.spool_dir` / `out_dir`). Absent: Capture is off. */
+  captureDirs?: { spool: string; out: string };
 }
 
 /** E92 — a socket as push-to-talk and spoken replies see it. */
@@ -221,12 +224,15 @@ export class IntercomService {
   readonly voice: VoiceSessions<VoiceSocket>;
   /** Spoken replies to push-to-talk messages. */
   readonly speaker: Speaker;
+  /** Capture — long recordings (null when off). */
+  readonly capture: CaptureStore | null;
 
   constructor(private readonly deps: IntercomDeps) {
     const env = deps.env ?? process.env;
+    const transcriber = deps.transcriber !== undefined ? deps.transcriber : createTranscriber(deps.config.voice, env);
     this.voice = new VoiceSessions<VoiceSocket>({
       config: deps.config.voice,
-      transcriber: deps.transcriber !== undefined ? deps.transcriber : createTranscriber(deps.config.voice, env),
+      transcriber,
       submit: (c, clientMsgId, text, engine) => this.handleSend(c.surface, { client_msg_id: clientMsgId, body: text }, {
         noteLine: VOICE_NOTE,
         metadata: { input: 'voice', transcript_engine: engine },
@@ -241,6 +247,16 @@ export class IntercomService {
       synth: deps.synthesizer !== undefined ? deps.synthesizer : createSynthesizer(deps.config.voice, env),
       log: (l) => this.log(l),
     });
+    const cap = deps.config.capture;
+    this.capture = cap.enabled && deps.captureDirs
+      ? new CaptureStore({
+        config: cap, spoolDir: cap.spool_dir || deps.captureDirs.spool, outDir: cap.out_dir || deps.captureDirs.out,
+        transcriber, language: deps.config.voice.language,
+        wake: (r) => this.captureWake(r),
+        ...(deps.now ? { now: deps.now } : {}),
+        log: (l) => this.log(`capture: ${l}`),
+      })
+      : null;
     this.calendar = deps.calendar ?? new CalendarFeed(deps.config.calendar);
     this.commute = deps.commute !== undefined ? deps.commute : loadCommute(deps.config.desk.commute_file, (l) => this.log(l));
     this.plan = deps.plan ?? createPlanSource(deps.config.desk.plan_file, (l) => this.log(l));
@@ -324,6 +340,20 @@ export class IntercomService {
     // E94 — desk summary: checked every 5 s, pushed only when it changed, so never more than one per 5 s.
     this.deskTimer = setInterval(() => { void this.pushDesk(); this.surfaceTick(); }, DESK_CHECK_MS);
     this.deskTimer.unref();
+    this.capture?.start();
+  }
+
+  /** Capture — a recording was saved: tell the agent in the surface's followed conversation (once per capture id). */
+  private async captureWake(r: CaptureResult): Promise<void> {
+    const surface = this.surfaces.get(r.surfaceId);
+    if (!surface) { this.log(`warn: capture ${r.id}: surface ${r.surfaceId} is not configured; no message`); return; }
+    const body = captureMessage(r, captureStartLabel(r.startedAt, this.deps.config.capture.timezone));
+    const ack = await this.handleSend(surface, { client_msg_id: `capture-${r.id}`.slice(0, 100), body }, {
+      noteLine: CAPTURE_NOTE,
+      metadata: { input: 'capture', capture_id: r.id, capture_json: r.json },
+      echoIcon: '⏺️',
+    });
+    if (ack['status'] !== 'queued') this.log(`warn: capture ${r.id} message not queued: ${JSON.stringify(ack)}`);
   }
 
   /** E96 — collaborators that keep computed resources (sessions, approvals, notices) in sync; run on the 5 s tick. */
@@ -356,6 +386,7 @@ export class IntercomService {
     this.sweepTimer = this.calendarTimer = this.deskTimer = null;
     this.voice.stop();
     this.speaker.stop();
+    this.capture?.stop();
   }
 
   // ── Auth ─────────────────────────────────────────────────────────────────

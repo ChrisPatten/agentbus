@@ -112,6 +112,28 @@ Your agent has a `speak` tool. It uses it to answer something you said, and also
 | `voice.speech.style_file` | off | A Markdown file describing how your agent should sound; it is shown to the agent once per session when you speak to it, and again if you edit the file |
 | `surfaces[].speech` | `true` | `false` keeps one screen silent |
 
+### 6. Record a conversation (optional)
+
+The Compact can record a meeting or a note: double-press BOOT to start, and hold HOLD TO STOP (or double-press again) to stop. The screen shows a red REC ring the whole time. The recording goes to the bus in small numbered pieces as you go; if the bus cannot be reached, the device keeps the pieces and sends them later. When it is complete, the bus writes the audio and a transcript (with speakers and times when ElevenLabs transcribes it) to a folder, and sends your agent a `[capture]` message with the file paths, so it can summarise and file it. You see the message in the followed chat as `⏺️ [capture] …`.
+
+```yaml
+adapters:
+  intercom:
+    capture:
+      out_dir: /Users/me/notes/captures
+```
+
+| Option | Default | What it does |
+|---|---|---|
+| `capture.enabled` | `true` | Turns recording uploads on |
+| `capture.out_dir` | `captures` next to the bus database | Where recordings go, one folder per day: the `.wav`, the `.txt` transcript and a `.json` summary |
+| `capture.timezone` | `America/New_York` | Your time zone, for the folder date and the start time |
+| `capture.max_seconds` | `7200` | Longest recording accepted |
+| `capture.transcribe` | `true` | Transcribe with the same service as push-to-talk |
+| `capture.wake` | `true` | Tell your agent when a recording is saved |
+
+Recording other people may need their consent where you live (in Massachusetts, everyone in the conversation must agree).
+
 ## Troubleshooting
 
 | Problem | What to try |

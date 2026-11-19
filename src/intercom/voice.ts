@@ -29,6 +29,43 @@ export interface Transcriber {
   readonly name: string;
   /** Transcribe a WAV file; resolves to the text (possibly empty). Rejects on failure or abort. */
   transcribe(wav: Buffer, opts: { language: string; signal: AbortSignal }): Promise<string>;
+  /**
+   * Long-form (Capture): the whole recording in one request, with timed and, where the engine can, speaker-labelled
+   * segments. Optional; without it Capture sends the audio in `capture.segment_s` pieces to `transcribe`.
+   */
+  transcribeDetailed?(wav: Buffer, opts: { language: string; signal: AbortSignal }): Promise<DetailedTranscript>;
+}
+
+/** One stretch of speech: seconds from the start of the recording, and the engine's speaker label when it has one. */
+export interface TranscriptSegment { start: number; end: number; speaker?: string; text: string }
+export interface DetailedTranscript { text: string; segments: TranscriptSegment[]; language?: string }
+
+/**
+ * Group Scribe's word list into segments: a new one at a speaker change, a pause over 1.5 s, or a sentence end once
+ * the segment is past 25 s. Spacing tokens are kept as text; audio events are dropped.
+ */
+export function wordsToSegments(words: { text?: unknown; start?: unknown; end?: unknown; type?: unknown; speaker_id?: unknown }[]): TranscriptSegment[] {
+  const out: TranscriptSegment[] = [];
+  let cur: TranscriptSegment | null = null;
+  for (const w of words) {
+    const text = typeof w.text === 'string' ? w.text : '';
+    const type = typeof w.type === 'string' ? w.type : 'word';
+    if (type === 'audio_event') continue;
+    if (type === 'spacing') { if (cur) cur.text += text; continue; }
+    const start: number = typeof w.start === 'number' ? w.start : (cur ? cur.end : 0);
+    const end: number = typeof w.end === 'number' ? w.end : start;
+    const speaker = typeof w.speaker_id === 'string' ? w.speaker_id : undefined;
+    const split = !cur || speaker !== cur.speaker || start - cur.end > 1.5 || (cur.end - cur.start > 25 && /[.?!]\s*$/.test(cur.text));
+    if (split) {
+      if (cur) out.push(cur);
+      cur = { start, end, ...(speaker ? { speaker } : {}), text };
+    } else {
+      cur!.text += text;
+      cur!.end = end;
+    }
+  }
+  if (cur) out.push(cur);
+  return out.map((s) => ({ ...s, text: s.text.replace(/\s+/g, ' ').trim() })).filter((s) => s.text);
 }
 
 /** A RIFF/WAVE header plus the samples: 16-bit little-endian mono PCM at `rate`. */
@@ -107,6 +144,29 @@ export class ElevenLabsTranscriber implements Transcriber {
     if (!res.ok) throw new Error(`transcription HTTP ${res.status}`);
     const j = await res.json() as { text?: unknown };
     return typeof j.text === 'string' ? j.text : '';
+  }
+
+  /** Capture: the whole recording, diarized, with word timestamps grouped into segments. */
+  async transcribeDetailed(wav: Buffer, { language, signal }: { language: string; signal: AbortSignal }): Promise<DetailedTranscript> {
+    const form = new FormData();
+    const raw = wav.length >= 44 && wav.toString('ascii', 0, 4) === 'RIFF' && wav.readUInt32LE(24) === 16000 && wav.readUInt16LE(22) === 1;
+    const bytes = raw ? wav.subarray(44) : wav;
+    form.append('model_id', this.opts.model);
+    form.append('file', new Blob([new Uint8Array(bytes)], { type: raw ? 'application/octet-stream' : 'audio/wav' }), raw ? 'capture.pcm' : 'capture.wav');
+    if (raw) form.append('file_format', 'pcm_s16le_16');
+    if (language) form.append('language_code', language);
+    form.append('tag_audio_events', 'false');
+    form.append('diarize', 'true');
+    form.append('timestamps_granularity', 'word');
+    for (const k of this.opts.keyterms ?? []) form.append('keyterms', k);
+    const res = await (this.opts.fetchImpl ?? fetch)(`${this.opts.baseUrl.replace(/\/+$/, '')}/v1/speech-to-text`, {
+      method: 'POST', headers: { 'xi-api-key': this.opts.apiKey }, body: form, signal,
+    });
+    if (!res.ok) throw new Error(`transcription HTTP ${res.status}`);
+    const j = await res.json() as { text?: unknown; words?: unknown; language_code?: unknown };
+    const text = typeof j.text === 'string' ? j.text : '';
+    const segments = Array.isArray(j.words) ? wordsToSegments(j.words as Parameters<typeof wordsToSegments>[0]) : [];
+    return { text, segments: segments.length || !text.trim() ? segments : [{ start: 0, end: 0, text: text.trim() }], ...(typeof j.language_code === 'string' ? { language: j.language_code } : {}) };
   }
 }
 

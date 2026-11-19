@@ -730,6 +730,33 @@ export const IntercomAdapterSchema = z.object({
       style_file: z.string().default(''),
     }).prefault({}),
   }).prefault({}),
+  /**
+   * Compact Capture: long recordings from a surface (BOOT double-press on the Compact). The device streams numbered
+   * IMA ADPCM chunks (`capture_start` / `capture_chunk` / `capture_end`, docs/INTERCOM.md "Capture"); the bus keeps
+   * them in a durable spool, acknowledges each one, and on the end assembles a WAV, transcribes it with the
+   * push-to-talk engine (`voice`) and sends a `[capture]` message into the surface's followed conversation.
+   */
+  capture: z.object({
+    enabled: z.boolean().default(true),
+    /** Chunk spool until a recording is assembled. Empty: `capture-spool` beside the bus database. */
+    spool_dir: z.string().default(''),
+    /** Finished recordings: `<out_dir>/<YYYY-MM-DD>/<id>.wav`, `.txt` and `.json`. Empty: `captures` beside the bus database. */
+    out_dir: z.string().default(''),
+    /** Local date for the folder and the times in the message. */
+    timezone: z.string().default('America/New_York'),
+    /** Audio past this length is refused (the Compact stops at 2 h). */
+    max_seconds: z.number().int().min(60).max(4 * 3600).default(7200),
+    /** A recording with no frames for this long and no `capture_end` is assembled from what arrived (marked partial). */
+    stale_after_s: z.number().int().min(300).max(7 * 86400).default(6 * 3600),
+    /** Transcribe the assembled recording with the `voice` engine. */
+    transcribe: z.boolean().default(true),
+    /** Engines without long-form support get the audio in pieces this long (ElevenLabs Scribe gets it whole, diarized). */
+    segment_s: z.number().int().min(60).max(1500).default(600),
+    /** One transcription request may take this long. */
+    timeout_s: z.number().int().min(30).max(3600).default(900),
+    /** Send the `[capture]` message to the followed conversation once the files are written. */
+    wake: z.boolean().default(true),
+  }).prefault({}),
   surfaces: z.array(IntercomSurfaceSchema).default([]),
 }).superRefine((cfg, ctx) => {
   const seen = new Set<string>();

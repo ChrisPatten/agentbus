@@ -16,6 +16,7 @@ import { appendEvent, createPairCode } from '../intercom/store.js';
 import { createHttpServer } from './api.js';
 import { isIntercomUrl, registerIntercomRoutes, resolveStaticPath } from './intercom-routes.js';
 import { VERSION } from '../version.js';
+import { encodeAdpcm } from '../intercom/capture.js';
 
 const TOKEN = 't'.repeat(48);
 const cfg = IntercomAdapterSchema.parse({
@@ -29,7 +30,7 @@ const cfg = IntercomAdapterSchema.parse({
 const calendar = { today: async () => ({ date: '2026-11-01', tz: 'America/New_York', generated_at: 'now', events: [{ id: 'e', title: 'Dentist' }] }) } as unknown as CalendarFeed;
 
 describe('Intercom routes', () => {
-  let db: Database.Database; let server: FastifyInstance; let service: IntercomService; let webRoot: string; let base: string; let wsBase: string;
+  let db: Database.Database; let server: FastifyInstance; let service: IntercomService; let webRoot: string; let base: string; let wsBase: string; let capDir: string;
   let inbound: { body: string; metadata: Record<string, unknown> | undefined }[] = [];
   const sockets: WebSocket[] = [];
 
@@ -43,7 +44,9 @@ describe('Intercom routes', () => {
     writeFileSync(join(webRoot, 'sub', 'index.html'), 'sub index');
     writeFileSync(join(webRoot, '..', 'intercom-secret.txt'), 'TOPSECRETCONTENT');
     inbound = [];
+    capDir = mkdtempSync(join(tmpdir(), 'intercom-capture-'));
     service = new IntercomService({ config: cfg, db, calendar, env: { T: TOKEN, T2: 'u'.repeat(40) }, log: () => {},
+      captureDirs: { spool: join(capDir, 'spool'), out: join(capDir, 'out') },
       transcriber: { name: 'fake', transcribe: async (wav) => (wav.length > 44 ? 'Turn on the porch light' : '') },
       synthesizer: { name: 'fake-tts', rate: 16000, async *stream() { yield new Uint8Array(4000); yield new Uint8Array(2400); } },
       submitInbound: async (m) => { inbound.push({ body: m.payload.type === 'text' ? m.payload.body : '', metadata: m.metadata }); return { ok: true, id: 'x', queued: true, enqueued_count: 1 }; } });
@@ -57,6 +60,7 @@ describe('Intercom routes', () => {
     for (const s of sockets.splice(0)) s.terminate();
     await server.close(); db.close();
     rmSync(webRoot, { recursive: true, force: true }); rmSync(join(webRoot, '..', 'intercom-secret.txt'), { force: true });
+    rmSync(capDir, { recursive: true, force: true });
   });
 
   function open(): Promise<{ ws: WebSocket; frames: any[]; closed: Promise<number> }> {
@@ -279,6 +283,34 @@ describe('Intercom routes', () => {
     it('closes a socket whose first frame is binary', async () => {
       const { ws, closed } = await open();
       ws.send(pcm(10), { binary: true });
+      expect(await closed).toBe(4401);
+    });
+  });
+
+  describe('capture', () => {
+    it('acks numbered chunks, assembles and transcribes on end, and sends a [capture] message once', async () => {
+      const { ws, frames } = await open();
+      ws.send(JSON.stringify({ type: 'hello', token: TOKEN }));
+      await until(() => frames.some((f) => f.event === 'calendar'));
+      const chunk = encodeAdpcm(Int16Array.from({ length: 32000 }, (_, i) => (i % 16 < 8 ? 3000 : -3000))).toString('base64');
+      ws.send(JSON.stringify({ type: 'capture_start', id: 'cap-r1', rate: 16000, codec: 'ima_adpcm', chunk_samples: 32000, started_at: Date.now() - 5000 }));
+      ws.send(JSON.stringify({ type: 'capture_chunk', id: 'cap-r1', seq: 0, data: chunk }));
+      ws.send(JSON.stringify({ type: 'capture_chunk', id: 'cap-r1', seq: 1, data: chunk }));
+      await until(() => frames.filter((f) => f.type === 'capture_ack').length === 3);
+      expect(frames.filter((f) => f.type === 'capture_ack')).toEqual([
+        { type: 'capture_ack', id: 'cap-r1', acked: 0, have: 0 },
+        { type: 'capture_ack', id: 'cap-r1', seq: 0, acked: 1 },
+        { type: 'capture_ack', id: 'cap-r1', seq: 1, acked: 2 },
+      ]);
+      ws.send(JSON.stringify({ type: 'capture_end', id: 'cap-r1', chunks: 2, duration_ms: 4000, reason: 'stopped' }));
+      await until(() => frames.some((f) => f.type === 'capture_ack' && f.end === true));
+      await until(() => inbound.length === 1);
+      expect(inbound[0]!.body).toMatch(/^\[capture\] Recording from the Compact saved: 4 s, started .*Transcript: .*cap-r1\.txt/);
+      expect(inbound[0]!.metadata).toMatchObject({ origin: 'intercom', input: 'capture', capture_id: 'cap-r1', client_msg_id: 'capture-cap-r1' });
+    });
+    it('closes a socket whose first frame is a capture frame', async () => {
+      const { ws, closed } = await open();
+      ws.send(JSON.stringify({ type: 'capture_start', id: 'x' }));
       expect(await closed).toBe(4401);
     });
   });

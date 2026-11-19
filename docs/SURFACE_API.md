@@ -404,7 +404,7 @@ Inbound messages are appended after the pipeline accepts them (including surface
 - `state` frames (`quiet`, `battery`) also update the device's `device` item.
 - A `read_only` device may connect, receive everything and send `ping`, `state`, `view` and `notification_ack`. `send` and `notification_action` answer `{"type":"error","code":"read_only"}`; an `action` answers `action_result` `failed` / `read_only`.
 - Close codes: **4401** unauthorized or hello timeout, **4403** `revoked` (the device was revoked), 1001 ping timeout.
-- Push-to-talk audio frames: see [Push-to-talk audio](#push-to-talk-audio-e92).
+- Push-to-talk audio frames: see [Push-to-talk audio](#push-to-talk-audio-e92). Long recordings: see [Capture](#capture-long-recordings).
 - The `welcome` (and `GET /health`) `follow` object carries `conversation_id`, the followed conversation's id, so a device can open its thread (`GET /conversations/:id`, `view`) without computing the hash itself.
 
 ### Spoken replies
@@ -458,6 +458,25 @@ A surface (the Compact while BOOT is held) streams its microphone over the same 
 - **Bounds.** Audio past `voice.max_seconds` (60) is dropped; the recording is still transcribed. Audio lives in memory only and is gone once transcribed or dropped; nothing is written to disk except the command engine's temporary WAV, removed after the run. A socket that closes drops its recording, and a transcription still running for it is discarded.
 - **Latency mark.** `[intercom] {"evt":"latency","mark":"transcript_final","client_msg_id","ms","audio_ms","chars"}`, `ms` from `audio_end` to the final transcript.
 - **Engines** (`adapters.intercom.voice`, see [INTERCOM.md](INTERCOM.md#configure-the-bus)): `elevenlabs` posts to ElevenLabs Scribe, `<base_url>/v1/speech-to-text` (default model `scribe_v2`, key from `voice.elevenlabs.api_key_env`, `ELEVENLABS_API_KEY`), sending 16 kHz recordings as raw PCM (`file_format: pcm_s16le_16`) with `language_code` and any `keyterms`; `openai` posts a WAV to `<base_url>/audio/transcriptions` (default model `gpt-4o-mini-transcribe`, about 1.5 s for a short clip) with the key from the env var `voice.openai.api_key_env` (`OPENAI_API_KEY`); `command` runs `voice.command.argv` without a shell (`{wav}` is the path of a temporary 16-bit mono WAV, `{lang}` the language) and reads the transcript from stdout. `auto` (default) uses ElevenLabs when its key is set, else OpenAI, else the command, else voice answers `unavailable`. OpenAI retires `gpt-4o-mini-transcribe` on 2027-02-26; it stays only as a fallback until then. E92's resident local engine (S92.2) and its latency target (S92.3) are not built; a cold `whisper` CLI run takes about 35 s on bobafett, so the command engine suits only a warm local server.
+
+### Capture: long recordings
+
+A surface records a conversation or a note (the Compact: BOOT double-press) and uploads it in numbered, acknowledged chunks; the bus assembles, transcribes and files it, then tells the agent. Works on protocol v1 and v2. Source: `src/intercom/capture.ts`; config `adapters.intercom.capture`.
+
+| Frame | Direction | Meaning |
+|---|---|---|
+| `{"type":"capture_start","id","rate":16000,"codec":"ima_adpcm","chunk_samples":32000,"started_at":<epoch ms>}` | device → bus | Opens (or resumes) recording `id` (`[A-Za-z0-9._-]{1,64}`, unique per recording). `rate` 8000-48000, `chunk_samples` per full chunk (256 to 10 s), `started_at` when recording began on the device. Sent again after every reconnect: it is the resume handshake |
+| `{"type":"capture_chunk","id","seq","data"}` | device → bus | Chunk `seq` (0, 1, 2, ...): base64 of IMA ADPCM blocks (the phone-link codec, `docs/phone-link-v2.md` in the firmware repo: 5-byte header, 4-bit codes, each block decodable alone), at most 64 KB decoded. The last chunk may be short |
+| `{"type":"capture_end","id","chunks","duration_ms","reason"}` | device → bus | Sent once every chunk the device still holds has been acked. `reason`: `stopped`, `max` (2 h), `battery`, `storage_full`, or `interrupted` (the device restarted mid-recording and some audio was lost) |
+| `{"type":"capture_ack","id","acked","have?","seq?","end?","status?"}` | bus → device | The answer to every frame. `acked` = chunks held from 0 without a gap; `seq` echoes the chunk this acks (written to disk before the ack, so the device may delete it); `end: true` answers `capture_end` (the device may forget the recording) and also answers any frame for a recording already saved (`status: "saved"`) |
+| `{"type":"capture_ack","id","error","drop?"}` | bus → device | `invalid_id`, `invalid_frame`, `bad_chunk` (does not decode) with `drop: true`: the device discards that frame and moves on. `not_started` (a chunk before any `capture_start`), `internal_error`, `unavailable` (Capture is off): retry later |
+
+- **Durable before the ack.** Each chunk is written to `<spool_dir>/<surface>/<id>/c<seq>.adpcm` (atomic rename) before it is acked; a repeat of a held chunk is acked again without rewriting. Frames for one recording are handled one at a time.
+- **Assembly.** On `capture_end` the bus decodes chunks `0..chunks-1` to 16-bit PCM; a missing chunk becomes `chunk_samples` of silence and is listed in `gaps`. It writes `<out_dir>/<YYYY-MM-DD>/<id>.wav` (local date of `started_at` in `capture.timezone`), then `<id>.txt` (header, then `[hh:mm:ss] Speaker N: text` lines) when there is a transcript, and `<id>.json` (id, surface, start, duration, reason, partial, chunks, gaps, file paths, transcript status `ok`/`empty`/`failed`/`off`, engine, language, segments). The chunk files are then deleted; `meta.json` stays 30 days as the "already saved" marker.
+- **Transcription.** The push-to-talk engine (`voice`). ElevenLabs gets the whole recording in one request with `diarize` and word timestamps, grouped into speaker segments; other engines get `capture.segment_s` (600) pieces, timed by offset. Silence (peak under 200) is not sent. A failure keeps the WAV and says so in the message. One request may take `capture.timeout_s` (900).
+- **The message.** Once the files are written the bus sends `[capture] Recording from the Compact saved: 47 min 12 s, started Thu, Nov 19, 2:03 PM. Transcript: <txt> Audio: <wav>. Details: <json>.` into the surface's followed conversation as a surface send (`client_msg_id` `capture-<id>`, so at most once; metadata `input: "capture"`, `capture_id`, `capture_json`; Telegram echo `⏺️`), with a note that the bus wrote it. `capture.wake: false` skips it.
+- **Recovery.** At start and every 10 min the bus finishes recordings that have an end but were not saved (a restart mid-assembly), and assembles recordings with no frames for `capture.stale_after_s` (6 h) and no end as partial.
+- **Bounds.** `seq` beyond `capture.max_seconds` (7200) worth of chunks is refused with `drop`. A `read_only` device gets `error` / `read_only`.
 
 ## Actions and jobs
 

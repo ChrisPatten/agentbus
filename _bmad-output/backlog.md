@@ -4,6 +4,9 @@ Feature ideas and future work that hasn't been scoped into an epic yet. Promote 
 
 ## Ideas
 
+### The Compact: Capture (long recordings) → E104 (2026-11-19)
+See `_bmad-output/epics/E104-compact-capture.md`. BOOT double-press records; numbered ADPCM chunks with acks and resume; the bus assembles, transcribes and sends a `[capture]` message; built on `feat/compact-capture` and firmware branch `capture`.
+
 ### Intercom: agent-authored speech (`speak` tool) and once-per-session voice style guide → E102 (2026-11-09)
 See `_bmad-output/epics/E102-intercom-speak-tool.md`. The agent chooses what the Compact says aloud for a push-to-talk message (`speak`), the bus's automatic speech becomes a fallback, and a style-guide file is injected once per agent session; built on `feat/intercom-speak-tool`.
 

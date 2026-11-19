@@ -259,6 +259,13 @@ export function surfaceSocketHandler(server: FastifyInstance, service: IntercomS
         else await service.voice.end(voice!, frame);
         return;
       }
+      if (frame['type'] === 'capture_start' || frame['type'] === 'capture_chunk' || frame['type'] === 'capture_end') {
+        // Capture: long recordings, acknowledged chunk by chunk (docs/INTERCOM.md "Capture").
+        if (readOnly) { send({ type: 'error', code: 'read_only' }); return; }
+        if (!service.capture) { send({ type: 'capture_ack', id: frame['id'], error: 'unavailable' }); return; }
+        send(await service.capture.handle(client.surface.id, frame));
+        return;
+      }
       if (client.protocol === 2 && frame['type'] === 'action') {
         const { type: _t, ...request } = frame;
         send(await service.handleAction(client.surface, client.device, request) as unknown as Record<string, unknown>);

@@ -392,6 +392,7 @@ const intercom = config.adapters.intercom?.enabled
       : null,
     submitInbound: submitToPipeline,
     ...(surfaceRuntime ? { surfaceApi: surfaceRuntime.surfaceApi } : {}),
+    captureDirs: { spool: join(dirname(resolve(config.bus.db_path)), 'capture-spool'), out: join(dirname(resolve(config.bus.db_path)), 'captures') },
   }) : undefined;
 if (intercom && surfaceRuntime) surfaceRuntime.bind(intercom);
 // Device-facing extras shared by the main port and the surface listener.
