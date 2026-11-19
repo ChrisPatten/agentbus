@@ -34,7 +34,7 @@ import { buildDeparture, buildDeskPayload, createPlanSource, deskSignature, live
 import { OnMyWayStore } from './on-my-way.js';
 import type { LiveSource, LivePrediction } from './mbta.js';
 import { resolveGlance, surfaceBody } from './glance.js';
-import { createTranscriber, VoiceSessions, type Transcriber, type VoiceClient } from './voice.js';
+import { createCaptureTranscriber, createTranscriber, VoiceSessions, type Transcriber, type VoiceClient } from './voice.js';
 import { CAPTURE_NOTE, CaptureStore, captureMessage, captureStartLabel, type CaptureResult } from './capture.js';
 import { agentSpeechText, createSynthesizer, Speaker, speechText, type Synthesizer } from './speech.js';
 import {
@@ -157,6 +157,8 @@ export interface IntercomDeps {
   surfaceApi?: SurfaceApiDeps;
   /** E92 — the speech-to-text engine for push-to-talk. Absent: built from `config.voice` and the env; null: voice unavailable. */
   transcriber?: Transcriber | null;
+  /** Capture's speech-to-text engine. Absent: built from `config.capture.engine` (`voice`: the push-to-talk one); null: none. */
+  captureTranscriber?: Transcriber | null;
   /** Spoken replies — the text-to-speech engine. Absent: built from `config.voice` and the env; null: no speech. */
   synthesizer?: Synthesizer | null;
   /** Capture — the chunk spool and the output folder (each overridden by `capture.spool_dir` / `out_dir`). Absent: Capture is off. */
@@ -251,7 +253,8 @@ export class IntercomService {
     this.capture = cap.enabled && deps.captureDirs
       ? new CaptureStore({
         config: cap, spoolDir: cap.spool_dir || deps.captureDirs.spool, outDir: cap.out_dir || deps.captureDirs.out,
-        transcriber, language: deps.config.voice.language,
+        transcriber: deps.captureTranscriber !== undefined ? deps.captureTranscriber : createCaptureTranscriber(deps.config, env, transcriber),
+        language: deps.config.voice.language,
         wake: (r) => this.captureWake(r),
         ...(deps.now ? { now: deps.now } : {}),
         log: (l) => this.log(`capture: ${l}`),

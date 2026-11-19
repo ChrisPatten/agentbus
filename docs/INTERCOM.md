@@ -68,10 +68,22 @@ adapters:
 | `capture.timezone` | `America/New_York` | Local date for the folder and the start time in the message |
 | `capture.max_seconds` | `7200` | Longest recording accepted |
 | `capture.stale_after_s` | `21600` | A recording with no frames this long and no end is assembled as partial |
-| `capture.transcribe` | `true` | Transcribe with the `voice` engine (ElevenLabs whole and diarized; others in `segment_s` pieces) |
+| `capture.transcribe` | `true` | Transcribe the assembled recording with `capture.engine` |
+| `capture.engine` | `voice` | `voice`: the push-to-talk engine (ElevenLabs whole and diarized; others in `segment_s` pieces). `elevenlabs` / `openai`: that API for Capture only (keys and models from `voice.*`). `command`: a local program, `capture.command.argv`. Push-to-talk keeps its own engine |
+| `capture.command.argv` | — | For `engine: command`: argv without a shell; `{wav}` = WAV path, `{lang}` = `voice.language`. Required with `engine: command` |
+| `capture.command.output` | `json` | `json`: one run on the whole recording, stdout `{text, segments:[{start,end,text,speaker?}], language?, engine?}` (segments that are only a Whisper stock caption are dropped; `engine` replaces the label in the `.json`). `text`: stdout is plain text, audio in `segment_s` pieces |
 | `capture.segment_s` | `600` | Piece length for engines without long-form support |
-| `capture.timeout_s` | `900` | One transcription request may take this long |
+| `capture.timeout_s` | `900` | One transcription request may take this long (max 14400). The child process is killed when it passes |
 | `capture.wake` | `true` | Send the `[capture]` message into the followed conversation when the files are written |
+
+**Local transcription for Capture (whisper.cpp).** `scripts/whisper-local.py <wav> [<lang>]` transcribes on the Mac with whisper.cpp (Metal) and prints the JSON above; no speaker labels (Whisper has no diarization), so the `.txt` lines are `[hh:mm:ss] text`. It runs Silero VAD (`whisper-vad-speech-segments`) first and drops segments that overlap no speech, because Whisper fills silent 30 s windows with stock captions ("Thank you."); whisper.cpp's own `--vad` is not used because its timestamps drift by tens of seconds across long pauses. Setup: `brew install whisper.cpp`, models in `~/.cache/whisper-cpp/` (`ggml-large-v3-turbo.bin` from `huggingface.co/ggerganov/whisper.cpp`, `ggml-silero-v5.1.2.bin` from `huggingface.co/ggml-org/whisper-vad`); env overrides are in the script header (`WHISPER_MODEL`, `WHISPER_BEAM`, `WHISPER_PROMPT`, ...). Measured on an M2 (16 GB) with large-v3-turbo, beam 5: about 12.6x real time (20.6 min in 98 s), so a 2 h recording takes about 10 min of GPU; set `capture.timeout_s` to 3600 for headroom. The job is a child process, so the bus stays responsive; a SIGTERM (timeout) stops whisper-cli too.
+
+```yaml
+capture:
+  engine: command
+  command: { argv: [/path/to/agentbus/scripts/whisper-local.py, "{wav}", "{lang}"] }
+  timeout_s: 3600
+```
 | `surfaces[].speech` | `true` | `false` turns spoken replies off for that surface |
 | `voice.openai.api_key_env` | `OPENAI_API_KEY` | Env var holding the OpenAI key |
 | `voice.openai.model` | `gpt-4o-mini-transcribe` | Transcription model (`whisper-1` also works) |

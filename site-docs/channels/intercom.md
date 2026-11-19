@@ -114,7 +114,7 @@ Your agent has a `speak` tool. It uses it to answer something you said, and also
 
 ### 6. Record a conversation (optional)
 
-The Compact can record a meeting or a note: double-press BOOT to start, and hold HOLD TO STOP (or double-press again) to stop. The screen shows a red REC ring the whole time. The recording goes to the bus in small numbered pieces as you go; if the bus cannot be reached, the device keeps the pieces and sends them later. When it is complete, the bus writes the audio and a transcript (with speakers and times when ElevenLabs transcribes it) to a folder, and sends your agent a `[capture]` message with the file paths, so it can summarise and file it. You see the message in the followed chat as `⏺️ [capture] …`.
+The Compact can record a meeting or a note: double-press BOOT to start, and hold HOLD TO STOP (or double-press again) to stop. The screen shows a red REC ring the whole time. The recording goes to the bus in small numbered pieces as you go; if the bus cannot be reached, the device keeps the pieces and sends them later. When it is complete, the bus writes the audio and a transcript (with speakers and times when ElevenLabs transcribes it; with times only when a local Whisper transcribes it) to a folder, and sends your agent a `[capture]` message with the file paths, so it can summarise and file it. You see the message in the followed chat as `⏺️ [capture] …`.
 
 ```yaml
 adapters:
@@ -129,8 +129,21 @@ adapters:
 | `capture.out_dir` | `captures` next to the bus database | Where recordings go, one folder per day: the `.wav`, the `.txt` transcript and a `.json` summary |
 | `capture.timezone` | `America/New_York` | Your time zone, for the folder date and the start time |
 | `capture.max_seconds` | `7200` | Longest recording accepted |
-| `capture.transcribe` | `true` | Transcribe with the same service as push-to-talk |
+| `capture.transcribe` | `true` | Transcribe the recording |
+| `capture.engine` | `voice` | Which service transcribes recordings: `voice` (the same as push-to-talk), `elevenlabs`, `openai`, or `command` (a program on your computer, `capture.command.argv`) |
+| `capture.timeout_s` | `900` | How long one transcription may take, in seconds |
 | `capture.wake` | `true` | Tell your agent when a recording is saved |
+
+To keep recordings on your own computer, transcribe them locally with Whisper while push-to-talk keeps its fast cloud service. On a Mac with Apple Silicon, install whisper.cpp (`brew install whisper.cpp`), put the `ggml-large-v3-turbo.bin` and `ggml-silero-v5.1.2.bin` models in `~/.cache/whisper-cpp/`, and point Capture at the bundled script:
+
+```yaml
+    capture:
+      engine: command
+      command: { argv: [/path/to/agentbus/scripts/whisper-local.py, "{wav}", "{lang}"] }
+      timeout_s: 3600
+```
+
+An M2 transcribes about 12 minutes of audio per minute, so a 2-hour recording takes about 10 minutes. The transcript has times but no speaker labels.
 
 Recording other people may need their consent where you live (in Massachusetts, everyone in the conversation must agree).
 

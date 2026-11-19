@@ -168,6 +168,21 @@ describe('CaptureStore', () => {
     );
   });
 
+  it('records the engine the transcript reports, and writes lines without speaker labels', async () => {
+    const t: Transcriber = {
+      name: 'command:/x/whisper-local.py',
+      async transcribe() { return 'unused'; },
+      async transcribeDetailed() { return { text: 'Hello Kate', engine: 'whisper.cpp:large-v3-turbo', language: 'en', segments: [{ start: 3.2, end: 4.4, text: 'Hello Kate' }] }; },
+    };
+    const s = store(t);
+    await s.handle('compact', startFrame('cap-w'));
+    await s.handle('compact', { type: 'capture_chunk', id: 'cap-w', seq: 0, data: chunkB64() });
+    await s.handle('compact', { type: 'capture_end', id: 'cap-w', chunks: 1 });
+    const r = (await s.finalizeNow('compact', 'cap-w'))!;
+    expect(readFileSync(r.txt!, 'utf8')).toContain('\n[00:00:03] Hello Kate\n');
+    expect(JSON.parse(readFileSync(r.json, 'utf8'))).toMatchObject({ transcript: 'ok', engine: 'whisper.cpp:large-v3-turbo', language: 'en' });
+  });
+
   it('cuts long audio into pieces for engines without long-form support', async () => {
     const calls: number[] = [];
     const t: Transcriber = { name: 'piecewise', async transcribe(wav) { calls.push(wav.length); return `piece ${calls.length}`; } };

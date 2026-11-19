@@ -748,17 +748,36 @@ export const IntercomAdapterSchema = z.object({
     max_seconds: z.number().int().min(60).max(4 * 3600).default(7200),
     /** A recording with no frames for this long and no `capture_end` is assembled from what arrived (marked partial). */
     stale_after_s: z.number().int().min(300).max(7 * 86400).default(6 * 3600),
-    /** Transcribe the assembled recording with the `voice` engine. */
+    /** Transcribe the assembled recording (with `engine`). */
     transcribe: z.boolean().default(true),
+    /**
+     * Capture's own engine. `voice` (default): the push-to-talk engine. `elevenlabs` / `openai`: that API (key env
+     * and model from `voice.*`). `command`: a local program (`command.argv`), e.g. `scripts/whisper-local.py`
+     * (whisper.cpp). Push-to-talk keeps its own engine either way.
+     */
+    engine: z.enum(['voice', 'elevenlabs', 'openai', 'command']).default('voice'),
+    /**
+     * The local engine for `engine: command`: argv run without a shell, `{wav}` replaced by the WAV path and `{lang}`
+     * by `voice.language`. `output: json` (default): stdout is `{text, segments:[{start,end,text,speaker?}], language?,
+     * engine?}` and the whole recording goes in one run; `text`: stdout is plain text and the audio goes in
+     * `segment_s` pieces.
+     */
+    command: z.object({
+      argv: z.array(z.string().min(1)).min(1).optional(),
+      output: z.enum(['json', 'text']).default('json'),
+    }).prefault({}),
     /** Engines without long-form support get the audio in pieces this long (ElevenLabs Scribe gets it whole, diarized). */
     segment_s: z.number().int().min(60).max(1500).default(600),
-    /** One transcription request may take this long. */
-    timeout_s: z.number().int().min(30).max(3600).default(900),
+    /** One transcription request may take this long. whisper.cpp large-v3-turbo on an M2 runs about 12x real time (2 h ≈ 10 min). */
+    timeout_s: z.number().int().min(30).max(4 * 3600).default(900),
     /** Send the `[capture]` message to the followed conversation once the files are written. */
     wake: z.boolean().default(true),
   }).prefault({}),
   surfaces: z.array(IntercomSurfaceSchema).default([]),
 }).superRefine((cfg, ctx) => {
+  if (cfg.capture.engine === 'command' && !cfg.capture.command.argv) {
+    ctx.addIssue({ code: 'custom', message: 'capture.engine "command" needs capture.command.argv', path: ['capture', 'command', 'argv'] });
+  }
   const seen = new Set<string>();
   cfg.surfaces.forEach((s, i) => {
     if (seen.has(s.id)) ctx.addIssue({ code: 'custom', message: `Duplicate intercom surface id "${s.id}"`, path: ['surfaces', i, 'id'] });

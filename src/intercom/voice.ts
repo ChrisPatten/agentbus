@@ -38,7 +38,8 @@ export interface Transcriber {
 
 /** One stretch of speech: seconds from the start of the recording, and the engine's speaker label when it has one. */
 export interface TranscriptSegment { start: number; end: number; speaker?: string; text: string }
-export interface DetailedTranscript { text: string; segments: TranscriptSegment[]; language?: string }
+/** `engine`: a finer label than the transcriber's own name, when it reports one (e.g. `whisper.cpp:large-v3-turbo`). */
+export interface DetailedTranscript { text: string; segments: TranscriptSegment[]; language?: string; engine?: string }
 
 /**
  * Group Scribe's word list into segments: a new one at a speaker change, a pause over 1.5 s, or a sentence end once
@@ -173,22 +174,69 @@ export class ElevenLabsTranscriber implements Transcriber {
 /** A local engine: `argv` with `{wav}` and `{lang}` substituted, run without a shell; stdout is the transcript. */
 export class CommandTranscriber implements Transcriber {
   readonly name: string;
-  constructor(private readonly argv: string[]) { this.name = `command:${argv[0]}`; }
-  async transcribe(wav: Buffer, { language, signal }: { language: string; signal: AbortSignal }): Promise<string> {
+  constructor(protected readonly argv: string[]) { this.name = `command:${argv[0]}`; }
+  async transcribe(wav: Buffer, opts: { language: string; signal: AbortSignal }): Promise<string> {
+    return this.run(wav, opts, 1 << 20);
+  }
+
+  /** Write the WAV to a private temp file, run the command as a child process (off the event loop), return stdout. */
+  protected async run(wav: Buffer, { language, signal }: { language: string; signal: AbortSignal }, maxBuffer: number): Promise<string> {
     const dir = await mkdtemp(join(tmpdir(), 'agentbus-ptt-'));
     const file = join(dir, 'ptt.wav');
     try {
       await writeFile(file, wav, { mode: 0o600 });
       const args = this.argv.map((a) => a.replaceAll('{wav}', file).replaceAll('{lang}', language));
       return await new Promise<string>((resolve, reject) => {
-        execFile(args[0]!, args.slice(1), { signal, maxBuffer: 1 << 20, encoding: 'utf8' }, (err, stdout) => {
-          if (err) reject(err); else resolve(stdout);
+        execFile(args[0]!, args.slice(1), { signal, maxBuffer, encoding: 'utf8' }, (err, stdout, stderr) => {
+          if (!err) { resolve(stdout); return; }
+          const tail = String(stderr ?? '').trim().split('\n').slice(-3).join(' | ');
+          reject(tail && err.name !== 'AbortError' ? new Error(`${err.message.split('\n')[0]}: ${tail.slice(0, 400)}`) : err);
         });
       });
     } finally {
       await rm(dir, { recursive: true, force: true }).catch(() => { /* best effort */ });
     }
   }
+}
+
+/**
+ * A local long-form engine (Capture): the command prints JSON `{text, segments:[{start,end,text,speaker?}], language?,
+ * engine?}` for the whole recording, e.g. `scripts/whisper-local.py` (whisper.cpp). Segments that are only a Whisper
+ * stock caption (`cleanTranscript`) are dropped.
+ */
+export class CommandJsonTranscriber extends CommandTranscriber {
+  override async transcribe(wav: Buffer, opts: { language: string; signal: AbortSignal }): Promise<string> {
+    return (await this.transcribeDetailed(wav, opts)).text;
+  }
+
+  async transcribeDetailed(wav: Buffer, opts: { language: string; signal: AbortSignal }): Promise<DetailedTranscript> {
+    return parseCommandTranscript(await this.run(wav, opts, 64 << 20));
+  }
+}
+
+/** Parse and tidy a long-form command's JSON stdout. Throws when it is not the expected shape. */
+export function parseCommandTranscript(stdout: string): DetailedTranscript {
+  let j: unknown;
+  try { j = JSON.parse(stdout); } catch { throw new Error(`command printed no JSON transcript: ${stdout.trim().slice(0, 120) || '(empty)'}`); }
+  if (!j || typeof j !== 'object') throw new Error('command printed no JSON transcript object');
+  const o = j as { text?: unknown; segments?: unknown; language?: unknown; engine?: unknown };
+  const segments: TranscriptSegment[] = [];
+  for (const s of Array.isArray(o.segments) ? o.segments as Record<string, unknown>[] : []) {
+    const text = cleanTranscript(typeof s?.['text'] === 'string' ? s['text'] : '');
+    if (!text) continue;
+    const start = typeof s['start'] === 'number' && Number.isFinite(s['start']) ? s['start'] : (segments.at(-1)?.end ?? 0);
+    const end = typeof s['end'] === 'number' && Number.isFinite(s['end']) ? s['end'] : start;
+    const speaker = typeof s['speaker'] === 'string' && s['speaker'] ? s['speaker'] : undefined;
+    segments.push({ start, end, ...(speaker ? { speaker } : {}), text });
+  }
+  const whole = cleanTranscript(typeof o.text === 'string' ? o.text : '');
+  const text = segments.length ? segments.map((s) => s.text).join(' ') : whole;
+  return {
+    text,
+    segments: segments.length || !text ? segments : [{ start: 0, end: 0, text }],
+    ...(typeof o.language === 'string' && o.language ? { language: o.language } : {}),
+    ...(typeof o.engine === 'string' && o.engine ? { engine: o.engine.slice(0, 80) } : {}),
+  };
 }
 
 /** Pick the engine from config and env. Null: voice is unavailable (disabled, or no key and no command). */
@@ -205,6 +253,20 @@ export function createTranscriber(cfg: VoiceConfig, env: NodeJS.ProcessEnv): Tra
   if (xi) return eleven();
   if (key) return openai();
   return cfg.command.argv ? command() : null;
+}
+
+/**
+ * Capture's engine (`capture.engine`). `voice` reuses the push-to-talk transcriber as given; the others are built
+ * here, so push-to-talk keeps its engine. Null: no engine (the files are written without a transcript).
+ */
+export function createCaptureTranscriber(cfg: IntercomAdapterConfig, env: NodeJS.ProcessEnv, voice: Transcriber | null): Transcriber | null {
+  const cap = cfg.capture;
+  if (cap.engine === 'voice') return voice;
+  if (cap.engine === 'command') {
+    if (!cap.command.argv) return null;
+    return cap.command.output === 'json' ? new CommandJsonTranscriber(cap.command.argv) : new CommandTranscriber(cap.command.argv);
+  }
+  return createTranscriber({ ...cfg.voice, enabled: true, engine: cap.engine }, env);
 }
 
 /** The socket side of a session: who receives frames, and how the transcript is sent on. */

@@ -30,3 +30,7 @@ BOOT double-press on the Compact shows "Capture: coming soon". Chris wants it to
 - Unit tests for the codec (shared firmware vector), ack/resume/dedupe, assembly with a gap, transcription paths, recovery; a WebSocket route test end to end.
 - A synthetic capture over the live bus lands files in `data/intercom/captures/` and wakes Peggy once.
 - On hardware: `/info` shows capture state; a real double-press recording is uploaded and transcribed (Chris to confirm).
+
+## Follow-up (Nov 19): local Whisper for Capture
+- `capture.engine` / `capture.command` give Capture its own engine; live config uses `command` with `scripts/whisper-local.py` (whisper.cpp large-v3-turbo, Metal, Silero VAD filter), push-to-talk stays on ElevenLabs Scribe.
+- Measured about 12.6x real time on bobafett (M2): 2 h ≈ 10 min; `timeout_s: 3600` live. No speaker labels from local Whisper.

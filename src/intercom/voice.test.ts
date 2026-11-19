@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { IntercomAdapterSchema } from '../config/schema.js';
-import { cleanTranscript, createTranscriber, CommandTranscriber, ElevenLabsTranscriber, OpenAiTranscriber, pcmPeak, pcmToWav, VoiceSessions, type Transcriber, type VoiceClient } from './voice.js';
+import { cleanTranscript, createCaptureTranscriber, createTranscriber, CommandJsonTranscriber, CommandTranscriber, parseCommandTranscript, ElevenLabsTranscriber, OpenAiTranscriber, pcmPeak, pcmToWav, VoiceSessions, type Transcriber, type VoiceClient } from './voice.js';
 
 const voiceCfg = (over: Record<string, unknown> = {}) => IntercomAdapterSchema.parse({ voice: { partial_interval_ms: 0, ...over } }).voice;
 
@@ -113,6 +113,68 @@ describe('createTranscriber', () => {
   it('runs a local command on a temporary WAV file and reads its stdout', async () => {
     const t = new CommandTranscriber(['/bin/sh', '-c', 'test -s "$0" && echo " spoken words "', '{wav}']);
     expect(await t.transcribe(pcmToWav(Buffer.alloc(64), 16000), { language: 'en', signal: new AbortController().signal })).toContain('spoken words');
+  });
+
+  it('reports the tail of a failing command\'s stderr', async () => {
+    const t = new CommandTranscriber(['/bin/sh', '-c', 'echo "model not found" >&2; exit 3']);
+    await expect(t.transcribe(pcmToWav(Buffer.alloc(64), 16000), { language: 'en', signal: new AbortController().signal })).rejects.toThrow('model not found');
+  });
+});
+
+describe('local long-form command (Capture)', () => {
+  const sig = () => new AbortController().signal;
+  const json = JSON.stringify({
+    text: 'ignored', language: 'en', engine: 'whisper.cpp:large-v3-turbo',
+    segments: [
+      { start: 0, end: 4.1, text: ' Good  morning, Kate. ' },
+      { start: 30, end: 60, text: '[BLANK_AUDIO]' },
+      { start: 61, end: 62, text: 'Thanks for watching!' },
+      { start: 64.5, end: 70, text: 'Lunch on Friday?' },
+    ],
+  });
+
+  it('parses timed segments without speakers, drops stock captions and keeps the engine label', () => {
+    expect(parseCommandTranscript(json)).toEqual({
+      text: 'Good morning, Kate. Lunch on Friday?',
+      segments: [{ start: 0, end: 4.1, text: 'Good morning, Kate.' }, { start: 64.5, end: 70, text: 'Lunch on Friday?' }],
+      language: 'en', engine: 'whisper.cpp:large-v3-turbo',
+    });
+    expect(parseCommandTranscript(JSON.stringify({ text: ' just text ' }))).toEqual({ text: 'just text', segments: [{ start: 0, end: 0, text: 'just text' }] });
+    expect(parseCommandTranscript('{"text":"","segments":[]}')).toEqual({ text: '', segments: [] });
+    expect(() => parseCommandTranscript('whisper: oops')).toThrow('no JSON transcript');
+  });
+
+  it('runs the command once on the whole recording and reads its JSON stdout', async () => {
+    const t = new CommandJsonTranscriber(['/bin/sh', '-c', `test -s "$0" && test "$1" = en && printf '%s' '${json}'`, '{wav}', '{lang}']);
+    const d = await t.transcribeDetailed(pcmToWav(Buffer.alloc(64), 16000), { language: 'en', signal: sig() });
+    expect(d.segments).toHaveLength(2);
+    expect(d.engine).toBe('whisper.cpp:large-v3-turbo');
+    expect(await t.transcribe(pcmToWav(Buffer.alloc(64), 16000), { language: 'en', signal: sig() })).toBe('Good morning, Kate. Lunch on Friday?');
+  });
+
+  it('stops the child process when the job is aborted', async () => {
+    const t = new CommandJsonTranscriber(['/bin/sleep', '30']);
+    const ac = new AbortController();
+    const started = Date.now();
+    setTimeout(() => ac.abort(new Error('timeout')), 50);
+    await expect(t.transcribeDetailed(pcmToWav(Buffer.alloc(64), 16000), { language: 'en', signal: ac.signal })).rejects.toThrow();
+    expect(Date.now() - started).toBeLessThan(5000);
+  });
+
+  it('builds Capture\'s engine from capture.engine, leaving push-to-talk alone', () => {
+    const cfg = (capture: Record<string, unknown>, voice: Record<string, unknown> = {}) => IntercomAdapterSchema.parse({ voice, capture });
+    const ptt = createTranscriber(voiceCfg(), { ELEVENLABS_API_KEY: 'x' });
+    expect(createCaptureTranscriber(cfg({}), { ELEVENLABS_API_KEY: 'x' }, ptt)).toBe(ptt);
+    const local = createCaptureTranscriber(cfg({ engine: 'command', command: { argv: ['/opt/x/whisper-local.py', '{wav}', '{lang}'] } }), {}, ptt)!;
+    expect(local).toBeInstanceOf(CommandJsonTranscriber);
+    expect(local.name).toBe('command:/opt/x/whisper-local.py');
+    expect(typeof local.transcribeDetailed).toBe('function');
+    const plain = createCaptureTranscriber(cfg({ engine: 'command', command: { argv: ['whisper-x', '{wav}'], output: 'text' } }), {}, ptt)!;
+    expect(plain.transcribeDetailed).toBeUndefined();
+    // An API engine for Capture works even when push-to-talk is switched off.
+    expect(createCaptureTranscriber(cfg({ engine: 'openai' }, { enabled: false }), { OPENAI_API_KEY: 'k' }, null)?.name).toBe('openai:gpt-4o-mini-transcribe');
+    expect(createCaptureTranscriber(cfg({ engine: 'elevenlabs' }), {}, ptt)).toBeNull();
+    expect(() => IntercomAdapterSchema.parse({ capture: { engine: 'command' } })).toThrow('capture.command.argv');
   });
 });
 

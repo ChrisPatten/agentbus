@@ -12,7 +12,7 @@
  * written to a durable spool before its ack, so the device may forget it; a repeated chunk is acked again without
  * rewriting. `capture_start` is also the resume handshake (a device that lost its socket sends it again and skips what
  * is already held). The device sends `capture_end` once it has nothing left to upload; the bus then assembles the
- * WAV (missing chunks become silence and are listed), transcribes it with the push-to-talk engine, writes
+ * WAV (missing chunks become silence and are listed), transcribes it (`capture.engine`: the push-to-talk engine unless set, e.g. local whisper.cpp), writes
  * `<out_dir>/<date>/<id>.wav|.txt|.json` and sends a `[capture]` message into the surface's followed conversation.
  * A recording that stops arriving without an end is assembled as partial after `stale_after_s`.
  */
@@ -393,7 +393,7 @@ export class CaptureStore {
     const reason = m.end?.reason ?? 'partial';
     const record = {
       id, surface, started_at: new Date(m.started_at).toISOString(), started_local: label, duration_ms: durationMs,
-      reason, partial, chunks, gaps, wav, txt: txtPath, transcript, engine: t?.name ?? null,
+      reason, partial, chunks, gaps, wav, txt: txtPath, transcript, engine: detail?.engine ?? t?.name ?? null,
       ...(detail?.language ? { language: detail.language } : {}), ...(error ? { error } : {}),
       segments: detail?.segments ?? [], created_at: new Date(this.now()).toISOString(),
     };
