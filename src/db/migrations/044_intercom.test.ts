@@ -8,7 +8,8 @@ describe('migration 044 — intercom', () => {
     runMigrations(db);
     const tables = (db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'intercom_%' ORDER BY name`).all() as { name: string }[]).map((r) => r.name);
     expect(tables).toEqual(['intercom_events', 'intercom_pair_codes', 'intercom_sends', 'intercom_surface_seq']);
-    db.exec(`DELETE FROM schema_migrations WHERE version >= 44`);
+    // 048+ uses ALTER TABLE, which is not re-runnable, so only 044-047 are re-applied.
+    db.exec(`DELETE FROM schema_migrations WHERE version BETWEEN 44 AND 47`);
     expect(() => runMigrations(db)).not.toThrow();
     db.close();
   });

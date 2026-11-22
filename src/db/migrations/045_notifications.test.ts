@@ -12,7 +12,8 @@ describe('migration 045 — notifications', () => {
     expect(() => ins('b', 'acknowledged')).toThrow();
     db.prepare(`UPDATE notifications SET state='resolved' WHERE id='a'`).run();
     expect(() => ins('b', 'active')).not.toThrow();
-    db.exec(`DELETE FROM schema_migrations WHERE version >= 45`);
+    // 048+ uses ALTER TABLE, which is not re-runnable, so only 044-047 are re-applied.
+    db.exec(`DELETE FROM schema_migrations WHERE version BETWEEN 45 AND 47`);
     expect(() => runMigrations(db)).not.toThrow();
     db.close();
   });

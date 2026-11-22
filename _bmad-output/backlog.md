@@ -4,6 +4,9 @@ Feature ideas and future work that hasn't been scoped into an epic yet. Promote 
 
 ## Ideas
 
+### The Compact: replies to notifications → E105 (2026-11-22)
+See `_bmad-output/epics/E105-notification-replies.md`. A notification can ask a question; a voice (BOOT push-to-talk with `notification_id`) or choice reply goes into the notification's bound conversation; frozen firmware contract in `docs/NOTIFICATION_REPLIES_CONTRACT.md`; built on `feat/e105-notification-replies`.
+
 ### The Compact: Capture (long recordings) → E104 (2026-11-19)
 See `_bmad-output/epics/E104-compact-capture.md`. BOOT double-press records; numbered ADPCM chunks with acks and resume; the bus assembles, transcribes and sends a `[capture]` message; built on `feat/compact-capture` and firmware branch `capture`.
 

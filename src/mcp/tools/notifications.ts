@@ -6,7 +6,7 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { toolError, toolSuccess } from './helpers.js';
-import { originFromEnv } from '../../core/origin.js';
+import { originFromEnv, TURN_CONVERSATION_ENV } from '../../core/origin.js';
 
 const BASE = '/api/v1/internal/notifications';
 
@@ -32,7 +32,11 @@ export function registerNotificationTools(server: McpServer, busBaseUrl: string,
         'It makes the dial glow for attention/urgent and can offer up to 3 action buttons; a tap on one reaches the Intercom conversation as "[tapped] <label>". ' +
         'A "Got it" dismiss button is always added automatically, so do not include one in `actions`; actions should be real choices. ' +
         'Pass a `key` for anything you may resolve or refresh later: the same key while the item is open updates it in place. ' +
-        'Use send_message/reply for content, not notify. Title is cut at 60 characters, body at 280.',
+        'Use send_message/reply for content, not notify. Title is cut at 60 characters, body at 280. ' +
+        'To ask the operator a question he answers on the dial, pass `reply` (mode "voice", "choices" or "both") with `expires_in_s` (at most 86400) and where the answer should come back to: ' +
+        'conversation_id, or channel (and topic) copied from the header of the message you are working on; when called from a headless turn the conversation of this turn is used. ' +
+        'Then finish your turn: the answer arrives later as a new message in that conversation starting [reply to "<title>"] (voice) or [tapped] <label> (a choice), with a system block that carries your `reply.context`. ' +
+        'Act on it, then call update_notification(key, state "resolved", resolution). A reply is never approval to send an outbound message unless the exact draft was shown in full.',
       inputSchema: {
         title: z.string().min(1).describe('What needs the operator (60 characters at most)'),
         body: z.string().optional().describe('One line of detail (280 characters at most)'),
@@ -45,12 +49,26 @@ export function registerNotificationTools(server: McpServer, busBaseUrl: string,
           style: z.enum(['primary', 'success', 'danger']).optional(),
         })).max(3).optional().describe('Up to 3 action buttons for real choices; a "Got it" dismiss button is added automatically, so do not include one'),
         source: z.string().min(1).optional().describe('Where this comes from; defaults to this agent'),
+        reply: z.object({
+          mode: z.enum(['none', 'voice', 'choices', 'both']).describe('voice: he speaks the answer; choices: he taps one of `actions` (needs at least one); both'),
+          prompt: z.string().min(1).optional().describe('What to say, shown on the dial (80 characters at most): "Say a time"'),
+          context: z.string().min(1).optional().describe('Never shown on the device. Handed back to you verbatim with the reply (600 characters at most): what you will do with each answer'),
+          hints: z.array(z.string().min(1)).max(8).optional().describe('Names or words the speech engine should expect (40 characters each)'),
+          on_expire: z.enum(['note', 'wake']).optional().describe('note (default): a hidden note in the conversation. wake: a system turn so you can act on your default'),
+        }).optional().describe('Make this notification something he can answer. Requires expires_in_s and a conversation (below).'),
+        conversation_id: z.string().min(1).optional().describe('Where replies go. Defaults to the conversation of this headless turn when channel is not given'),
+        channel: z.string().min(1).optional().describe('Or the channel of the conversation replies go to, copied from your message header'),
+        topic: z.string().min(1).optional().describe('Topic of that conversation (default general)'),
+        contact: z.string().min(1).optional().describe('Contact of that conversation (default chris)'),
       },
     },
     async (args) => {
       try {
         const source = args.source?.trim() || originFromEnv(agentId).label || `Agent: ${agentId}`;
-        const { status, data } = await call(busBaseUrl, 'POST', BASE, { ...args, source });
+        const needsBinding = args.reply !== undefined && args.reply.mode !== 'none';
+        const turn = process.env[TURN_CONVERSATION_ENV]?.trim();
+        const fill = needsBinding && !args.conversation_id && !args.channel && !args.topic && !args.contact && turn ? { conversation_id: turn } : {};
+        const { status, data } = await call(busBaseUrl, 'POST', BASE, { ...args, ...fill, source });
         if (!data['ok']) return failure('Bus rejected notification', status, data);
         return toolSuccess({ id: data['id'], key: data['key'], state: data['state'] });
       } catch (err) {
@@ -73,6 +91,7 @@ export function registerNotificationTools(server: McpServer, busBaseUrl: string,
         level: z.enum(['info', 'attention', 'urgent']).optional(),
         state: z.enum(['resolved', 'acknowledged', 'active']).optional(),
         expires_in_s: z.number().int().positive().optional(),
+        resolution: z.string().min(1).optional().describe('With state "resolved": what you did, shown on the dial (60 characters at most): "Booked 3:30"'),
       },
     },
     async (args) => {

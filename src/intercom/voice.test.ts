@@ -55,6 +55,16 @@ describe('createTranscriber', () => {
     expect(createTranscriber(voiceCfg({ engine: 'elevenlabs' }), { OPENAI_API_KEY: 'k' })).toBeNull();
   });
 
+  it('adds per-recording keyterms to Scribe and the OpenAI prompt (E105)', async () => {
+    const seen: FormData[] = [];
+    const fetchImpl = vi.fn(async (_u: string | URL | Request, init?: RequestInit) => { seen.push(init!.body as FormData); return new Response(JSON.stringify({ text: 'ok' }), { status: 200 }); });
+    const opts = { language: 'en', signal: new AbortController().signal, keyterms: ['Dave', 'Minker'] };
+    await new ElevenLabsTranscriber({ apiKey: 'x', model: 'scribe_v2', baseUrl: 'https://xi.test', keyterms: ['Peggy'], fetchImpl: fetchImpl as unknown as typeof fetch }).transcribe(pcmToWav(Buffer.alloc(640), 16000), opts);
+    expect(seen[0]!.getAll('keyterms')).toEqual(['Peggy', 'Dave', 'Minker']);
+    await new OpenAiTranscriber({ apiKey: 'k', model: 'm', baseUrl: 'https://oa.test', prompt: 'Names.', fetchImpl: fetchImpl as unknown as typeof fetch }).transcribe(pcmToWav(Buffer.alloc(640), 16000), opts);
+    expect(seen[1]!.get('prompt')).toBe('Names. Words that may come up: Dave, Minker.');
+  });
+
   it('sends 16 kHz audio to Scribe as raw PCM and returns its text', async () => {
     const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       const form = init!.body as FormData;

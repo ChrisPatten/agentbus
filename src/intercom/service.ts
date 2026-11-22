@@ -38,9 +38,9 @@ import { createCaptureTranscriber, createTranscriber, VoiceSessions, type Transc
 import { CAPTURE_NOTE, CaptureStore, captureMessage, captureStartLabel, type CaptureResult } from './capture.js';
 import { agentSpeechText, createSynthesizer, Speaker, speechText, type Synthesizer } from './speech.js';
 import {
-  acknowledgeNotification, attentionFor, expireDue, getNotification, isTerminal, openForSurface, publicNotification,
+  acknowledgeNotification, attentionFor, bindingOf, claimReply, expireDue, getNotification, isTerminal, openForSurface, publicNotification, releaseReply, replyMode,
   sweepNotifications, targetsSurface, updateNotification, upsertNotification, listNotifications,
-  type Notification, type NotifyInputT, type StateFilter, type UpdateInputT, type UpdateResult, type WriteResult,
+  type Notification, type NotifyInputT, type ReplyBinding, type StateFilter, type UpdateInputT, type UpdateResult, type WriteResult,
 } from './notifications-store.js';
 import { appendEvent, cursorNeedsReset, eventBounds, getSend, putSend, readEvents, sweepEvents, sweepPairCodes, type StoredEvent } from './store.js';
 import {
@@ -106,6 +106,12 @@ interface Interaction {
   firstStatusLogged: boolean;
   firstReplyLogged: boolean;
   closeTimer: NodeJS.Timeout | null;
+  /**
+   * E105: conversations other than the followed one that this interaction answers (a reply to a notification is
+   * injected into the notification's bound conversation). Their agent messages reach the surface as `reply` events
+   * while the window is open, and their turn activity and turn end drive it. Keyed by conversation id.
+   */
+  bound: Map<string, ReplyBinding>;
   /** Spoken replies: the socket that sent this interaction's latest push-to-talk message. Null after a typed send. */
   speak?: {
     to: VoiceSocket; at: number;
@@ -235,12 +241,15 @@ export class IntercomService {
     this.voice = new VoiceSessions<VoiceSocket>({
       config: deps.config.voice,
       transcriber,
-      submit: (c, clientMsgId, text, engine) => this.handleSend(c.surface, { client_msg_id: clientMsgId, body: text }, {
-        noteLine: VOICE_NOTE,
-        metadata: { input: 'voice', transcript_engine: engine },
-        echoIcon: '🎙️',
-        speakTo: c,
-      }),
+      submit: (c, clientMsgId, text, engine, notificationId) => notificationId
+        ? this.handleVoiceReply(c, clientMsgId, text, engine, notificationId)
+        : this.handleSend(c.surface, { client_msg_id: clientMsgId, body: text }, {
+          noteLine: VOICE_NOTE,
+          metadata: { input: 'voice', transcript_engine: engine },
+          echoIcon: '🎙️',
+          speakTo: c,
+        }),
+      preflight: (c, notificationId) => this.voiceReplyCheck(c.surface, notificationId),
       ...(deps.now ? { now: deps.now } : {}),
       log: (l) => this.log(l),
     });
@@ -790,7 +799,7 @@ export class IntercomService {
       st.interaction.closeTimer = null;
       return st.interaction;
     }
-    const interaction: Interaction = { id: randomUUID(), acceptedAt: this.now(), firstStatusLogged: false, firstReplyLogged: false, closeTimer: null };
+    const interaction: Interaction = { id: randomUUID(), acceptedAt: this.now(), firstStatusLogged: false, firstReplyLogged: false, closeTimer: null, bound: new Map() };
     st.interaction = interaction;
     this.emitEphemeral(surface, 'interaction', { interaction_id: interaction.id, state: 'open' });
     return interaction;
@@ -851,15 +860,27 @@ export class IntercomService {
   /** A turn ended in this conversation (Stop hook). */
   onTurnEnded(conversationId: string | null | undefined): void {
     if (!conversationId) return;
-    try { for (const s of this.surfaces.values()) if (s.conversationId === conversationId) this.noteTurnEnded(s); } catch (err) { console.error(`[intercom] onTurnEnded failed: ${String(err)}`); }
+    try { for (const s of this.surfaces.values()) if (s.conversationId === conversationId || this.state.get(s.id)?.interaction?.bound.has(conversationId)) this.noteTurnEnded(s); } catch (err) { console.error(`[intercom] onTurnEnded failed: ${String(err)}`); }
   }
 
   private followersOf(input: { channel: string; contactId?: string | null; topic?: string | null; conversationId?: string | null }): Surface[] {
     const out: Surface[] = [];
     for (const s of this.surfaces.values()) {
-      if (input.conversationId ? input.conversationId === s.conversationId : this.matches(s, input.channel, input.topic, input.contactId)) out.push(s);
+      if (input.conversationId ? input.conversationId === s.conversationId : this.matches(s, input.channel, input.topic, input.contactId)) { out.push(s); continue; }
+      const i = this.state.get(s.id)?.interaction;
+      if (i && this.boundMatch(i, input)) out.push(s);                         // E105: the bound conversation of an open interaction
     }
     return out;
+  }
+
+  /** E105: does this (channel, topic, contact) or conversation id name a conversation bound to the interaction? */
+  private boundMatch(i: Interaction, input: { channel?: string | undefined; contactId?: string | null | undefined; topic?: string | null | undefined; conversationId?: string | null | undefined }): boolean {
+    if (i.bound.size === 0) return false;
+    if (input.conversationId) return i.bound.has(input.conversationId);
+    for (const b of i.bound.values()) {
+      if (input.channel === b.channel && normalizeTopic(input.topic) === normalizeTopic(b.topic) && (!input.contactId || bareContact(input.contactId) === b.contact)) return true;
+    }
+    return false;
   }
 
   // ── Agent outbound → reply events ────────────────────────────────────────
@@ -875,9 +896,10 @@ export class IntercomService {
       if (envelope.payload.type !== 'text') return;
       if (meta['intercom_spoken'] === true) return;                              // E102: the record of a `speak` call; the device was already shown it
       for (const s of this.surfaces.values()) {
-        if (!this.matches(s, envelope.channel, envelope.topic, envelope.recipient)) continue;
         const st = this.state.get(s.id)!;
         const i = st.interaction;
+        const followed = this.matches(s, envelope.channel, envelope.topic, envelope.recipient);
+        if (!followed && !(i && this.boundMatch(i, { channel: envelope.channel, topic: envelope.topic, contactId: envelope.recipient }))) continue;
         if (!i) continue;                                                       // out of window: not delivered to the surface
         const body = envelope.payload.body;
         const { text, cut } = surfaceBody(body);
@@ -1024,7 +1046,7 @@ export class IntercomService {
 
   // ── Surface send ─────────────────────────────────────────────────────────
 
-  async handleSend(surface: Surface, frame: { client_msg_id?: unknown; body?: unknown }, extra: { noteLine?: string; metadata?: Record<string, unknown>; echoIcon?: string; speakTo?: VoiceSocket } = {}): Promise<Record<string, unknown>> {
+  async handleSend(surface: Surface, frame: { client_msg_id?: unknown; body?: unknown }, extra: { noteLine?: string; metadata?: Record<string, unknown>; echoIcon?: string; speakTo?: VoiceSocket; /** E105: inject into this bound conversation instead of the followed one */ binding?: ReplyBinding } = {}): Promise<Record<string, unknown>> {
     const clientMsgId = typeof frame.client_msg_id === 'string' ? frame.client_msg_id : '';
     if (!clientMsgId || clientMsgId.length > 100) return { type: 'error', code: 'invalid_frame' };
     const reject = (reason: string, messageId = ''): Record<string, unknown> => ({ type: 'ack', client_msg_id: clientMsgId, status: 'rejected', reason, ...(messageId ? { message_id: messageId } : {}) });
@@ -1045,11 +1067,12 @@ export class IntercomService {
       interaction.firstStatusLogged = false;
       interaction.firstReplyLogged = false;
 
+      const bound = extra.binding;
       const inbound: InboundMessage = {
         id: messageId,
-        channel: surface.follow.channel,
-        ...(surface.follow.topic ? { topic: surface.follow.topic } : {}),
-        sender: `contact:${surface.follow.contact}`,
+        channel: bound ? bound.channel : surface.follow.channel,
+        ...(bound ? (normalizeTopic(bound.topic) !== 'general' ? { topic: bound.topic } : {}) : (surface.follow.topic ? { topic: surface.follow.topic } : {})),
+        sender: `contact:${bound ? bound.contact : surface.follow.contact}`,
         payload: { type: 'text', body },
         metadata: { origin: 'intercom', surface_id: surface.id, interaction_id: interaction.id, client_msg_id: clientMsgId, ...extra.metadata },
       };
@@ -1084,9 +1107,10 @@ export class IntercomService {
         this.voiceMessages.set(messageId, { surfaceId: surface.id, interactionId: interaction.id });
         if (this.voiceMessages.size > 200) this.voiceMessages.delete(this.voiceMessages.keys().next().value as string);
       }
+      if (bound) interaction.bound.set(bound.conversation_id, bound);
       const ack = { type: 'ack', client_msg_id: clientMsgId, status: 'queued', message_id: messageId, interaction_id: interaction.id };
       putSend(this.deps.db, surface.id, clientMsgId, messageId, ack);
-      void this.echo(surface, body, extra.echoIcon);
+      void this.echo(surface, body, extra.echoIcon, bound);
       return ack;
     } finally {
       this.sendLocks.delete(lockKey);
@@ -1102,15 +1126,16 @@ export class IntercomService {
   }
 
   /** The silent `⌨️ text` echo into the followed Telegram chat. Bookkeeping only: it bypasses the queue and DeliveryWorker. */
-  private async echo(surface: Surface, body: string, icon = '⌨️'): Promise<void> {
+  private async echo(surface: Surface, body: string, icon = '⌨️', bound?: ReplyBinding): Promise<void> {
     if (!this.deps.config.echo_to_followed) return;
+    const channel = bound ? bound.channel : surface.follow.channel;
     try {
-      const adapter = this.deps.registry?.lookupPrimaryByChannel(surface.follow.channel);
-      if (!adapter) { this.log(`warn: no adapter for ${surface.follow.channel}; echo skipped`); return; }
+      const adapter = this.deps.registry?.lookupPrimaryByChannel(channel);
+      if (!adapter) { this.log(`warn: no adapter for ${channel}; echo skipped`); return; }
       const echo: MessageEnvelope = {
         id: randomUUID(), timestamp: new Date(this.now()).toISOString(),
-        channel: surface.follow.channel, topic: normalizeTopic(surface.follow.topic),
-        sender: 'system:bus', recipient: `contact:${surface.follow.contact}`, reply_to: null, priority: 'normal',
+        channel, topic: normalizeTopic(bound ? bound.topic : surface.follow.topic),
+        sender: 'system:bus', recipient: `contact:${bound ? bound.contact : surface.follow.contact}`, reply_to: null, priority: 'normal',
         payload: { type: 'text', body: `${icon} ${body}\n— via Intercom` },
         metadata: { adapter_id: adapter.id, silent: true, no_preview: true, intercom_echo: true, bus_notice: true },
       };
@@ -1136,8 +1161,30 @@ export class IntercomService {
     return true;
   }
 
-  raise(input: NotifyInputT): WriteResult {
-    const res = upsertNotification(this.deps.db, input, this.now());
+  /**
+   * E105 — resolve where replies to this notification go. `conversation_id` must be one the bus has seen; or
+   * `channel` (+ `topic`, default general, + `contact`, default the notification's contact). Required with a reply mode.
+   */
+  prepareBinding(input: NotifyInputT): { ok: true; binding: ReplyBinding | null } | { ok: false; error: string; detail: string } {
+    const mode = input.reply?.mode ?? 'none';
+    const hasRef = input.conversation_id !== undefined || input.channel !== undefined || input.topic !== undefined || input.contact !== undefined;
+    if (!hasRef) {
+      return mode === 'none' ? { ok: true, binding: null }
+        : { ok: false, error: 'binding_required', detail: `reply.mode ${mode} needs conversation_id, or channel (and topic)` };
+    }
+    if (input.conversation_id !== undefined) {
+      const row = this.deps.db.prepare(`SELECT id, contact_id, channel, topic FROM conversation_registry WHERE id = ?`).get(input.conversation_id) as { id: string; contact_id: string; channel: string; topic: string } | undefined;
+      if (!row) return { ok: false, error: 'unknown_conversation', detail: `conversation_id ${input.conversation_id} is not a conversation this bus has seen` };
+      return { ok: true, binding: { conversation_id: row.id, channel: row.channel, topic: row.topic, contact: row.contact_id } };
+    }
+    if (!input.channel) return { ok: false, error: 'invalid_body', detail: 'topic or contact without channel: pass conversation_id, or channel' };
+    const contact = bareContact(input.contact ?? input.contact_id ?? 'chris');
+    const topic = normalizeTopic(input.topic);
+    return { ok: true, binding: { conversation_id: computeConversationId(contact, input.channel, topic), channel: input.channel, topic, contact } };
+  }
+
+  raise(input: NotifyInputT, binding: ReplyBinding | null = null): WriteResult {
+    const res = upsertNotification(this.deps.db, input, this.now(), binding);
     this.publish(res.notification, res.contentChanged);
     return res;
   }
@@ -1197,38 +1244,177 @@ export class IntercomService {
   notificationTick(): void {
     if (!this.notificationsOn) return;
     try {
-      for (const n of expireDue(this.deps.db, this.now())) this.publish(n, false);
+      for (const n of expireDue(this.deps.db, this.now())) { this.publish(n, false); this.onReplyExpired(n); }
       sweepNotifications(this.deps.db, this.deps.notifications?.retention_days ?? 14, this.now());
     } catch (err) { this.log(`warn: notification tick failed: ${String(err)}`); }
   }
 
-  /** `{"type":"notification_ack"}` from a surface. Returns an error frame, or null on success. */
-  handleNotificationAck(surface: Surface, frame: { id?: unknown }): Record<string, unknown> | null {
+  /**
+   * `{"type":"notification_ack"}` from a surface. Returns an error frame, or null on success.
+   * E105: with `skip: true` on a reply-mode notification still awaiting its answer, the item is closed to replies
+   * (`reply_state: skipped`) and a context-only "skipped" note goes into the bound conversation; the job is not woken.
+   */
+  handleNotificationAck(surface: Surface, frame: { id?: unknown; skip?: unknown }): Record<string, unknown> | null {
     const id = typeof frame.id === 'string' ? frame.id : '';
     const n = id ? getNotification(this.deps.db, id) : null;
     if (!this.notificationsOn || !n || isTerminal(n) || !targetsSurface(n, surface.id)) return { type: 'error', code: 'notification_not_found' };
+    if (frame.skip === true && replyMode(n) !== 'none' && !n.reply_via) {
+      const claim = claimReply(this.deps.db, id, 'skip', surface.id, this.now());
+      if ('notification' in claim) {
+        this.publish(claim.notification, false);
+        this.noteToBound(claim.notification, `Notification "${n.title}" was skipped at ${this.clock(new Date(this.now()).toISOString())}.`);
+        return null;
+      }
+    }
     const res = acknowledgeNotification(this.deps.db, id, surface.id, this.now());
     if (res?.changed) this.publish(res.notification, false);
     return null;
   }
 
-  /** `{"type":"notification_action"}`: acknowledge, then send `[tapped] <label>` into the followed conversation like a surface `send`. */
+  private rejectAck(clientMsgId: string, reason: string): Record<string, unknown> {
+    return { type: 'ack', client_msg_id: clientMsgId, status: 'rejected', reason };
+  }
+
+  /** Why a reply by `input` to this notification is refused right now, or null. Reply-mode notifications only. */
+  private replyRefusal(n: Notification, input: 'voice' | 'choice'): string | null {
+    if (n.state === 'expired') return 'notification_expired';
+    if (n.state === 'resolved') return 'notification_not_found';
+    const mode = replyMode(n);
+    if (mode === 'none' || !bindingOf(n)) return 'reply_not_allowed';
+    if (input === 'voice' ? mode === 'choices' : mode === 'voice') return 'reply_not_allowed';
+    if (n.reply_via) return 'already_replied';
+    return null;
+  }
+
+  /** E105 — `audio_start` with a `notification_id`: may this press answer it? Also hands the engine the notification's hints. */
+  voiceReplyCheck(surface: Surface, notificationId: string): { ok: true; keyterms?: string[] } | { ok: false; reason: string } {
+    const n = this.notificationsOn ? getNotification(this.deps.db, notificationId) : null;
+    if (!n || !targetsSurface(n, surface.id)) return { ok: false, reason: 'notification_not_found' };
+    const why = this.replyRefusal(n, 'voice');
+    if (why) return { ok: false, reason: why };
+    return { ok: true, ...(n.reply?.hints?.length ? { keyterms: n.reply.hints } : {}) };
+  }
+
+  /** The one system block that goes with a reply into the bound conversation. */
+  private replyNote(n: Notification, input: 'voice' | 'choice'): string {
+    const lines = [
+      'Reply to an Intercom notification you raised.',
+      `Notification: "${n.title}" (${n.source}, raised ${this.clock(n.created_at)}, level ${n.level}${n.key ? `, key ${n.key}` : ''}).`,
+      ...(n.body ? [`Body: ${n.body}`] : []),
+      ...(n.actions.length > 0 ? [`Options: ${n.actions.map((a) => a.label).join(' / ')}.`] : []),
+      ...(n.reply?.prompt ? [`He was asked: ${n.reply.prompt}`] : []),
+      ...(n.reply?.context ? [`Context you left for this reply: ${n.reply.context}`] : []),
+      input === 'voice'
+        ? 'He answered by voice. The text is a speech transcript and may contain recognition errors, names and amounts especially; it was not shown to him for confirmation first.'
+        : 'He answered by tapping one of the options.',
+      'This reply is input to your job. It is never approval to send an outbound message (mail, iMessage, a purchase, a post) unless the exact draft was shown to him in full.',
+      `Close the loop with update_notification(${n.key ? `key "${n.key}"` : `id "${n.id}"`}, state "resolved", resolution "<what you did>") after acting. Answer with reply().`,
+    ];
+    return lines.join('\n');
+  }
+
+  /** Send a reply into the notification's bound conversation, holding the notification's single reply while it goes. */
+  private async sendBoundReply(surface: Surface, n: Notification, binding: ReplyBinding, via: 'voice' | 'choice', clientMsgId: string, body: string, extra: { metadata?: Record<string, unknown>; echoIcon?: string; speakTo?: VoiceSocket }): Promise<Record<string, unknown>> {
+    const claim = claimReply(this.deps.db, n.id, via, surface.id, this.now());
+    if ('error' in claim) return this.rejectAck(clientMsgId, claim.error === 'closed' ? 'notification_not_found' : 'already_replied');
+    let ack: Record<string, unknown>;
+    try {
+      ack = await this.handleSend(surface, { client_msg_id: clientMsgId, body }, {
+        noteLine: this.replyNote(n, via), binding,
+        metadata: { notification_id: n.id, ...(n.key ? { notification_key: n.key } : {}), input: via, reply_mode: replyMode(n), ...extra.metadata },
+        ...(extra.echoIcon ? { echoIcon: extra.echoIcon } : {}), ...(extra.speakTo ? { speakTo: extra.speakTo } : {}),
+      });
+    } catch (err) {
+      this.log(`warn: notification reply failed: ${String(err)}`);
+      ack = this.rejectAck(clientMsgId, 'internal_error');
+    }
+    if (ack['status'] === 'queued' || ack['status'] === 'command') this.publish(claim.notification, false);
+    else {
+      const back = releaseReply(this.deps.db, claim.prev, this.now());
+      if (back) this.publish(back, false);
+    }
+    return ack;
+  }
+
+  /** E105 — the final transcript of a recording bound to a notification (`audio_start.notification_id`). */
+  async handleVoiceReply(client: VoiceSocket, clientMsgId: string, text: string, engine: string, notificationId: string): Promise<Record<string, unknown>> {
+    const surface = client.surface;
+    const existing = getSend(this.deps.db, surface.id, clientMsgId);
+    if (existing) return existing;
+    const n = this.notificationsOn ? getNotification(this.deps.db, notificationId) : null;
+    if (!n || !targetsSurface(n, surface.id)) return this.rejectAck(clientMsgId, 'notification_not_found');
+    const why = this.replyRefusal(n, 'voice');
+    if (why) return this.rejectAck(clientMsgId, why);
+    return this.sendBoundReply(surface, n, bindingOf(n)!, 'voice', clientMsgId, `[reply to "${n.title}"] ${text}`, {
+      metadata: { transcript_engine: engine }, echoIcon: '🎙️', speakTo: client,
+    });
+  }
+
+  /**
+   * `{"type":"notification_action"}`: acknowledge, then send `[tapped] <label>` into the followed conversation like a
+   * surface `send`. E105: a notification with a binding sends it into the bound conversation instead, and a reply-mode
+   * one takes a single answer (`already_replied`, `reply_not_allowed`, `notification_expired` as rejected acks).
+   */
   async handleNotificationAction(surface: Surface, frame: { client_msg_id?: unknown; id?: unknown; index?: unknown }): Promise<Record<string, unknown>> {
     const clientMsgId = typeof frame.client_msg_id === 'string' ? frame.client_msg_id : '';
     if (!clientMsgId || clientMsgId.length > 100 || typeof frame.id !== 'string' || !Number.isInteger(frame.index)) return { type: 'error', code: 'invalid_frame' };
+    const lockKey = `${surface.id}:${clientMsgId}`;
+    while (this.sendLocks.has(lockKey)) await this.sendLocks.get(lockKey);       // a retry waits for the attempt in flight
     const existing = getSend(this.deps.db, surface.id, clientMsgId);
     if (existing) return existing;                                             // idempotent on client_msg_id, even if the item has since been resolved
     const n = getNotification(this.deps.db, frame.id);
-    if (!this.notificationsOn || !n || isTerminal(n) || !targetsSurface(n, surface.id)) return { type: 'error', code: 'notification_not_found' };
+    if (!this.notificationsOn || !n || !targetsSurface(n, surface.id)) return { type: 'error', code: 'notification_not_found' };
+    const mode = replyMode(n);
+    if (isTerminal(n)) {
+      return mode === 'none' ? { type: 'error', code: 'notification_not_found' } : this.rejectAck(clientMsgId, n.state === 'expired' ? 'notification_expired' : 'notification_not_found');
+    }
     const action = n.actions[frame.index as number];
     if (!action) return { type: 'error', code: 'invalid_frame' };
+    const binding = bindingOf(n);
+    const noteLine = `On the Intercom notification "${n.title}" (${n.source}, raised ${this.clock(n.created_at)})`.replace(/\s+/g, ' ');
+    if (mode !== 'none') {
+      const why = this.replyRefusal(n, 'choice');
+      if (why) return this.rejectAck(clientMsgId, why);
+      this.noteOnMyWay(n, action.label);
+      return this.sendBoundReply(surface, n, binding!, 'choice', clientMsgId, `[tapped] ${action.label}`, {});
+    }
     const acked = acknowledgeNotification(this.deps.db, n.id, surface.id, this.now());
     if (acked?.changed) this.publish(acked.notification, false);
     this.noteOnMyWay(n, action.label);
     return this.handleSend(surface, { client_msg_id: clientMsgId, body: `[tapped] ${action.label}` }, {
-      noteLine: `On the Intercom notification "${n.title}" (${n.source}, raised ${this.clock(n.created_at)})`.replace(/\s+/g, ' '),
+      noteLine,
       metadata: { notification_id: n.id },
+      ...(binding ? { binding } : {}),
     });
+  }
+
+  /** A hidden context-only note in the notification's bound conversation (no wake). Nothing without a binding. */
+  private noteToBound(n: Notification, text: string): void {
+    const binding = bindingOf(n);
+    const cfg = this.deps.appConfig;
+    if (!binding || !cfg) return;
+    const res = shareContextToConversation(this.deps.db, cfg, { contactId: binding.contact, channel: binding.channel, topic: normalizeTopic(binding.topic), body: text, source: `Intercom: ${n.source}` });
+    if (!res.ok) this.log(`warn: notification note not written for ${n.id}: ${res.error}`);
+  }
+
+  /** An unanswered reply-mode notification expired: a context-only note (`on_expire: note`), or a system turn (`wake`). */
+  private onReplyExpired(n: Notification): void {
+    const binding = bindingOf(n);
+    if (!binding || replyMode(n) === 'none' || n.reply_via) return;
+    const at = this.clock(n.updated_at);
+    if (n.reply?.on_expire !== 'wake') { this.noteToBound(n, `Notification "${n.title}" expired unanswered at ${at}.`); return; }
+    const text = `Notification "${n.title}"${n.key ? ` (key ${n.key})` : ''} expired unanswered at ${at}. Do the default named in its context, or log it and stop.` +
+      (n.reply?.context ? `\nContext you left: ${n.reply.context}` : '');
+    const inbound: InboundMessage = {
+      channel: binding.channel,
+      ...(normalizeTopic(binding.topic) !== 'general' ? { topic: binding.topic } : {}),
+      sender: `contact:${binding.contact}`,
+      payload: { type: 'text', body: `[notification expired] ${n.title}` },
+      metadata: { origin: 'intercom', notification_id: n.id, ...(n.key ? { notification_key: n.key } : {}), notification_expired: true },
+    };
+    void this.deps.submitInbound(inbound, { systemOnly: true, blocks: [renderSystemBlock('intercom', text)] })
+      .then((r) => { if (!(r.queued && r.enqueued_count > 0)) this.log(`warn: expiry wake for ${n.id} not queued`); })
+      .catch((err) => this.log(`warn: expiry wake for ${n.id} failed: ${String(err)}`));
   }
 
   /** E96 — mirror the surface's open notifications into its `notices` resource. */
@@ -1255,7 +1441,7 @@ export class IntercomService {
     if (ack['type'] === 'error') return { ...base, status: 'failed', reason: ack['code'] === 'notification_not_found' ? 'not_found' : 'invalid' };
     const messageId = typeof ack['message_id'] === 'string' ? { message_id: ack['message_id'] } : {};
     if (ack['status'] === 'queued' || ack['status'] === 'command') return { ...base, status: 'done', ...messageId };
-    return { ...base, status: 'failed', reason: String(ack['reason'] ?? 'rejected'), ...messageId };
+    return { ...base, status: 'failed', reason: ack['reason'] === 'notification_not_found' ? 'not_found' : String(ack['reason'] ?? 'rejected'), ...messageId };
   }
 
   // ── Test/inspection helpers ──────────────────────────────────────────────

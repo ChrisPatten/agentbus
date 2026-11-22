@@ -20,6 +20,16 @@ const LEVEL_RANK: Record<NotificationLevel, number> = { info: 1, attention: 2, u
 
 export interface NotificationAction { label: string; style?: 'primary' | 'success' | 'danger' }
 
+export type ReplyMode = 'none' | 'voice' | 'choices' | 'both';
+export type ReplyVia = 'voice' | 'choice' | 'skip';
+export type ReplyState = 'none' | 'awaiting' | 'received' | 'skipped' | 'closed';
+
+/** E105 — what a notification asks for. `context` is for the session only and is never sent to a device. */
+export interface ReplyConfig { mode: ReplyMode; prompt?: string; context?: string; hints?: string[]; on_expire: 'note' | 'wake' }
+
+/** E105 — where replies to a notification go. Stored as JSON in `conversation_ref`; never sent to a device. */
+export interface ReplyBinding { conversation_id: string; channel: string; topic: string; contact: string }
+
 export interface Notification {
   id: string;
   key: string | null;
@@ -37,6 +47,10 @@ export interface Notification {
   created_at: string;
   updated_at: string;
   expires_at: string | null;
+  reply: ReplyConfig | null;
+  replied_at: string | null;
+  reply_via: ReplyVia | null;
+  resolution: string | null;
 }
 
 /** Cut to `max` characters, ending in "…" when something was removed. */
@@ -55,6 +69,22 @@ const Level = z.enum(['info', 'attention', 'urgent']);
 const Targets = z.array(z.string().min(1).max(100)).min(1).max(20);
 const ExpiresIn = z.number().int().positive().max(366 * 86_400);
 
+export const REPLY_PROMPT_MAX = 80;
+export const REPLY_CONTEXT_MAX = 600;
+export const REPLY_HINTS_MAX = 8;
+export const REPLY_HINT_LEN = 40;
+export const REPLY_MAX_EXPIRES_S = 86_400;
+export const RESOLUTION_MAX = 60;
+
+const ReplySchema = z.object({
+  mode: z.enum(['none', 'voice', 'choices', 'both']),
+  prompt: z.string().trim().min(1).max(REPLY_PROMPT_MAX).optional(),
+  context: z.string().trim().min(1).max(REPLY_CONTEXT_MAX).optional(),
+  hints: z.array(z.string().trim().min(1).max(REPLY_HINT_LEN)).max(REPLY_HINTS_MAX).optional(),
+  on_expire: z.enum(['note', 'wake']).optional(),
+}).strict();
+const Resolution = z.string().trim().min(1).max(2000).transform((r) => truncate(r, RESOLUTION_MAX));
+
 export const NotifyInput = z.object({
   title: Title,
   body: Body.optional(),
@@ -65,8 +95,22 @@ export const NotifyInput = z.object({
   actions: z.array(ActionSchema).max(MAX_ACTIONS).optional(),
   source: z.string().trim().min(1).max(100),
   contact_id: z.string().trim().min(1).max(100).optional(),
-  conversation_ref: z.string().trim().min(1).max(300).optional(),
-}).strict();
+  /** E105 — replies. With a mode other than none: a binding (conversation_id, or channel + topic) and `expires_in_s` (1..86400) are required. */
+  reply: ReplySchema.optional(),
+  conversation_id: z.string().trim().min(1).max(200).optional(),
+  channel: z.string().trim().min(1).max(200).optional(),
+  topic: z.string().trim().min(1).max(200).optional(),
+  contact: z.string().trim().min(1).max(100).optional(),
+}).strict().superRefine((v, ctx) => {
+  const mode = v.reply?.mode ?? 'none';
+  if (mode === 'none') return;
+  if (v.expires_in_s === undefined || v.expires_in_s > REPLY_MAX_EXPIRES_S) {
+    ctx.addIssue({ code: 'custom', path: ['expires_in_s'], message: `required with reply.mode ${mode}, at most ${REPLY_MAX_EXPIRES_S}` });
+  }
+  if ((mode === 'choices' || mode === 'both') && !(v.actions && v.actions.length > 0)) {
+    ctx.addIssue({ code: 'custom', path: ['actions'], message: `reply.mode ${mode} needs at least one action` });
+  }
+});
 export type NotifyInputT = z.infer<typeof NotifyInput>;
 
 export const UpdateInput = z.object({
@@ -77,11 +121,36 @@ export const UpdateInput = z.object({
   level: Level.optional(),
   state: z.enum(['resolved', 'acknowledged', 'active']).optional(),
   expires_in_s: ExpiresIn.optional(),
+  resolution: Resolution.optional(),
 }).strict();
 export type UpdateInputT = z.infer<typeof UpdateInput>;
 
-type Row = Omit<Notification, 'targets' | 'actions'> & { targets: string; actions: string };
-const fromRow = (r: Row): Notification => ({ ...r, targets: JSON.parse(r.targets) as string[], actions: JSON.parse(r.actions) as NotificationAction[] });
+type Row = Omit<Notification, 'targets' | 'actions' | 'reply'> & { targets: string; actions: string; reply: string | null };
+const fromRow = (r: Row): Notification => ({
+  ...r, targets: JSON.parse(r.targets) as string[], actions: JSON.parse(r.actions) as NotificationAction[],
+  reply: r.reply ? (JSON.parse(r.reply) as ReplyConfig) : null,
+});
+
+/** The reply binding stored in `conversation_ref`, or null (no binding, or a value that is not one). */
+export function bindingOf(n: Pick<Notification, 'conversation_ref'>): ReplyBinding | null {
+  if (!n.conversation_ref) return null;
+  try {
+    const b = JSON.parse(n.conversation_ref) as Partial<ReplyBinding>;
+    return typeof b.conversation_id === 'string' && typeof b.channel === 'string' && typeof b.topic === 'string' && typeof b.contact === 'string'
+      ? { conversation_id: b.conversation_id, channel: b.channel, topic: b.topic, contact: b.contact } : null;
+  } catch { return null; }
+}
+
+/** The mode of a notification's reply config; `none` when it has none. */
+export const replyMode = (n: Pick<Notification, 'reply'>): ReplyMode => n.reply?.mode ?? 'none';
+
+export function replyState(n: Notification): ReplyState {
+  if (replyMode(n) === 'none') return 'none';
+  if (isTerminal(n)) return 'closed';
+  if (n.reply_via === 'skip') return 'skipped';
+  if (n.reply_via) return 'received';
+  return 'awaiting';
+}
 
 export function getNotification(db: Database.Database, id: string): Notification | null {
   const r = db.prepare(`SELECT * FROM notifications WHERE id = ?`).get(id) as Row | undefined;
@@ -93,34 +162,44 @@ export function findOpenByKey(db: Database.Database, key: string): Notification 
   return r ? fromRow(r) : null;
 }
 
-export const isTerminal = (n: Pick<Notification, 'state'>): boolean => n.state === 'resolved' || n.state === 'expired';
+export function isTerminal(n: Pick<Notification, 'state'>): boolean { return n.state === 'resolved' || n.state === 'expired'; }
 export const targetsSurface = (n: Pick<Notification, 'targets'>, surfaceId: string): boolean => n.targets.includes('*') || n.targets.includes(surfaceId);
 
 export interface WriteResult { notification: Notification; created: boolean; /** title, body or level changed (or created) */ contentChanged: boolean }
 
-/** Create, or update in place when `key` matches a non-terminal row. The result is `active`. */
-export function upsertNotification(db: Database.Database, input: NotifyInputT, now = Date.now()): WriteResult {
+/**
+ * Create, or update in place when `key` matches a non-terminal row. The result is `active`.
+ * `binding` is where replies go (E105); a re-raise without `reply` and `binding` keeps the old ones, and always clears the reply outcome.
+ */
+export function upsertNotification(db: Database.Database, input: NotifyInputT, now = Date.now(), binding: ReplyBinding | null = null): WriteResult {
   const iso = new Date(now).toISOString();
   const expires = input.expires_in_s ? new Date(now + input.expires_in_s * 1000).toISOString() : undefined;
+  const reply: ReplyConfig | null | undefined = input.reply && input.reply.mode !== 'none'
+    ? { ...input.reply, on_expire: input.reply.on_expire ?? 'note' }
+    : (input.reply ? null : undefined);
   return db.transaction((): WriteResult => {
     const existing = input.key ? findOpenByKey(db, input.key) : null;
     if (!existing) {
       const n: Notification = {
         id: randomUUID(), key: input.key ?? null, contact_id: input.contact_id ?? 'chris', title: input.title, body: input.body || null,
         level: input.level ?? 'attention', state: 'active', targets: input.targets ?? ['*'], actions: input.actions ?? [],
-        source: input.source, conversation_ref: input.conversation_ref ?? null, acked_by: null, acked_at: null,
+        source: input.source, conversation_ref: binding ? JSON.stringify(binding) : null, acked_by: null, acked_at: null,
         created_at: iso, updated_at: iso, expires_at: expires ?? null,
+        reply: reply ?? null, replied_at: null, reply_via: null, resolution: null,
       };
-      db.prepare(`INSERT INTO notifications(id,key,contact_id,title,body,level,state,targets,actions,source,conversation_ref,acked_by,acked_at,created_at,updated_at,expires_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(n.id, n.key, n.contact_id, n.title, n.body, n.level, n.state, JSON.stringify(n.targets), JSON.stringify(n.actions),
-        n.source, n.conversation_ref, null, null, iso, iso, n.expires_at);
+      db.prepare(`INSERT INTO notifications(id,key,contact_id,title,body,level,state,targets,actions,source,conversation_ref,acked_by,acked_at,created_at,updated_at,expires_at,reply,replied_at,reply_via,resolution)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(n.id, n.key, n.contact_id, n.title, n.body, n.level, n.state, JSON.stringify(n.targets), JSON.stringify(n.actions),
+        n.source, n.conversation_ref, null, null, iso, iso, n.expires_at, n.reply ? JSON.stringify(n.reply) : null, null, null, null);
       return { notification: n, created: true, contentChanged: true };
     }
     const next: Notification = {
       ...existing, title: input.title, body: input.body !== undefined ? (input.body || null) : existing.body,
       level: input.level ?? existing.level, state: 'active', targets: input.targets ?? existing.targets, actions: input.actions ?? existing.actions,
-      source: input.source, conversation_ref: input.conversation_ref ?? existing.conversation_ref, acked_by: null, acked_at: null,
+      source: input.source,
+      conversation_ref: binding ? JSON.stringify(binding) : (reply === null ? null : existing.conversation_ref),
+      acked_by: null, acked_at: null,
       updated_at: iso, expires_at: expires ?? existing.expires_at,
+      reply: reply === undefined ? existing.reply : reply, replied_at: null, reply_via: null, resolution: null,
     };
     writeRow(db, next);
     const contentChanged = next.title !== existing.title || next.body !== existing.body || next.level !== existing.level;
@@ -129,8 +208,9 @@ export function upsertNotification(db: Database.Database, input: NotifyInputT, n
 }
 
 function writeRow(db: Database.Database, n: Notification): void {
-  db.prepare(`UPDATE notifications SET title=?, body=?, level=?, state=?, targets=?, actions=?, source=?, conversation_ref=?, acked_by=?, acked_at=?, updated_at=?, expires_at=? WHERE id=?`)
-    .run(n.title, n.body, n.level, n.state, JSON.stringify(n.targets), JSON.stringify(n.actions), n.source, n.conversation_ref, n.acked_by, n.acked_at, n.updated_at, n.expires_at, n.id);
+  db.prepare(`UPDATE notifications SET title=?, body=?, level=?, state=?, targets=?, actions=?, source=?, conversation_ref=?, acked_by=?, acked_at=?, updated_at=?, expires_at=?, reply=?, replied_at=?, reply_via=?, resolution=? WHERE id=?`)
+    .run(n.title, n.body, n.level, n.state, JSON.stringify(n.targets), JSON.stringify(n.actions), n.source, n.conversation_ref, n.acked_by, n.acked_at, n.updated_at, n.expires_at,
+      n.reply ? JSON.stringify(n.reply) : null, n.replied_at, n.reply_via, n.resolution, n.id);
 }
 
 export type UpdateResult = WriteResult | { error: 'not_found' | 'terminal' | 'invalid' };
@@ -146,6 +226,7 @@ export function updateNotification(db: Database.Database, patch: UpdateInputT, n
   const next: Notification = {
     ...existing, title: patch.title ?? existing.title, body: patch.body !== undefined ? (patch.body || null) : existing.body,
     level: patch.level ?? existing.level, state, updated_at: iso,
+    resolution: patch.resolution ?? existing.resolution,
     expires_at: patch.expires_in_s ? new Date(now + patch.expires_in_s * 1000).toISOString() : existing.expires_at,
     acked_by: state === 'acknowledged' ? (existing.acked_by ?? null) : (state === 'active' ? null : existing.acked_by),
     acked_at: state === 'acknowledged' ? (existing.acked_at ?? iso) : (state === 'active' ? null : existing.acked_at),
@@ -218,5 +299,30 @@ export function publicNotification(n: Notification): Record<string, unknown> {
   return {
     id: n.id, key: n.key, title: n.title, body: n.body, level: n.level, state: n.state, actions: n.actions, source: n.source,
     created_at: n.created_at, updated_at: n.updated_at, expires_at: n.expires_at,
+    reply: n.reply ? { mode: n.reply.mode, prompt: n.reply.prompt ?? null, hints: n.reply.hints ?? [], on_expire: n.reply.on_expire } : null,
+    reply_state: replyState(n), replied_at: n.replied_at, reply_via: n.reply_via, resolution: n.resolution,
   };
+}
+
+/**
+ * E105 — claim the single reply of an open reply-mode notification, atomically. Marks it `acknowledged` with `reply_via`
+ * and `replied_at`. Returns the row and what it was before (for {@link releaseReply}), or why not: `already_replied`
+ * (a reply or skip is already in), or `closed`.
+ */
+export function claimReply(db: Database.Database, id: string, via: ReplyVia, surfaceId: string, now = Date.now()): { notification: Notification; prev: Notification } | { error: 'already_replied' | 'closed' } {
+  const prev = getNotification(db, id);
+  if (!prev || isTerminal(prev)) return { error: 'closed' };
+  const iso = new Date(now).toISOString();
+  const res = db.prepare(`UPDATE notifications SET reply_via = ?, replied_at = ?, state = 'acknowledged', acked_by = COALESCE(acked_by, ?), acked_at = COALESCE(acked_at, ?), updated_at = ?
+    WHERE id = ? AND reply_via IS NULL AND state IN ('active','acknowledged')`).run(via, iso, surfaceId, iso, iso, id);
+  const n = getNotification(db, id);
+  if (res.changes === 1 && n) return { notification: n, prev };
+  return { error: 'already_replied' };
+}
+
+/** Undo a claim whose message never reached the session, so the device can try again. */
+export function releaseReply(db: Database.Database, prev: Notification, now = Date.now()): Notification | null {
+  db.prepare(`UPDATE notifications SET reply_via = NULL, replied_at = NULL, state = ?, acked_by = ?, acked_at = ?, updated_at = ? WHERE id = ? AND state IN ('active','acknowledged')`)
+    .run(prev.state, prev.acked_by, prev.acked_at, new Date(now).toISOString(), prev.id);
+  return getNotification(db, prev.id);
 }

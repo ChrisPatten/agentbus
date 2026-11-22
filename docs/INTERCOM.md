@@ -203,7 +203,7 @@ After `welcome` the server replays durable events with `seq > cursor` (oldest fi
 
 Errors: `{"type":"error","code":"invalid_frame"\|"unauthorized"\|"internal_error"\|"notification_not_found"\|"read_only"}`. `read_only` (E96) answers `send` and `notification_action` from a device paired with `read_only` scope.
 
-**Notifications (E89).** When `notifications.enabled`, the server also sends `notification` (durable) and `attention` (ephemeral) events, plus a snapshot of open items after `welcome`, and accepts `notification_ack` and `notification_action` frames. The agent note on each surface message then also carries the notify-versus-message guidance. See [NOTIFICATIONS.md](NOTIFICATIONS.md).
+**Notifications (E89).** When `notifications.enabled`, the server also sends `notification` (durable) and `attention` (ephemeral) events, plus a snapshot of open items after `welcome`, and accepts `notification_ack` and `notification_action` frames. The agent note on each surface message then also carries the notify-versus-message guidance. See [NOTIFICATIONS.md](NOTIFICATIONS.md). Replies to notifications (E105: `reply`, `reply_state`, a bound conversation, `audio_start.notification_id`, `notification_ack` with `skip`) are specified in [NOTIFICATION_REPLIES_CONTRACT.md](NOTIFICATION_REPLIES_CONTRACT.md); the interaction window also covers a notification's bound conversation.
 
 ## Follow engine
 

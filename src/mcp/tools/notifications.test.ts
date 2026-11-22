@@ -59,6 +59,22 @@ describe('notification tools (E89)', () => {
     expect(JSON.parse((fetchMock.mock.calls[1] as [string, { body: string }])[1].body).source).toBe('Peggy: Intercom');
   });
 
+  it('notify with a reply fills conversation_id from the headless turn, unless a channel is given', async () => {
+    fetchMock.mockResolvedValue(json(201, { ok: true, id: 'n1', key: 'k', state: 'active' }));
+    vi.stubEnv('AGENTBUS_TURN_CONVERSATION_ID', 'conv-turn');
+    const reply = { mode: 'voice', prompt: 'Say a time', context: 'ctx', hints: ['Dave'] };
+    await call('notify', { title: 't', key: 'k', expires_in_s: 600, reply });
+    expect(JSON.parse((fetchMock.mock.calls[0] as [string, { body: string }])[1].body)).toMatchObject({ conversation_id: 'conv-turn', reply });
+    await call('notify', { title: 't', expires_in_s: 600, reply, channel: 'telegram:peggy', topic: 'thread:abc' });
+    const second = JSON.parse((fetchMock.mock.calls[1] as [string, { body: string }])[1].body);
+    expect(second).toMatchObject({ channel: 'telegram:peggy', topic: 'thread:abc' });
+    expect(second).not.toHaveProperty('conversation_id');
+    await call('notify', { title: 'no reply' });
+    expect(JSON.parse((fetchMock.mock.calls[2] as [string, { body: string }])[1].body)).not.toHaveProperty('conversation_id');
+    await call('update_notification', { key: 'k', state: 'resolved', resolution: 'Booked 3:30' });
+    expect(JSON.parse((fetchMock.mock.calls[3] as [string, { body: string }])[1].body)).toEqual({ state: 'resolved', resolution: 'Booked 3:30' });
+  });
+
   it('surfaces a bus rejection as a tool error', async () => {
     fetchMock.mockResolvedValueOnce(json(400, { ok: false, error: 'invalid_body', detail: 'title: required' }));
     const r = await call('notify', { title: 't' });

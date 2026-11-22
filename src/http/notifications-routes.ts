@@ -49,7 +49,9 @@ export function registerNotificationRoutes(
     const parsed = NotifyInput.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ ok: false, error: 'invalid_body', detail: parsed.error.issues.map((i) => `${i.path.join('.') || 'body'}: ${i.message}`).join('; ') });
     if (!service.writeAllowed(parsed.data.source)) return reply.code(429).header('Retry-After', '60').send({ ok: false, error: 'rate_limited' });
-    const res = service.raise(parsed.data);
+    const bound = service.prepareBinding(parsed.data);
+    if (!bound.ok) return reply.code(400).send({ ok: false, error: bound.error, detail: bound.detail });
+    const res = service.raise(parsed.data, bound.binding);
     return reply.code(res.created ? 201 : 200).send({ ok: true, id: res.notification.id, key: res.notification.key, state: res.notification.state, created: res.created });
   };
 

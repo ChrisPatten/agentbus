@@ -239,6 +239,11 @@ function loadMigrations(): Migration[] {
       description: 'voice_style_injections: once-per-session Intercom voice style guide (E102)',
       sql: readFileSync(join(migrationsDir, '047_voice_style_injections.sql'), 'utf-8'),
     },
+    {
+      version: 48,
+      description: 'notifications: reply, replied_at, reply_via, resolution columns (E105)',
+      sql: readFileSync(join(migrationsDir, '048_notification_replies.sql'), 'utf-8'),
+    },
   ];
 }
 

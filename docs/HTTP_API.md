@@ -424,8 +424,8 @@ Registered when `notifications.enabled` and `adapters.intercom.enabled`. Semanti
 
 | Method | Path | Body or query | Answer |
 |---|---|---|---|
-| POST | `/api/v1/notifications` | `{title, source, body?, level?, key?, targets?, expires_in_s?, actions?, contact_id?, conversation_ref?}` | `201 {ok, id, key, state, created: true}`; `200 ... created: false` when `key` matched an open item |
-| PATCH | `/api/v1/notifications/:id` or `/api/v1/notifications?key=…` | `{title?, body?, level?, state?: resolved\|acknowledged\|active, expires_in_s?}` | `200 {ok, id, key, state}`; `404` unknown; `409` already resolved or expired |
+| POST | `/api/v1/notifications` | `{title, source, body?, level?, key?, targets?, expires_in_s?, actions?, contact_id?, reply?, conversation_id?, channel?, topic?, contact?}` (E105: see [NOTIFICATIONS.md](NOTIFICATIONS.md#replies-e105); 400 `binding_required` / `unknown_conversation`) | `201 {ok, id, key, state, created: true}`; `200 ... created: false` when `key` matched an open item |
+| PATCH | `/api/v1/notifications/:id` or `/api/v1/notifications?key=…` | `{title?, body?, level?, state?: resolved\|acknowledged\|active, expires_in_s?, resolution?}` | `200 {ok, id, key, state}`; `404` unknown; `409` already resolved or expired |
 | GET | `/api/v1/notifications?state=active\|open\|all&limit=N` | default `open` (active plus acknowledged), limit 50 (max 200) | `{ok, notifications: [...]}` |
 
 `Authorization: Bearer <token>` where the token equals the value of an env var named in `notifications.api_tokens_env` (else 401). `source` is required (a free label; the rate limit is per source). Errors: 400 `{ok:false, error:"invalid_body", detail}`, 413 over 8 KB, 429 over 30 writes per minute per source with `Retry-After: 60`. The MCP tools use the identical handlers at `/api/v1/internal/notifications*` under the shared `X-Bus-Token` auth instead of Bearer tokens.

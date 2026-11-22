@@ -111,6 +111,24 @@ describe('notifications HTTP API and WebSocket (E89)', () => {
       expect((await (await call('GET', '/api/v1/notifications?state=all')).json() as any).notifications).toHaveLength(1);
     });
 
+    it('replies (E105): 400 without a binding or with an unknown conversation; 201 with channel and topic; resolution on PATCH', async () => {
+      const ask = { title: 'Dave call', key: 'dc', source: 'cron', expires_in_s: 600, reply: { mode: 'voice', context: 'secret job context' } };
+      const noBinding = await call('POST', '/api/v1/notifications', ask);
+      expect(noBinding.status).toBe(400);
+      expect(await noBinding.json()).toMatchObject({ ok: false, error: 'binding_required' });
+      expect(await (await call('POST', '/api/v1/notifications', { ...ask, conversation_id: 'nope' })).json()).toMatchObject({ error: 'unknown_conversation' });
+      expect((await call('POST', '/api/v1/notifications', { ...ask, expires_in_s: undefined, channel: 'telegram:peggy' })).status).toBe(400);
+      expect((await call('POST', '/api/v1/notifications', { ...ask, channel: 'telegram:peggy', private: true })).status).toBe(400);
+      const ok = await call('POST', '/api/v1/notifications', { ...ask, channel: 'telegram:peggy', topic: 'thread:00000000000000b1' });
+      expect(ok.status).toBe(201);
+      const listed = (await (await call('GET', '/api/v1/notifications')).json() as any).notifications[0];
+      expect(listed).toMatchObject({ reply_state: 'awaiting', reply: { mode: 'voice' } });
+      expect(JSON.stringify(listed)).not.toContain('secret job context');
+      const res = await call('PATCH', '/api/v1/notifications?key=dc', { state: 'resolved', resolution: 'Booked 3:30' });
+      expect(res.status).toBe(200);
+      expect((await (await call('GET', '/api/v1/notifications?state=all')).json() as any).notifications[0]).toMatchObject({ resolution: 'Booked 3:30', reply_state: 'closed' });
+    });
+
     it('the internal route used by the MCP tools needs no Bearer token (shared bus auth applies instead)', async () => {
       const res = await call('POST', '/api/v1/internal/notifications', { title: 'From a tool', source: 'Agent: peggy' }, null);
       expect(res.status).toBe(201);

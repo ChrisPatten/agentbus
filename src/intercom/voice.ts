@@ -28,7 +28,7 @@ export interface Transcriber {
   /** Short engine label for logs and message metadata. */
   readonly name: string;
   /** Transcribe a WAV file; resolves to the text (possibly empty). Rejects on failure or abort. */
-  transcribe(wav: Buffer, opts: { language: string; signal: AbortSignal }): Promise<string>;
+  transcribe(wav: Buffer, opts: { language: string; signal: AbortSignal; /** E105: extra words to bias this recording only */ keyterms?: string[] }): Promise<string>;
   /**
    * Long-form (Capture): the whole recording in one request, with timed and, where the engine can, speaker-labelled
    * segments. Optional; without it Capture sends the audio in `capture.segment_s` pieces to `transcribe`.
@@ -104,13 +104,14 @@ export class OpenAiTranscriber implements Transcriber {
   constructor(private readonly opts: { apiKey: string; model: string; baseUrl: string; prompt?: string; fetchImpl?: typeof fetch }) {
     this.name = `openai:${opts.model}`;
   }
-  async transcribe(wav: Buffer, { language, signal }: { language: string; signal: AbortSignal }): Promise<string> {
+  async transcribe(wav: Buffer, { language, signal, keyterms }: { language: string; signal: AbortSignal; keyterms?: string[] }): Promise<string> {
     const form = new FormData();
     form.append('file', new Blob([new Uint8Array(wav)], { type: 'audio/wav' }), 'ptt.wav');
     form.append('model', this.opts.model);
     form.append('response_format', 'json');
     if (language) form.append('language', language);
-    if (this.opts.prompt) form.append('prompt', this.opts.prompt);
+    const prompt = [this.opts.prompt, keyterms?.length ? `Words that may come up: ${keyterms.join(', ')}.` : ''].filter(Boolean).join(' ');
+    if (prompt) form.append('prompt', prompt);
     const res = await (this.opts.fetchImpl ?? fetch)(`${this.opts.baseUrl.replace(/\/+$/, '')}/audio/transcriptions`, {
       method: 'POST', headers: { Authorization: `Bearer ${this.opts.apiKey}` }, body: form, signal,
     });
@@ -129,7 +130,7 @@ export class ElevenLabsTranscriber implements Transcriber {
   constructor(private readonly opts: { apiKey: string; model: string; baseUrl: string; keyterms?: string[]; fetchImpl?: typeof fetch }) {
     this.name = `elevenlabs:${opts.model}`;
   }
-  async transcribe(wav: Buffer, { language, signal }: { language: string; signal: AbortSignal }): Promise<string> {
+  async transcribe(wav: Buffer, { language, signal, keyterms }: { language: string; signal: AbortSignal; keyterms?: string[] }): Promise<string> {
     const form = new FormData();
     const raw = wav.length >= 44 && wav.toString('ascii', 0, 4) === 'RIFF' && wav.readUInt32LE(24) === 16000 && wav.readUInt16LE(22) === 1;
     const bytes = raw ? wav.subarray(44) : wav;
@@ -138,7 +139,7 @@ export class ElevenLabsTranscriber implements Transcriber {
     if (raw) form.append('file_format', 'pcm_s16le_16');
     if (language) form.append('language_code', language);
     form.append('tag_audio_events', 'false');
-    for (const k of this.opts.keyterms ?? []) form.append('keyterms', k);
+    for (const k of [...(this.opts.keyterms ?? []), ...(keyterms ?? [])]) form.append('keyterms', k);
     const res = await (this.opts.fetchImpl ?? fetch)(`${this.opts.baseUrl.replace(/\/+$/, '')}/v1/speech-to-text`, {
       method: 'POST', headers: { 'xi-api-key': this.opts.apiKey }, body: form, signal,
     });
@@ -175,7 +176,7 @@ export class ElevenLabsTranscriber implements Transcriber {
 export class CommandTranscriber implements Transcriber {
   readonly name: string;
   constructor(protected readonly argv: string[]) { this.name = `command:${argv[0]}`; }
-  async transcribe(wav: Buffer, opts: { language: string; signal: AbortSignal }): Promise<string> {
+  async transcribe(wav: Buffer, opts: { language: string; signal: AbortSignal; keyterms?: string[] }): Promise<string> {
     return this.run(wav, opts, 1 << 20);
   }
 
@@ -290,13 +291,21 @@ interface Session {
   partialTimer: NodeJS.Timeout | null;
   partialBusy: boolean;
   partialBytes: number;
+  /** E105: the notification this recording answers, and its keyterms. */
+  notificationId?: string;
+  keyterms?: string[];
 }
 
 export interface VoiceDeps<C extends VoiceClient = VoiceClient> {
   config: VoiceConfig;
   transcriber: Transcriber | null;
   /** Send the final transcript on like a typed `send`; resolves to the `ack` frame. */
-  submit(client: C, clientMsgId: string, text: string, engine: string): Promise<Record<string, unknown>>;
+  submit(client: C, clientMsgId: string, text: string, engine: string, notificationId?: string): Promise<Record<string, unknown>>;
+  /**
+   * E105: check a recording that names a notification before any audio is taken. `ok: false` ends the press with a
+   * failed final transcript carrying `reason`; `keyterms` bias the engine for this recording only.
+   */
+  preflight?(client: C, notificationId: string): { ok: true; keyterms?: string[] } | { ok: false; reason: string };
   now?: () => number;
   log?: (line: string) => void;
 }
@@ -306,30 +315,42 @@ const CMID_MAX = 100;
 /** Per-socket push-to-talk recordings. One open recording per socket; a new `audio_start` replaces it. */
 export class VoiceSessions<C extends VoiceClient = VoiceClient> {
   private readonly sessions = new Map<string, Session>();
+  /** E105: the recording a failed pre-flight refused, per socket, so its `audio_end` is ignored rather than answered `no_recording`. */
+  private readonly refused = new Map<string, string>();
   constructor(private readonly deps: VoiceDeps<C>) {}
 
   get available(): boolean { return !!this.deps.transcriber; }
   private now(): number { return this.deps.now?.() ?? Date.now(); }
   private log(line: string): void { (this.deps.log ?? ((l) => console.log(`[intercom] ${l}`)))(line); }
 
-  private result(client: VoiceClient, cmid: string, status: 'ok' | 'empty' | 'failed', extra: Record<string, unknown> = {}): void {
-    client.send({ type: 'transcript', client_msg_id: cmid, final: true, status, ...extra });
+  private result(client: VoiceClient, cmid: string, status: 'ok' | 'empty' | 'failed', extra: Record<string, unknown> = {}, s?: Session): void {
+    client.send({ type: 'transcript', client_msg_id: cmid, final: true, status, ...(s?.notificationId ? { notification_id: s.notificationId } : {}), ...extra });
   }
 
   /** `audio_start`. Answers `invalid_frame` for a malformed frame. */
-  start(client: VoiceClient, frame: Record<string, unknown>): Record<string, unknown> | null {
+  start(client: C, frame: Record<string, unknown>): Record<string, unknown> | null {
     const cmid = typeof frame['client_msg_id'] === 'string' ? frame['client_msg_id'] : '';
+    const nid = frame['notification_id'];
+    if (nid !== undefined && (typeof nid !== 'string' || !nid || nid.length > 100)) return { type: 'error', code: 'invalid_frame' };
     const rate = frame['rate'] === undefined ? 16000 : frame['rate'];
     const format = frame['format'] === undefined ? 'pcm_s16le' : frame['format'];
     if (!cmid || cmid.length > CMID_MAX || typeof rate !== 'number' || !Number.isInteger(rate) || rate < 8000 || rate > 48000 || format !== 'pcm_s16le') {
       return { type: 'error', code: 'invalid_frame' };
     }
     this.drop(client.id);
-    if (!this.deps.transcriber) { this.result(client, cmid, 'failed', { reason: 'unavailable' }); return null; }
+    this.refused.delete(client.id);
+    let keyterms: string[] | undefined;
+    if (typeof nid === 'string') {
+      const pre = this.deps.preflight ? this.deps.preflight(client, nid) : { ok: true as const };
+      if (!pre.ok) { this.refused.set(client.id, cmid); client.send({ type: 'transcript', client_msg_id: cmid, final: true, status: 'failed', reason: pre.reason, notification_id: nid }); return null; }
+      keyterms = pre.keyterms;
+    }
+    if (!this.deps.transcriber) { this.result(client, cmid, 'failed', { reason: 'unavailable', ...(typeof nid === 'string' ? { notification_id: nid } : {}) }); return null; }
     const s: Session = {
       cmid, rate, chunks: [], bytes: 0, maxBytes: this.deps.config.max_seconds * rate * 2,
       startedAt: this.now(), lastChunkAt: this.now(), ended: false, closed: false, abort: new AbortController(),
       idleTimer: null, partialTimer: null, partialBusy: false, partialBytes: 0,
+      ...(typeof nid === 'string' ? { notificationId: nid } : {}), ...(keyterms?.length ? { keyterms } : {}),
     };
     this.sessions.set(client.id, s);
     this.armIdle(client, s);
@@ -361,6 +382,7 @@ export class VoiceSessions<C extends VoiceClient = VoiceClient> {
   async end(client: C, frame: Record<string, unknown>): Promise<void> {
     const cmid = typeof frame['client_msg_id'] === 'string' ? frame['client_msg_id'] : '';
     const s = this.sessions.get(client.id);
+    if (!s && this.refused.get(client.id) === cmid) { this.refused.delete(client.id); return; }
     if (!s || s.cmid !== cmid || s.ended) { if (cmid && cmid.length <= CMID_MAX) this.result(client, cmid, 'failed', { reason: 'no_recording' }); return; }
     s.ended = true;
     this.stopTimers(s);
@@ -370,7 +392,7 @@ export class VoiceSessions<C extends VoiceClient = VoiceClient> {
     const cfg = this.deps.config;
     if (ms < cfg.min_ms || (cfg.silence_peak > 0 && pcmPeak(pcm) < cfg.silence_peak)) {
       this.finish(client.id, s);
-      this.result(client, cmid, 'empty', { duration_ms: ms });
+      this.result(client, cmid, 'empty', { duration_ms: ms }, s);
       return;
     }
     const released = this.now();
@@ -382,20 +404,20 @@ export class VoiceSessions<C extends VoiceClient = VoiceClient> {
       this.finish(client.id, s);
       if (aborted) return;                                    // cancelled or the socket went away
       this.log(`warn: transcription failed (${this.deps.transcriber?.name}): ${String(err)}`);
-      this.result(client, cmid, 'failed', { reason: 'stt_error', duration_ms: ms });
+      this.result(client, cmid, 'failed', { reason: 'stt_error', duration_ms: ms }, s);
       return;
     }
     if (s.closed) return;
     this.finish(client.id, s);
     text = cleanTranscript(text);
     this.log(JSON.stringify({ evt: 'latency', mark: 'transcript_final', client_msg_id: cmid, ms: this.now() - released, audio_ms: ms, chars: text.length }));
-    if (!text) { this.result(client, cmid, 'empty', { duration_ms: ms }); return; }
-    this.result(client, cmid, 'ok', { text, duration_ms: ms });
-    client.send(await this.deps.submit(client, cmid, text, this.deps.transcriber!.name));
+    if (!text) { this.result(client, cmid, 'empty', { duration_ms: ms }, s); return; }
+    this.result(client, cmid, 'ok', { text, duration_ms: ms }, s);
+    client.send(await this.deps.submit(client, cmid, text, this.deps.transcriber!.name, s.notificationId));
   }
 
   /** The socket closed: drop its recording. */
-  detach(client: VoiceClient): void { this.drop(client.id); }
+  detach(client: VoiceClient): void { this.drop(client.id); this.refused.delete(client.id); }
 
   /** Drop every recording (bus shutdown). */
   stop(): void { for (const id of [...this.sessions.keys()]) this.drop(id); }
@@ -403,7 +425,7 @@ export class VoiceSessions<C extends VoiceClient = VoiceClient> {
   private run(s: Session, pcm: Buffer): Promise<string> {
     const t = this.deps.transcriber!;
     const timeout = setTimeout(() => s.abort.abort(new Error('timeout')), this.deps.config.timeout_ms);
-    return t.transcribe(pcmToWav(pcm, s.rate), { language: this.deps.config.language, signal: s.abort.signal })
+    return t.transcribe(pcmToWav(pcm, s.rate), { language: this.deps.config.language, signal: s.abort.signal, ...(s.keyterms ? { keyterms: s.keyterms } : {}) })
       .finally(() => clearTimeout(timeout));
   }
 
@@ -418,10 +440,10 @@ export class VoiceSessions<C extends VoiceClient = VoiceClient> {
     const timeout = setTimeout(() => ac.abort(), this.deps.config.timeout_ms);
     const onAbort = () => ac.abort();
     s.abort.signal.addEventListener('abort', onAbort, { once: true });
-    t.transcribe(pcmToWav(pcm, s.rate), { language: this.deps.config.language, signal: ac.signal })
+    t.transcribe(pcmToWav(pcm, s.rate), { language: this.deps.config.language, signal: ac.signal, ...(s.keyterms ? { keyterms: s.keyterms } : {}) })
       .then((text) => {
         const clean = cleanTranscript(text);
-        if (clean && !s.ended && !s.closed) client.send({ type: 'transcript', client_msg_id: s.cmid, final: false, text: clean });
+        if (clean && !s.ended && !s.closed) client.send({ type: 'transcript', client_msg_id: s.cmid, final: false, text: clean, ...(s.notificationId ? { notification_id: s.notificationId } : {}) });
       })
       .catch(() => { /* interim only */ })
       .finally(() => { clearTimeout(timeout); s.abort.signal.removeEventListener('abort', onAbort); s.partialBusy = false; });
@@ -432,7 +454,7 @@ export class VoiceSessions<C extends VoiceClient = VoiceClient> {
     s.idleTimer = setTimeout(() => {
       if (s.ended || this.sessions.get(client.id) !== s) return;
       this.drop(client.id);
-      this.result(client, s.cmid, 'failed', { reason: 'timeout' });
+      this.result(client, s.cmid, 'failed', { reason: 'timeout' }, s);
     }, this.deps.config.idle_timeout_ms);
     s.idleTimer.unref?.();
   }

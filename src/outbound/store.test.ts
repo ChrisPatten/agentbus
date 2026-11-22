@@ -19,7 +19,7 @@ describe('migration 040 — outbound_messages', () => {
   it('applies on top of a database already at migration 39 without touching existing rows', () => {
     const db = new Database(':memory:');
     runMigrations(db);
-    db.exec(`DELETE FROM schema_migrations WHERE version >= 40; DROP TABLE outbound_messages; DROP TABLE input_prompts;`);
+    db.exec(`DELETE FROM schema_migrations WHERE version >= 40; DROP TABLE outbound_messages; DROP TABLE input_prompts; DROP TABLE notifications;`);
     db.prepare(
       `INSERT INTO choice_prompts (id, channel, topic, labels, status, created_at, expires_at) VALUES ('p', 'telegram', 'general', '["A"]', 'open', 'x', 'y')`,
     ).run();
