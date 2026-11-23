@@ -258,6 +258,19 @@ describe('E100 Moment fields and lifecycle on the publish routes', () => {
     expect(applied).toEqual([]);
   });
 
+  it('stores free only when true, resets it on republish, and 400s on decision or urgent', async () => {
+    const { s, hub } = await setup();
+    expect((await put(s, 'lunch', event({ weight: 'ambient', free: true }))).statusCode).toBe(201);
+    expect(hub.get('compact', 'events', 'lunch')).toMatchObject({ free: true });
+    expect((await put(s, 'lunch', event({ weight: 'ambient' }))).statusCode).toBeLessThan(300);
+    expect(hub.get('compact', 'events', 'lunch')).not.toHaveProperty('free');
+    for (const weight of ['decision', 'urgent']) {
+      const bad = await put(s, 'x', event({ weight, free: true }));
+      expect(bad.statusCode).toBe(400);
+      expect(bad.json().error).toMatch(/free is not allowed/);
+    }
+  });
+
   it('ends with each reason; refuses an unknown reason', async () => {
     const { s, hub } = await setup();
     for (const reason of ['withdrawn', 'answered', 'cleared']) {

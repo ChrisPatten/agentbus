@@ -326,6 +326,26 @@ describe('validateEvent: consequence and changed (E100)', () => {
   });
 });
 
+describe('validateEvent: free (Moment)', () => {
+  const ev = (extra: Record<string, unknown>) => validateEvent({ id: 'm', title: 'Lunch', ...extra }, ctx).event;
+
+  it('stores free only when true; false or absent leaves no key', () => {
+    expect(ev({ free: true })).toMatchObject({ free: true });
+    expect(ev({ free: true, weight: 'ambient' }).free).toBe(true);
+    expect(ev({ free: true, weight: 'notice' }).free).toBe(true);
+    expect(ev({ free: false })).not.toHaveProperty('free');
+    expect(ev({})).not.toHaveProperty('free');
+  });
+
+  it('refuses free on decision or urgent Moments (by weight or level) and non-booleans', () => {
+    expect(err(() => ev({ free: true, weight: 'decision' }))).toMatch(/free is not allowed on a decision or urgent Moment/);
+    expect(err(() => ev({ free: true, weight: 'urgent' }))).toMatch(/free is not allowed/);
+    expect(err(() => ev({ free: true, level: 'attention' }))).toMatch(/free is not allowed/);
+    expect(err(() => ev({ free: 'yes' }))).toBe('free must be true or false');
+    expect(ev({ free: false, weight: 'urgent' })).not.toHaveProperty('free');
+  });
+});
+
 describe('validateAction: kind (E100)', () => {
   const act = (a: Record<string, unknown>) => validateEvent({ id: 'm', title: 't', actions: [{ id: 'a', label: 'Go', run: { body: 'b' }, ...a }] }, ctx).event.actions[0]!;
   const draft = { confirm: { draft: 'On my way' } };

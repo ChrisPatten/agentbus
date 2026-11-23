@@ -118,7 +118,9 @@ describe('surface tools (E96)', () => {
     const tools = (await c.listTools()).tools;
     await c.close();
     const ev = tools.find((t) => t.name === 'surface_publish_event')!;
-    expect(Object.keys((ev.inputSchema as { properties: object }).properties)).toEqual(expect.arrayContaining(['weight', 'consequence', 'changed']));
+    expect(Object.keys((ev.inputSchema as { properties: object }).properties)).toEqual(expect.arrayContaining(['weight', 'consequence', 'changed', 'free']));
+    await call('surface_publish_event', { surface: 'compact', id: 'lunch', title: 'Lunch', free: true });
+    expect(sent(2).body).toMatchObject({ free: true });
     expect(ev.description).toMatch(/Urgent only: consequence \(at most 60 characters/);
     expect(ev.description).toMatch(/kind "tap" on a button that sends is refused/);
     expect(Object.keys((tools.find((t) => t.name === 'surface_remove_event')!.inputSchema as { properties: object }).properties)).toEqual(['surface', 'id', 'reason']);

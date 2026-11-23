@@ -185,6 +185,8 @@ export interface SurfaceEvent {
   level: Level;
   /** E100 — Moment weight, stored only when the agent gave one (clients map `level` otherwise). */
   weight?: Weight;
+  /** Free Moment: still shown (ring, Day list) but not Busy and no countdown. Stored only when true; never with a decision or urgent weight. */
+  free?: true;
   /** E100 — urgent only: what happens if Chris does nothing ("Misses your 7:15 transfer"). */
   consequence?: string;
   /** E100 — urgent only: the value that changed. */

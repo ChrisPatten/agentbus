@@ -47,6 +47,7 @@ export const EVENT_DESCRIPTION =
   'Give weight OR level: level is derived from weight (ambient/notice → info, decision → attention, urgent → urgent); if you give both they must agree. ' +
   `Urgent only: consequence (at most ${BOUNDS.consequence} characters, what happens if nothing is done) and changed {field: start|end|place|title|other, old, new} ` +
   `(old and new at most ${BOUNDS.changedValue} characters, e.g. "6:42" → "6:58"); on a non-urgent event they are refused. ` +
+  'free: true marks a free Moment (still shown on the ring and Day list, but not Busy and no countdown); refused on decision or urgent weight. '+
   'Button kind is tap or hold (hold to confirm): default hold when the button has confirm or run.sends_on_behalf, else tap; kind "tap" on a button that sends is refused; ' +
   'set kind "hold" yourself for anything irreversible. Lifecycle: the bus owns state. Publishing makes the event open (re-publishing an ended id starts a new life); ' +
   'it ends as expired (expires_at), answered (a button on a decision or urgent event fired, or surface_remove_event reason answered), withdrawn or cleared, ' +
@@ -99,6 +100,7 @@ export function registerSurfaceTools(server: McpServer, busBaseUrl: string, agen
         body: z.string().optional().describe(`Detail text, at most ${BOUNDS.body} characters`),
         weight: z.enum(['ambient', 'notice', 'decision', 'urgent']).optional().describe('Moment weight: ambient, notice, decision or urgent. Sets level for you (ambient/notice → info, decision → attention, urgent → urgent)'),
         level: z.enum(['info', 'attention', 'urgent']).optional().describe('info (default), attention or urgent. Older field: prefer weight; if you give both they must agree'),
+        free: z.boolean().optional().describe('true marks a free Moment: still shown on the ring and Day list, but not Busy and no countdown. Not allowed with weight decision or urgent. Omit for a normal Moment'),
         consequence: z.string().optional().describe(`Urgent only: what happens if nothing is done, e.g. "Misses your 7:15 transfer" (at most ${BOUNDS.consequence} characters)`),
         changed: z.object({
           field: z.enum(['start', 'end', 'place', 'title', 'other']),

@@ -4,6 +4,9 @@ Feature ideas and future work that hasn't been scoped into an epic yet. Promote 
 
 ## Ideas
 
+### Surface Events: `free` flag (free Moments) (2026-11-23, Chris)
+A Moment can be marked `free: true`: shown on the Compact (ring, Day list) but not Busy and no countdown. Small additive change to the E100 Moment model on branch `feat/moment-free` (validator, MCP tool, `docs/SURFACE_API.md`); too small for its own epic. Firmware side is built separately from the contract in the CHANGELOG entry.
+
 ### The Compact: replies to notifications → E105 (2026-11-22)
 See `_bmad-output/epics/E105-notification-replies.md`. A notification can ask a question; a voice (BOOT push-to-talk with `notification_id`) or choice reply goes into the notification's bound conversation; frozen firmware contract in `docs/NOTIFICATION_REPLIES_CONTRACT.md`; built on `feat/e105-notification-replies`.
 

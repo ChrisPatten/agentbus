@@ -253,6 +253,12 @@ export function validateEvent(input: unknown, ctx: ValidateEventContext): { even
   if (consequence && !urgent) fail('consequence is only for urgent events: set weight "urgent" (or level "urgent"), or leave consequence out');
   const changed = eventChanged(e['changed']);
   if (changed && !urgent) fail('changed is only for urgent events: set weight "urgent" (or level "urgent"), or leave changed out');
+  let free = false;
+  if (e['free'] !== undefined && e['free'] !== null) {
+    if (typeof e['free'] !== 'boolean') fail('free must be true or false');
+    free = e['free'] as boolean;
+  }
+  if (free && level !== 'info') fail('free is not allowed on a decision or urgent Moment (weight decision or urgent, or level attention or urgent): a free Moment must never hide a decision. Use weight ambient or notice, or leave free out');
   const at = isoTime(e, 'at');
   const end = isoTime(e, 'end');
   if (end && !at) fail('end needs at (the start time)');
@@ -307,6 +313,7 @@ export function validateEvent(input: unknown, ctx: ValidateEventContext): { even
     ...(body ? { body } : {}),
     level,
     ...(weight ? { weight } : {}),
+    ...(free ? { free: true as const } : {}),
     ...(consequence ? { consequence } : {}),
     ...(changed ? { changed } : {}),
     state: 'open',
