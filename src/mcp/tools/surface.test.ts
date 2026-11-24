@@ -7,7 +7,7 @@ import { registerSurfaceTools } from './surface.js';
 
 const BUS_URL = 'http://bus:4000';
 const healthState: HealthState = { status: 'healthy', busReachable: true, lastPollAt: null, consecutiveFailures: 0 };
-const NAMES = ['list_surfaces', 'surface_publish_event', 'surface_remove_event', 'surface_set_slot', 'surface_clear_slot', 'surface_write_widget', 'surface_remove_widget', 'surface_set_face', 'surface_upload_asset', 'clear_answer_needed'];
+const NAMES = ['list_surfaces', 'surface_publish_event', 'surface_remove_event', 'surface_set_slot', 'surface_clear_slot', 'surface_write_widget', 'surface_remove_widget', 'surface_set_face', 'surface_upload_asset', 'clear_answer_needed', 'device'];
 
 async function connect(register: (s: McpServer) => void) {
   const server = new McpServer({ name: 'test', version: '0.0.1' });
@@ -182,5 +182,20 @@ describe('surface tools (E96)', () => {
     const r = await call('surface_upload_asset', { data_base64: 'aGk=', content_type: 'image/png' });
     expect(r.isError).toBe(true);
     expect(text(r)).toBe('Error: the file is not a PNG (bad signature)');
+  });
+
+  it('device posts the command with the agent id and returns the bus answer', async () => {
+    fetchMock.mockResolvedValue(json(200, { ok: false, reason: 'offline', surface: 'compact' }));
+    const r = await call('device', { surface: 'compact', op: 'pomodoro', args: 'start 25', wait: false });
+    expect(sent()).toMatchObject({ url: `${BUS_URL}/api/v1/surface-publish/compact/command`, method: 'POST', body: { op: 'pomodoro', args: 'start 25', wait: false, agent_id: 'peggy-pool-1' } });
+    expect(JSON.parse(text(r))).toEqual({ ok: false, reason: 'offline' });
+  });
+
+  it('device has a short description that points to help', async () => {
+    const c = await connect((s) => registerSurfaceTools(s, BUS_URL, 'peggy'));
+    const d = (await c.listTools()).tools.find((t) => t.name === 'device')!;
+    await c.close();
+    expect(d.description!.length).toBeLessThan(700);
+    expect(d.description).toMatch(/"help"/);
   });
 });

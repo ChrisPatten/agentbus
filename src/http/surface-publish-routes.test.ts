@@ -69,13 +69,13 @@ const surfaces: PublishableSurface[] = [
 let server: FastifyInstance | null = null;
 afterEach(async () => { await server?.close(); server = null; });
 
-async function setup() {
+async function setup(extra: Partial<Parameters<typeof registerSurfacePublishRoutes>[1]> = {}) {
   const db = new Database(':memory:'); runMigrations(db);
   const { hub, applied } = fakeHub();
   const { store, jobs } = fakeJobs(db);
   const cleared: string[] = [];
   server = Fastify();
-  registerSurfacePublishRoutes(server, { surfaces: () => surfaces, hub, jobs: store, db, now: () => NOW, onAnswerNeededCleared: (c) => cleared.push(c) });
+  registerSurfacePublishRoutes(server, { surfaces: () => surfaces, hub, jobs: store, db, now: () => NOW, onAnswerNeededCleared: (c) => cleared.push(c), ...extra });
   await server.ready();
   return { db, hub, applied, jobs, cleared, s: server };
 }
@@ -319,5 +319,51 @@ describe('E100 Moment fields and lifecycle on the publish routes', () => {
     expect(full.json().error).toMatch(/already has 50 live events; the limit is 50/);
     // Reviving a tombstone is a new live event, so it is refused too.
     expect((await put(s, 'dead0', event(), 'open')).json().error).toMatch(/already has 50 live events/);
+  });
+});
+
+describe('device command bus ops (phase 2)', () => {
+  const sent: { surface: string; op: string }[] = [];
+  const cmd = async (s: FastifyInstance, op: string, args: unknown, agent = 'peggy-pool-2', surface = 'compact') =>
+    (await s.inject({ method: 'POST', url: `/api/v1/surface-publish/${surface}/command`, payload: { agent_id: agent, op, args } })).json() as Record<string, any>;
+  const setupCmd = () => setup({ sendCommand: async (surface, input) => { sent.push({ surface, op: input.op }); return { ok: true, data: 'device' }; } });
+
+  it('event.publish and event.remove run the existing handlers and never reach the device', async () => {
+    sent.length = 0;
+    const { s, hub } = await setupCmd();
+    const { agent_id: _a, ...ev } = event();
+    const pub = await cmd(s, 'event.publish', { id: 'train', ...ev });
+    expect(pub).toMatchObject({ ok: true, data: { id: 'train', state: 'open', created: true } });
+    expect(hub.get('compact', 'events', 'train')).toMatchObject({ title: 'Train in 10 min' });
+    const rem = await cmd(s, 'event.remove', { id: 'train', reason: 'answered' });
+    expect(rem.ok).toBe(true);
+    expect(hub.get('compact', 'events', 'train')).toMatchObject({ state: 'answered' });
+    expect(sent).toEqual([]);
+  });
+
+  it('widget.write and widget.remove; args may be a JSON string', async () => {
+    const { s, hub } = await setupCmd();
+    const w = await cmd(s, 'widget.write', JSON.stringify({ id: 'wx', type: 'weather', data: { t: 41 } }));
+    expect(w).toMatchObject({ ok: true, data: { id: 'wx' } });
+    expect(hub.get('compact', 'widgets', 'wx')).toMatchObject({ type: 'weather' });
+    expect((await cmd(s, 'widget.remove', { id: 'wx' })).data).toMatchObject({ removed: true });
+  });
+
+  it('maps validation errors to bad_args with the message, and checks publishers', async () => {
+    const { s } = await setupCmd();
+    const bad = await cmd(s, 'event.publish', { id: 'x', title: '' });
+    expect(bad).toMatchObject({ ok: false, reason: 'bad_args' });
+    expect(typeof bad['data']).toBe('string');
+    expect(await cmd(s, 'widget.remove', 'not json')).toMatchObject({ ok: false, reason: 'bad_args' });
+    expect(await cmd(s, 'event.remove', {})).toMatchObject({ ok: false, reason: 'bad_args' });
+    const res = await s.inject({ method: 'POST', url: '/api/v1/surface-publish/compact/command', payload: { agent_id: 'mallory', op: 'event.publish', args: { id: 'x', title: 'y' } } });
+    expect(res.statusCode).toBe(403);
+  });
+
+  it('other ops go to the device', async () => {
+    sent.length = 0;
+    const { s } = await setupCmd();
+    expect(await cmd(s, 'pomodoro', 'status')).toMatchObject({ ok: true, data: 'device' });
+    expect(sent).toEqual([{ surface: 'compact', op: 'pomodoro' }]);
   });
 });
