@@ -12,6 +12,7 @@
  *   PUT    /api/v1/surface-publish/:surface/widgets/:id    write widget data
  *   DELETE /api/v1/surface-publish/:surface/widgets/:id    remove a widget
  *   POST   /api/v1/surface-publish/answer-needed/clear     clear a conversation's answer-needed flag
+ *   POST   /api/v1/surface-publish/:surface/command        device command {op, args?, ttl_s?, wait?} (the `device` tool); see docs/DEVICE_COMMANDS.md
  *
  * Identity: like the other agent routes (advisories, proposals), the caller
  * names itself with `agent_id` (body for PUT/POST, query for GET/DELETE); the
@@ -46,6 +47,9 @@ export interface SurfacePublishDeps {
   assetDir?: string;
   /** Largest accepted upload, bytes (default 1 MiB). */
   assetMaxBytes?: number;
+  log?: (line: string) => void;
+  /** Device commands: sends a `command` to the surface's device (the IntercomService method). Without it the command route is not registered. */
+  sendCommand?: (surfaceId: string, input: { op: string; args?: unknown; ttlS?: number; wait?: boolean; extraOps?: { op: string; usage: string }[] }) => Promise<{ ok: boolean; reason?: string; data?: unknown }>;
   /** Called after an answer-needed flag was cleared (e.g. to rebuild the sessions resource). */
   onAnswerNeededCleared?: (conversationId: string) => void;
 }
@@ -357,4 +361,85 @@ export function registerSurfacePublishRoutes(server: FastifyInstance, deps: Surf
     if (cleared) deps.onAnswerNeededCleared?.(conversationId);
     return { ok: true, conversation_id: conversationId, cleared };
   });
+
+  // ── Device commands ────────────────────────────────────────────────────────
+  // One tool, any op. `help` and the bus ops below are answered here; every other op goes to the device as a
+  // `command` frame. Same auth as the other routes: an agent listed in the surface's `publishers`.
+  if (deps.sendCommand) {
+    const sendCommand = deps.sendCommand;
+    /** Phase 2: ops the bus runs itself by calling the existing publish routes (same validation, limits and ownership rules). */
+    const BUS_OPS: { op: string; usage: string }[] = [
+      { op: 'event.publish', usage: 'args {id,title,...} as surface_publish_event' },
+      { op: 'event.remove', usage: 'args {id, reason?: withdrawn|answered|cleared}' },
+      { op: 'widget.write', usage: 'args {id,type,data:{...}}' },
+      { op: 'widget.remove', usage: 'args {id}' },
+      ...(deps.assetDir ? [{ op: 'asset.upload', usage: 'args {data_base64, content_type: image/png|image/jpeg|image/svg+xml}' }] : []),
+    ];
+    const argObject = (args: unknown): Record<string, unknown> => {
+      let v = args;
+      if (typeof v === 'string') { try { v = JSON.parse(v); } catch { throw new BoundsError('args must be a JSON object'); } }
+      if (!v || typeof v !== 'object' || Array.isArray(v)) throw new BoundsError('args must be a JSON object');
+      return v as Record<string, unknown>;
+    };
+    const itemId = (a: Record<string, unknown>): string => {
+      if (typeof a['id'] !== 'string' || !a['id']) throw new BoundsError('args.id is required');
+      return encodeURIComponent(a['id']);
+    };
+    const REASON: Record<number, string> = { 400: 'bad_args', 403: 'forbidden', 404: 'unknown_surface', 415: 'bad_args', 413: 'bad_args' };
+
+    server.post<{ Params: { surface: string } }>(`${P}/:surface/command`, { bodyLimit: deps.assetMaxBytes ? Math.ceil(deps.assetMaxBytes * 1.4) + 4096 : BODY_LIMIT }, async (req, reply) => {
+      const body = asBody(req.body);
+      const agentId = agentOf(body, req.query as Record<string, unknown>);
+      const surface = authorize(reply, req.params.surface, agentId);
+      if (!surface) return reply;
+      const op = typeof body['op'] === 'string' ? body['op'].trim() : '';
+      if (!op || op.length > 40) return reply.code(400).send({ ok: false, error: 'op is required (1-40 characters); op "help" lists what the device can do' });
+      const ttl = typeof body['ttl_s'] === 'number' ? body['ttl_s'] : undefined;
+      const wait = body['wait'] === false ? false : true;
+      const send = async () => sendCommand(surface.id, {
+        op, ...(body['args'] !== undefined ? { args: body['args'] } : {}), ...(ttl !== undefined ? { ttlS: ttl } : {}), wait, extraOps: BUS_OPS,
+      });
+      const bus = BUS_OPS.find((o) => o.op === op);
+      if (!bus) {
+        const r = await send();
+        return reply.send({ ...r, surface: surface.id });
+      }
+      // Bus ops: logged like device commands, then routed to the existing handler with the caller's own identity.
+      let target: { method: 'PUT' | 'DELETE' | 'POST'; url: string; payload?: unknown; headers?: Record<string, string> };
+      try {
+        const a = op === 'asset.upload' ? asBody(body['args']) : argObject(body['args']);
+        const base = `${P}/${encodeURIComponent(surface.id)}`;
+        const q = `agent_id=${encodeURIComponent(agentId)}`;
+        const { id: _i, ...rest } = a;
+        switch (op) {
+          case 'event.publish': target = { method: 'PUT', url: `${base}/events/${itemId(a)}`, payload: { ...rest, agent_id: agentId } }; break;
+          case 'event.remove': target = { method: 'DELETE', url: `${base}/events/${itemId(a)}?${q}${typeof a['reason'] === 'string' ? `&reason=${encodeURIComponent(a['reason'])}` : ''}` }; break;
+          case 'widget.write': target = { method: 'PUT', url: `${base}/widgets/${itemId(a)}`, payload: { ...rest, agent_id: agentId } }; break;
+          case 'widget.remove': target = { method: 'DELETE', url: `${base}/widgets/${itemId(a)}?${q}` }; break;
+          default: {
+            const type = typeof a['content_type'] === 'string' ? a['content_type'] : '';
+            const data = typeof a['data_base64'] === 'string' ? a['data_base64'] : '';
+            if (!type || !data) throw new BoundsError('args needs data_base64 and content_type');
+            target = { method: 'POST', url: `${P}/assets?${q}`, payload: Buffer.from(data, 'base64'), headers: { 'content-type': type } };
+          }
+        }
+      } catch (err) {
+        if (err instanceof BoundsError) return reply.send({ ok: false, reason: 'bad_args', data: err.message, surface: surface.id });
+        throw err;
+      }
+      const token = req.headers['x-bus-token'];
+      const res = await server.inject({
+        method: target.method, url: target.url,
+        ...(target.payload !== undefined ? { payload: target.payload as string | Buffer | object } : {}),
+        headers: { ...(typeof token === 'string' ? { 'x-bus-token': token } : {}), ...(target.headers ?? {}) },
+      });
+      let data: Record<string, unknown> = {};
+      try { data = res.json() as Record<string, unknown>; } catch { /* non-JSON */ }
+      const outcome = res.statusCode < 300 && data['ok'] !== false
+        ? { ok: true, data: (({ ok: _o, ...r }) => r)(data) }
+        : { ok: false, reason: REASON[res.statusCode] ?? 'failed', data: data['error'] ?? `HTTP ${res.statusCode}` };
+      deps.log?.(JSON.stringify({ evt: 'device_command', surface_id: surface.id, op, bus: true, ok: outcome.ok, ...(outcome.ok ? {} : { reason: outcome.reason }) }));
+      return reply.send({ ...outcome, surface: surface.id });
+    });
+  }
 }

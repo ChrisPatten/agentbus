@@ -2736,6 +2736,8 @@ export async function createHttpServer(deps: HttpServerDeps): Promise<FastifyIns
         ...(assetDir ? { assetDir } : {}), ...(assetMaxBytes ? { assetMaxBytes } : {}),
         surfaces: () => [...intercomService.surfaces.values()].map((s) => ({ id: s.id, follow: intercomService.followJson(s), publishers: s.publishers })),
         ...(onFlagsChanged ? { onAnswerNeededCleared: () => onFlagsChanged() } : {}),
+        sendCommand: (surfaceId, input) => intercomService.sendCommand(surfaceId, input),
+        log: (line) => server.log.info(line),
       });
     }
     if (config.notifications?.enabled) registerNotificationRoutes(server, { config: config.notifications, service: deps.intercom });

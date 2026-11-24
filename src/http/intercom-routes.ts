@@ -20,7 +20,7 @@ import websocket from '@fastify/websocket';
 import { z } from 'zod';
 import type { IntercomAdapterConfig } from '../config/schema.js';
 import { randomUUID } from 'node:crypto';
-import { IntercomService, type Client, type SocketLike, type VoiceSocket } from '../intercom/service.js';
+import { IntercomService, parseOps, type Client, type SocketLike, type VoiceSocket } from '../intercom/service.js';
 import type { ResourceName } from '../surface/types.js';
 import { createPairCode, redeemPairCode } from '../intercom/store.js';
 
@@ -73,6 +73,8 @@ const Hello = z.object({
   protocol: z.number().int().min(1).max(2).optional(),
   /** E96 — the device's last-seen rev per resource. */
   revs: z.record(z.string(), z.number().int().min(0)).optional(),
+  /** Device commands — the ops the device registers, `[{op, usage}]`. Re-sent on every connection. */
+  ops: z.array(z.unknown()).max(200).optional(),
 });
 const SendFrame = z.object({ type: z.literal('send'), client_msg_id: z.string().min(1).max(100), body: z.string() });
 
@@ -214,6 +216,7 @@ export function surfaceSocketHandler(server: FastifyInstance, service: IntercomS
         client = {
           socket, surface: auth.surface, ready: false, cursor: 0, lastPong: Date.now(),
           ...(auth.device ? { device: auth.device } : {}), protocol: hello.data.protocol ?? 1,
+          ...((ops) => (ops ? { ops } : {}))(parseOps(hello.data.ops)),
         };
         sockets.add(client);
         voice = { id: randomUUID(), surface: auth.surface, send, sendBinary };
@@ -251,6 +254,9 @@ export function surfaceSocketHandler(server: FastifyInstance, service: IntercomS
         service.setSurfaceState(client.surface, frame, client);
         return;
       }
+      // Device commands: the answer to a bus `command` frame, and a refreshed op list. Answers are not writes, so read-only devices may send them.
+      if (frame['type'] === 'command_result') { service.handleCommandResult(client, frame); return; }
+      if (frame['type'] === 'capabilities') { service.setClientOps(client, frame['ops']); return; }
       if (frame['type'] === 'speech_stop') { if (voice) service.speaker.cancel(voice.id, 'stopped'); return; }
       if (frame['type'] === 'audio_start' || frame['type'] === 'audio_end' || frame['type'] === 'audio_cancel') {
         if (readOnly) { send({ type: 'error', code: 'read_only' }); return; }

@@ -69,6 +69,11 @@ const actionSchema = z.object({
   }),
 });
 
+export const DEVICE_DESCRIPTION =
+  'Run an op on a surface\'s device (the Compact is "compact"): pomodoro, power, face, chime, info and more, plus bus ops event.publish, event.remove, widget.write, widget.remove, asset.upload. ' +
+  'op "help" lists the ops with usage (args=<op> for one); args is a string or JSON object. Returns {ok,data} or {ok:false,reason}; ' +
+  'device reasons: unknown_op, bad_args, expired, busy, failed; bus reasons: offline (nothing queued), timeout (waits up to 10 s; wait:false does not wait). ttl_s (default 120) is how long the device may sit on it.';
+
 export function registerSurfaceTools(server: McpServer, busBaseUrl: string, agentId: string): void {
   const q = `agent_id=${encodeURIComponent(agentId)}`;
   const path = (surface: string, kind: string, id: string) => `${BASE}/${encodeURIComponent(surface)}/${kind}/${encodeURIComponent(id)}`;
@@ -127,6 +132,30 @@ export function registerSurfaceTools(server: McpServer, busBaseUrl: string, agen
       },
     },
     async ({ surface, id, ...event }) => run('publish event', 'PUT', path(surface, 'events', id), event),
+  );
+
+  server.registerTool(
+    'device',
+    {
+      description: DEVICE_DESCRIPTION,
+      inputSchema: {
+        surface: surfaceField,
+        op: z.string().min(1).max(40).describe('Op name; "help" lists them'),
+        args: z.union([z.string(), z.record(z.string(), z.unknown())]).optional().describe('Op arguments: a string or a JSON object'),
+        ttl_s: z.number().int().min(1).max(3600).optional().describe('Seconds the device may hold the command before refusing it as expired (default 120)'),
+        wait: z.boolean().optional().describe('Wait for the result (default true; false returns once sent)'),
+      },
+    },
+    async ({ surface, ...rest }) => {
+      try {
+        const { status, data } = await call(busBaseUrl, 'POST', `${BASE}/${encodeURIComponent(surface)}/command`, { ...rest, agent_id: agentId });
+        if (typeof data['ok'] !== 'boolean') return failure(status, data);
+        const { surface: _s, ...result } = data;
+        return toolSuccess(result);
+      } catch (err) {
+        return toolError(`Failed to run device command: ${String(err)}`);
+      }
+    },
   );
 
   server.registerTool(

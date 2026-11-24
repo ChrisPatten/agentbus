@@ -81,6 +81,29 @@ export interface Client {
   revs?: Partial<Record<ResourceName, number>>;
   /** E102 — this socket as the speech engine sees it (mute and sleep state, binary sends). Set by the WebSocket route. */
   voice?: VoiceSocket;
+  /** Device commands — the ops this client declared in its hello (or a later `capabilities` frame). */
+  ops?: DeviceOp[];
+}
+
+/** One op a device registered (docs/DEVICE_COMMANDS.md). */
+export interface DeviceOp { op: string; usage: string }
+
+/** What `sendCommand` answers: the device's result, or a reason the bus adds (`offline`, `timeout`). */
+export type CommandOutcome = { ok: true; data?: unknown } | { ok: false; reason: string; data?: unknown };
+
+export const COMMAND_WAIT_MS = 10_000;
+const MAX_OPS = 64;
+
+/** Keeps well-formed `{op, usage}` entries from a hello; anything else is dropped. */
+export function parseOps(raw: unknown): DeviceOp[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const ops: DeviceOp[] = [];
+  for (const o of raw.slice(0, MAX_OPS)) {
+    if (!o || typeof o !== 'object') continue;
+    const { op, usage } = o as Record<string, unknown>;
+    if (typeof op === 'string' && op.length > 0 && op.length <= 40) ops.push({ op, usage: typeof usage === 'string' ? usage.slice(0, 200) : '' });
+  }
+  return ops;
 }
 
 /** E96 — Surface API v2 collaborators. Absent: the service behaves exactly as protocol v1 (shared surface tokens). */
@@ -218,6 +241,10 @@ export class IntercomService {
   /** E102 — utterances wait their turn per device socket. */
   private readonly speechChains = new WeakMap<object, Promise<void>>();
   private readonly pairHits = new Map<string, number[]>();
+  /** Device commands awaiting a `command_result`, by command id. */
+  private readonly pendingCommands = new Map<string, { surfaceId: string; settle: (o: CommandOutcome) => void }>();
+  /** The ops from each surface's latest hello; kept after the device disconnects so `help` still answers. */
+  private readonly opsCache = new Map<string, DeviceOp[]>();
   readonly calendar: CalendarFeed;
   private sweepTimer: NodeJS.Timeout | null = null;
   private calendarTimer: NodeJS.Timeout | null = null;
@@ -474,6 +501,7 @@ export class IntercomService {
     const reset = cursorNeedsReset(this.deps.db, surface.id, cursor);
     client.cursor = reset ? latest : cursor;
     if (clientName) client.clientName = clientName;
+    if (client.ops) this.opsCache.set(surface.id, client.ops);
     const api = this.deps.surfaceApi;
     const v2 = client.protocol === SURFACE_PROTOCOL_VERSION && !!api;
     // Attach-time writes happen first, then pending coalesced deltas go to the other sockets, so no
@@ -984,6 +1012,77 @@ export class IntercomService {
   /** Surfaces `speak` may target: speech on for the bus and for the surface. */
   private speechSurfaces(): Surface[] {
     return [...this.surfaces.values()].filter((s) => s.speech !== false);
+  }
+
+  // ── Device commands ──────────────────────────────────────────────────────
+
+  /** Ops the surface's device last declared (empty until one has said hello with `ops`). */
+  surfaceOps(surfaceId: string): DeviceOp[] { return this.opsCache.get(surfaceId) ?? []; }
+
+  /** A later `capabilities` frame (or hello) replaces the client's op list and the surface's cache. */
+  setClientOps(client: Client, raw: unknown): void {
+    const ops = parseOps(raw);
+    if (!ops) return;
+    client.ops = ops;
+    this.opsCache.set(client.surface.id, ops);
+    this.log(JSON.stringify({ evt: 'device_ops', surface_id: client.surface.id, ops: ops.map((o) => o.op) }));
+  }
+
+  /**
+   * Sends a `command` frame to the surface's connected device and (with `wait`) awaits its `command_result`.
+   * `help` is answered here from the cached ops. No connected client answers `offline` at once; commands are never queued.
+   */
+  async sendCommand(surfaceId: string, input: { op: string; args?: unknown; ttlS?: number; wait?: boolean; waitMs?: number; extraOps?: DeviceOp[] }): Promise<CommandOutcome> {
+    const { op } = input;
+    const note = (outcome: CommandOutcome, extra: Record<string, unknown> = {}): CommandOutcome => {
+      this.log(JSON.stringify({ evt: 'device_command_done', surface_id: surfaceId, op, ok: outcome.ok, ...(outcome.ok ? {} : { reason: outcome.reason }), ...extra }));
+      return outcome;
+    };
+    const argText = input.args === undefined ? undefined : typeof input.args === 'string' ? input.args : JSON.stringify(input.args);
+    if (op === 'help') {
+      this.log(JSON.stringify({ evt: 'device_command', surface_id: surfaceId, op, ...(argText ? { args: argText.slice(0, 200) } : {}), local: true }));
+      const ops = [...this.surfaceOps(surfaceId), ...(input.extraOps ?? [])];
+      const want = typeof input.args === 'string' ? input.args.trim() : '';
+      if (want) {
+        const hit = ops.find((o) => o.op === want);
+        return note(hit ? { ok: true, data: hit } : { ok: false, reason: 'unknown_op', data: ops.length ? `known ops: ${ops.map((o) => o.op).join(', ')}` : 'no ops known for this surface yet' }, { local: true });
+      }
+      return note({ ok: true, data: ops }, { local: true });
+    }
+    const targets = [...this.clients].filter((c) => c.surface.id === surfaceId && c.ready);
+    // Prefer a client that declared ops (a device that runs commands) over a plain web client.
+    const withOps = targets.filter((c) => c.ops);
+    const chosen = (withOps.length ? withOps : targets).slice(-1)[0];
+    if (!chosen) {
+      this.log(JSON.stringify({ evt: 'device_command', surface_id: surfaceId, op, ...(argText ? { args: argText.slice(0, 200) } : {}), sent: false }));
+      return note({ ok: false, reason: 'offline' });
+    }
+    const id = randomUUID();
+    const ttl = Math.max(1, Math.min(Math.trunc(input.ttlS ?? 120), 3600));
+    const wait = input.wait !== false;
+    this.log(JSON.stringify({ evt: 'device_command', id, surface_id: surfaceId, op, ...(argText ? { args: argText.slice(0, 200) } : {}), ttl_s: ttl, wait }));
+    const result = wait ? new Promise<CommandOutcome>((resolve) => {
+      const timer = setTimeout(() => { this.pendingCommands.delete(id); resolve({ ok: false, reason: 'timeout' }); }, input.waitMs ?? COMMAND_WAIT_MS);
+      timer.unref?.();
+      this.pendingCommands.set(id, { surfaceId, settle: (o) => { clearTimeout(timer); this.pendingCommands.delete(id); resolve(o); } });
+    }) : null;
+    this.raw(chosen.socket, { type: 'command', id, op, ...(input.args === undefined ? {} : { args: input.args }), ttl_s: ttl });
+    if (!result) return note({ ok: true, data: { sent: true, id } }, { id });
+    return note(await result, { id });
+  }
+
+  /** A device's `command_result`: settles the waiting call, or is logged when nobody waits (late, repeated or unknown id). */
+  handleCommandResult(client: Client, frame: Record<string, unknown>): void {
+    const id = typeof frame['id'] === 'string' ? frame['id'] : '';
+    const ok = frame['ok'] === true;
+    const reason = typeof frame['reason'] === 'string' && frame['reason'] ? frame['reason'] : 'failed';
+    const outcome: CommandOutcome = ok
+      ? { ok: true, ...(frame['data'] !== undefined ? { data: frame['data'] } : {}) }
+      : { ok: false, reason, ...(frame['data'] !== undefined ? { data: frame['data'] } : {}) };
+    const pending = id ? this.pendingCommands.get(id) : undefined;
+    const mine = pending && pending.surfaceId === client.surface.id;
+    this.log(JSON.stringify({ evt: 'device_command_result', id, surface_id: client.surface.id, ok, ...(ok ? {} : { reason }), awaited: !!mine }));
+    if (mine) pending.settle(outcome);
   }
 
   /**
